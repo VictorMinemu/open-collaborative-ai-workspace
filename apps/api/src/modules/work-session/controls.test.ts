@@ -5,6 +5,7 @@ import {
   type RuntimeModel,
 } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
+import type { AgentControlsLayer } from "./context";
 import {
   buildRuntimeControls,
   CONTROLLER_FLOOR,
@@ -293,5 +294,186 @@ describe("clampToControls", () => {
       buildRuntimeControls("codex", ctx(), "big"),
     );
     expect(changed).toEqual([]);
+  });
+});
+
+describe("07.16 agent layer (PD-07, PD-08)", () => {
+  /** A bot whose profile allows everything the catalog offers; each test narrows one cap. */
+  const open: AgentControlsLayer = {
+    agentId: "00000000-0000-4000-8000-000000000001",
+    maxMode: "fullAccess",
+    allowFullAccess: true,
+    tainted: false,
+    isolated: false,
+    models: ["big", "small"],
+    efforts: ["low", "medium", "high", "xhigh"],
+    contextWindows: [200_000, 1_000_000],
+    fastMode: "allowed",
+  };
+  const bot = (over: Partial<AgentControlsLayer> = {}, extra: Partial<ControlsContext> = {}) =>
+    ctx({ agent: { ...open, ...over }, ...extra });
+  const big = (c: ControlsContext) =>
+    buildRuntimeControls("codex", c, "big").models.find((m) => m.id === "big")!;
+  const current = {
+    model: "big",
+    effort: null,
+    contextWindow: null,
+    fastMode: false,
+    permissionMode: "default" as const,
+  };
+
+  it("a profile that allows everything changes nothing", () => {
+    expect(buildRuntimeControls("codex", bot(), "big")).toEqual(buildRuntimeControls("codex", ctx(), "big"));
+    expect(highestAvailableMode(bot())).toBe("fullAccess");
+  });
+
+  it("modes above maxMode report bot_profile; the highest available mode and the turn mode stay at or below it", () => {
+    const c = bot({ maxMode: "plan" });
+    for (const m of ["default", "acceptEdits", "auto", "fullAccess"] as const) {
+      expect(mode(c, m), m).toMatchObject({ available: false, reason: "bot_profile" });
+    }
+    expect(mode(c, "plan")).toMatchObject({ available: true, reason: null });
+    const cap = highestAvailableMode(c, "big", "fullAccess");
+    expect(cap).toBe("plan");
+    expect(turnMode("fullAccess", cap)).toBe("plan");
+    expect(highestAvailableMode(bot({ maxMode: "acceptEdits" }), "big", "fullAccess")).toBe("acceptEdits");
+  });
+
+  it("Full access needs the per-bot consent", () => {
+    expect(mode(bot({ allowFullAccess: false }), "fullAccess")).toMatchObject({
+      available: false,
+      reason: "bot_profile",
+    });
+    expect(highestAvailableMode(bot({ allowFullAccess: false }))).toBe("auto");
+  });
+
+  it("Full access after outside content only on an isolated server (D-08)", () => {
+    expect(mode(bot({ tainted: true, isolated: false }), "fullAccess")).toMatchObject({
+      available: false,
+      reason: "bot_profile",
+    });
+    expect(mode(bot({ tainted: true, isolated: true }), "fullAccess")).toMatchObject({
+      available: true,
+      reason: null,
+    });
+    expect(mode(bot({ tainted: false, isolated: true }), "fullAccess")).toMatchObject({ available: true });
+    // A tainted bot keeps every mode below Full access.
+    expect(mode(bot({ tainted: true }), "auto")).toMatchObject({ available: true });
+  });
+
+  it("a member's own limit keeps its reason (org_policy, device_opt_in, device_grant, denied_for_you)", () => {
+    const capped = { allowFullAccess: false, tainted: true, maxMode: "plan" as const };
+    expect(
+      mode(bot(capped, { policy: { ...ctx().policy, allowFullAccess: false } }), "fullAccess"),
+    ).toMatchObject({ reason: "org_policy" });
+    expect(mode(bot(capped, { deviceOptIn: false }), "fullAccess")).toMatchObject({
+      reason: "device_opt_in",
+    });
+    expect(mode(bot(capped, { modeCap: "acceptEdits" }), "fullAccess")).toMatchObject({
+      reason: "device_grant",
+    });
+    expect(mode(bot(capped, { fullAccessGrain: false }), "fullAccess")).toMatchObject({
+      reason: "denied_for_you",
+    });
+    expect(mode(bot(capped, { exposed: (k) => k !== "mode.auto" }), "auto")).toMatchObject({
+      reason: "not_confirmed",
+    });
+  });
+
+  it("a catalog model outside the profile's set reports bot_profile; inside it is as without the agent", () => {
+    const c = bot({ models: ["big"] });
+    const models = buildRuntimeControls("codex", c, "big").models;
+    expect(models.find((m) => m.id === "small")).toMatchObject({ available: false, reason: "bot_profile" });
+    expect(models.find((m) => m.id === "big")).toEqual(big(ctx()));
+    expect(decideSettings(current, { model: "small" }, "codex", c)).toEqual({
+      ok: false,
+      field: "model",
+      reason: "bot_profile",
+    });
+    // A listed model the device did not report is not in the catalog (the device decides first).
+    expect(decideSettings(current, { model: "ghost" }, "codex", bot({ models: ["big", "ghost"] }))).toEqual({
+      ok: false,
+      field: "model",
+      reason: "not_in_catalog",
+    });
+    // The org policy's model list keeps its reason.
+    const policy = { ...ctx().policy, allowedModels: { "claude-code": [], codex: ["small"] } };
+    expect(big(bot({ models: ["small"] }, { policy }))).toMatchObject({
+      available: false,
+      reason: "org_policy",
+    });
+  });
+
+  it("efforts outside the profile's set report bot_profile; an effort above the org maxEffort stays org_policy", () => {
+    const c = bot({ efforts: ["low", "medium"] });
+    const efforts = big(c).efforts;
+    expect(efforts.filter((e) => e.available).map((e) => e.value)).toEqual(["low", "medium"]);
+    expect(efforts.find((e) => e.value === "high")).toMatchObject({
+      available: false,
+      reason: "bot_profile",
+    });
+    expect(decideSettings(current, { effort: "high" }, "codex", c)).toEqual({
+      ok: false,
+      field: "effort",
+      reason: "bot_profile",
+    });
+    const policy = { ...ctx().policy, maxEffort: { "claude-code": null, codex: "medium" as const } };
+    expect(big(bot({ efforts: ["low"] }, { policy })).efforts.find((e) => e.value === "xhigh")).toMatchObject(
+      {
+        available: false,
+        reason: "org_policy",
+      },
+    );
+    expect(big(bot({ efforts: ["low"] }, { exposed: (k) => k !== "effort" })).efforts[0]).toMatchObject({
+      reason: "not_confirmed",
+    });
+  });
+
+  it("context windows outside the profile's set report bot_profile", () => {
+    const c = bot({ contextWindows: [200_000] });
+    expect(big(c).contextWindows).toEqual([
+      { available: true, reason: null, detail: null, value: 200_000 },
+      { available: false, reason: "bot_profile", detail: null, value: 1_000_000 },
+    ]);
+    expect(decideSettings(current, { contextWindow: 1_000_000 }, "codex", c)).toEqual({
+      ok: false,
+      field: "contextWindow",
+      reason: "bot_profile",
+    });
+    const unconfirmed = bot({ contextWindows: [] }, { exposed: (k) => k !== "context.window" });
+    expect(big(unconfirmed).contextWindows.every((w) => w.reason === "not_confirmed")).toBe(true);
+  });
+
+  it("fast mode off in the profile reports bot_profile; allowed and on are as without the agent", () => {
+    expect(big(bot({ fastMode: "off" })).fastMode).toMatchObject({ available: false, reason: "bot_profile" });
+    expect(decideSettings(current, { fastMode: true }, "codex", bot({ fastMode: "off" }))).toEqual({
+      ok: false,
+      field: "fastMode",
+      reason: "bot_profile",
+    });
+    expect(big(bot({ fastMode: "allowed" })).fastMode).toEqual(big(ctx()).fastMode);
+    expect(big(bot({ fastMode: "on" })).fastMode).toEqual(big(ctx()).fastMode);
+    // The org policy and the runtime keep their reasons.
+    const noFast = { policy: { ...ctx().policy, allowFastMode: false } };
+    expect(big(bot({ fastMode: "off" }, noFast)).fastMode).toMatchObject({ reason: "org_policy" });
+    const small = buildRuntimeControls("codex", bot({ fastMode: "off" }), "small").models.find(
+      (m) => m.id === "small",
+    )!;
+    expect(small.fastMode).toMatchObject({ reason: "runtime" });
+  });
+
+  it("clampToControls lowers a session to the bot's caps (re-authorization reads the same context)", () => {
+    const c = bot({ maxMode: "acceptEdits", models: ["big"], efforts: ["low"], fastMode: "off" });
+    const { next, changed } = clampToControls(
+      { model: "small", effort: "high", contextWindow: null, fastMode: true, permissionMode: "fullAccess" },
+      buildRuntimeControls("codex", c, "small"),
+    );
+    expect(next).toMatchObject({
+      model: "big",
+      effort: null,
+      fastMode: false,
+      permissionMode: "acceptEdits",
+    });
+    expect(changed.sort()).toEqual(["effort", "fastMode", "model", "permissionMode"]);
   });
 });

@@ -536,6 +536,21 @@ describe("agents cannot leave their turn, their tenant or their budget (Task 2)"
     }
   });
 
+  it("07.16 D-20: a turn that read a Work Zone session's output can no longer change the board: 403 tainted", async () => {
+    const { ev } = await cardTurn(victor, opsId, "Valve order\n@clerk check the session");
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [ev.eventId]);
+    const before = await boardRows(opsId);
+    for (const res of [
+      await createCard(ev.eventId),
+      await patchCard(ev.eventId, target.messageId, { expectedVersion: 1, waitingOn: "us" }),
+    ]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("tainted");
+    }
+    expect(await boardRows(opsId)).toEqual(before);
+    expect(await toolCalls(ev.eventId)).toBe(0);
+  });
+
   it("the ninth counted call of a turn is refused (403 cap_reached) and creates nothing", async () => {
     const { ev: busy } = await cardTurn(victor, opsId, "Inventory count\n@clerk keep an eye on it");
     for (let i = 0; i < 8; i++) expect((await readBoard(busy.eventId)).status).toBe(200);

@@ -18,10 +18,14 @@ import {
   loadConfig,
   ProjectRegistry,
   resolveFullAccess,
+  resolveHostKind,
+  resolveIsolatedServer,
   resolveRuntimeUpdates,
   setFullAccessOptIn,
+  setIsolatedServer,
   setRuntimeUpdatesLevel,
 } from "./config.js";
+import { installedBundlePath, installInfoPath } from "./install-info.js";
 
 const dirs: string[] = [];
 function home(): string {
@@ -93,6 +97,129 @@ describe("Full access opt-in (ADR-0012, D-02, P-12)", () => {
     writeFileSync(join(broken, "runtime.json"), "{ not json");
     await expect(setFullAccessOptIn(broken, true)).rejects.toThrow(/runtime\.json/);
     expect(readFileSync(join(broken, "runtime.json"), "utf8")).toBe("{ not json");
+  });
+});
+
+describe("Isolated server mark (07.16, D-19)", () => {
+  it("is off without the section; on from the file; OCW_ISOLATED_SERVER wins in both directions", async () => {
+    expect(resolveIsolatedServer(await loadConfig(home(), {}), {})).toEqual({ on: false, source: "config" });
+    expect(resolveIsolatedServer({ isolatedServer: { on: true } }, {})).toEqual({
+      on: true,
+      source: "config",
+    });
+    expect(resolveIsolatedServer({ isolatedServer: { on: true } }, { OCW_ISOLATED_SERVER: "0" })).toEqual({
+      on: false,
+      source: "env",
+    });
+    expect(
+      resolveIsolatedServer({ isolatedServer: { on: false } }, { OCW_ISOLATED_SERVER: "false" }),
+    ).toEqual({
+      on: false,
+      source: "env",
+    });
+    expect(resolveIsolatedServer({ isolatedServer: { on: false } }, { OCW_ISOLATED_SERVER: "1" })).toEqual({
+      on: true,
+      source: "env",
+    });
+    expect(resolveIsolatedServer({ isolatedServer: { on: false } }, { OCW_ISOLATED_SERVER: "true" })).toEqual(
+      {
+        on: true,
+        source: "env",
+      },
+    );
+    // Anything else is not a decision: the file decides.
+    expect(resolveIsolatedServer({ isolatedServer: { on: true } }, { OCW_ISOLATED_SERVER: "yes" })).toEqual({
+      on: true,
+      source: "config",
+    });
+    expect((await loadConfig(home(), {})).isolatedServer).toEqual({ on: false });
+  });
+
+  it("setIsolatedServer writes isolatedServer.on atomically (0600) and keeps fullAccess and runtimeUpdates", async () => {
+    const h = home();
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        fullAccess: { optIn: true },
+        runtimeUpdates: { level: "notify" },
+      }),
+    );
+    await setIsolatedServer(h, true);
+    const file = join(h, "runtime.json");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      serverUrl: "https://ocw.example.com",
+      fullAccess: { optIn: true },
+      runtimeUpdates: { level: "notify" },
+      isolatedServer: { on: true },
+    });
+    expect((await loadConfig(h, {})).isolatedServer.on).toBe(true);
+    await setIsolatedServer(h, false);
+    expect((await loadConfig(h, {})).isolatedServer.on).toBe(false);
+    const broken = home();
+    writeFileSync(join(broken, "runtime.json"), "{ not json");
+    await expect(setIsolatedServer(broken, true)).rejects.toThrow(/runtime\.json/);
+  });
+});
+
+describe("resolveHostKind (07.16, PD-18)", () => {
+  /** A home with `install.sh`'s record and the installed bundle (`runtime/current` → `versions/<sha>`). */
+  function installedHome(): string {
+    const h = realpathSync(home());
+    const version = join(h, "runtime", "versions", "abc");
+    mkdirSync(version, { recursive: true });
+    writeFileSync(join(version, "ocw-runtime.mjs"), "// bundle\n");
+    symlinkSync(version, join(h, "runtime", "current"));
+    writeFileSync(
+      installInfoPath(h),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        version: "1.0.0",
+        sha256: "a".repeat(64),
+        installedAt: new Date().toISOString(),
+        nodePath: "/usr/bin/node",
+      }),
+    );
+    return h;
+  }
+
+  it("OCW_RUNTIME_HOST desktop or service decides; any other value is ignored", async () => {
+    const h = home();
+    expect(await resolveHostKind({ env: { OCW_RUNTIME_HOST: "desktop" }, home: h, entry: "/x/cli.js" })).toBe(
+      "desktop",
+    );
+    expect(await resolveHostKind({ env: { OCW_RUNTIME_HOST: "service" }, home: h, entry: "/x/cli.js" })).toBe(
+      "service",
+    );
+    expect(
+      await resolveHostKind({ env: { OCW_RUNTIME_HOST: "laptop" }, home: h, entry: "/x/cli.js" }),
+    ).toBeNull();
+    // The env wins over the install record.
+    const installed = installedHome();
+    expect(
+      await resolveHostKind({
+        env: { OCW_RUNTIME_HOST: "desktop" },
+        home: installed,
+        entry: installedBundlePath(installed),
+      }),
+    ).toBe("desktop");
+  });
+
+  it("service when install.json exists and the running entry is the installed bundle; null otherwise", async () => {
+    const h = installedHome();
+    expect(await resolveHostKind({ env: {}, home: h, entry: installedBundlePath(h) })).toBe("service");
+    // The same file through its resolved version directory.
+    expect(
+      await resolveHostKind({
+        env: {},
+        home: h,
+        entry: join(h, "runtime", "versions", "abc", "ocw-runtime.mjs"),
+      }),
+    ).toBe("service");
+    expect(await resolveHostKind({ env: {}, home: h, entry: "/opt/elsewhere/cli.js" })).toBeNull();
+    expect(await resolveHostKind({ env: {}, home: h, entry: undefined })).toBeNull();
+    expect(await resolveHostKind({ env: {}, home: home(), entry: "/x/cli.js" })).toBeNull();
   });
 });
 

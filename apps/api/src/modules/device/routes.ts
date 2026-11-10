@@ -165,6 +165,9 @@ export function toDevice(r: DeviceRow, ownerName: string | null, projectCount: n
     status: r.status,
     shared: r.shared,
     fullAccessOptIn: r.fullAccessOptIn,
+    // 07.16 (D-19, PD-18): device-reported facts, read-only here (written only from the device's frames).
+    hostKind: r.hostKind ?? null,
+    isolatedServer: r.isolatedServer,
     shareMaxMode: r.shareMaxMode,
     lastSeenAt: r.lastSeenAt ? new Date(r.lastSeenAt).toISOString() : null,
     runtimes: runtimesOf(r.runtimeInfo),
@@ -278,14 +281,15 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         if (shareMaxMode === "fullAccess" && !row.fullAccessOptIn) {
           throw conflict(FULL_ACCESS_OPT_IN_MESSAGE, "device_opt_in");
         }
-        await tx
-          .update(devices)
-          .set({
-            ...(name !== undefined ? { name } : {}),
-            ...(shared !== undefined ? { shared } : {}),
-            ...(shareMaxMode !== undefined ? { shareMaxMode } : {}),
-          })
-          .where(eq(devices.id, row.id));
+        const changes = {
+          ...(name !== undefined ? { name } : {}),
+          ...(shared !== undefined ? { shared } : {}),
+          ...(shareMaxMode !== undefined ? { shareMaxMode } : {}),
+        };
+        // A body with no known key (unknown keys are stripped, e.g. `hostKind`) changes nothing; an empty SET is a
+        // query error (07.16-05: it answered 500).
+        if (Object.keys(changes).length > 0)
+          await tx.update(devices).set(changes).where(eq(devices.id, row.id));
         await core.audit.record(tx, {
           action: "device.updated",
           resourceType: "device",

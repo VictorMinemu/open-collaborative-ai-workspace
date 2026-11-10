@@ -1,8 +1,10 @@
 import {
   type AuthzDenial,
+  type ContextWindow,
   type ControlDenialReason,
   type CreateWorkSessionRequest,
   compatibilityOf,
+  type EffortLevel,
   type RuntimeId,
   RuntimeInfo,
   type SessionAudienceInput,
@@ -20,14 +22,20 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { eq, max } from "drizzle-orm";
+import { eq, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
 import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, orgResource, type PermissionService } from "../organization";
-import { loadControlsContext } from "./context";
-import { buildRuntimeControls, decideSettings, highestAvailableMode, storedSettings } from "./controls";
+import { type AgentControlsLayer, loadControlsContext } from "./context";
+import {
+  buildRuntimeControls,
+  type ControlsContext,
+  decideSettings,
+  highestAvailableMode,
+  storedSettings,
+} from "./controls";
 import { checkImageBudget } from "./images";
 import { defaultVisibilityOf } from "./projects";
 import type { SessionRow, WorkSessionService } from "./service";
@@ -111,6 +119,17 @@ export interface WorkSessionStartOptions {
   proposedByAgentId?: string;
   /** The approval that started it (audit only). */
   approvalId?: string;
+  /**
+   * 07.16 PD-03, PD-07: a bot's start in its sponsor's tenant transaction (the actor is the sponsor). Its caps join the
+   * one controls context (`bot_profile` refusals); the session and its first prompt are recorded as the bot's
+   * (`started_by_agent_id`, `author_agent_id`); a tainted layer sets `tainted_at` (D-08). Absent on every human path.
+   */
+  agent?: { layer: AgentControlsLayer };
+  /**
+   * 07.16 D-18, PD-15: a person started a proposal a bot made after reading outside content. Only the first prompt is
+   * marked tainted; the session is the person's and is not tainted.
+   */
+  firstPromptTainted?: boolean;
 }
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
@@ -126,6 +145,7 @@ const DENIAL_LAYER: Record<ControlDenialReason, AuthzDenial["layer"]> = {
   runtime: "resource",
   not_in_catalog: "resource",
   not_confirmed: "resource",
+  bot_profile: "agent",
 };
 
 const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
@@ -136,6 +156,7 @@ const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
   runtime: "The runtime on this device does not offer this",
   not_in_catalog: "The runtime on this device did not report this option",
   not_confirmed: "This option is not available yet",
+  bot_profile: "Above this bot's Work Zone profile",
 };
 
 const FIELD_LABEL: Record<string, string> = {
@@ -271,13 +292,15 @@ export async function createWorkSession(
     };
   }
   // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
-  // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
+  // opt-in ∩ grain). A person's model keeps today's free choice here (a change inside the session is
+  // catalog-checked); a bot's model is decided here (07.16 PD-09, below).
   const loaded = await loadControlsContext(tx, perms, {
     deviceId: d.id,
     runtime: runtimeId,
     userId: actor.userId,
     inSession: false,
     access,
+    ...(opts.agent ? { agent: opts.agent.layer } : {}),
   });
   if (!loaded) return { ok: false, code: "project_not_found", message: "Device not found" };
   const ctx = loaded.ctx;
@@ -294,14 +317,19 @@ export async function createWorkSession(
     if (!lower) return settingsFailure("permissionMode", startOption?.reason ?? "runtime");
     startMode = lower;
   }
+  // 07.16 PD-09: a bot's model is decided like a change (in the device's catalog and in its profile's set); a
+  // person's model stays out of the patch (today's free choice). The bot's baseline names no model, so it counts as
+  // changed and is checked.
+  const botModel = opts.agent !== undefined && input.model !== undefined;
   const startPatch: SessionSettingsPatch = {
     permissionMode: startMode,
+    ...(botModel ? { model: input.model } : {}),
     ...(input.effort !== undefined ? { effort: input.effort } : {}),
     ...(input.fastMode !== undefined ? { fastMode: input.fastMode } : {}),
     ...(input.contextWindow !== undefined ? { contextWindow: input.contextWindow } : {}),
   };
   const baseline = {
-    model: input.model ?? null,
+    model: opts.agent ? null : (input.model ?? null),
     effort: null,
     contextWindow: null,
     fastMode: false,
@@ -309,6 +337,12 @@ export async function createWorkSession(
   };
   const start = decideSettings(baseline, startPatch, runtimeId, ctx);
   if (!start.ok) return settingsFailure(start.field, start.reason);
+  // 07.16 code review WR-03: what a bot's session actually runs stays inside its profile's sets, a value left to the
+  // runtime included (the catalog's default model, that model's default effort and selectable context window).
+  if (opts.agent) {
+    const off = botSettingOutside(opts.agent.layer, ctx, runtimeId, start.next);
+    if (off) return settingsFailure(off, "bot_profile");
+  }
   // D-03, D-04: the asked audience, validated against the project's access, or the project's default (`project` when
   // its switch is on, `owner` when off; a personal repository: `project`). A proposal never passes one.
   const audience: SessionAudienceInput = input.visibility ?? {
@@ -350,6 +384,9 @@ export async function createWorkSession(
       titleSource: input.title ? "user" : "heuristic",
       createdBy: actor.userId,
       visibility: audience.kind,
+      startedByAgentId: opts.agent?.layer.agentId ?? null,
+      // D-08: sticky from the start; Full access after this needs an isolated server (the context decides it).
+      ...(opts.agent?.layer.tainted ? { taintedAt: sql`now()` } : {}),
     })
     .returning();
   // The chosen teams or people as grants (the same writer as the visibility PUT).
@@ -380,15 +417,46 @@ export async function createWorkSession(
       visibility: audience.kind,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.approvalId ? { approvalId: opts.approvalId } : {}),
+      ...(opts.agent ? { startedByAgentId: opts.agent.layer.agentId } : {}),
+      ...(opts.agent?.layer.tainted ? { tainted: true } : {}),
     },
   });
   if (prompt) {
     await queueWorkPrompt(tx, deps, actor, s!, prompt, [], {
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
+      ...(opts.agent ? { authorAgentId: opts.agent.layer.agentId } : {}),
+      ...(opts.agent?.layer.tainted === true || opts.firstPromptTainted === true ? { tainted: true } : {}),
     });
   }
   const dto = await svc.emitSession(tx, s!.id);
   return { ok: true, session: dto! };
+}
+
+/**
+ * WR-03: the first effective setting of a bot's start outside its profile's sets, or null. The effective model is the
+ * one named, else the catalog's default; its effort and context window are the ones named, else the model's defaults
+ * (a fixed window, one the runtime offers no choice of, is never checked).
+ */
+function botSettingOutside(
+  layer: AgentControlsLayer,
+  ctx: ControlsContext,
+  runtime: RuntimeId,
+  next: SessionSettingsPatch,
+): "model" | "effort" | "contextWindow" | null {
+  const catalog = ctx.catalog && ctx.catalog.runtime === runtime ? ctx.catalog : null;
+  if (!catalog) return null;
+  const model =
+    (next.model ? catalog.models.find((m) => m.id === next.model) : undefined) ??
+    catalog.models.find((m) => m.isDefault);
+  if (!model) return null;
+  if (!layer.models.includes(model.id)) return "model";
+  const effort = next.effort ?? model.defaultEffort;
+  if (model.efforts.length > 0 && effort && !layer.efforts.includes(effort as EffortLevel)) return "effort";
+  const window = next.contextWindow ?? model.defaultContextWindow;
+  if (model.contextWindows.length > 1 && window && !layer.contextWindows.includes(window as ContextWindow)) {
+    return "contextWindow";
+  }
+  return null;
 }
 
 function settingsFailure(field: string, reason: ControlDenialReason): WorkSessionStartFailure {
@@ -419,7 +487,9 @@ export async function joinConversation(tx: Tx, actor: WorkSessionActor, s: Sessi
 
 /**
  * Queue a prompt authored by `actor` at the end of the session's queue (images linked and budget-checked), audit
- * and emit it, and ask for a title on the session's first prompt. `proposedByAgentId` marks a bot's proposal.
+ * and emit it, and ask for a title on the session's first prompt. `proposedByAgentId` marks a bot's proposal;
+ * `authorAgentId` (07.16 D-06) a prompt a bot sent in its sponsor's name (`actor`); never both (the DB check).
+ * `tainted` (07.16 D-08, D-18) marks a prompt written after outside content was read.
  */
 export async function queueWorkPrompt(
   tx: Tx,
@@ -428,7 +498,7 @@ export async function queueWorkPrompt(
   s: SessionRow,
   body: string,
   attachmentIds: readonly string[] = [],
-  opts: { proposedByAgentId?: string } = {},
+  opts: { proposedByAgentId?: string; authorAgentId?: string; tainted?: boolean } = {},
 ) {
   const { core, svc } = deps;
   const [{ pos } = { pos: 0 }] = await tx
@@ -445,6 +515,8 @@ export async function queueWorkPrompt(
       body,
       position: Number(pos ?? 0) + 1,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
+      ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
+      ...(opts.tainted ? { tainted: true } : {}),
     })
     .returning();
   // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
@@ -472,6 +544,8 @@ export async function queueWorkPrompt(
       executionDeviceId: s.deviceId,
       workSessionId: s.id,
       length: body.length,
+      ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
+      ...(opts.tainted ? { tainted: true } : {}),
       // Ids and a count only, never bytes (D-03).
       ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
     },

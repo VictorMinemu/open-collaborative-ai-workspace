@@ -1,0 +1,1 @@
+No external API integration: the detector fired on "API" in the ROADMAP section ("Agent Channel API"), which is this repository's own internal Agent Channel and REST API; Phase 07.16 adds no third-party service, SDK or package (RESEARCH Standard Stack: no new dependency) and only reuses in-repo seams (work-session start/queue/arbiter, pg-boss, Agent Cards, the OpenClaw plugin).

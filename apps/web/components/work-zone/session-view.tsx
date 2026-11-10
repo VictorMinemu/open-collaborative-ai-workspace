@@ -6,6 +6,7 @@ import {
   WORK_PROMPT_MAX_IMAGES,
   type WorkSession,
   type WorkSessionChanges,
+  type WorkSessionOrigin,
 } from "@ocw/contracts";
 import {
   Archive,
@@ -38,6 +39,7 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 import { useToastClearance } from "@/hooks/use-toast-clearance";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
+import { permalinkPath } from "@/lib/permalink";
 import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
@@ -81,6 +83,44 @@ export function accessLostCopy(
 /** The composer's place for a creator who left the session's project (D-12). */
 export function leftProjectLine(projectName: string): string {
   return `You left ${projectName}. You can still read and archive this session.`;
+}
+
+/**
+ * 07.16-18 (D-13, PD-19): "Back to <conversation>" for a bot-started session, built only from the server's per-viewer
+ * `origin` (never a client return URL, T-07.16-18-03): the card in its thread for a channel, the DM permalink for a
+ * DM or group, the AI chat's own route. Browser back keeps working on its own.
+ */
+export function sessionBackLink(origin: WorkSessionOrigin): { label: string; href: string } {
+  if (origin.kind === "ai_chat") {
+    return { label: `Back to ${origin.name}`, href: `/chat/ai/${encodeURIComponent(origin.conversationId)}` };
+  }
+  return {
+    label: origin.kind === "channel" ? `Back to #${origin.name}` : `Back to ${origin.name}`,
+    href: permalinkPath(
+      { id: origin.conversationId, kind: origin.kind },
+      origin.messageId,
+      origin.threadRootId,
+    ),
+  };
+}
+
+/** D-13: the way back to the conversation the bot's card came from; above the breadcrumb, 44 px on mobile. */
+export function SessionBackLink({ origin }: { origin: WorkSessionOrigin }) {
+  const back = sessionBackLink(origin);
+  return (
+    <Link
+      href={back.href}
+      data-testid="session-back"
+      title={back.label}
+      className={cn(
+        buttonVariants({ variant: "ghost", size: "sm" }),
+        "-ml-2 h-7 max-w-full justify-start px-2 font-normal text-[12.5px] text-muted-foreground hover:text-foreground max-md:h-11 max-md:text-[13px] [&_svg]:size-3.5",
+      )}
+    >
+      <ArrowLeft aria-hidden />
+      <span className="truncate">{back.label}</span>
+    </Link>
+  );
 }
 
 export function SessionView({ id }: { id: string }) {
@@ -128,6 +168,7 @@ function LiveSessionView({ id, onReopen }: { id: string; onReopen: () => void })
       state={state}
       viewerCan={query.data?.viewerCan ?? []}
       leftProject={query.data?.viewerState === "left_project"}
+      origin={query.data?.origin ?? null}
     />
   );
 }
@@ -202,11 +243,14 @@ function LoadedSession({
   state,
   viewerCan,
   leftProject,
+  origin,
 }: {
   state: LiveSession;
   viewerCan: readonly Permission[];
   /** The viewer created this session and left its team project since (D-12): read and archive only. */
   leftProject: boolean;
+  /** 07.16 (D-13): the conversation a bot started this session from, when this viewer reads it. */
+  origin: WorkSessionOrigin | null;
 }) {
   const session = state.session;
   const devices = useDevices();
@@ -299,6 +343,7 @@ function LoadedSession({
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
         canChangeVisibility={viewerCan.includes("work_session.visibility")}
+        origin={origin}
       />
       <div className="flex min-h-0 flex-1">
         <DropZone
@@ -470,6 +515,7 @@ function SessionHeader({
   changesCount,
   canArchive,
   canChangeVisibility,
+  origin,
 }: {
   session: WorkSession;
   state: LiveSession;
@@ -482,6 +528,7 @@ function SessionHeader({
   canArchive: boolean;
   /** The API's `work_session.visibility` on this session (the chip says "Change" rather than "See"). */
   canChangeVisibility: boolean;
+  origin: WorkSessionOrigin | null;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
@@ -558,6 +605,7 @@ function SessionHeader({
 
   return (
     <header className="shrink-0 px-3 pt-1 pb-2 sm:px-5 md:pt-3" data-testid="session-header">
+      {origin ? <SessionBackLink origin={origin} /> : null}
       <div className="flex min-h-11 items-center gap-2 md:min-h-9">
         {/* ref-4 breadcrumb: project / session title; below 768 the title has its own line under it. */}
         <nav aria-label="Breadcrumb" className="flex min-w-24 flex-1 items-center md:min-w-0 md:gap-2.5">
@@ -614,7 +662,7 @@ function SessionHeader({
                         name={p.name}
                         src={p.avatarUrl}
                         seed={p.uid}
-                        className="size-6 opacity-50 ring-2 ring-background grayscale"
+                        className="size-6 ring-2 ring-background grayscale"
                       />
                     </span>
                   </Tooltip>

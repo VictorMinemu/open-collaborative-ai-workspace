@@ -64,6 +64,95 @@ describe("ocw-runtime full-access (headless opt-in, ADR-0012)", () => {
   }, 30_000);
 });
 
+describe("ocw-runtime isolated-server (07.16, D-19, PD-18)", () => {
+  it("on warns on stderr and prints JSON; status with the daemon stopped; the env overrides; a bad sub-command is usage", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    writeFileSync(join(home, "runtime.json"), JSON.stringify({ fullAccess: { optIn: true } }));
+    const on = await cliAsync(home, ["isolated-server", "on"], { OCW_RUNTIME_HOST: "service" });
+    expect(on.code).toBe(0);
+    expect(on.stderr).toContain(
+      "Isolated server: bots that read outside content may run Full access sessions here. Turn this on only on a machine that holds nothing else that matters.",
+    );
+    expect(JSON.parse(on.stdout)).toEqual({
+      isolatedServer: true,
+      isolatedServerSource: "config",
+      host: "service",
+      honoured: true,
+      daemon: "stopped",
+    });
+    const file = join(home, "runtime.json");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      fullAccess: { optIn: true },
+      isolatedServer: { on: true },
+    });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    // Not a service host: stored, but not honoured.
+    const status = await cliAsync(home, ["isolated-server", "status"]);
+    expect(status.code).toBe(0);
+    expect(JSON.parse(status.stdout)).toEqual({
+      isolatedServer: true,
+      isolatedServerSource: "config",
+      host: null,
+      honoured: false,
+      daemon: "stopped",
+    });
+
+    const forcedOff = await cliAsync(home, ["isolated-server", "on"], {
+      OCW_RUNTIME_HOST: "service",
+      OCW_ISOLATED_SERVER: "0",
+    });
+    expect(JSON.parse(forcedOff.stdout)).toMatchObject({
+      isolatedServer: false,
+      isolatedServerSource: "env",
+      honoured: false,
+    });
+    expect(forcedOff.stderr).toContain("OCW_ISOLATED_SERVER");
+
+    const off = await cliAsync(home, ["isolated-server", "off"], { OCW_RUNTIME_HOST: "service" });
+    expect(off.code).toBe(0);
+    expect(off.stderr).not.toContain("Isolated server: bots");
+    expect(JSON.parse(readFileSync(file, "utf8")).isolatedServer).toEqual({ on: false });
+
+    const bad = await cliAsync(home, ["isolated-server", "maybe"]);
+    expect(bad.code).not.toBe(0);
+    expect(bad.stderr).toContain("usage: ocw-runtime isolated-server on|off|status");
+    expect(JSON.parse(readFileSync(file, "utf8")).isolatedServer).toEqual({ on: false });
+  }, 60_000);
+
+  it("daemon running: the daemon reloads the mark and the JSON says running", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const daemon = await Daemon.create({
+      home,
+      env: { OCW_RUNTIME_HOST: "service" },
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: silentLogger,
+    });
+    try {
+      await daemon.start();
+      const on = await cliAsync(home, ["isolated-server", "on"]);
+      expect(on.code).toBe(0);
+      expect(JSON.parse(on.stdout)).toEqual({
+        isolatedServer: true,
+        isolatedServerSource: "config",
+        host: "service",
+        honoured: true,
+        daemon: "running",
+      });
+      expect(await daemon.status()).toMatchObject({
+        isolatedServer: true,
+        isolatedServerSource: "config",
+        host: "service",
+      });
+    } finally {
+      await daemon.stop();
+    }
+  }, 60_000);
+});
+
 // ---------------------------------------------------------------------------------------------
 // 07.11 `ocw-runtime updates status|check|now` (D-05, D-09, PD-08). PD-19: a fake CLI in a scratch HOME and PATH;
 // the daemon-down report only resolves (it runs nothing); the in-process daemon has its level off.

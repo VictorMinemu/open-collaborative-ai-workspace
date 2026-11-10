@@ -18,6 +18,7 @@ import {
   type WorkApproval,
   type WorkPrompt,
   type WorkSession,
+  type WorkSessionAgentRef,
   type WorkSessionChanges,
   type WorkSessionStatus,
   type WorkSessionVisibilitySummary,
@@ -39,7 +40,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, count, desc, eq, inArray, isNull, min, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { Jobs } from "../../lib/jobs";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
@@ -47,9 +48,11 @@ import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
-import { loadControlsContext } from "./context";
+import { botLayerForSession } from "./bot-profile";
+import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
+  type ControlsContext,
   clampToControls,
   highestAvailableMode,
   pickSettings,
@@ -268,7 +271,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     const rows = userId === null ? all : all.filter((r) => (r.access ?? []).length > 0);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, running, dir, summaries] = await Promise.all([
+    const [queued, pending, running, dir, summaries, starters] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -286,6 +289,11 @@ export class WorkSessionService implements DeviceSessionHandler {
         .groupBy(workPrompts.workSessionId),
       memberDirectory(tx),
       visibilitySummaries(tx, ids),
+      // 07.16 (D-06): the bots that started these sessions, by the same lookup as the prompts' bots.
+      agentRefs(
+        tx,
+        rows.flatMap((r) => (r.s.startedByAgentId ? [r.s.startedByAgentId] : [])),
+      ),
     ]);
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
@@ -334,6 +342,7 @@ export class WorkSessionService implements DeviceSessionHandler {
           },
           createdAt: new Date(s.createdAt).toISOString(),
           updatedAt: new Date(s.updatedAt).toISOString(),
+          startedByAgent: agentRefOf(s.startedByAgentId, starters),
         };
         return {
           dto,
@@ -363,13 +372,14 @@ export class WorkSessionService implements DeviceSessionHandler {
       tx,
       rows.map((r) => r.id),
     );
-    const bots = await proposerNames(tx, rows);
+    const bots = await promptAgents(tx, rows);
     return rows.map((r) =>
       toPrompt(
         r,
         dir.get(r.authorUserId)?.displayName ?? null,
         images.get(r.id) ?? [],
         proposedByOf(r, bots),
+        agentRefOf(r.authorAgentId, bots),
       ),
     );
   }
@@ -590,7 +600,7 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
     const [dir, images] = await Promise.all([memberDirectory(tx), attachmentsForWorkPrompts(tx, [row.id])]);
-    const bots = await proposerNames(tx, [row]);
+    const bots = await promptAgents(tx, [row]);
     await this.deps.realtime.appendEvent(
       tx,
       wsTopic(row.workSessionId),
@@ -600,6 +610,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         dir.get(row.authorUserId)?.displayName ?? null,
         images.get(row.id) ?? [],
         proposedByOf(row, bots),
+        agentRefOf(row.authorAgentId, bots),
       ),
     );
   }
@@ -643,7 +654,36 @@ export class WorkSessionService implements DeviceSessionHandler {
         { singletonKey: `ws:${s.id}:${s.lastLocalSeq}` },
       );
     }
+    // 07.16 (D-09, PD-16): a bot's session changed state; its card follows and the bot may be woken. The row flag is the
+    // debounce of record (one pending wake per session): standard pg-boss queues do not dedupe by key (Pitfall 4). The
+    // 3 s delay absorbs an `idle → running` flip of the same dispatch; the handler decides on the state it then reads.
+    if (entered) await this.syncBotCard(tx, s);
     await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.16 (D-12, PD-16): a bot's session changed what its live card shows (its state, or its mode or model without a
+   * state change: code review WR-07): one pending `work_session.bot_sync` per session. The handler refreshes the card
+   * only when its fields changed and wakes the bot only for a wake-worthy state not woken yet, so a settings change
+   * alone never wakes it. A person's session does nothing.
+   */
+  async syncBotCard(
+    tx: Tx,
+    s: Pick<SessionRow, "id" | "organizationId" | "startedByAgentId">,
+  ): Promise<void> {
+    if (!s.startedByAgentId || !this.deps.jobs) return;
+    const flipped = await tx.execute(sql`
+      update app.bot_work_sessions set wake_pending = true
+       where work_session_id = ${s.id} and not wake_pending
+      returning 1`);
+    if (flipped.rows.length > 0) {
+      await this.deps.jobs.sendInTx(
+        tx,
+        "work_session.bot_sync",
+        { organizationId: s.organizationId, workSessionId: s.id },
+        { startAfter: new Date(Date.now() + 3_000) },
+      );
+    }
   }
 
   /** `session.start` payload for this session (resume when the runtime already has a session id). */
@@ -701,12 +741,25 @@ export class WorkSessionService implements DeviceSessionHandler {
       // P-07: re-checked on every turn: min(session mode, the author's cap = org policy ∩ device opt-in ∩ the
       // author's device cap (floor for unlisted controllers, nothing for revoked ones) ∩ grain ∩ catalog).
       policy ??= await loadWorkZonePolicy(tx);
+      // 07.16 (D-04, PD-07, Pitfall 10): a bot's prompt (written in its sponsor's name) is re-decided against the bot's
+      // live profile on every turn: no active profile for this session → refused; else its caps join the sponsor's.
+      // A prompt written after outside content counts as tainted even before the session is marked (D-08).
+      let agent: AgentControlsLayer | undefined;
+      if (next.authorAgentId) {
+        const layer = await botLayerForSession(tx, this.deps.perms, s);
+        if (!layer || layer.agentId !== next.authorAgentId) {
+          await this.refusePrompt(tx, s, next, "bot_not_allowed");
+          continue;
+        }
+        agent = next.tainted ? { ...layer, tainted: true } : layer;
+      }
       const author = await loadControlsContext(tx, this.deps.perms, {
         deviceId: s.deviceId,
         runtime: s.runtime,
         userId: next.authorUserId,
         inSession: true,
         policy,
+        ...(agent ? { agent } : {}),
       });
       const cap = author ? highestAvailableMode(author.ctx, s.model, s.permissionMode) : null;
       const mode = turnMode(s.permissionMode, cap);
@@ -746,11 +799,13 @@ export class WorkSessionService implements DeviceSessionHandler {
         resourceType: "work_prompt",
         resourceId: next.id,
         userId: next.authorUserId,
+        ...(next.authorAgentId ? { agentId: next.authorAgentId } : {}),
         deviceId: s.deviceId,
         sessionId: s.id,
         metadata: {
           promptId: next.id,
           authorUserId: next.authorUserId,
+          ...(next.authorAgentId ? { authorAgentId: next.authorAgentId } : {}),
           requestedMode: s.permissionMode,
           effectiveMode: mode,
           capped: mode !== s.permissionMode,
@@ -765,14 +820,15 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
-   * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them): failed,
-   * audited, never sent; the arbiter moves to the next prompt.
+   * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them; 07.16
+   * Pitfall 10, `bot_not_allowed`: the bot's profile is not active for this turn): failed, audited, never sent; the
+   * arbiter moves to the next prompt.
    */
   private async refusePrompt(
     tx: Tx,
     s: SessionRow,
     p: PromptRow,
-    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported",
+    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed",
   ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
@@ -784,12 +840,14 @@ export class WorkSessionService implements DeviceSessionHandler {
       resourceType: "work_prompt",
       resourceId: p.id,
       userId: p.authorUserId,
+      ...(p.authorAgentId ? { agentId: p.authorAgentId } : {}),
       deviceId: s.deviceId,
       sessionId: s.id,
       result: "denied",
       metadata: {
         promptId: p.id,
         authorUserId: p.authorUserId,
+        ...(p.authorAgentId ? { authorAgentId: p.authorAgentId } : {}),
         requestedMode: s.permissionMode,
         reason,
       },
@@ -805,6 +863,11 @@ export class WorkSessionService implements DeviceSessionHandler {
    * what the creator may pick now (policy ∩ opt-in ∩ cap ∩ grain ∩ catalog ∩ inventory) and the device is told
    * (`session.configure`); a Full access turn in flight is interrupted when Full access is left. `actorUserId` is the
    * person whose change caused the re-check (the audit actor; the transaction's own user otherwise).
+   *
+   * 07.16 (D-04, PD-08, E4): a bot's session (`started_by_agent_id`) is decided with the bot's live layer joined to its
+   * sponsor's controls while the profile is active, and with the sponsor's own controls when it is not (people keep
+   * their control of the session); a bot turn in flight that its layer no longer allows is interrupted, a person's turn
+   * never is by the bot's layer. A person's session takes the branch it always took.
    */
   async reauthorize(
     tx: Tx,
@@ -815,12 +878,14 @@ export class WorkSessionService implements DeviceSessionHandler {
   ): Promise<void> {
     const actor = actorUserId ? { userId: actorUserId } : {};
     if (!ACTIVE_STATES.includes(s.status)) return;
+    const layer = s.startedByAgentId ? await botLayerForSession(tx, this.deps.perms, s) : null;
     const creator = await loadControlsContext(tx, this.deps.perms, {
       deviceId: s.deviceId,
       runtime: s.runtime,
       userId: s.createdBy,
       inSession: false,
       ...(policy ? { policy } : {}),
+      ...(layer ? { agent: layer } : {}),
     });
     if (!creator) return;
     if (creator.cap === null) {
@@ -848,9 +913,13 @@ export class WorkSessionService implements DeviceSessionHandler {
     }
     const current = requestedSettings(s);
     const { next, changed } = clampToControls(current, buildRuntimeControls(s.runtime, creator.ctx, s.model));
-    if (changed.length === 0) return;
+    if (changed.length === 0) {
+      if (s.startedByAgentId) await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
+      return;
+    }
     const from = current.permissionMode;
     const to = next.permissionMode ?? from;
+    let interruptSent = false;
     await tx
       .update(workSessions)
       .set({
@@ -906,9 +975,74 @@ export class WorkSessionService implements DeviceSessionHandler {
           kind: "interrupt",
           payload: {},
         });
+        interruptSent = true;
       }
     }
+    if (s.startedByAgentId && !interruptSent) {
+      await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
+    }
+    // WR-07: the live card shows the mode and model every reader of the channel sees; it follows the downgrade.
+    await this.syncBotCard(tx, s);
     await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.16 (E4, PD-08): the bot's turn in flight in its session, interrupted when the bot may no longer run it at its
+   * mode: the profile is not active (or names another bot), or the layer (with the turn's own taint) no longer allows
+   * the mode. A person's turn is left alone. Audited like an interrupt, with the turn and the bot.
+   */
+  private async interruptBotTurn(
+    tx: Tx,
+    s: SessionRow,
+    ctx: ControlsContext,
+    layer: AgentControlsLayer | null,
+    reason: ReauthorizeReason,
+    actor: { userId?: string },
+  ): Promise<void> {
+    const [turn] = await tx
+      .select({
+        id: workPrompts.id,
+        permissionMode: workPrompts.permissionMode,
+        authorAgentId: workPrompts.authorAgentId,
+        tainted: workPrompts.tainted,
+      })
+      .from(workPrompts)
+      .where(
+        and(
+          eq(workPrompts.workSessionId, s.id),
+          inArray(workPrompts.status, IN_FLIGHT),
+          isNotNull(workPrompts.authorAgentId),
+        ),
+      )
+      .limit(1);
+    if (!turn) return;
+    if (layer && layer.agentId === turn.authorAgentId && turn.permissionMode) {
+      const agent = turn.tainted ? { ...layer, tainted: true } : layer;
+      const allowed = highestAvailableMode({ ...ctx, agent }, s.model, turn.permissionMode);
+      if (allowed === turn.permissionMode) return;
+    }
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "interrupt",
+      payload: {},
+    });
+    await this.deps.audit.record(tx, {
+      ...actor,
+      action: "work_session.interrupted",
+      resourceType: "work_session",
+      resourceId: s.id,
+      ...(turn.authorAgentId ? { agentId: turn.authorAgentId } : {}),
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      metadata: {
+        reason,
+        promptId: turn.id,
+        authorAgentId: turn.authorAgentId,
+        mode: turn.permissionMode,
+        botActive: layer !== null,
+      },
+    });
   }
 
   /**
@@ -1097,9 +1231,17 @@ export class WorkSessionService implements DeviceSessionHandler {
         .select({ id: workSessions.id })
         .from(workSessions)
         .where(and(eq(workSessions.deviceId, device.deviceId), inArray(workSessions.status, ACTIVE_STATES)));
+      let policy: WorkZonePolicy | undefined;
       for (const { id } of rows) {
         const s = await this.lock(tx, id);
         if (!s) continue;
+        // 07.16 (D-19, PD-08): the hello rewrote the device's opt-in and isolated mark without a sweep; a bot session
+        // is re-decided now (lowered, its bot turn interrupted), before anything is re-attached or dispatched.
+        if (s.startedByAgentId) {
+          policy ??= await loadWorkZonePolicy(tx);
+          await this.reauthorize(tx, s, "device_opt_out", policy);
+          if (!ACTIVE_STATES.includes(s.status)) continue;
+        }
         if (alive === null || alive.has(s.id)) {
           if (s.status !== "host_offline") continue;
           if (await this.hasPendingApprovals(tx, s.id)) await this.setStatus(tx, s, "waiting_approval");
@@ -1695,25 +1837,46 @@ export function normalizeEvent(ev: SessionEvent): SessionEvent {
   return ev;
 }
 
+/** A bot as a session or a prompt names it (name and handle), live bots only. */
+type AgentNames = ReadonlyMap<string, { name: string; handle: string }>;
+
 /**
- * Phase 07.5 (D-04, UI-SPEC Surface 3): the names of the bots that proposed these prompts. A deleted bot (soft
- * delete; a hard delete already cleared the column) is gone, so its prompts show no proposer. One query, and only
- * when a prompt has a proposer.
+ * The live bots among `ids`. A deleted bot (soft delete; a hard delete already cleared the column) is gone, so what
+ * it proposed, wrote or started names no bot. One query, and none when no id is given.
  */
-async function proposerNames(tx: Tx, rows: readonly PromptRow[]): Promise<Map<string, string>> {
-  const ids = [...new Set(rows.flatMap((r) => (r.proposedByAgentId ? [r.proposedByAgentId] : [])))];
-  if (ids.length === 0) return new Map();
+async function agentRefs(tx: Tx, ids: readonly string[]): Promise<AgentNames> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return new Map();
   const found = await tx
-    .select({ id: agents.id, name: agents.name })
+    .select({ id: agents.id, name: agents.name, handle: agents.username })
     .from(agents)
-    .where(and(inArray(agents.id, ids), isNull(agents.deletedAt)));
-  return new Map(found.map((a) => [a.id, a.name]));
+    .where(and(inArray(agents.id, unique), isNull(agents.deletedAt)));
+  return new Map(found.map((a) => [a.id, { name: a.name, handle: a.handle }]));
 }
 
-function proposedByOf(r: PromptRow, names: ReadonlyMap<string, string>): WorkPrompt["proposedBy"] {
-  const name = r.proposedByAgentId ? names.get(r.proposedByAgentId) : undefined;
-  return r.proposedByAgentId && name !== undefined
-    ? { agentId: r.proposedByAgentId, displayName: name.slice(0, 200) }
+/**
+ * Phase 07.5 (D-04, UI-SPEC Surface 3) and 07.16 (D-06): the bots that proposed or wrote these prompts, in one
+ * lookup for both columns.
+ */
+function promptAgents(tx: Tx, rows: readonly PromptRow[]): Promise<AgentNames> {
+  return agentRefs(
+    tx,
+    rows.flatMap((r) => [r.proposedByAgentId, r.authorAgentId].filter((id): id is string => id !== null)),
+  );
+}
+
+function proposedByOf(r: PromptRow, names: AgentNames): WorkPrompt["proposedBy"] {
+  const bot = r.proposedByAgentId ? names.get(r.proposedByAgentId) : undefined;
+  return r.proposedByAgentId && bot !== undefined
+    ? { agentId: r.proposedByAgentId, displayName: bot.name.slice(0, 200) }
+    : null;
+}
+
+/** 07.16 (D-06): `agentId` as a stable reference with its name and handle; null when unset or deleted. */
+function agentRefOf(agentId: string | null, names: AgentNames): WorkSessionAgentRef | null {
+  const bot = agentId ? names.get(agentId) : undefined;
+  return agentId && bot
+    ? { agentId, displayName: bot.name.slice(0, 200), handle: bot.handle.slice(0, 64) }
     : null;
 }
 
@@ -1723,6 +1886,8 @@ export function toPrompt(
   attachments: Attachment[] = [],
   /** Phase 07.5: the bot whose Work Zone proposal created this prompt (`proposedByOf`); null for a person's prompt. */
   proposedBy: WorkPrompt["proposedBy"] = null,
+  /** 07.16 (D-06): the bot that wrote this prompt (`agentRefOf`); the author stays its sponsor. */
+  authorAgent: WorkSessionAgentRef | null = null,
 ): WorkPrompt {
   return {
     id: r.id,
@@ -1738,6 +1903,9 @@ export function toPrompt(
     completedAt: iso(r.completedAt),
     attachments,
     proposedBy,
+    authorAgent,
+    // D-08: sent from a bot turn after outside content (or the first prompt of a proposal made after it).
+    tainted: r.tainted,
   };
 }
 

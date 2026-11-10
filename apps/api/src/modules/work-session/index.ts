@@ -1,4 +1,9 @@
-import { EventTypes, WorkProjectUpdatedEvent, type WorkSession } from "@ocw/contracts";
+import {
+  type BotWorkSessionReadModel,
+  EventTypes,
+  WorkProjectUpdatedEvent,
+  type WorkSession,
+} from "@ocw/contracts";
 import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
@@ -6,6 +11,9 @@ import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
+import { registerBotProfileRoutes } from "./bot-profile";
+import { type BotReadParams, readBotWorkSession } from "./bot-read";
+import { type BotSessions, createBotSessions } from "./bot-sessions";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
 import { registerProjectRoutes } from "./projects";
@@ -27,6 +35,32 @@ import {
 } from "./start";
 import { withoutViewerFields } from "./viewer-fields";
 
+// 07.16-20 (PD-12, PD-16): the wake handler refreshes the live card with the start's own composer.
+export { composeWorkSessionCard } from "./bot-card";
+// 07.16-11 (PD-17): delivery asks whether a bot's turn is offered the Work Zone tools, and with which context.
+export { workZoneOfferFor } from "./bot-offer";
+// 07.16-07 (PD-04 … PD-06): the start route, the arbiter, the offer and the web read a bot's profile status.
+export {
+  type BotProfileRow,
+  type BotProfileStatus,
+  botLayerForSession,
+  loadBotProfile,
+  profileScopeRefusal,
+  profileStatus,
+} from "./bot-profile";
+// 07.16-17 (PD-14, D-10): what a bot reads about its own session; 07.16-20's wake names the same deciders.
+export { type BotReadParams, sessionDeciders } from "./bot-read";
+// 07.16-15 (PD-03, PD-10 … PD-13): a bot's own start, its audience, its card and the one ownership rule; 07.16-16 its
+// prompt and stop, and the one audit builder of the bot's Work Zone routes.
+export {
+  auditBotWorkSession,
+  type BotSessions,
+  type BotWorkSessionRow,
+  botSessionAudience,
+  type ConversationReaders,
+  ownBotSession,
+  refusedAnswer,
+} from "./bot-sessions";
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
 export type { OrgQueueOptions, OrgTask } from "./org-queue";
@@ -69,6 +103,16 @@ export interface WorkSessionModule extends ApiModule {
    * Null when the module was built without the approval service (no `work_zone.start` kind to request).
    */
   proposals: WorkZoneProposalService | null;
+  /**
+   * 07.16-15 (PD-03): a bot's own Work Zone sessions. The Agent Channel routes call these inside the bot's sponsor's
+   * tenant transaction; every start goes through `start` above (`createWorkSession` with the agent layer).
+   */
+  bots: BotSessions;
+  /**
+   * 07.16-17 (PD-14): the bounded, redacted, repo-relative read of a bot's own session (`ocw_work_session_read`), in
+   * the sponsor's tenant transaction, after the Agent Channel route found the session and claimed the call.
+   */
+  botRead(tx: Tx, p: BotReadParams): Promise<BotWorkSessionReadModel>;
 }
 
 /**
@@ -176,14 +220,26 @@ export function createWorkSessionModule(
     };
   }
 
+  // 07.16-15 (PD-03): a bot's start is `createWorkSession` for its sponsor, with the bot's caps as the agent layer.
+  // 07.16-16 (PD-13): its follow-up prompts and its stop are the bodies people's routes use (`controller.ts`).
+  const bots = createBotSessions({
+    core,
+    start,
+    controller: { core, svc: service, startDeps: { core, perms, svc: service, hub } },
+  });
+
   return {
     name: "work-session",
     register(app) {
       registerWorkSessionRoutes(app, core, hub, service);
       registerProjectRoutes(app, core, perms);
+      // 07.16 (D-01 … D-03): a bot's Work Zone profile and the per-bot device consent; changes sweep the device.
+      registerBotProfileRoutes(app, core, perms, service);
     },
     start,
     proposals,
+    bots,
+    botRead: (tx, p) => readBotWorkSession(tx, { core, perms }, p),
     // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
     close: () => service.close(),
   };

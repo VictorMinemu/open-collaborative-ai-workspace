@@ -103,14 +103,30 @@ export function toolCallHashTuple(t: {
 }
 
 /** The stored action of a request (null when it is gone or belongs to another organization). */
-/** Whether the turn that asked had used a member's sign-in (`agent_turns.member_data`, D-13). */
-async function sourceMemberData(tx: Tx, eventId: string): Promise<boolean> {
+/**
+ * What the turn that asked carries forward, as it stands now: a member's sign-in (`agent_turns.member_data`, D-13) and
+ * a Work Zone session's output read (`agent_turns.session_output_read`, 07.16 D-20, code review CR-02). Read live: the
+ * asking turn keeps running and the re-run resumes its OpenClaw session, so a mark set after the request still counts.
+ */
+async function sourceTurnMarks(
+  tx: Tx,
+  eventId: string,
+): Promise<{ memberData: boolean; sessionOutputRead: boolean }> {
   const [turn] = await tx
-    .select({ memberData: agentTurns.memberData })
+    .select({ memberData: agentTurns.memberData, sessionOutputRead: agentTurns.sessionOutputRead })
     .from(agentTurns)
     .where(eq(agentTurns.eventId, eventId))
     .limit(1);
-  return turn?.memberData === true;
+  return { memberData: turn?.memberData === true, sessionOutputRead: turn?.sessionOutputRead === true };
+}
+
+/**
+ * The stored action as people are shown it: "after untrusted content" also when the asking turn read a Work Zone
+ * session's output (D-20 treats it as untrusted, CR-02). Display only: the re-run's taint stays `t.tainted`.
+ */
+async function shownToolCall(tx: Tx, t: ToolCallRow): Promise<ToolCallRow> {
+  if (t.tainted) return t;
+  return (await sourceTurnMarks(tx, t.eventId)).sessionOutputRead ? { ...t, tainted: true } : t;
 }
 
 export async function loadToolCall(
@@ -610,7 +626,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
           hiddenCharacters: preview.notices.hiddenCharacters || all.hidden,
           maskedSecret: preview.notices.maskedSecret || all.masked,
         },
-        tainted: t.tainted,
+        tainted: (await shownToolCall(tx, t)).tainted,
         agent: { id: t.agentId, displayName: await agentName(tx, t.agentId) },
         requestedFor: {
           id: t.requestedForUserId,
@@ -649,16 +665,17 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       if (!t) return { title: "This action no longer exists.", context: null, requester, tags: [] };
       const source = await sourceOf(tx, t);
       const origin = originOf(await askedIn(tx, t), t.threadRootMessageId !== null);
+      const shown = await shownToolCall(tx, t);
       return {
         title: await titleOf(tx, t, source),
         context: originLabel(origin),
         requester,
-        tags: t.tainted ? [{ label: "Outside content", tone: "warning" }] : [],
+        tags: shown.tainted ? [{ label: "Outside content", tone: "warning" }] : [],
         agent: { id: t.agentId, displayName: bot.slice(0, 200) },
         origin,
         chips: [
           { kind: "source", label: source.name.slice(0, 80), icon: SOURCE_ICON[source.kind] },
-          ...(t.tainted ? [{ kind: "tainted" as const, label: "Outside content" }] : []),
+          ...(shown.tainted ? [{ kind: "tainted" as const, label: "Outside content" }] : []),
         ],
         useBy: useByOf(row),
       };
@@ -667,7 +684,12 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async card(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await decidingRule(tx, t)));
+      return composeToolCallCard(
+        tx,
+        row,
+        await shownToolCall(tx, t),
+        await waitingForOf(tx, t, await decidingRule(tx, t)),
+      );
     },
 
     async link(tx, row) {
@@ -694,14 +716,17 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       const t = await loadToolCall(tx, row);
       if (!t) return null;
       const useBy = useByOf(row);
+      const marks = await sourceTurnMarks(tx, t.eventId);
       return {
         ...(row.status === "approved" && useBy
           ? { grant: { tool: t.tool, arguments: t.argumentsCanonical, useBy } }
           : {}),
         // The request turn's taint, stored under its lock: the re-run starts tainted (D-04, APPROVE-04).
         sourceTainted: t.tainted,
-        // 07.8-25 (D-13): the re-run continues a turn that used the requester's sign-in, so it has member data too.
-        ...((await sourceMemberData(tx, t.eventId)) ? { sourceMemberData: true } : {}),
+        // 07.8-25 (D-13): the re-run continues a turn that used the requester's sign-in, so it has member data too;
+        // 07.16 D-20 (CR-02): and one that read a Work Zone session's output keeps that mark (never laundered).
+        ...(marks.memberData ? { sourceMemberData: true } : {}),
+        ...(marks.sessionOutputRead ? { sourceSessionOutputRead: true } : {}),
       };
     },
   };

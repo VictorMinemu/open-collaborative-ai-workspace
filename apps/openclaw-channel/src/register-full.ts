@@ -13,13 +13,15 @@ import { registerMemoryTool } from "./memory-tool.js";
 import { registerRecordTool } from "./record-tool.js";
 import { registerSandboxTools } from "./sandbox-tools.js";
 import { sharedToolGuardClient, type ToolGuard, toolGuard } from "./tool-guard.js";
+import { registerWorkSessionTools } from "./work-session-tools.js";
 import { registerWorkZoneTools } from "./work-zone-tools.js";
 
 /**
  * The plugin's full-runtime registrations (`defineChannelPluginEntry({ registerFull })`, run in "full" and
  * "tool-discovery"): our tools `ocw_memory_save` (D-10), `ocw_memory_list|read|write|propose` (07.2-07),
  * `ocw_agent_card` (06-14), `ocw_board_card` (07.1-13), the per-member connector and keychain tools (07.4-09), the
- * Work Zone proposal tools `ocw_work_zone_projects|ocw_start_work_zone` (07.5-10), the confined sandbox and browser
+ * Work Zone proposal tools `ocw_work_zone_projects|ocw_start_work_zone` (07.5-10), the bot's own Work Zone session tools
+ * `ocw_work_session_start|prompt|read|stop` (07.16, work-session-tools.ts), the confined sandbox and browser
  * tools `ocw_sandbox_*` / `ocw_browser_*` (07.8, sandbox-tools.ts, browser-tools.ts), the 07.15 read tool
  * `ocw_attachment_read` (attachment-tool.ts), the 07.6 tools
  * `ocw_automation_propose` (automation-tool.ts) and `ocw_record_update` (record-tool.ts), the 07.7 consult tool
@@ -41,6 +43,7 @@ export function registerFull(
   registerBoardTool(api, { guard, client });
   registerConnectorTools(api, { guard, client });
   registerWorkZoneTools(api, { guard, client });
+  registerWorkSessionTools(api, { guard, client });
   registerSandboxTools(api, { guard, client });
   registerBrowserTools(api, { guard, client });
   registerAttachmentTools(api, { guard, client });

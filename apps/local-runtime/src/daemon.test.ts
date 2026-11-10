@@ -29,7 +29,7 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
-import { setFullAccessOptIn, setRuntimeUpdatesLevel } from "./config.js";
+import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
@@ -898,6 +898,67 @@ describe("Full access: the device's own opt-in (ADR-0012, D-02, P-12)", () => {
       f.type === "event" && f.event.type === "session.settings" ? [f.event.permissionMode] : [],
     );
     expect(modes).not.toContain("fullAccess");
+  });
+});
+
+describe("Isolated server and host kind (07.16, D-19, PD-18)", () => {
+  it("a service host with the mark on reports host and isolatedServer in hello, capabilities and status", async () => {
+    await setIsolatedServer(home, true);
+    await gatedDaemon({ OCW_RUNTIME_HOST: "service" });
+    await daemon.start();
+    const hello = await server.frame("hello");
+    expect(hello.device.host).toBe("service");
+    expect(hello.isolatedServer).toBe(true);
+    expect((await server.frame("capabilities")).isolatedServer).toBe(true);
+    const status = await controlRequest(socketPath(), { cmd: "status" });
+    expect(status.result).toMatchObject({
+      isolatedServer: true,
+      isolatedServerSource: "config",
+      host: "service",
+    });
+    // Only the enum crosses the wire: no local path of the host decision.
+    expect(JSON.stringify(server.last.frames)).not.toContain(home);
+  });
+
+  it("a desktop host never reports the mark, whatever the file says", async () => {
+    await setIsolatedServer(home, true);
+    await gatedDaemon({ OCW_RUNTIME_HOST: "desktop" });
+    await daemon.start();
+    const hello = await server.frame("hello");
+    expect(hello.device.host).toBe("desktop");
+    expect(hello.isolatedServer).toBe(false);
+    expect((await server.frame("capabilities")).isolatedServer).toBe(false);
+  });
+
+  it("an unknown host sends no device.host and no mark", async () => {
+    await setIsolatedServer(home, true);
+    await gatedDaemon({});
+    await daemon.start();
+    const hello = await server.frame("hello");
+    expect(hello.device).not.toHaveProperty("host");
+    expect(hello.isolatedServer).toBe(false);
+  });
+
+  it("reloadConfig after turning the mark off sends capabilities with isolatedServer: false at once", async () => {
+    await setIsolatedServer(home, true);
+    await gatedDaemon({ OCW_RUNTIME_HOST: "service" });
+    await daemon.start();
+    expect((await server.frame("hello")).isolatedServer).toBe(true);
+    await server.frame("capabilities", (f) => f.isolatedServer === true);
+    await setIsolatedServer(home, false);
+    const res = await controlRequest(socketPath(), { cmd: "reloadConfig" });
+    expect(res).toMatchObject({
+      ok: true,
+      result: { isolatedServer: false, isolatedServerSource: "config", host: "service" },
+    });
+    await server.frame("capabilities", (f) => f.isolatedServer === false);
+    // The environment wins over the file.
+    await gatedDaemon({ OCW_RUNTIME_HOST: "service", OCW_ISOLATED_SERVER: "1" });
+    await daemon.start();
+    expect(await controlRequest(socketPath(), { cmd: "reloadConfig" })).toMatchObject({
+      ok: true,
+      result: { isolatedServer: true, isolatedServerSource: "env" },
+    });
   });
 });
 

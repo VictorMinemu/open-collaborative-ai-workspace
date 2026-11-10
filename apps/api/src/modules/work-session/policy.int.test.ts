@@ -226,7 +226,8 @@ describe("Work Zone policy (D-02, D-11)", () => {
     const policyB = await db.withTenant({ organizationId: orgB, userId: userB }, (tx) =>
       loadWorkZonePolicy(tx),
     );
-    expect(policyB).toEqual({ ...DEFAULT_WORK_ZONE_POLICY, updatedAt: null });
+    // 07.16 (D-15): the org cap on bot sessions is a new optional field; absent row = 10.
+    expect(policyB).toEqual({ ...DEFAULT_WORK_ZONE_POLICY, botSessionsMax: 10, updatedAt: null });
     // Org A's device catalogs never show up in org B's known models.
     expect(await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => knownModels(tx))).toEqual({
       "claude-code": [],
@@ -377,5 +378,66 @@ describe("07.11: runtime updates level (D-02)", () => {
         "alter table app.work_zone_policies add constraint work_zone_policies_runtime_updates_ck check (runtime_updates in ('automatic','notify','off'))",
       );
     }
+  });
+});
+
+describe("07.16: the organization's cap on bot Work Zone sessions (D-15, PD-22)", () => {
+  const capAudits = async () =>
+    (
+      await su.query(
+        "select metadata from app.audit_events where action = 'work_zone_policy.updated' and metadata->'changed' @> '[\"botSessionsMax\"]'::jsonb order by occurred_at",
+      )
+    ).rows;
+
+  it("an organization with no policy row reads 10", async () => {
+    const org = randomUUID();
+    const user = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Gamma', $2)", [
+      org,
+      `gamma-${org}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Gamma', $2)", [
+      user,
+      `${user}@gamma.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Gamma', 'admin')",
+      [org, user],
+    );
+    const policy = await stack.built.core.db.withTenant({ organizationId: org, userId: user }, (tx) =>
+      loadWorkZonePolicy(tx),
+    );
+    expect(policy.botSessionsMax).toBe(10);
+  });
+
+  it("an admin reads it and saves 0..1000, audited with the changed key", async () => {
+    const res = await admin.request("GET", "/api/v1/work-zone-policy");
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body!.botSessionsMax).toBe(10);
+
+    const saved = await put({ botSessionsMax: 3 });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(saved.body!.botSessionsMax).toBe(3);
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body!.botSessionsMax).toBe(3);
+    const row = await su.query(
+      "select bot_sessions_max from app.work_zone_policies where organization_id = $1",
+      [orgId],
+    );
+    expect(row.rows[0].bot_sessions_max).toBe(3);
+    expect((await capAudits()).at(-1)).toEqual({ metadata: { changed: ["botSessionsMax"] } });
+
+    // 0 = bots never start sessions (the admin's switch).
+    expect((await put({ botSessionsMax: 0 })).body!.botSessionsMax).toBe(0);
+  });
+
+  it("1001 is refused (400) and a non-admin cannot change it (403)", async () => {
+    expect((await put({ botSessionsMax: 1001 })).status).toBe(400);
+    expect((await put({ botSessionsMax: 5 }, dana)).status).toBe(403);
+    const row = await su.query(
+      "select bot_sessions_max from app.work_zone_policies where organization_id = $1",
+      [orgId],
+    );
+    expect(row.rows[0].bot_sessions_max).toBe(0);
+    expect((await put({ botSessionsMax: 10 })).body!.botSessionsMax).toBe(10);
   });
 });

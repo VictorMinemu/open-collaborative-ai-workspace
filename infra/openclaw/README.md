@@ -277,6 +277,23 @@ carries one turn only:
 - no URL, Garage key (`/att/`, `X-Amz-`) or file content outside a read's tool result in any model request, and no file
   content, file name, URL or key in the cell's logs.
 
+`bot_work_sessions` (07.16-14) runs the working-tree plugin's `ocw_work_session_*` tools in the real cell against the
+fake API (`POST /__test/work-sessions` sets each route's answer) and the fake model (fixture
+`test/mention-work-sessions.json`, a DM turn that carries `turn.workZone`):
+- turn-scoped: the four names are in the bot's `alsoAllow`, and the turn offers exactly them;
+- start and read with the turn's ids only: one `POST /work-sessions/start` with `agentId,eventId,projectId,prompt`
+  and one `POST /work-sessions/read` with `agentId,eventId,workSessionId`, never a device, user, visibility, worktree
+  or audience key and never `/tool-calls`; the reply relays the started sentence and the read's header;
+- outside content: after `web_search` in the same turn the start still reaches its route (the fake answers
+  `proposed`, the reply relays the proposal sentence) while `ocw_start_work_zone` is refused in the cell (no
+  `/work-zone/proposals` body);
+- session output: after a read, `ocw_memory_save` is blocked in the cell (no `/memories` body) and
+  `ocw_work_session_prompt` still reaches its route;
+- wake-up: an `agent.work_session.v1` published through `POST /__test/event` is answered on the session's card
+  (`inReplyToMessageId` = the card, `eventId` = the event's) and the model sees the `Work Zone session update` block;
+- no person's prompt or absolute host path (both only in fields outside the contracts) in any model request or cell
+  log line, and the session's output only inside a read's tool result.
+
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.
 

@@ -35,6 +35,8 @@ const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>OCW_RUNTIME_HOST</key>
+    <string>service</string>
   </dict>
   <key>StandardOutPath</key>
   <string>/Users/alice/.ocw/logs/runtime.log</string>

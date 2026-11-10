@@ -13,6 +13,9 @@ import { API_URL } from "../tests/env";
  * Runtime CLI updates (07.11, PD-19): every device runs with `OCW_RUNTIME_UPDATES=off` unless the spec's `env`
  * overrides it; only the runtime-updates specs do, together with a scratch `HOME` and `PATH`
  * (`e2e/support/runtime-updates.ts`), so no spec's daemon ever touches a real CLI.
+ * 07.16-21: `extraProjects` registers more scratch repositories on the same device (their ids in `extraProjectIds`),
+ * and `startIsolatedServer` runs the daemon as a headless service (`OCW_RUNTIME_HOST=service`) and turns the
+ * isolated-server mark on with the device's own CLI (`ocw-runtime isolated-server on`, D-19).
  */
 
 const RUNTIME_BIN = join(import.meta.dirname, "..", "..", "apps", "local-runtime", "bin", "ocw-runtime");
@@ -21,6 +24,8 @@ export interface FakeDeviceHandle {
   deviceId: string;
   projectId: string;
   projectName: string;
+  /** The ids of `opts.extraProjects` by name (07.16-21: a bot profile lists two projects of one device). */
+  extraProjectIds: Record<string, string>;
   /** The device's scratch `OCW_HOME` (control socket, config, token). */
   ocwHome: string;
   /**
@@ -43,7 +48,7 @@ export interface FakeDeviceHandle {
 
 export async function startFakeDevice(
   adminApi: APIRequestContext,
-  opts: { name: string; projectName: string; env?: Record<string, string> },
+  opts: { name: string; projectName: string; extraProjects?: string[]; env?: Record<string, string> },
 ): Promise<FakeDeviceHandle> {
   const enrollment = await adminApi.post("/api/v1/devices/enrollments", { data: {} });
   expect(enrollment.ok(), "create a pairing code").toBe(true);
@@ -51,16 +56,18 @@ export async function startFakeDevice(
 
   const home = mkdtempSync(join(tmpdir(), "ocw-e2e-home-"));
   const repoParent = mkdtempSync(join(tmpdir(), "ocw-e2e-repo-"));
-  const repo = join(repoParent, opts.projectName);
-  mkdirSync(repo);
-  writeFileSync(
-    join(repo, "README.md"),
-    `# ${opts.projectName}\n\nScratch repository for an end-to-end test.\n`,
-  );
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
-  git("init", "-q", "-b", "main");
-  git("add", "-A");
-  git("-c", "user.email=e2e@ocw.test", "-c", "user.name=E2E", "commit", "-qm", "init");
+  const scratchRepo = (name: string) => {
+    const dir = join(repoParent, name);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "README.md"), `# ${name}\n\nScratch repository for an end-to-end test.\n`);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init", "-q", "-b", "main");
+    git("add", "-A");
+    git("-c", "user.email=e2e@ocw.test", "-c", "user.name=E2E", "commit", "-qm", "init");
+    return dir;
+  };
+  const repo = scratchRepo(opts.projectName);
+  const extraRepos = (opts.extraProjects ?? []).map((name) => ({ name, dir: scratchRepo(name) }));
 
   const env = {
     ...process.env,
@@ -72,7 +79,7 @@ export async function startFakeDevice(
     ...opts.env,
   };
   let daemon: ChildProcess | null = null;
-  const found: { deviceId?: string; projectId?: string } = {};
+  const found: { deviceId?: string; projectId?: string; extra: Record<string, string> } = { extra: {} };
   const cleanup = async () => {
     daemon?.kill("SIGTERM");
     daemon = null;
@@ -95,6 +102,9 @@ export async function startFakeDevice(
         return null;
       }
     })();
+    for (const extra of extraRepos) {
+      execFileSync(process.execPath, [RUNTIME_BIN, "add-project", extra.dir], { env, stdio: "pipe" });
+    }
     daemon = spawn(process.execPath, [RUNTIME_BIN, "run"], { env, stdio: "ignore" });
 
     await expect
@@ -109,10 +119,14 @@ export async function startFakeDevice(
           const projects = (await (await adminApi.get("/api/v1/projects")).json()) as {
             projects: Array<{ id: string; deviceId: string; name: string; available: boolean }>;
           };
-          found.projectId = projects.projects.find(
-            (p) => p.deviceId === d.id && p.name === opts.projectName && p.available,
-          )?.id;
-          return found.projectId !== undefined;
+          const idOf = (name: string) =>
+            projects.projects.find((p) => p.deviceId === d.id && p.name === name && p.available)?.id;
+          found.projectId = idOf(opts.projectName);
+          for (const extra of extraRepos) {
+            const id = idOf(extra.name);
+            if (id) found.extra[extra.name] = id;
+          }
+          return found.projectId !== undefined && Object.keys(found.extra).length === extraRepos.length;
         },
         { timeout: 30_000, message: `${opts.name} comes online with ${opts.projectName}` },
       )
@@ -169,6 +183,7 @@ export async function startFakeDevice(
       deviceId,
       projectId,
       projectName: opts.projectName,
+      extraProjectIds: { ...found.extra },
       ocwHome: home,
       runtimeCli,
       shutdown,
@@ -180,4 +195,38 @@ export async function startFakeDevice(
     await cleanup();
     throw err;
   }
+}
+
+/**
+ * A fake device that runs as a headless service (`OCW_RUNTIME_HOST=service`) with the isolated-server mark turned on
+ * locally (`ocw-runtime isolated-server on`, which the running daemon reloads and reports), as an admin's build server
+ * would be (07.16 D-19, PD-18). Resolves once `GET /devices` lists it as a service host with the mark.
+ */
+export async function startIsolatedServer(
+  adminApi: APIRequestContext,
+  opts: { name: string; projectName: string; extraProjects?: string[]; env?: Record<string, string> },
+): Promise<FakeDeviceHandle> {
+  const device = await startFakeDevice(adminApi, {
+    ...opts,
+    env: { ...opts.env, OCW_RUNTIME_HOST: "service" },
+  });
+  try {
+    await device.runtimeCli(["isolated-server", "on"]);
+    await expect
+      .poll(
+        async () => {
+          const { devices } = (await (await adminApi.get("/api/v1/devices")).json()) as {
+            devices: Array<{ id: string; hostKind?: string | null; isolatedServer?: boolean }>;
+          };
+          const d = devices.find((x) => x.id === device.deviceId);
+          return d ? { hostKind: d.hostKind ?? null, isolatedServer: d.isolatedServer === true } : null;
+        },
+        { timeout: 30_000, message: `${opts.name} reports a service host with the isolated-server mark` },
+      )
+      .toEqual({ hostKind: "service", isolatedServer: true });
+  } catch (err) {
+    await device.stop();
+    throw err;
+  }
+  return device;
 }

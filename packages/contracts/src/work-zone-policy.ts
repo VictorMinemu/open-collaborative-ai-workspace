@@ -32,6 +32,11 @@ export const WorkZonePolicy = z.object({
    * that never received it behaves as `notify`.
    */
   runtimeUpdates: RuntimeUpdatesLevel,
+  /**
+   * 07.16 (D-15, PD-22): active bot-started Work Zone sessions in the organization at once; 0 = bots never start
+   * sessions; absent = 10.
+   */
+  botSessionsMax: z.number().int().min(0).max(1000).optional(),
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });

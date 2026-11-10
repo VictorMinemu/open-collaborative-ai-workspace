@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.15 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 and 07.15 added 2026-11-07 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.15 → 07.16 → 07.17 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 and 07.15 added 2026-11-07 and 07.16 and 07.17 added 2026-11-09 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -963,6 +963,121 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [x] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
+
+### Phase 07.16: Bot Work Zone orchestration (INSERTED)
+
+**Goal**: A bot runs Work Zone sessions itself: its profile says on which device or server, in which projects, with which
+runtime, model and permission mode (bypass included, through ADR-0012's chain); it starts sessions, sends them prompts,
+reads their output and keeps orchestrating until they finish or need help, and the conversation shows a live card that
+opens the session and comes back.
+
+- **Profile:** per bot, set by its owner (personal) or a lead/admin (team); the device owner consents per bot; caps on
+  projects, model, options and mode; bypass only when organization policy ∩ device opt-in ∩ profile allow it.
+- **Control:** `ocw_*` tools to start, prompt, read and stop, decided in the Agent Channel API; humans keep prompting
+  the same session; one executor.
+- **Wake-ups:** session transitions (turn done, waiting for approval, failed, ended) wake the bot in the originating
+  conversation, bounded by the profile; the wake runs as the original asker (D-17).
+- **Outside content (owner decision 2026-11-09, option 1):** from a tainted turn only with the admin-only "act on outside
+  content" profile flag, and bypass then only on a device marked as an isolated server; otherwise the proposal card.
+- **Card:** live Work Zone card in the conversation, back link from the session; desktop and mobile.
+
+**Requirements**: BWZ-01, BWZ-02, BWZ-03, BWZ-04, BWZ-05, BWZ-06
+**Depends on:** Phase 07.5 (proposals, taint), Phase 07.12 (shared Work Zone projects), ADR-0012 (bypass chain), ADR-0033 (headless servers)
+**ADR:** 0038 (supersedes the bot-start clauses of ADR-0026 and the "seeing is not controlling" clause of ADR-0030 for bots)
+**Success Criteria** (what must be TRUE):
+
+  1. An admin gives a team bot a profile (a headless server, two projects, Claude Code, a model, bypass allowed by the
+     org and opted in on that server for this bot); in a channel a member asks the bot to fix something and the bot
+     starts the session there without anyone pressing Start
+  2. The bot sends follow-up prompts, reads the output, and when the session finishes it reports in the thread and
+     mentions the asker; when the session waits for an approval it mentions the people who can approve
+  3. The thread shows a live card (status, current step, Open); Open goes to the session and its back link returns to
+     the thread; desktop 1440 and mobile 390
+  4. From a turn that read an MCP result the bot starts only if "act on outside content" is on, and in bypass only on
+     an isolated server; otherwise it posts today's proposal card; every action is audited without prompt content
+  5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
+     (fake runtime) pass; ADR-0038 records the decisions
+
+**Plans:** 22/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+
+Plans:
+**Wave 1**
+
+- [x] 07.16-01-PLAN.md — Wave 1: Bot-facing contracts (four `ocw_work_session_*` tools, `TurnContext.workZone`, refusals and sentences, redacted read model, `agent.work_session.v1`, profile/consent views, card helpers), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-30)
+- [x] 07.16-02-PLAN.md — Wave 1: Control-plane contracts: `bot_profile` denial reason, device host kind and isolated server, prompt/session agent and taint fields, per-viewer origin, org bot-session cap, `AgentControlsLayer`
+- [x] 07.16-03-PLAN.md — Wave 1: The one additive migration (profiles, profile projects, consents, bot session side table, agent/taint/device/policy/turn columns), RLS backstop, `work_session.bot_sync` queue, upgrade proof
+- [x] 07.16-04-PLAN.md — Wave 1: ADR-0038 (Accepted; supersedes the quoted ADR-0026/0030/0028 clauses for bots) and AGENTS.md rows
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 07.16-05-PLAN.md — Wave 2: Device facts end to end: `ocw-runtime isolated-server`, host kind, hello/capabilities → hub → `GET /devices`; FakeDevice turn/approval helpers
+- [x] 07.16-06-PLAN.md — Wave 2: The agent layer in the one controls context and `createWorkSession({ agent })` / `queueWorkPrompt` agent author and taint
+- [x] 07.16-07-PLAN.md — Wave 2: Profile and consent API (`bot-profile.ts`, `profileStatus`, admin-only outside-content flag, device-owner/admin consent, org cap)
+- [x] 07.16-08-PLAN.md — Wave 2: Plugin tools `ocw_work_session_start|prompt|read|stop`, guard sets (route decides taint, session-output mark), turn scoping, manifest
+- [x] 07.16-09-PLAN.md — Wave 2: Plugin wake event and the "Your Work Zone" / "Work Zone session update" blocks
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 07.16-10-PLAN.md — Wave 3: Per-turn dispatch under the bot's cap, `bot_not_allowed`, agent-aware re-authorization, `submitWorkPrompt`/`archiveWorkSession` extraction
+- [x] 07.16-11-PLAN.md — Wave 3: The turn offer (`workZoneOfferFor`, four turn-scoped tools, `workZone`); bots without a profile byte-identical
+- [x] 07.16-12-PLAN.md — Wave 3: Web: the bot sheet's Work Zone profile section
+- [x] 07.16-13-PLAN.md — Wave 3: Web: device bot consents, the Isolated server fact, "Bot sessions at once"
+- [x] 07.16-14-PLAN.md — Wave 3: Real-cell smoke `bot_work_sessions`
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 07.16-15-PLAN.md — Wave 4: The start route as the sponsor (caps, audience, live card, claim options, D-20 start rule): the phase's API end to end
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 07.16-16-PLAN.md — Wave 5: Prompt and stop routes; own sessions only; people keep control
+- [x] 07.16-17-PLAN.md — Wave 5: The redacted read route and the session-output flag
+- [x] 07.16-18-PLAN.md — Wave 5: Back link (per-viewer origin), agent author and taint marks, the live Work Zone card in chat
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 07.16-19-PLAN.md — Wave 6: Outside content: admin-flag path, isolated-only bypass, sticky taint, the proposal fallback
+- [x] 07.16-20-PLAN.md — Wave 6: Wake-ups and card refresh (`setStatus` hook → `work_session.bot_sync` → card + `agent.work_session.v1`)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [x] 07.16-21-PLAN.md — Wave 7: The browser journey e2e (fake cell, fake runtime, desktop 1440 and mobile 390, light and dark)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [x] 07.16-22-PLAN.md — Wave 8: Phase gate: every CI workflow green, README/DEMO/STATUS/SERVER, CODEOWNERS and guard, signed VALIDATION
+
+### Phase 07.17: Automation fan-out and team mentions (INSERTED)
+
+**Goal**: An automation watches a source (for example new orders through an MCP every 10 minutes) and, for each new item,
+opens its own conversation (a thread in a channel or a card on a board), where the bot reads the context, works in the
+Work Zone through its 07.16 profile, moves the card through the columns and mentions a team or a person when it finishes
+or needs help.
+
+- **Schedule:** minimum interval 5 minutes.
+- **Fan-out:** one run opens one conversation per new item, capped per run, deduplicated by the item's external id; each
+  conversation gets its own bot turn with the item as untrusted content.
+- **Board:** the bot moves and sets waiting on every card its automation opened.
+- **Team mentions:** `@team` (org unit by stable id) notifies its members who read the conversation; for people and bots.
+
+**Requirements**: AFO-01, AFO-02, AFO-03, AFO-04, AFO-05
+**Depends on:** Phase 07.16, Phase 07.10 (automations), Phase 07.1 (boards)
+**ADR:** 0039
+**Success Criteria** (what must be TRUE):
+
+  1. An automation every 10 minutes reads a fake orders MCP; two new orders open two cards on a board; the next run
+     opens none for the same orders
+  2. In each card the bot reads the order's documents, starts a Work Zone session through its profile, moves the card
+     to a started column, and to done (or waiting) at the end
+  3. On finish or when it needs help the bot mentions a team; its members who read the board get a notification
+  4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
+     ADR-0039 records the decisions
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.17 to break down)
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 

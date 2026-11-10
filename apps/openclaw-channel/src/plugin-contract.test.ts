@@ -2210,6 +2210,10 @@ const PLUGIN_TOOLS = [
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
+  "ocw_work_session_start",
+  "ocw_work_session_prompt",
+  "ocw_work_session_read",
+  "ocw_work_session_stop",
   "ocw_sandbox_exec",
   "ocw_sandbox_process",
   "ocw_sandbox_read",
@@ -2324,6 +2328,10 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_record_update",
         "ocw_consult_agent",
         "ocw_attachment_read",
+        "ocw_work_session_start",
+        "ocw_work_session_prompt",
+        "ocw_work_session_read",
+        "ocw_work_session_stop",
       ],
     });
     const boardTurn = {
@@ -3321,5 +3329,402 @@ describe("attachments mirror parity (07.15-01: plugin ↔ packages/contracts bot
     expect(m.AgentChannelAttachmentReadResponse.safeParse({ ...newer, code: "Not A Code" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts bot-work-zone.ts, bot-capabilities.ts, agent-channel.ts; Pitfall 9)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    caps: (await import(contracts("bot-capabilities.ts"))) as { TurnContext: Schema },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema>,
+    wz: (await import(contracts("bot-work-zone.ts"))) as Record<string, Schema>,
+    bypass: ((await import(contracts("session-events.ts"))) as { RUNTIME_BYPASS_LITERALS: readonly string[] })
+      .RUNTIME_BYPASS_LITERALS,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f11";
+  const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f12";
+  const PROJECT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f13";
+  const DEVICE = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f14";
+  const SESSION = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f15";
+  const CARD = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f16";
+  const APPROVAL = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f17";
+  const MSG = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f18";
+  const ANA = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1d";
+
+  const workZone = {
+    runtime: "claude-code",
+    device: { id: DEVICE, name: "build-server", online: true },
+    projects: [
+      { id: PROJECT, name: "billing-api" },
+      { id: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f19", name: "web" },
+    ],
+    projectsMore: 0,
+    models: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    defaultModel: "claude-sonnet-4-5",
+    efforts: ["low", "high"],
+    fastMode: "allowed",
+    defaultMode: "default",
+    maxMode: "fullAccess",
+    outsideContent: false,
+    sessions: [{ id: SESSION, status: "running", projectName: "billing-api" }],
+  };
+  const turn = { tools: [], toolFlags: {}, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 };
+  /** The one fixture turn both copies must read the same way. */
+  const offered = {
+    ...turn,
+    tools: [
+      "ocw_work_session_start",
+      "ocw_work_session_prompt",
+      "ocw_work_session_read",
+      "ocw_work_session_stop",
+    ],
+    toolFlags: {
+      ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+      ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+    },
+    workZone,
+  };
+  const mention = (t: unknown) => ({
+    eventId: EVENT,
+    seq: 1,
+    type: "agent.mention.v1",
+    organizationId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1a",
+    cellId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1b",
+    agent: { id: AGENT, handle: "scout", displayName: "Scout" },
+    conversation: { id: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1c", kind: "channel", name: "billing" },
+    thread: { rootMessageId: MSG },
+    message: {
+      id: MSG,
+      text: "@scout fix the invoice test",
+      createdAt: "2026-11-09T10:00:00.000Z",
+      author: { kind: "user", id: ANA, displayName: "Ana" },
+      mentions: [],
+    },
+    threadHistory: [],
+    roster: [],
+    turn: t,
+  });
+
+  it("the limits, fast modes, refusal codes and sentences are the contracts'", async () => {
+    const { wz, m } = await load();
+    const c = wz as unknown as {
+      BOT_WORK_ZONE_LIMITS: Record<string, number>;
+      BotFastMode: { options: string[] };
+      BotWorkSessionRefusal: { options: string[] };
+      BotProfileInactiveReason: { options: string[] };
+      BOT_WORK_SESSION_SENTENCES: Record<string, string>;
+      BOT_WORK_SESSION_PROPOSED_SENTENCE: string;
+      BOT_PROFILE_STATUS_SENTENCES: Record<string, string>;
+    };
+    expect({ ...m.BOT_WORK_ZONE_LIMITS }).toEqual({ ...c.BOT_WORK_ZONE_LIMITS });
+    expect([...m.BotFastMode.options]).toEqual([...c.BotFastMode.options]);
+    expect([...m.BotWorkSessionRefusal.options]).toEqual([...c.BotWorkSessionRefusal.options]);
+    expect([...m.BotProfileInactiveReason.options]).toEqual([...c.BotProfileInactiveReason.options]);
+    expect({ ...m.BOT_WORK_SESSION_SENTENCES }).toEqual({ ...c.BOT_WORK_SESSION_SENTENCES });
+    expect(m.BOT_WORK_SESSION_PROPOSED_SENTENCE).toBe(c.BOT_WORK_SESSION_PROPOSED_SENTENCE);
+    // 07.16-08: the start tool appends the status line of a `profile_inactive` refusal's reason.
+    expect({ ...m.BOT_PROFILE_STATUS_SENTENCES }).toEqual({ ...c.BOT_PROFILE_STATUS_SENTENCES });
+  });
+
+  it("a turn with workZone parses identically in both copies, alone and inside a mention", async () => {
+    const { caps, wz, bypass, m } = await load();
+    const contract = caps.TurnContext.safeParse(offered);
+    expect(contract.success).toBe(true);
+    expect(m.TurnContext.parse(offered)).toEqual(contract.data);
+    expect(m.TurnContext.parse(offered)).toEqual(offered);
+    expect(m.AgentMentionEvent.parse(mention(offered)).turn).toEqual(offered);
+    const first = workZone.projects[0];
+    const session = workZone.sessions[0];
+    expectSameVerdicts(m.TurnWorkZone, wz.TurnWorkZone as Schema, [
+      workZone,
+      { ...workZone, runtime: "codex", defaultModel: null, fastMode: "off", sessions: [] },
+      { ...workZone, projects: Array.from({ length: 21 }, () => first) },
+      { ...workZone, sessions: Array.from({ length: 11 }, () => session) },
+      ...bypass.map((maxMode) => ({ ...workZone, maxMode })),
+      { ...workZone, runtime: "opencode" },
+      { ...workZone, device: { ...workZone.device, name: "x".repeat(121) } },
+      { ...workZone, hostPath: "/Users/ana/billing-api" },
+    ]);
+  });
+
+  it("a 07.15 turn and EMPTY_TURN parse unchanged in the mirror (no workZone appears)", async () => {
+    const { caps, m } = await load();
+    expect(caps.TurnContext.safeParse(turn).success).toBe(true);
+    const parsed = m.TurnContext.parse(turn);
+    expect(parsed).toEqual(turn);
+    expect("workZone" in parsed).toBe(false);
+    expect(m.TurnContext.parse(m.EMPTY_TURN)).toEqual(m.EMPTY_TURN);
+  });
+
+  it("an invalid offer is refused by the contract; the mirror drops it and keeps the turn", async () => {
+    const { caps, m } = await load();
+    const projects = Array.from({ length: 21 }, () => workZone.projects[0]);
+    const bad = { ...offered, workZone: { ...workZone, projects } };
+    expect(caps.TurnContext.safeParse(bad).success).toBe(false);
+    const parsed = m.TurnContext.safeParse(bad);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.workZone).toBeUndefined();
+    expect(parsed.data?.tools).toEqual(offered.tools);
+  });
+
+  it("the start request: the mirror accepts and refuses what the contract does (strict, never a device or a user)", async () => {
+    const { wz, m } = await load();
+    const base = { eventId: EVENT, agentId: AGENT, projectId: PROJECT, prompt: "Fix the invoice test" };
+    expectSameVerdicts(m.AgentChannelWorkSessionStart, wz.AgentChannelWorkSessionStart as Schema, [
+      base,
+      {
+        ...base,
+        model: "claude-opus-4-1",
+        effort: "high",
+        fastMode: true,
+        contextWindow: 200_000,
+        permissionMode: "fullAccess",
+      },
+      { ...base, prompt: "  padded  " },
+      { ...base, prompt: "   " },
+      { ...base, prompt: "x".repeat(50_000) },
+      { ...base, prompt: "x".repeat(50_001) },
+      { ...base, deviceId: DEVICE },
+      { ...base, userId: AGENT },
+      { ...base, visibility: "project" },
+      { ...base, worktree: false },
+      { ...base, audience: { kind: "owner" } },
+      ...(await load()).bypass.map((permissionMode) => ({ ...base, permissionMode })),
+      { ...base, contextWindow: 999 },
+    ]);
+  });
+
+  it("the start answers parse identically in both copies", async () => {
+    const { wz, m } = await load();
+    const started = {
+      kind: "started",
+      workSessionId: SESSION,
+      status: "provisioning",
+      cardMessageId: CARD,
+      model: "claude-sonnet-4-5",
+      mode: "acceptEdits",
+      projectName: "billing-api",
+    };
+    const proposed = {
+      kind: "proposed",
+      approvalId: APPROVAL,
+      reason: "outside_content",
+      sentence: m.BOT_WORK_SESSION_PROPOSED_SENTENCE,
+    };
+    const refused = {
+      kind: "refused",
+      code: "setting_not_allowed",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.setting_not_allowed,
+      field: "model",
+    };
+    const inactive = {
+      kind: "refused",
+      code: "profile_inactive",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.profile_inactive,
+      reason: "no_consent",
+    };
+    const contract = wz.AgentChannelWorkSessionStartResponse as Schema;
+    for (const answer of [started, proposed, refused, inactive]) {
+      expect(contract.safeParse(answer).success).toBe(true);
+      expect(m.AgentChannelWorkSessionStartResponse.parse(answer)).toEqual(answer);
+    }
+    expectSameVerdicts(m.AgentChannelWorkSessionStartResponse, contract, [
+      started,
+      { ...started, cardMessageId: null, model: null },
+      ...(await load()).bypass.map((mode) => ({ ...started, mode })),
+      { ...started, projectName: "x".repeat(201) },
+      proposed,
+      { ...proposed, sentence: "x".repeat(301) },
+      refused,
+      inactive,
+      { ...refused, sentence: "x".repeat(301) },
+    ]);
+  });
+
+  it("a refusal code from a newer API stays a string in the mirror (the sentence still reaches the model)", async () => {
+    const { wz, m } = await load();
+    const newer = { kind: "refused", code: "quota_moved", sentence: "Bot sessions are paused." };
+    expect((wz.AgentChannelWorkSessionStartResponse as Schema).safeParse(newer).success).toBe(false);
+    expect(m.AgentChannelWorkSessionStartResponse.parse(newer)).toEqual(newer);
+    expect(m.AgentChannelWorkSessionStartResponse.safeParse({ ...newer, code: "Not A Code" }).success).toBe(
+      false,
+    );
+  });
+
+  it("the prompt, read and stop requests: the mirror accepts and refuses what the contract does", async () => {
+    const { wz, m } = await load();
+    const ids = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
+    expectSameVerdicts(m.AgentChannelWorkSessionPrompt, wz.AgentChannelWorkSessionPrompt as Schema, [
+      { ...ids, prompt: "Run the whole suite" },
+      { ...ids, prompt: " " },
+      { ...ids, prompt: "x".repeat(50_001) },
+      { ...ids, prompt: "go", userId: ANA },
+      { ...ids, prompt: "go", deviceId: DEVICE },
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionRead, wz.AgentChannelWorkSessionRead as Schema, [
+      ids,
+      { ...ids, cursor: 0 },
+      { ...ids, cursor: 41 },
+      { ...ids, cursor: -1 },
+      { ...ids, userId: ANA },
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionStop, wz.AgentChannelWorkSessionStop as Schema, [
+      ids,
+      { ...ids, deviceId: DEVICE },
+      { ...ids, prompt: "stop" },
+    ]);
+  });
+
+  const fullRead = {
+    kind: "read",
+    session: {
+      id: SESSION,
+      status: "idle",
+      runtime: "codex",
+      model: null,
+      mode: "default",
+      worktree: true,
+      title: "Fix the invoice test",
+      projectName: "billing-api",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+    },
+    queue: {
+      queued: 1,
+      running: 0,
+      completed: 2,
+      failed: 0,
+      cancelled: 0,
+      mine: [{ id: MSG, status: "queued", position: 1 }],
+    },
+    output: {
+      texts: [
+        { seq: 12, text: "a".repeat(3_000) },
+        { seq: 13, text: "b".repeat(3_000) },
+      ],
+      truncated: false,
+    },
+    tools: Array.from({ length: 10 }, () => ({ name: "Edit", ok: true, summary: "edited a file" })),
+    changes: {
+      files: Array.from({ length: 50 }, (_, i) => ({
+        path: `src/f${i}.ts`,
+        status: "added",
+        additions: 1,
+        deletions: 0,
+      })),
+      branch: null,
+      truncated: false,
+    },
+    approvals: [{ id: APPROVAL, tool: "Bash", paths: ["scripts/a.sh"], summary: "Run a script" }],
+    deciders: [{ id: ANA, handle: "ana", displayName: "Ana" }],
+    error: null,
+    cursor: 13,
+  };
+
+  it("the prompt, stop and read answers parse identically in both copies; the read model's bounds are the contracts'", async () => {
+    const { wz, m } = await load();
+    const queued = { kind: "queued", workSessionId: SESSION, promptId: MSG, position: 1, status: "queued" };
+    const stopped = { kind: "stopped", workSessionId: SESSION };
+    const refused = {
+      kind: "refused",
+      code: "session_ended",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.session_ended,
+    };
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionPromptResponse,
+      wz.AgentChannelWorkSessionPromptResponse as Schema,
+      [queued, refused, { ...queued, status: "waiting" }, stopped],
+    );
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionStopResponse,
+      wz.AgentChannelWorkSessionStopResponse as Schema,
+      [stopped, refused, queued],
+    );
+    const first = fullRead.changes.files[0];
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionReadResponse,
+      wz.AgentChannelWorkSessionReadResponse as Schema,
+      [
+        fullRead,
+        refused,
+        {
+          ...fullRead,
+          output: { texts: [], truncated: false },
+          changes: null,
+          tools: [],
+          approvals: [],
+          deciders: [],
+        },
+        {
+          ...fullRead,
+          output: { texts: [...fullRead.output.texts, { seq: 14, text: "c" }], truncated: true },
+        },
+        { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "/Users/x/repo/a.ts" }] } },
+        { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "C:\\repo\\a.ts" }] } },
+        { ...fullRead, approvals: [{ ...fullRead.approvals[0], paths: ["~/repo/a.ts"] }] },
+        { ...fullRead, tools: [...fullRead.tools, fullRead.tools[0]] },
+        { ...fullRead, deciders: Array(4).fill(fullRead.deciders[0]) },
+        { ...fullRead, error: "x".repeat(501) },
+      ],
+    );
+    for (const answer of [queued, stopped, refused, fullRead]) {
+      const mirror =
+        answer.kind === "queued"
+          ? m.AgentChannelWorkSessionPromptResponse
+          : answer.kind === "stopped"
+            ? m.AgentChannelWorkSessionStopResponse
+            : m.AgentChannelWorkSessionReadResponse;
+      expect(mirror.parse(answer)).toEqual(answer);
+    }
+  });
+
+  it("the wake event parses identically in both copies; older types are untouched", async () => {
+    const { channel, m } = await load();
+    expect(m.AgentChannelEventTypes.workSession).toBe("agent.work_session.v1");
+    const c = channel as unknown as {
+      WorkSessionTransition: { options: string[] };
+      AgentWorkSessionEvent: Schema;
+    };
+    expect([...m.WorkSessionTransition.options]).toEqual([...c.WorkSessionTransition.options]);
+    const event = {
+      ...mention(offered),
+      type: "agent.work_session.v1",
+      workSession: {
+        workSessionId: SESSION,
+        transition: "waiting_approval",
+        status: "waiting_approval",
+        summary: "Work Zone session in billing-api is waiting for approval of Bash.",
+        pendingApprovals: 1,
+        deciders: [{ id: ANA, handle: "ana", displayName: "Ana" }],
+      },
+    };
+    expect(c.AgentWorkSessionEvent.safeParse(event).success).toBe(true);
+    expect(m.AgentWorkSessionEvent.parse(event)).toEqual(event);
+    expectSameVerdicts(m.AgentWorkSessionEvent, c.AgentWorkSessionEvent, [
+      event,
+      { ...event, workSession: { ...event.workSession, transition: "started" } },
+      { ...event, workSession: { ...event.workSession, summary: "x".repeat(501) } },
+      {
+        ...event,
+        workSession: { ...event.workSession, deciders: Array(4).fill(event.workSession.deciders[0]) },
+      },
+      { ...event, type: "agent.mention.v1" },
+    ]);
   });
 });

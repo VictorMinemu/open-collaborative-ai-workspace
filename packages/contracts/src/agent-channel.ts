@@ -27,6 +27,7 @@ import {
   WaitingOn,
 } from "./board";
 import { ATTACHMENT_READ_LIMITS, SearchProvider, TurnContext } from "./bot-capabilities";
+import { BOT_WORK_ZONE_LIMITS, WorkSessionDecider } from "./bot-work-zone";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { ConnectionStatus, jsonBytes } from "./connectors";
@@ -45,6 +46,7 @@ import {
 } from "./memory";
 import { ServerFrame } from "./realtime";
 import { SANDBOX_LIMITS } from "./sandbox";
+import { WorkSessionStatus } from "./session-events";
 import { TOOL_APPROVAL_LIMITS } from "./tool-approvals";
 
 /**
@@ -95,6 +97,11 @@ export const AgentChannelEventTypes = {
    * in the hop's thread; the answer (if any) is `consultReply.answerMessageId`. Older plugins skip the unknown type.
    */
   consultReply: "agent.consult_reply.v1",
+  /**
+   * Phase 07.16 (D-09, PD-16): a Work Zone session this bot started finished a turn, waits for an approval, failed,
+   * ended or went offline. Built like a mention of the bot on its live card; older plugins skip the unknown type.
+   */
+  workSession: "agent.work_session.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -295,6 +302,31 @@ export const AgentConsultReplyEvent = AgentMentionEvent.omit({ type: true }).ext
     }),
 });
 export type AgentConsultReplyEvent = z.infer<typeof AgentConsultReplyEvent>;
+
+/** Phase 07.16 (D-09): why a bot is woken about its session. */
+export const WorkSessionTransition = z.enum(["turn_done", "waiting_approval", "failed", "ended", "offline"]);
+export type WorkSessionTransition = z.infer<typeof WorkSessionTransition>;
+
+/**
+ * Phase 07.16 (D-09, D-10, D-17, PD-16): a session this bot started changed state, delivered as a new turn in the thread
+ * of its live card. Built by the API like a mention of the bot on the card message: structural author = the person who
+ * asked, `turn` computed for them (unattended: no browser tools). `summary` is server-composed from structured facts
+ * only (transition, project, turn number, counts, tool names of pending approvals), never runtime text, so the wake
+ * turn does not start as if it had read the session's output. `deciders` are the people who may decide the pending
+ * approvals (the bot cannot). Older plugins skip the unknown type.
+ */
+export const AgentWorkSessionEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.workSession),
+  workSession: z.object({
+    workSessionId: Id,
+    transition: WorkSessionTransition,
+    status: WorkSessionStatus,
+    summary: z.string().max(BOT_WORK_ZONE_LIMITS.summaryChars),
+    pendingApprovals: z.number().int().nonnegative(),
+    deciders: z.array(WorkSessionDecider).max(BOT_WORK_ZONE_LIMITS.deciders),
+  }),
+});
+export type AgentWorkSessionEvent = z.infer<typeof AgentWorkSessionEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

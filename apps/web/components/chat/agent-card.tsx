@@ -9,6 +9,7 @@ import {
   APPROVAL_NOTE_MAX,
   type ApprovalRequestStatus,
   type WorkZoneProposalView,
+  workSessionCardOf,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -88,6 +89,7 @@ import { decideCard, followCard, refreshCard, useAgentCard } from "@/lib/card-qu
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useDevices, useWorkZoneOrgSync } from "@/lib/workzone-queries";
+import { WorkSessionCard, WorkSessionCardHeading, workSessionStatusWord } from "./work-session-card";
 
 /**
  * The one Agent Card renderer (06-15, AGENT-04, D-07, D-08, P-11, P-13), used in channels, threads, DMs, group DMs and
@@ -1574,10 +1576,17 @@ function WorkZoneProposalCard({
       {value}
     </WzField>
   );
+  // 07.16 (D-18, PD-15): the server's notices (a proposal made after outside content says so), for every reader. Only a
+  // platform-composed card carries them; a bot's own card never does (T-07.6-15-03).
+  const notices = card.platformOwned === true ? (card.notices ?? []) : [];
 
   return (
     <>
       <div className="grid gap-3 px-3.5 pb-3.5">
+        {notices.map((n, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: notices have no id and are replaced as a whole
+          <NoticeLine key={i} notice={n} />
+        ))}
         {link.status === "failed" ? (
           <p
             data-testid="agent-card-failed-reason"
@@ -1973,7 +1982,14 @@ export function AgentCardView({
   // bot's card never does, whatever its data says.
   const platform = card.platformOwned === true;
   const badge = !!link || !!signIn || platform;
-  const statusLabel = platform ? card.statusLabel : undefined;
+  // 07.16 (D-12, PD-20): the live card of a bot-started session (platform-owned, no approval, Open to the session)
+  // renders as `WorkSessionCard` inside this shell; every other card, proposals included, is unchanged.
+  const live = !link && !signIn && workSessionCardOf(card) !== null;
+  const statusLabel = platform
+    ? live
+      ? workSessionStatusWord(card.status, card.statusLabel)
+      : card.statusLabel
+    : undefined;
   const notices = platform && !linkedKind && !signIn ? (card.notices ?? []) : [];
 
   return (
@@ -1993,7 +2009,7 @@ export function AgentCardView({
         className={
           signIn
             ? "grid gap-2.5 px-3.5 pt-3"
-            : linkedKind
+            : linkedKind || live
               ? "grid gap-2.5 px-3.5 pt-3 pb-3"
               : "grid gap-2.5 px-3.5 pt-3 pb-3.5"
         }
@@ -2034,13 +2050,17 @@ export function AgentCardView({
             />
           )}
         </div>
-        <h3
-          id={`${summaryId}-title`}
-          data-testid="agent-card-title"
-          className="break-words font-semibold text-[15px] leading-snug"
-        >
-          {card.title}
-        </h3>
+        {live ? (
+          <WorkSessionCardHeading card={card} titleId={`${summaryId}-title`} />
+        ) : (
+          <h3
+            id={`${summaryId}-title`}
+            data-testid="agent-card-title"
+            className="break-words font-semibold text-[15px] leading-snug"
+          >
+            {card.title}
+          </h3>
+        )}
         {notices.map((n, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: notices have no id and are replaced as a whole
           <NoticeLine key={i} notice={n} />
@@ -2056,7 +2076,7 @@ export function AgentCardView({
             </span>
           </p>
         ) : null}
-        {card.fields.length > 0 && !linkedKind && !signIn ? (
+        {card.fields.length > 0 && !linkedKind && !signIn && !live ? (
           <dl
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
@@ -2105,6 +2125,8 @@ export function AgentCardView({
         <AutomationProposalCard messageId={messageId} card={card} link={link} bot={bot} />
       ) : link ? (
         <LinkedFooter messageId={messageId} card={card} link={link} openTarget={openTarget} />
+      ) : live ? (
+        <WorkSessionCard messageId={messageId} card={card} />
       ) : hasActions || card.decision ? (
         <div
           data-testid="agent-card-actions"

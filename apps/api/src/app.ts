@@ -64,7 +64,11 @@ import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
 import { createRecordWrites, createWatchedModule } from "./modules/watched";
 import { createWorkMemoryModule } from "./modules/work-memory";
-import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
+import {
+  createWorkSessionAttachmentScope,
+  createWorkSessionModule,
+  type WorkSessionModule,
+} from "./modules/work-session";
 import { stripQueryStrings } from "./telemetry/redact";
 import { API_VERSION } from "./version";
 
@@ -89,6 +93,8 @@ export interface BuiltApp {
   sandbox: SandboxModule;
   /** Bot browsers (07.8-14): the context module and its `browser` events handler (tests drive their own consumers). */
   browser: BrowserModule;
+  /** The Work Zone session module (07.16-06): tests call its `start` with a bot's agent option. */
+  workSession: WorkSessionModule;
   /** The registered modules' names, in registration order (wiring tests). */
   moduleNames: readonly string[];
   close(): Promise<void>;
@@ -387,6 +393,7 @@ export async function buildApp(
       modelLabel: (ref) => modelGateway.labelOf(ref),
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
+      workSession, // 07.16-15: a bot's own Work Zone sessions, in its sponsor's name (PD-03)
       automations: automation.proposals, // 07.6-12: natural-language automation proposals (AUTO-03)
       records: createRecordWrites(core), // 07.6-14: compare-and-set writes to watched records (AUTO-04)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
@@ -435,6 +442,7 @@ export async function buildApp(
     toolApprovals: toolApproval.service,
     sandbox,
     browser,
+    workSession,
     moduleNames: modules.map((m) => m.name),
     async close() {
       await app.close();

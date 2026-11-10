@@ -1,14 +1,17 @@
 "use client";
 
 import {
+  BOT_WORK_ZONE_LIMITS,
   EFFORT_LABELS,
   KNOWN_EFFORTS,
   type PermissionMode,
   type RuntimeId,
   type RuntimeUpdatesLevel,
+  type UpdateWorkZonePolicyRequest,
   type WorkZonePolicyView,
 } from "@ocw/contracts";
 import {
+  Bot,
   ClipboardList,
   FilePen,
   Hand,
@@ -24,6 +27,7 @@ import { type ReactNode, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -33,7 +37,10 @@ import { useCan, usePermissions } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { useUpdateWorkZonePolicy, useWorkZonePolicy } from "@/lib/workzone-policy-queries";
 
-type Draft = Omit<WorkZonePolicyView, "updatedAt" | "knownModels">;
+type Draft = Omit<WorkZonePolicyView, "updatedAt" | "knownModels" | "botSessionsMax"> & {
+  /** 07.16 (D-15, PD-22): always a number in the form (absent on the API = the default). */
+  botSessionsMax: number;
+};
 type GovernedMode = Draft["allowedPermissionModes"][number];
 type Restrict = Record<RuntimeId, boolean>;
 
@@ -94,7 +101,35 @@ const RUNTIME_UPDATE_LEVELS: Array<{ value: RuntimeUpdatesLevel; label: string; 
   { value: "off", label: "Off", description: "Devices don't check for new versions." },
 ];
 
-const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => rest;
+export const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => ({
+  ...rest,
+  botSessionsMax: rest.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
+});
+
+/** 07.16 (D-15, PD-22): the organization's cap on bot-started sessions. */
+export const BOT_SESSIONS_COPY = {
+  label: "Bot sessions at once",
+  hint: "0 = bots never start Work Zone sessions",
+  invalid: `Enter a whole number from 0 to ${BOT_WORK_ZONE_LIMITS.orgSessionsMax}`,
+} as const;
+
+/** What the API would refuse (0..1000, whole numbers), refused before sending; null when the value is fine. */
+export function botSessionsError(value: string): string | null {
+  const v = value.trim();
+  if (!/^\d+$/.test(v)) return BOT_SESSIONS_COPY.invalid;
+  return Number(v) <= BOT_WORK_ZONE_LIMITS.orgSessionsMax ? null : BOT_SESSIONS_COPY.invalid;
+}
+
+/** The Save body: the whole draft, a runtime left on "any model" sending no list. */
+export function toPolicyBody(draft: Draft, restrict: Restrict): UpdateWorkZonePolicyRequest {
+  return {
+    ...draft,
+    allowedModels: {
+      "claude-code": restrict["claude-code"] ? draft.allowedModels["claude-code"] : [],
+      codex: restrict.codex ? draft.allowedModels.codex : [],
+    },
+  };
+}
 const restrictOf = (d: Draft): Restrict => ({
   "claude-code": d.allowedModels["claude-code"].length > 0,
   codex: d.allowedModels.codex.length > 0,
@@ -151,15 +186,30 @@ export function WorkZonePolicySettings() {
   return <PolicyForm policy={policy.data} />;
 }
 
-function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
+/**
+ * The policy form. `initial` is the state an edit leaves (the tests render an out-of-range bot sessions cap);
+ * the page starts it from the saved policy.
+ */
+export function PolicyForm({
+  policy,
+  initial,
+}: {
+  policy: WorkZonePolicyView;
+  initial?: { botSessions?: string } | undefined;
+}) {
   const save = useUpdateWorkZonePolicy();
   const saved = toDraft(policy);
   const [draft, setDraft] = useState<Draft>(saved);
   const [restrict, setRestrict] = useState<Restrict>(restrictOf(saved));
   const [modelErrors, setModelErrors] = useState<Partial<Record<RuntimeId, string>>>({});
+  // The field's text, so an out-of-range value stays visible with its error; the draft keeps the last valid number.
+  const [botSessions, setBotSessions] = useState(initial?.botSessions ?? String(saved.botSessionsMax));
+  const botError = botSessionsError(botSessions);
   const savedRestrict = restrictOf(saved);
   const dirty =
-    canonical(draft) !== canonical(saved) || RUNTIME_IDS.some((rt) => restrict[rt] !== savedRestrict[rt]);
+    canonical(draft) !== canonical(saved) ||
+    RUNTIME_IDS.some((rt) => restrict[rt] !== savedRestrict[rt]) ||
+    botSessions.trim() !== String(saved.botSessionsMax);
   const noModes = draft.allowedPermissionModes.length === 0;
 
   // Leaving the page with unsaved changes asks first.
@@ -194,6 +244,12 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
     setDraft(saved);
     setRestrict(savedRestrict);
     setModelErrors({});
+    setBotSessions(String(saved.botSessionsMax));
+  }
+
+  function changeBotSessions(value: string) {
+    setBotSessions(value);
+    if (botSessionsError(value) === null) setDraft((d) => ({ ...d, botSessionsMax: Number(value.trim()) }));
   }
 
   async function submit() {
@@ -204,18 +260,13 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
       }
     }
     setModelErrors(errors);
-    if (noModes || Object.keys(errors).length > 0) return;
+    if (noModes || botError || Object.keys(errors).length > 0) return;
     try {
-      const updated = await save.mutateAsync({
-        ...draft,
-        allowedModels: {
-          "claude-code": restrict["claude-code"] ? draft.allowedModels["claude-code"] : [],
-          codex: restrict.codex ? draft.allowedModels.codex : [],
-        },
-      });
+      const updated = await save.mutateAsync(toPolicyBody(draft, restrict));
       const next = toDraft(updated);
       setDraft(next);
       setRestrict(restrictOf(next));
+      setBotSessions(String(next.botSessionsMax));
       toast.success("Work Zone policy saved", {
         description: "Every Work Zone session follows it from its next turn.",
       });
@@ -396,6 +447,13 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
         />
       </Section>
 
+      <Section
+        title="Bots"
+        description="How many Work Zone sessions bots may run at the same time across the organization."
+      >
+        <BotSessionsField value={botSessions} error={botError} onChange={changeBotSessions} />
+      </Section>
+
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t bg-background/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
         <span
           className={cn("mr-auto text-xs", noModes ? "text-destructive" : "text-muted-foreground")}
@@ -412,7 +470,11 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
         <Button variant="outline" onClick={reset} disabled={!dirty || save.isPending}>
           <RotateCcw /> Discard
         </Button>
-        <Button onClick={submit} disabled={!dirty || noModes || save.isPending} data-testid="save-policy">
+        <Button
+          onClick={submit}
+          disabled={!dirty || noModes || !!botError || save.isPending}
+          data-testid="save-policy"
+        >
           {save.isPending ? <Spinner /> : <Save />}
           Save policy
         </Button>
@@ -636,6 +698,53 @@ export function RuntimeUpdatesField({
         </code>
         ).
       </p>
+    </div>
+  );
+}
+
+/** The org cap on bot sessions (D-15, PD-22): bot-started sessions active in the organization at the same time. */
+function BotSessionsField({
+  value,
+  error,
+  onChange,
+}: {
+  value: string;
+  error: string | null;
+  onChange: (v: string) => void;
+}) {
+  const id = useId();
+  return (
+    <div className="rounded-2xl border bg-card p-4 shadow-xs">
+      <div className="flex items-start gap-3">
+        <IconTile icon={Bot} warn={false} />
+        <div className="grid min-w-0 flex-1 gap-1.5">
+          <label htmlFor={id} className="font-medium text-sm">
+            {BOT_SESSIONS_COPY.label}
+          </label>
+          <Input
+            id={id}
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={BOT_WORK_ZONE_LIMITS.orgSessionsMax}
+            step={1}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={`${id}-hint`}
+            data-testid="policy-bot-sessions"
+            className="w-full tabular-nums max-lg:h-11 sm:w-32"
+          />
+          <span id={`${id}-hint`} className="text-muted-foreground text-xs">
+            {BOT_SESSIONS_COPY.hint}. Each bot also has its own limit in its Work Zone profile.
+          </span>
+          {error ? (
+            <p role="alert" className="text-[13px] text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

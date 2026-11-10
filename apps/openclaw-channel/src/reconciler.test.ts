@@ -355,6 +355,10 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
         "ocw_record_update",
         "ocw_consult_agent",
         "ocw_attachment_read",
+        "ocw_work_session_start",
+        "ocw_work_session_prompt",
+        "ocw_work_session_read",
+        "ocw_work_session_stop",
       ],
     });
     expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });

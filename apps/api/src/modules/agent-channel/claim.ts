@@ -66,6 +66,17 @@ export async function claimToolCall(
      * (not `tool_calls`) and adds one read. The characters a read returns are added by its route afterwards.
      */
     attachmentRead?: { maxReads: number; maxChars: number };
+    /**
+     * 07.16 D-08 (PD-15): the bot's profile lets it act on outside content, so a side-effecting call is claimed on a
+     * tainted turn: the taint condition is omitted for this one UPDATE (like `grantApprovalId`) and the audit says
+     * `outsideContent: true`. The caps and the session-output condition below still apply.
+     */
+    outsideContent?: boolean;
+    /**
+     * 07.16 D-20 (PD-15): once a turn read a Work Zone session's output (`agent_turns.session_output_read`), every
+     * other side-effecting call of the turn is refused as `tainted`; prompting and stopping that session are exempt.
+     */
+    sessionOutputExempt?: boolean;
   },
 ): Promise<ClaimedCall> {
   const { turn, flags } = p;
@@ -80,7 +91,13 @@ export async function claimToolCall(
           ]
         : [lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)]),
       p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
-      flags.sideEffecting && !p.grantApprovalId ? eq(agentTurns.tainted, false) : undefined,
+      flags.sideEffecting && !p.grantApprovalId && !p.outsideContent
+        ? eq(agentTurns.tainted, false)
+        : undefined,
+      // D-20: false only after a session read; a person's one-use grant lifts it as it lifts the taint.
+      flags.sideEffecting && !p.grantApprovalId && !p.sessionOutputExempt
+        ? eq(agentTurns.sessionOutputRead, false)
+        : undefined,
     ];
     const updated = await tx
       .update(agentTurns)
@@ -96,10 +113,12 @@ export async function claimToolCall(
     if (updated.length === 0) {
       // Nothing updated: say why from a fresh read (only on the denial path).
       const [after] = await tx
-        .select({ tainted: agentTurns.tainted })
+        .select({ tainted: agentTurns.tainted, sessionOutputRead: agentTurns.sessionOutputRead })
         .from(agentTurns)
         .where(eq(agentTurns.eventId, turn.eventId));
-      reason = flags.sideEffecting && after?.tainted ? "tainted" : "cap_reached";
+      const taintRefused = after?.tainted === true && !p.grantApprovalId && !p.outsideContent;
+      const outputRefused = after?.sessionOutputRead === true && !p.grantApprovalId && !p.sessionOutputExempt;
+      reason = flags.sideEffecting && (taintRefused || outputRefused) ? "tainted" : "cap_reached";
     }
   }
 
@@ -141,6 +160,7 @@ export async function claimToolCall(
       reason,
       ...p.metadata,
       ...(p.grantApprovalId ? { approvalId: p.grantApprovalId, grant: true } : {}),
+      ...(p.outsideContent ? { outsideContent: true } : {}),
     },
   });
   return { callId: row.id, allowed: reason === null, reason };
@@ -161,6 +181,26 @@ const LATE_TAINT_MAX_STEPS = 10;
  * the sandbox claim, the memory, board and consult routes), so the cell's local guard needs no new signal.
  */
 export async function taintReturnTurns(tx: Tx, eventId: string): Promise<void> {
+  await markReturnTurns(tx, eventId, "tainted");
+}
+
+/**
+ * 07.16 D-20 (code review CR-02): the turn read a Work Zone session's output (`ocw_work_session_read`). The mark is set
+ * on the turn and handed, like late taint, to every still-running return turn that continues it: they resume the same
+ * per-thread OpenClaw session, which now holds the output. Only `session_output_read` is set (it is not a taint).
+ */
+export async function markSessionOutputRead(tx: Tx, eventId: string): Promise<void> {
+  await tx.update(agentTurns).set({ sessionOutputRead: true }).where(eq(agentTurns.eventId, eventId));
+  await markReturnTurns(tx, eventId, "session_output_read");
+}
+
+/** `taintReturnTurns`' walk, for one of the two carried marks (a fixed column name, never caller text). */
+async function markReturnTurns(
+  tx: Tx,
+  eventId: string,
+  mark: "tainted" | "session_output_read",
+): Promise<void> {
+  const column = sql.raw(mark);
   await tx.execute(sql`
     with recursive chain as (
       select c.id from ${agentChains} c where c.root_event_id = ${eventId}
@@ -176,9 +216,9 @@ export async function taintReturnTurns(tx: Tx, eventId: string): Promise<void> {
         join ${agentTurns} t on t.returning_hop_id = h.id and t.chain_id = h.chain_id
        where r.n < ${LATE_TAINT_MAX_STEPS}
     )
-    update ${agentTurns} t set tainted = true
+    update ${agentTurns} t set ${column} = true
       from reach r
-     where t.event_id = r.event_id and r.n > 0 and t.tainted = false and t.done_at is null`);
+     where t.event_id = r.event_id and r.n > 0 and t.${column} = false and t.done_at is null`);
 }
 
 /** A call refused before any turn was found (unknown, foreign or no longer live): audited with no human to attribute. */

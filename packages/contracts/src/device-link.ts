@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { IsoDateTime, RelativePath } from "./common";
-import { RuntimeInfo } from "./device";
+import { DeviceHostKind, RuntimeInfo } from "./device";
 import {
   InstallMethod,
   RuntimeCompatibilityManifest,
@@ -87,6 +87,8 @@ export const DeviceInfo = z.object({
   arch: z.string().max(32).optional(),
   daemonVersion: z.string().max(64).optional(),
   appVersion: z.string().max(64).optional(),
+  /** 07.16 (PD-18): how the daemon runs. Optional so older daemons stay on protocol v1 (absent = unknown). */
+  host: DeviceHostKind.optional(),
 });
 export type DeviceInfo = z.infer<typeof DeviceInfo>;
 
@@ -103,6 +105,11 @@ export const HelloFrame = z.object({
    * (absent = false). Never settable from the server or the web.
    */
   fullAccessOptIn: z.boolean().optional(),
+  /**
+   * 07.16 (D-19): the device owner's LOCAL isolated-server mark, honoured by the API only for `service` hosts. Optional
+   * so older daemons stay on protocol v1 (absent = false). Never settable from the server or the web.
+   */
+  isolatedServer: z.boolean().optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 
@@ -114,6 +121,11 @@ export const CapabilitiesFrame = z.object({
   type: z.literal("capabilities"),
   catalogs: z.array(RuntimeCatalog).max(4),
   fullAccessOptIn: z.boolean(),
+  /**
+   * 07.16 (D-19): the device owner's local isolated-server mark, re-sent when it changes; honoured by the API only for
+   * `service` hosts, never settable from the server or the web. Optional for older daemons (absent = off).
+   */
+  isolatedServer: z.boolean().optional(),
 });
 export type CapabilitiesFrame = z.infer<typeof CapabilitiesFrame>;
 

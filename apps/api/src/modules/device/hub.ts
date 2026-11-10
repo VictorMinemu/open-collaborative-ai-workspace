@@ -316,6 +316,10 @@ export class DeviceHub {
           platform: hello.device.platform,
           // ADR-0012: only the device itself reports its owner's local opt-in (absent = off, older daemons).
           fullAccessOptIn: hello.fullAccessOptIn ?? false,
+          // 07.16 (D-19, PD-18): reported by the device only, like the Full access opt-in; honoured only for headless
+          // service daemons (a desktop or unknown host reporting the mark is stored as false).
+          hostKind: hello.device.host ?? null,
+          isolatedServer: hello.device.host === "service" && hello.isolatedServer === true,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
@@ -357,21 +361,27 @@ export class DeviceHub {
 
   /**
    * P-05: store what the device's runtimes offer and its owner's local full-access opt-in. Written only from the
-   * authenticated device socket; no user route can set either column (T-03.2-01-07).
+   * authenticated device socket; no user route can set either column (T-03.2-01-07). 07.16 (D-19, PD-18): the
+   * isolated-server mark likewise, honoured only for a device whose hello said it is a `service` host (absent = off).
    */
   async onCapabilities(device: DeviceRef, frame: CapabilitiesFrame): Promise<void> {
     const optedOut = await this.opts.db.withTenant(
       { organizationId: device.organizationId, userId: null },
       async (tx) => {
         const [before] = await tx
-          .select({ optIn: devices.fullAccessOptIn })
+          .select({
+            optIn: devices.fullAccessOptIn,
+            hostKind: devices.hostKind,
+            isolated: devices.isolatedServer,
+          })
           .from(devices)
           .where(eq(devices.id, device.deviceId))
           .for("update");
         if (!before) return false;
+        const isolatedServer = before.hostKind === "service" && frame.isolatedServer === true;
         const rows = await tx
           .update(devices)
-          .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn })
+          .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn, isolatedServer })
           .where(eq(devices.id, device.deviceId))
           .returning({ status: devices.status });
         await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
@@ -379,10 +389,13 @@ export class DeviceHub {
           status: rows[0]!.status,
           changed: true,
         });
-        return before.optIn && !frame.fullAccessOptIn;
+        // The isolated mark turning off lowers what bot sessions on it may run (07.16-10, through their agent layer);
+        // the same sweep as a Full access opt-out, human sessions are unaffected by this term.
+        return (before.optIn && !frame.fullAccessOptIn) || (before.isolated && !isolatedServer);
       },
     );
-    // ADR-0012: the owner turned Full access off on the device: its live sessions leave Full access now.
+    // ADR-0012: the owner turned Full access (07.16: or the isolated mark) off on the device: its live sessions are
+    // re-authorized now.
     if (optedOut) await this.handler?.onAccessChanged(device, "device_opt_out");
   }
 

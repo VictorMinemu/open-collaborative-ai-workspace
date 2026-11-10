@@ -526,6 +526,14 @@ describe("agents write only their own scopes, before any untrusted content, with
       await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: false }));
     }
 
+    // 07.16 D-20: a turn that read a Work Zone session's output writes no memory either (the flag alone refuses).
+    const afterRead = await turn(sam, samDmId, samBotId, "remember what the session did", false);
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [
+      afterRead.eventId,
+    ]);
+    expect((await append(afterRead, "- from the session")).body).toEqual({ refused: "tainted" });
+    expect(await toolCalls(afterRead.eventId)).toBe(0);
+
     const secret = await turn(sam, samDmId, samBotId, "remember my key", false);
     expect((await append(secret, `- key ${ANTHROPIC_KEY}`)).body).toEqual({ refused: "secret_detected" });
     expect(

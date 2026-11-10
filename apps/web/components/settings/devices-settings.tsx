@@ -41,6 +41,7 @@ import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
 import { useRuntimeConfig } from "@/lib/config";
 import { useDesktop } from "@/lib/desktop";
+import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { cn, relativeTime } from "@/lib/utils";
 import {
@@ -51,6 +52,7 @@ import {
   wzKeys,
 } from "@/lib/workzone-queries";
 import { CopyLine } from "./copy-line";
+import { DeviceBotConsents, showsBotConsents } from "./device-bot-consents";
 import { DeviceSharing } from "./device-sharing";
 import { PairApproveDialog, PairCodeField, PLATFORM_LABEL } from "./pair-approve-dialog";
 import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
@@ -223,6 +225,8 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
   // Decided by the API resolver: revoke = owner or admin; update (rename, share) = owner only.
   const canRevoke = d.viewerCan?.includes("device.revoke") ?? false;
   const canUpdate = d.viewerCan?.includes("device.update") ?? false;
+  // 07.16 (D-22): an admin also decides which bots run on a headless server; the API decides again (`viewerCan.grant`).
+  const canManageWorkZone = useCan("work_zone.manage");
   const online = d.status === "online";
 
   return (
@@ -298,6 +302,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
       </div>
       <DeviceFacts device={d} owned={owned} />
       {canUpdate ? <DeviceSharing device={d} /> : null}
+      {showsBotConsents(d, owned, canManageWorkZone) ? <DeviceBotConsents device={d} /> : null}
       <Dialog open={confirm} onOpenChange={setConfirm}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -349,9 +354,10 @@ const LOGIN: Record<RuntimeId, string> = { "claude-code": "Claude login", codex:
 
 /**
  * Whose runtime subscription the device uses (D-06) and its Full access opt-in, which is set on the device itself
- * and only shown here (ADR-0012 §5).
+ * and only shown here (ADR-0012 §5). 07.16 (D-19, PD-18): on a headless server, also its Isolated server mark, set
+ * only on the server (`ocw-runtime isolated-server on`) and shown here read-only.
  */
-function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
+export function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
   const whose = owned ? "your" : `${d.ownerName ?? "the owner"}'s`;
   const signedIn = d.runtimes.filter((r) => r.installed && r.loggedIn);
   return (
@@ -411,7 +417,54 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
           </p>
         </div>
       </div>
+      {d.hostKind === "service" ? <IsolatedServerFact on={d.isolatedServer === true} /> : null}
       {d.runtimeMaintenance ? <DeviceRuntimeUpdates device={d} /> : null}
+    </div>
+  );
+}
+
+/**
+ * The Isolated server fact (D-08, D-19, PD-18), in the Full access row's style: a fact the server reports about itself,
+ * never a control (P5). Only headless servers report it and the API honours it only there.
+ */
+function IsolatedServerFact({ on }: { on: boolean }) {
+  return (
+    <div className="flex items-start gap-2.5" data-testid="device-isolated-server" data-enabled={on}>
+      <span
+        className={cn(
+          "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md [&_svg]:size-3.5",
+          // The same pairs as the Full access row (WINDOWS #197).
+          on
+            ? "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-300"
+            : "bg-muted text-muted-foreground",
+        )}
+      >
+        {on ? <ShieldAlert /> : <ShieldCheck />}
+      </span>
+      <div className="grid min-w-0 flex-1 gap-0.5">
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-sm">
+          Isolated server
+          <span className="inline-flex items-center gap-1 font-normal text-muted-foreground text-xs">
+            <Lock className="size-3" aria-hidden /> Set on the device
+          </span>
+        </p>
+        <p className="text-sm">
+          {on ? (
+            "On — bots that read outside content may run Full access sessions here"
+          ) : (
+            <>
+              Off — mark it on the server:{" "}
+              <code className="whitespace-nowrap rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+                ocw-runtime isolated-server on
+              </code>
+            </>
+          )}
+        </p>
+        <p className="text-muted-foreground text-xs">
+          Only for a server with nothing else on it: after a bot reads mail, web pages or files, it may still
+          start sessions here that act without asking.
+        </p>
+      </div>
     </div>
   );
 }

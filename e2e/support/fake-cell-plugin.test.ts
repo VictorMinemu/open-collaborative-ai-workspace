@@ -481,3 +481,346 @@ describe("FakeCellPlugin attachments (07.15-09)", () => {
     expect(String(seen.at(-1)?.body.text)).not.toContain("[attachments:");
   });
 });
+
+// ---------------------------------------------------------------- 07.16-21: the bot's own Work Zone sessions (PD-26)
+
+const WS = "00000000-0000-4000-8000-0000000000aa";
+const PROJECT = "00000000-0000-4000-8000-0000000000ab";
+const CARD = "00000000-0000-4000-8000-0000000000ac";
+const ROOT = "00000000-0000-4000-8000-0000000000ad";
+const ANA_ID = "00000000-0000-4000-8000-0000000000ae";
+const VICTOR_ID = "00000000-0000-4000-8000-0000000000af";
+const ATLAS_ID = "00000000-0000-4000-8000-0000000000a7";
+const WAKE_EVENT = "00000000-0000-4000-8000-0000000000e8";
+const WORK_SESSION_TOOLS = [
+  "ocw_work_session_start",
+  "ocw_work_session_prompt",
+  "ocw_work_session_read",
+  "ocw_work_session_stop",
+];
+
+/** A channel turn of Atlas for Ana, offered the four Work Zone tools. */
+const atlasTurn = (over: Record<string, unknown> = {}) =>
+  ({
+    eventId: "00000000-0000-4000-8000-0000000000e7",
+    seq: 1,
+    agent: { id: ATLAS_ID, handle: "atlas", displayName: "Atlas" },
+    conversation: { id: "00000000-0000-4000-8000-0000000000c7", kind: "channel", name: "eng" },
+    thread: { rootMessageId: ROOT },
+    message: { id: ROOT, text: "", author: { kind: "user", id: ANA_ID, displayName: "Ana Gil" } },
+    threadHistory: [],
+    roster: [],
+    turn: { tools: [...WORK_SESSION_TOOLS] },
+    ...over,
+  }) as unknown as MentionPayload;
+
+/** A read answer whose last output text ends with `Mode: fullAccess` (the fake runtime's footer). */
+const READ_ANSWER = {
+  kind: "read",
+  session: {
+    id: WS,
+    status: "idle",
+    runtime: "claude-code",
+    model: "opus",
+    mode: "fullAccess",
+    worktree: true,
+    title: "Fix the invoice test",
+    projectName: "billing-api",
+    updatedAt: "2026-11-09T10:00:00.000Z",
+  },
+  queue: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0, mine: [] },
+  output: {
+    texts: [
+      { seq: 3, text: "I'll start by reading the project README. " },
+      { seq: 9, text: "Done. I created `notes/ocw-change-1.md`.\n\nModel: opus\nMode: fullAccess\n" },
+    ],
+    truncated: false,
+  },
+  tools: [],
+  changes: null,
+  approvals: [],
+  deciders: [],
+  error: null,
+  cursor: 12,
+};
+
+/** The wake (`agent.work_session.v1`) of Atlas's session: built like a mention of Atlas on its card, for Ana. */
+const wake = (workSession: Record<string, unknown>, over: Record<string, unknown> = {}) =>
+  asEvent({
+    ...atlasTurn({
+      eventId: WAKE_EVENT,
+      message: { id: CARD, text: "summary", author: { kind: "user", id: ANA_ID, displayName: "Ana Gil" } },
+      ...over,
+    }),
+    type: "agent.work_session.v1",
+    workSession: {
+      workSessionId: WS,
+      status: "idle",
+      pendingApprovals: 0,
+      deciders: [],
+      ...workSession,
+    },
+  });
+
+const TURN_DONE = "Work Zone session in billing-api finished turn 1; nothing is queued.";
+const WAITING_SUMMARY = "Work Zone session in billing-api is waiting for 3 approvals.";
+
+describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
+  it("ocw_work_session_start posts the turn, the project, the prompt and only the choices given to /work-sessions/start and renders `started <project> (<mode>)`", async () => {
+    answers["/agent-channel/v1/work-sessions/start"] = [
+      200,
+      {
+        kind: "started",
+        workSessionId: WS,
+        status: "provisioning",
+        cardMessageId: CARD,
+        model: "opus",
+        mode: "fullAccess",
+        projectName: "billing-api",
+      },
+    ];
+    const m = atlasTurn();
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(m, [
+      {
+        tool: "ocw_work_session_start",
+        // A device, a user or an audience never travels: the plugin's schema is closed (07.16-08).
+        args: {
+          projectId: PROJECT,
+          prompt: "fix the invoice test",
+          permissionMode: "fullAccess",
+          deviceId: "d",
+        },
+      },
+      { tool: "ocw_work_session_start", args: { projectId: PROJECT, prompt: "and the ledger" } },
+    ]);
+    expect(lines).toEqual([
+      "Tool ocw_work_session_start: started billing-api (fullAccess)",
+      "Tool ocw_work_session_start: started billing-api (fullAccess)",
+    ]);
+    expect(seen.slice(from)).toEqual([
+      {
+        path: "/agent-channel/v1/work-sessions/start",
+        body: {
+          eventId: m.eventId,
+          agentId: m.agent.id,
+          projectId: PROJECT,
+          prompt: "fix the invoice test",
+          permissionMode: "fullAccess",
+        },
+      },
+      {
+        path: "/agent-channel/v1/work-sessions/start",
+        body: { eventId: m.eventId, agentId: m.agent.id, projectId: PROJECT, prompt: "and the ledger" },
+      },
+    ]);
+    expect(plugin.workSessionRequests.at(-1)).toMatchObject({
+      eventId: m.eventId,
+      tool: "ocw_work_session_start",
+      route: "/work-sessions/start",
+      status: 200,
+      body: { kind: "started", cardMessageId: CARD },
+    });
+  });
+
+  it("a start renders `proposed` and `refused (<code>)` (in-band or the error envelope's code); a tool the turn does not offer is never sent", async () => {
+    const m = atlasTurn();
+    const start = { tool: "ocw_work_session_start", args: { projectId: PROJECT, prompt: "x" } };
+    answers["/agent-channel/v1/work-sessions/start"] = [
+      200,
+      { kind: "proposed", approvalId: WS, reason: "outside_content", sentence: "s" },
+    ];
+    expect(await plugin.simulateToolCalls(m, [start])).toEqual(["Tool ocw_work_session_start: proposed"]);
+    answers["/agent-channel/v1/work-sessions/start"] = [
+      200,
+      { kind: "refused", code: "device_offline", sentence: "s" },
+    ];
+    expect(await plugin.simulateToolCalls(m, [start])).toEqual([
+      "Tool ocw_work_session_start: refused (device_offline)",
+    ]);
+    answers["/agent-channel/v1/work-sessions/start"] = [404, { error: { code: "unknown_turn" } }];
+    expect(await plugin.simulateToolCalls(m, [start])).toEqual([
+      "Tool ocw_work_session_start: refused (unknown_turn)",
+    ]);
+    const from = seen.length;
+    expect(await plugin.simulateToolCalls(atlasTurn({ turn: { tools: [] } }), [start])).toEqual([
+      "Tool ocw_work_session_start: not offered",
+    ]);
+    expect(since(from)).toEqual([]);
+  });
+
+  it("prompt, read and stop post the turn and their own fields only and render `queued`, `read <status>: <last output line>` and `stopped`", async () => {
+    answers["/agent-channel/v1/work-sessions/prompt"] = [
+      200,
+      { kind: "queued", workSessionId: WS, promptId: PROJECT, position: 1, status: "queued" },
+    ];
+    answers["/agent-channel/v1/work-sessions/read"] = [200, READ_ANSWER];
+    answers["/agent-channel/v1/work-sessions/stop"] = [200, { kind: "stopped", workSessionId: WS }];
+    const m = atlasTurn();
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(m, [
+      { tool: "ocw_work_session_prompt", args: { workSessionId: WS, prompt: "add a test", projectId: "p" } },
+      { tool: "ocw_work_session_read", args: { workSessionId: WS } },
+      { tool: "ocw_work_session_read", args: { workSessionId: WS, cursor: 12 } },
+      { tool: "ocw_work_session_stop", args: { workSessionId: WS } },
+    ]);
+    expect(lines).toEqual([
+      "Tool ocw_work_session_prompt: queued",
+      "Tool ocw_work_session_read: read idle: Mode: fullAccess",
+      "Tool ocw_work_session_read: read idle: Mode: fullAccess",
+      "Tool ocw_work_session_stop: stopped",
+    ]);
+    const turn = { eventId: m.eventId, agentId: m.agent.id };
+    expect(seen.slice(from)).toEqual([
+      {
+        path: "/agent-channel/v1/work-sessions/prompt",
+        body: { ...turn, workSessionId: WS, prompt: "add a test" },
+      },
+      { path: "/agent-channel/v1/work-sessions/read", body: { ...turn, workSessionId: WS } },
+      { path: "/agent-channel/v1/work-sessions/read", body: { ...turn, workSessionId: WS, cursor: 12 } },
+      { path: "/agent-channel/v1/work-sessions/stop", body: { ...turn, workSessionId: WS } },
+    ]);
+    answers["/agent-channel/v1/work-sessions/prompt"] = [
+      200,
+      { kind: "refused", code: "not_your_session", sentence: "s" },
+    ];
+    expect(
+      await plugin.simulateToolCalls(m, [
+        { tool: "ocw_work_session_prompt", args: { workSessionId: WS, prompt: "x" } },
+      ]),
+    ).toEqual(["Tool ocw_work_session_prompt: refused (not_your_session)"]);
+  });
+
+  it("a turn_done wake reads the session, then replies `Done: <last output line> @<asker handle>` on the card, in the card's thread, for the wake", async () => {
+    answers["/agent-channel/v1/work-sessions/read"] = [200, READ_ANSWER];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      userHandles: { [ANA_ID]: "ana" },
+    });
+    const from = seen.length;
+    await cell.onEvent("agent.work_session.v1", wake({ transition: "turn_done", summary: TURN_DONE }));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/work-sessions/read",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen.at(-3)?.body).toEqual({ eventId: WAKE_EVENT, agentId: ATLAS_ID, workSessionId: WS });
+    expect(seen.at(-1)?.body).toEqual({
+      agentId: ATLAS_ID,
+      conversationId: "00000000-0000-4000-8000-0000000000c7",
+      threadRootMessageId: ROOT,
+      inReplyToMessageId: CARD,
+      eventId: WAKE_EVENT,
+      text: "Done: Mode: fullAccess @ana",
+      idempotencyKey: `evt:${WAKE_EVENT}`,
+    });
+    expect(cell.workSessionWakes.at(-1)).toEqual({
+      eventId: WAKE_EVENT,
+      transition: "turn_done",
+      workSessionId: WS,
+      text: "Done: Mode: fullAccess @ana",
+    });
+  });
+
+  it("a waiting_approval wake reads the session for the pending tools and names every decider; other transitions say the summary to the asker", async () => {
+    // The summary as the API writes it since code review WR-01: a count, never the runtime's tool names.
+    const summary = `${WAITING_SUMMARY} The bot can't approve it; mention one of the people listed.`;
+    const deciders = [
+      { id: VICTOR_ID, handle: "victor", displayName: "Víctor Ruiz" },
+      { id: ANA_ID, handle: "ana", displayName: "Ana Gil" },
+    ];
+    answers["/agent-channel/v1/work-sessions/read"] = [
+      200,
+      {
+        ...READ_ANSWER,
+        session: { ...READ_ANSWER.session, status: "waiting_approval", mode: "default" },
+        approvals: [
+          { id: PROJECT, tool: "Write", paths: ["notes/ocw-change-1.md"], summary: "Create notes" },
+          { id: CARD, tool: "Write", paths: ["notes/b.md"], summary: "Create notes" },
+          { id: ROOT, tool: "Bash", paths: [], summary: "npm test" },
+        ],
+        deciders,
+      },
+    ];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      userHandles: { [ANA_ID]: "ana" },
+    });
+    const waiting = { transition: "waiting_approval", status: "waiting_approval", pendingApprovals: 3 };
+    let from = seen.length;
+    await cell.onEvent("agent.work_session.v1", wake({ ...waiting, summary, deciders }));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/work-sessions/read",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen.at(-3)?.body).toEqual({ eventId: WAKE_EVENT, agentId: ATLAS_ID, workSessionId: WS });
+    // Each tool once, in the read's order; the deciders the wake names. The bot never calls a decision route.
+    expect(seen.at(-1)?.body.text).toBe("Needs approval: Write, Bash @victor @ana");
+    expect(cell.workSessionWakes.at(-1)).toMatchObject({
+      transition: "waiting_approval",
+      text: "Needs approval: Write, Bash @victor @ana",
+    });
+
+    // Not offered the read (the consent was revoked): it still names who decides, without a tool.
+    from = seen.length;
+    await cell.onEvent(
+      "agent.work_session.v1",
+      wake({ ...waiting, summary, deciders: deciders.slice(0, 1) }, { turn: { tools: [] } }),
+    );
+    expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+    expect(seen.at(-1)?.body.text).toBe("Needs approval: a tool @victor");
+
+    from = seen.length;
+    await cell.onEvent(
+      "agent.work_session.v1",
+      wake(
+        {
+          transition: "failed",
+          status: "failed",
+          summary: "Work Zone session in billing-api failed during turn 1.",
+          deciders: [{ id: VICTOR_ID, handle: "victor", displayName: "Víctor Ruiz" }],
+        },
+        // No handle given for this asker: the decider with the asker's id names them.
+        { message: { id: CARD, text: "s", author: { kind: "user", id: VICTOR_ID, displayName: "" } } },
+      ),
+    );
+    expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+    expect(seen.at(-1)?.body.text).toBe(
+      "failed: Work Zone session in billing-api failed during turn 1. @victor",
+    );
+  });
+
+  it("a wake is answered only with autoReply and never for a held bot; a turn_done wake not offered the read answers with the summary", async () => {
+    const quiet = new FakeCellPlugin({ apiUrl, token: "cell-token" });
+    const held = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      holdAgents: new Set([ATLAS_ID]),
+    });
+    let from = seen.length;
+    const ev = wake({ transition: "turn_done", summary: TURN_DONE });
+    await quiet.onEvent("agent.work_session.v1", ev);
+    await held.onEvent("agent.work_session.v1", ev);
+    expect(since(from)).toEqual([]);
+
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      userHandles: { [ANA_ID]: "ana" },
+    });
+    from = seen.length;
+    await cell.onEvent(
+      "agent.work_session.v1",
+      wake({ transition: "turn_done", summary: TURN_DONE }, { turn: { tools: [] } }),
+    );
+    expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+    expect(seen.at(-1)?.body.text).toBe(`Done: ${TURN_DONE} @ana`);
+  });
+});

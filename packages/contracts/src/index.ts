@@ -10,6 +10,7 @@ export * from "./attachments";
 export * from "./automations";
 export * from "./board";
 export * from "./bot-capabilities";
+export * from "./bot-work-zone";
 export * from "./chat";
 export * from "./common";
 export * from "./connectors";

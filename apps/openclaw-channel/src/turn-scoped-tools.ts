@@ -2,7 +2,8 @@
  * Tools the API offers only on some turns, decided per delivery from facts the cell-wide snapshot does not carry
  * (07.1-13, 07.5-10, 07.6-20). `ocw_board_card` is offered only on a board channel's turns (07.1-10), the two Work Zone
  * proposal tools only on turns whose human holds `work_session.create` (07.5-08), the two 07.6 tools and the 07.7 consult
- * tool only where their own rules hold (below), so `GET /cell` (the bot's tools in
+ * tool only where their own rules hold (below), the 07.16 Work Zone session tools only to a bot with an active Work Zone
+ * profile, so `GET /cell` (the bot's tools in
  * any conversation, for no human) never lists them, while OpenClaw can only run a tool the bot's entry configures
  * (`alsoAllow`) and a turn may only narrow that list (`toolsAllow`).
  *
@@ -30,6 +31,22 @@ export const CONSULT_TOOL_NAME = "ocw_consult_agent";
  * read (`access: "read"`) while object storage is configured; never in `GET /cell`.
  */
 export const ATTACHMENT_TOOL_NAME = "ocw_attachment_read";
+/**
+ * 07.16 (D-05, PD-09, PD-17): the bot's own Work Zone session tools, offered only on the turns of a bot with an active
+ * Work Zone profile (the API decides per delivery); never in `GET /cell`. Declared here, with no imports, because the
+ * gate (tool-guard.ts) builds its sets from them while it loads (work-session-tools.ts imports the gate).
+ */
+export const WORK_SESSION_START_TOOL = "ocw_work_session_start";
+export const WORK_SESSION_PROMPT_TOOL = "ocw_work_session_prompt";
+export const WORK_SESSION_READ_TOOL = "ocw_work_session_read";
+export const WORK_SESSION_STOP_TOOL = "ocw_work_session_stop";
+export const WORK_SESSION_TOOL_NAMES = [
+  WORK_SESSION_START_TOOL,
+  WORK_SESSION_PROMPT_TOOL,
+  WORK_SESSION_READ_TOOL,
+  WORK_SESSION_STOP_TOOL,
+] as const;
+export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
 const DELIVERED_TURN_TOOL = "ocw_agent_card";
 
 /** The bot's snapshot tools plus the turn-scoped ones it may be offered (only for a bot that is offered any tool). */
@@ -42,6 +59,7 @@ export function withTurnScopedTools(tools: readonly string[] | undefined): strin
     ...AUTOMATION_TOOLS,
     CONSULT_TOOL_NAME,
     ATTACHMENT_TOOL_NAME,
+    ...WORK_SESSION_TOOL_NAMES,
   ]) {
     if (!list.includes(name)) list.push(name);
   }

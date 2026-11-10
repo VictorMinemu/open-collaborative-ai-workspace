@@ -1,4 +1,7 @@
 import {
+  type BotWorkZoneProfileInput,
+  BotWorkZoneProfileView,
+  DeviceBotConsentsView,
   type PermissionMode,
   type RuntimeCatalog,
   type RuntimeModel,
@@ -6,6 +9,7 @@ import {
   UpdateWorkSessionVisibilityResult,
 } from "@ocw/contracts";
 import { workProjectRepos } from "@ocw/db";
+import type pg from "pg";
 import { expect } from "vitest";
 import { WorkSessionService } from "./modules/work-session";
 import { TestClient, type TestStack } from "./testing";
@@ -262,4 +266,64 @@ export async function settled(stack: TestStack, organizationId?: string): Promis
   const handler = stack.built.deviceHub.sessionHandler;
   if (!(handler instanceof WorkSessionService)) throw new Error("no work-session service");
   await handler.settled(organizationId);
+}
+
+// ---------------------------------------------------------------- bot Work Zone profiles (07.16-07)
+
+/**
+ * D-01, PD-04: `client` (who manages the bot) saves its Work Zone profile and becomes its sponsor; returns the parsed
+ * view. Call the route directly to assert a refusal.
+ */
+export async function createBotProfile(
+  client: TestClient,
+  agentId: string,
+  input: BotWorkZoneProfileInput,
+): Promise<BotWorkZoneProfileView> {
+  const res = await client.request("PUT", `/api/v1/agents/${agentId}/work-zone-profile`, input);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return BotWorkZoneProfileView.parse(res.body);
+}
+
+/** D-03, PD-06: `client` (the device's owner, or an admin on a service host) lets the bot run sessions on the device. */
+export async function grantBotConsent(
+  client: TestClient,
+  deviceId: string,
+  agentId: string,
+  opts: { allowFullAccess: boolean },
+): Promise<DeviceBotConsentsView> {
+  const res = await client.request("PUT", `/api/v1/devices/${deviceId}/bot-consents/${agentId}`, {
+    allowFullAccess: opts.allowFullAccess,
+  });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return DeviceBotConsentsView.parse(res.body);
+}
+
+/**
+ * `client` writes `text` in `conversationId` (a DM with the bot, or a channel mention) and gets the event id of the
+ * delivered bot turn. Today's usage is cleared first: suites deliver more turns than a personal bot's daily limit (30),
+ * which is not what they test (lifted from `proposals.int.test.ts`, which keeps its own copy).
+ */
+export async function freshBotTurn(
+  su: pg.Client,
+  client: TestClient,
+  conversationId: string,
+  text: string,
+): Promise<string> {
+  await su.query("delete from app.agent_usage_daily");
+  const msg = await client.request("POST", `/api/v1/conversations/${conversationId}/messages`, {
+    body: text,
+  });
+  expect(msg.status, JSON.stringify(msg.body)).toBe(200);
+  const messageId = msg.body!.id as string;
+  const rows = await eventually(async () => {
+    const r = (
+      await su.query(
+        "select payload from app.stream_events where type = 'agent.mention.v1' and payload->'message'->>'id' = $1",
+        [messageId],
+      )
+    ).rows as Array<{ payload: { eventId: string } }>;
+    return r.length > 0 ? r : undefined;
+  });
+  expect(rows).toHaveLength(1);
+  return rows[0]!.payload.eventId;
 }

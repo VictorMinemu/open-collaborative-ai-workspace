@@ -87,6 +87,11 @@ export const AgentChannelEventTypes = {
    * turn in the hop's thread (built like a mention; `consultReply` says who answered and how).
    */
   consultReply: "agent.consult_reply.v1",
+  /**
+   * Phase 07.16 (D-09, PD-16): a Work Zone session this bot started finished a turn, waits for an approval, failed,
+   * ended or went offline, delivered as a new turn in the thread of its live card (`workSession` says which and how).
+   */
+  workSession: "agent.work_session.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -474,6 +479,379 @@ export const ATTACHMENT_READ_LIMITS = {
   charsPerFile: 64_000,
 } as const;
 
+// ---------------------------------------------------------------- bot Work Zone sessions (07.16, mirror of contracts
+// bot-work-zone.ts, bot-capabilities.ts and agent-channel.ts; parity: plugin-contract.test.ts)
+
+/** The contracts' `BOT_WORK_ZONE_LIMITS`; the tools check the prompt bound locally, the API re-validates everything. */
+export const BOT_WORK_ZONE_LIMITS = {
+  projectsMax: 50,
+  turnProjects: 20,
+  allowedValuesMax: 20,
+  maxConcurrentDefault: 2,
+  maxConcurrentMax: 10,
+  promptsPerHourDefault: 30,
+  promptsPerHourMax: 120,
+  wakesPerSessionDayDefault: 20,
+  wakesPerSessionDayMax: 100,
+  orgSessionsDefault: 10,
+  orgSessionsMax: 1000,
+  promptChars: 50_000,
+  readOutputChars: 6_000,
+  readTools: 10,
+  readFiles: 50,
+  readApprovals: 10,
+  readApprovalPaths: 10,
+  readMine: 20,
+  deciders: 3,
+  summaryChars: 500,
+  errorChars: 500,
+  toolSummaryChars: 200,
+  turnSessions: 10,
+} as const;
+
+/** Contracts `RuntimeId`, `PermissionMode`, `WorkSessionStatus`, `EffortLevel` and `ContextWindow`. */
+export const WorkZoneRuntimeId = z.enum(["claude-code", "codex"]);
+export const WorkZonePermissionMode = z.enum(["default", "acceptEdits", "plan", "auto", "fullAccess"]);
+export type WorkZonePermissionMode = z.infer<typeof WorkZonePermissionMode>;
+export const WorkSessionStatus = z.enum([
+  "provisioning",
+  "idle",
+  "running",
+  "waiting_approval",
+  "host_offline",
+  "completed",
+  "failed",
+  "archived",
+]);
+export type WorkSessionStatus = z.infer<typeof WorkSessionStatus>;
+const WorkZoneEffort = z.string().trim().min(1).max(32);
+const WorkZoneContextWindow = z.number().int().min(1000).max(10_000_000);
+const WorkZoneName = z.string().max(200);
+
+/** `off`: never; `allowed`: the bot may turn fast mode on; `on`: on by default. */
+export const BotFastMode = z.enum(["off", "allowed", "on"]);
+export type BotFastMode = z.infer<typeof BotFastMode>;
+
+/**
+ * `TurnContext.workZone` (07.16 D-05, PD-17): what this bot may do in the Work Zone on this turn, from its active
+ * profile. Names and ids only (never a host path, a token or a user).
+ */
+export const TurnWorkZone = z.object({
+  runtime: WorkZoneRuntimeId,
+  device: z.object({ id: Id, name: z.string().max(120), online: z.boolean() }),
+  projects: z.array(z.object({ id: Id, name: WorkZoneName })).max(BOT_WORK_ZONE_LIMITS.turnProjects),
+  projectsMore: z.number().int().nonnegative(),
+  models: z.array(WorkZoneName).max(BOT_WORK_ZONE_LIMITS.allowedValuesMax),
+  defaultModel: WorkZoneName.nullable(),
+  efforts: z.array(WorkZoneEffort).max(10),
+  fastMode: BotFastMode,
+  defaultMode: WorkZonePermissionMode,
+  maxMode: WorkZonePermissionMode,
+  outsideContent: z.boolean(),
+  sessions: z
+    .array(z.object({ id: Id, status: WorkSessionStatus, projectName: WorkZoneName }))
+    .max(BOT_WORK_ZONE_LIMITS.turnSessions),
+});
+export type TurnWorkZone = z.infer<typeof TurnWorkZone>;
+
+const BotPrompt = z.string().trim().min(1).max(BOT_WORK_ZONE_LIMITS.promptChars);
+
+/**
+ * `POST /work-sessions/start` (`ocw_work_session_start`). Strict: never a device, a user, a visibility, a worktree or an
+ * audience; absent options = the profile's defaults.
+ */
+export const AgentChannelWorkSessionStart = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  projectId: Id,
+  prompt: BotPrompt,
+  model: z.string().trim().min(1).max(200).optional(),
+  effort: WorkZoneEffort.optional(),
+  fastMode: z.boolean().optional(),
+  contextWindow: WorkZoneContextWindow.optional(),
+  permissionMode: WorkZonePermissionMode.optional(),
+});
+export type AgentChannelWorkSessionStart = z.infer<typeof AgentChannelWorkSessionStart>;
+
+/** `POST /work-sessions/prompt` (`ocw_work_session_prompt`): one more prompt to a session this bot started. */
+export const AgentChannelWorkSessionPrompt = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  prompt: BotPrompt,
+});
+export type AgentChannelWorkSessionPrompt = z.infer<typeof AgentChannelWorkSessionPrompt>;
+
+/** `POST /work-sessions/read` (`ocw_work_session_read`): output after `cursor` (absent = from the start). */
+export const AgentChannelWorkSessionRead = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  cursor: z.number().int().nonnegative().optional(),
+});
+export type AgentChannelWorkSessionRead = z.infer<typeof AgentChannelWorkSessionRead>;
+
+/** `POST /work-sessions/stop` (`ocw_work_session_stop`): archives a session this bot started. */
+export const AgentChannelWorkSessionStop = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+});
+export type AgentChannelWorkSessionStop = z.infer<typeof AgentChannelWorkSessionStop>;
+
+/** The contracts' refusal codes, in their order. */
+export const BotWorkSessionRefusal = z.enum([
+  "not_in_turn",
+  "cap_reached",
+  "profile_inactive",
+  "project_not_allowed",
+  "setting_not_allowed",
+  "mode_not_allowed",
+  "prompt_not_allowed",
+  "too_many_sessions",
+  "org_limit",
+  "prompt_rate",
+  "tree_busy",
+  "device_offline",
+  "runtime_unavailable",
+  "outside_content",
+  "outside_content_bypass",
+  "session_output",
+  "not_your_session",
+  "session_ended",
+  "not_allowed",
+]);
+export type BotWorkSessionRefusal = z.infer<typeof BotWorkSessionRefusal>;
+
+/** The contracts' fixed sentence per code; the tools use them for the refusals they decide locally. */
+export const BOT_WORK_SESSION_SENTENCES: Readonly<Record<BotWorkSessionRefusal, string>> = {
+  not_in_turn: "Work Zone sessions are not available on this turn.",
+  cap_reached: "This turn has used all its tool calls. Ask the person to send the request again.",
+  profile_inactive:
+    "This bot can't run Work Zone sessions right now. Ask whoever manages it to check its Work Zone profile.",
+  project_not_allowed:
+    "That project is not in this bot's Work Zone profile. Use one of the projects listed for this turn.",
+  setting_not_allowed:
+    "That model or option is not allowed by this bot's Work Zone profile. Use the defaults or one of the listed values.",
+  mode_not_allowed: "That permission mode is above what this bot's Work Zone profile allows here.",
+  prompt_not_allowed: "Slash commands can't be sent as prompts. Describe the work in words.",
+  too_many_sessions:
+    "This bot already runs as many Work Zone sessions as its profile allows. Stop one or wait for one to finish.",
+  org_limit: "The organization's limit of bot Work Zone sessions is reached. Try again when one finishes.",
+  prompt_rate: "This bot has sent as many prompts this hour as its profile allows. Try again later.",
+  tree_busy: "Another session is already working on that project's files. Wait for it to finish.",
+  device_offline:
+    "The bot's Work Zone device is offline. Tell the person; the session can start when the device is back.",
+  runtime_unavailable: "The runtime this bot uses is not available on its device right now.",
+  outside_content:
+    "This turn read outside content, so the bot can't start or prompt a session on its own. A person must review it.",
+  outside_content_bypass:
+    "After outside content, Full access runs only on an isolated server. Use a lower mode.",
+  session_output:
+    "This turn read a session's output: it can't start a session, and it can prompt only the one session it read. Ask the person to send the request again.",
+  not_your_session: "This bot can only control Work Zone sessions it started.",
+  session_ended: "That session has ended.",
+  not_allowed: "The bot's sponsor is not allowed to do this in the Work Zone any more.",
+};
+
+export const BOT_WORK_SESSION_PROPOSED_SENTENCE =
+  "The bot proposed the session instead: a person must review the prompt and press Start.";
+
+/** The contracts' inactive-profile reasons, in their order. */
+export const BotProfileInactiveReason = z.enum([
+  "bot_disabled",
+  "no_consent",
+  "device_revoked",
+  "sponsor_inactive",
+  "sponsor_not_allowed",
+  "sponsor_device_access",
+  "no_projects",
+  "org_disabled",
+]);
+export type BotProfileInactiveReason = z.infer<typeof BotProfileInactiveReason>;
+
+/**
+ * The contracts' status line of an inactive profile, one per reason. A `profile_inactive` refusal carries the reason; the
+ * start tool tells the model why after the refusal's own sentence.
+ */
+export const BOT_PROFILE_STATUS_SENTENCES: Readonly<Record<BotProfileInactiveReason, string>> = {
+  bot_disabled: "The bot is disabled.",
+  no_consent: "The device's owner has not allowed this bot to run sessions there.",
+  device_revoked: "The device was removed from the organization.",
+  sponsor_inactive: "The person who saved the profile is no longer an active member.",
+  sponsor_not_allowed: "The person who saved the profile can no longer start Work Zone sessions.",
+  sponsor_device_access: "The person who saved the profile can no longer use the device.",
+  no_projects: "None of the profile's projects can be used any more.",
+  org_disabled: "The organization does not let bots start Work Zone sessions.",
+};
+
+/**
+ * A refused call. A code from a newer API stays a string (its sentence still reaches the model); an unknown reason or
+ * field reads as absent.
+ */
+export const BotWorkSessionRefused = z.object({
+  kind: z.literal("refused"),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u),
+  sentence: z.string().max(300),
+  reason: BotProfileInactiveReason.optional().catch(undefined),
+  field: z
+    .enum(["model", "effort", "contextWindow", "fastMode", "permissionMode"])
+    .optional()
+    .catch(undefined),
+});
+export type BotWorkSessionRefused = z.infer<typeof BotWorkSessionRefused>;
+
+/** `started` (the session and its live card exist), `proposed` (outside content: a person starts it) or refused. */
+export const AgentChannelWorkSessionStartResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("started"),
+    workSessionId: Id,
+    status: WorkSessionStatus,
+    cardMessageId: Id.nullable(),
+    model: WorkZoneName.nullable(),
+    mode: WorkZonePermissionMode,
+    projectName: WorkZoneName,
+  }),
+  z.object({
+    kind: z.literal("proposed"),
+    approvalId: Id,
+    reason: z.literal("outside_content"),
+    sentence: z.string().max(300),
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionStartResponse = z.infer<typeof AgentChannelWorkSessionStartResponse>;
+
+/** Contracts `PromptStatus` and `DiffFileStatus`. */
+export const WorkPromptStatus = z.enum([
+  "queued",
+  "dispatched",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const WorkDiffFileStatus = z.enum([
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "untracked",
+  "copied",
+  "unmerged",
+]);
+
+/** Contracts `RelativePath`: no leading slash, drive letter or home shortcut, no `..` segment (principle 7). */
+const WorkZoneRelativePath = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine((p) => !/^([/\\]|[A-Za-z]:[/\\]|~)/.test(p) && !p.split(/[/\\]/).includes(".."), {
+    message: "must be a repo-relative path",
+  });
+
+export const AgentChannelWorkSessionPromptResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("queued"),
+    workSessionId: Id,
+    promptId: Id,
+    position: z.number().int(),
+    status: WorkPromptStatus,
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionPromptResponse = z.infer<typeof AgentChannelWorkSessionPromptResponse>;
+
+export const AgentChannelWorkSessionStopResponse = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("stopped"), workSessionId: Id }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionStopResponse = z.infer<typeof AgentChannelWorkSessionStopResponse>;
+
+/** A person who may decide the session's approvals (the bot names them, it never decides). */
+export const WorkSessionDecider = z.object({ id: Id, handle: z.string().max(64), displayName: WorkZoneName });
+export type WorkSessionDecider = z.infer<typeof WorkSessionDecider>;
+
+const WorkCount = z.number().int().nonnegative();
+const WorkToolName = z.string().max(100);
+const WorkToolSummary = z.string().max(BOT_WORK_ZONE_LIMITS.toolSummaryChars);
+
+/**
+ * What `ocw_work_session_read` returns: bounded and repo-relative. The output is the runtime's work product, untrusted
+ * data the tool wraps as such before the model reads it.
+ */
+export const BotWorkSessionReadModel = z.object({
+  session: z.object({
+    id: Id,
+    status: WorkSessionStatus,
+    runtime: WorkZoneRuntimeId,
+    model: WorkZoneName.nullable(),
+    mode: WorkZonePermissionMode,
+    worktree: z.boolean(),
+    title: WorkZoneName,
+    projectName: WorkZoneName,
+    updatedAt: z.string(),
+  }),
+  queue: z.object({
+    queued: WorkCount,
+    running: WorkCount,
+    completed: WorkCount,
+    failed: WorkCount,
+    cancelled: WorkCount,
+    mine: z
+      .array(z.object({ id: Id, status: WorkPromptStatus, position: z.number().int() }))
+      .max(BOT_WORK_ZONE_LIMITS.readMine),
+  }),
+  output: z
+    .object({
+      texts: z.array(z.object({ seq: WorkCount, text: z.string() })).max(50),
+      truncated: z.boolean(),
+    })
+    .refine((o) => o.texts.reduce((n, t) => n + t.text.length, 0) <= BOT_WORK_ZONE_LIMITS.readOutputChars, {
+      message: "output over the read budget",
+      path: ["texts"],
+    }),
+  tools: z
+    .array(z.object({ name: WorkToolName, ok: z.boolean().nullable(), summary: WorkToolSummary }))
+    .max(BOT_WORK_ZONE_LIMITS.readTools),
+  changes: z
+    .object({
+      files: z
+        .array(
+          z.object({
+            path: WorkZoneRelativePath,
+            status: WorkDiffFileStatus,
+            additions: WorkCount,
+            deletions: WorkCount,
+          }),
+        )
+        .max(BOT_WORK_ZONE_LIMITS.readFiles),
+      branch: WorkZoneName.nullable(),
+      truncated: z.boolean(),
+    })
+    .nullable(),
+  approvals: z
+    .array(
+      z.object({
+        id: Id,
+        tool: WorkToolName,
+        paths: z.array(WorkZoneRelativePath).max(BOT_WORK_ZONE_LIMITS.readApprovalPaths),
+        summary: WorkToolSummary,
+      }),
+    )
+    .max(BOT_WORK_ZONE_LIMITS.readApprovals),
+  deciders: z.array(WorkSessionDecider).max(BOT_WORK_ZONE_LIMITS.deciders),
+  error: z.string().max(BOT_WORK_ZONE_LIMITS.errorChars).nullable(),
+  cursor: WorkCount,
+});
+export type BotWorkSessionReadModel = z.infer<typeof BotWorkSessionReadModel>;
+
+export const AgentChannelWorkSessionReadResponse = z.discriminatedUnion("kind", [
+  BotWorkSessionReadModel.extend({ kind: z.literal("read") }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionReadResponse = z.infer<typeof AgentChannelWorkSessionReadResponse>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -522,6 +900,11 @@ export const TurnContext = z.object({
   maxAttachmentReads: z.number().int().nonnegative().optional().catch(undefined),
   /** 07.15 (D-17): characters all reads of this turn may return. Informational: the API enforces it. */
   maxAttachmentChars: z.number().int().nonnegative().optional().catch(undefined),
+  /**
+   * 07.16 (D-05, PD-17): present only on turns of a bot with an active Work Zone profile. Informational: an invalid
+   * block reads as absent (the tools then list no projects), and the API decides every call anyway.
+   */
+  workZone: TurnWorkZone.optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -706,6 +1089,28 @@ export const AgentConsultReplyEvent = AgentMentionEvent.omit({ type: true }).ext
     }),
 });
 export type AgentConsultReplyEvent = z.infer<typeof AgentConsultReplyEvent>;
+
+/** 07.16 (D-09): why a bot is woken about its session (contracts `WorkSessionTransition`). */
+export const WorkSessionTransition = z.enum(["turn_done", "waiting_approval", "failed", "ended", "offline"]);
+export type WorkSessionTransition = z.infer<typeof WorkSessionTransition>;
+
+/**
+ * 07.16 (D-09, D-10, PD-16): a session this bot started changed state, delivered as a new turn in the thread of its
+ * live card (built like a mention; author = the person who asked). `summary` is server-composed from structured facts,
+ * never runtime text; `deciders` may decide pending approvals (the bot cannot).
+ */
+export const AgentWorkSessionEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.workSession),
+  workSession: z.object({
+    workSessionId: Id,
+    transition: WorkSessionTransition,
+    status: WorkSessionStatus,
+    summary: z.string().max(BOT_WORK_ZONE_LIMITS.summaryChars),
+    pendingApprovals: z.number().int().nonnegative(),
+    deciders: z.array(WorkSessionDecider).max(BOT_WORK_ZONE_LIMITS.deciders),
+  }),
+});
+export type AgentWorkSessionEvent = z.infer<typeof AgentWorkSessionEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

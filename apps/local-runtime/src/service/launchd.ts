@@ -72,6 +72,10 @@ export function renderLaunchdPlist(opts: LaunchdPlistOptions): string {
     "  <dict>",
     "    <key>PATH</key>",
     `    ${s(opts.path)}`,
+    // 07.16 PD-18: tells the daemon it runs as a headless service; the server honours the isolated-server mark only
+    // for services.
+    "    <key>OCW_RUNTIME_HOST</key>",
+    `    ${s("service")}`,
     ...(opts.ocwHome ? ["    <key>OCW_HOME</key>", `    ${s(opts.ocwHome)}`] : []),
     "  </dict>",
     "  <key>StandardOutPath</key>",

@@ -43,6 +43,9 @@ export const JOB_QUEUES = {
   "maintenance.daily": Empty,
   // Phase 07.7 (D-11, ADR-0027): the hop timeouts' tick; it reads `app.expired_agent_chain_hops` (ids only).
   "consult.tick": Empty,
+  // Phase 07.16 (D-09, PD-16): a bot session's state changed; the handler refreshes its card and decides a wake (ids
+  // only; the worker is registered by 07.16-20).
+  "work_session.bot_sync": z.object({ organizationId: Id, workSessionId: Id }).strict(),
 } as const satisfies Record<JobQueueName, z.ZodType>;
 
 export type QueueName = keyof typeof JOB_QUEUES;

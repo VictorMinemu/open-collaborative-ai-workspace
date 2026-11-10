@@ -64,6 +64,24 @@ export const REQUIRED_AREAS = [
   // Phase 07.15 (ADR-0037): the bot attachment read route and the row rule shared by reads and sandbox imports.
   { area: "bot attachment reads", file: "apps/api/src/modules/agent-channel/attachments.ts" },
   { area: "bot attachment access rule", file: "apps/api/src/modules/agent-channel/attachment-access.ts" },
+  // Phase 07.16 (ADR-0038): bots run Work Zone sessions as their sponsor, read a redacted model, are woken, and the
+  // profile and consent decide the bypass chain; people and bots share the prompt and archive bodies.
+  {
+    area: "bot Work Zone start, prompt and stop",
+    file: "apps/api/src/modules/agent-channel/work-sessions.ts",
+  },
+  { area: "bot Work Zone read model route", file: "apps/api/src/modules/agent-channel/work-session-read.ts" },
+  { area: "bot Work Zone wake-ups", file: "apps/api/src/modules/agent-channel/work-session-wakes.ts" },
+  { area: "bot Work Zone profile and consent", file: "apps/api/src/modules/work-session/bot-profile.ts" },
+  {
+    area: "bot Work Zone sessions (sponsor transaction)",
+    file: "apps/api/src/modules/work-session/bot-sessions.ts",
+  },
+  { area: "bot Work Zone redacted read model", file: "apps/api/src/modules/work-session/bot-read.ts" },
+  {
+    area: "prompt and archive bodies people and bots share",
+    file: "apps/api/src/modules/work-session/controller.ts",
+  },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

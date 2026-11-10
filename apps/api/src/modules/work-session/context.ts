@@ -1,4 +1,11 @@
-import { isExposed, type PermissionMode, type RuntimeId, type WorkZonePolicy } from "@ocw/contracts";
+import {
+  type ContextWindow,
+  type EffortLevel,
+  isExposed,
+  type PermissionMode,
+  type RuntimeId,
+  type WorkZonePolicy,
+} from "@ocw/contracts";
 import { devices, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import { type DeviceAccess, loadDeviceAccess } from "../device";
@@ -23,6 +30,29 @@ export interface MemberControls {
   facts: ResourceFacts;
 }
 
+/**
+ * 07.16 (PD-05, PD-07): a bot's Work Zone caps, intersected into the ONE controls context so a bot's start or prompt
+ * never goes above its profile (refusals carry `bot_profile`). Built only by `profileStatus` / `botLayerForSession`
+ * in `bot-profile.ts`; `loadControlsContext` copies it into `ControlsContext.agent` and the control builders decide
+ * against it (07.16-06).
+ */
+export interface AgentControlsLayer {
+  agentId: string;
+  /** The profile's highest permission mode. */
+  maxMode: PermissionMode;
+  /** The device owner's consent allows Full access for this bot and the profile's max mode is Full access (PD-05). */
+  allowFullAccess: boolean;
+  /** The session (`tainted_at`) or the start turn read outside content (D-08). */
+  tainted: boolean;
+  /** A service host whose owner marked it an isolated server (D-19). */
+  isolated: boolean;
+  /** The profile's model, effort and context window sets and its fast mode (PD-07 decides against them). */
+  models: readonly string[];
+  efforts: readonly EffortLevel[];
+  contextWindows: readonly ContextWindow[];
+  fastMode: "off" | "allowed" | "on";
+}
+
 export interface LoadControlsOptions {
   deviceId: string;
   runtime: RuntimeId;
@@ -32,6 +62,8 @@ export interface LoadControlsOptions {
   /** Preloaded inputs (loops over many sessions). */
   policy?: WorkZonePolicy;
   access?: DeviceAccess;
+  /** 07.16 PD-07: the bot's caps when a bot starts or prompts in its sponsor's name; absent on every human path. */
+  agent?: AgentControlsLayer;
 }
 
 /** null when the device is not visible in this tenant. */
@@ -69,6 +101,8 @@ export async function loadControlsContext(
       modeCap: authorModeCap({ cap, revoked, floor: access.floorOf(d) }, o.inSession),
       fullAccessGrain: grain.allowed,
       exposed: (uiKey) => isExposed(o.runtime, uiKey),
+      // The member's own computations above are unchanged (`modeCap` stays the sponsor's); the bot's caps come last.
+      ...(o.agent ? { agent: o.agent } : {}),
     },
     cap,
     revoked,

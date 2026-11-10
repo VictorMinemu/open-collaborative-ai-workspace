@@ -66,6 +66,14 @@ export const WorkSessionAttention = z.object({
 });
 export type WorkSessionAttention = z.infer<typeof WorkSessionAttention>;
 
+/** 07.16 (D-06): a bot named on a session or a prompt, by stable id (principle 11). */
+export const WorkSessionAgentRef = z.object({
+  agentId: Id,
+  displayName: z.string().max(200),
+  handle: z.string().max(64),
+});
+export type WorkSessionAgentRef = z.infer<typeof WorkSessionAgentRef>;
+
 export const WorkSession = z.object({
   id: Id,
   conversationId: Id,
@@ -120,6 +128,11 @@ export const WorkSession = z.object({
    * surfaces (the list, the detail, their `user:` frames); absent on the shared `ws:` stream, so optional.
    */
   attention: WorkSessionAttention.optional(),
+  /**
+   * 07.16 (D-06): the bot that started the session (its sponsor is `createdBy`). Viewer-neutral, so it may ride every
+   * surface; null = started by a person; optional so older payloads parse.
+   */
+  startedByAgent: WorkSessionAgentRef.nullable().optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 
@@ -202,6 +215,16 @@ export const WorkPrompt = z.object({
     .object({ agentId: Id, displayName: z.string().max(200) })
     .nullable()
     .default(null),
+  /**
+   * 07.16 (D-06): the bot that wrote this prompt; the author (`authorUserId`) stays the bot's sponsor. null = a person
+   * wrote it; optional so stored `prompt.updated` payloads parse.
+   */
+  authorAgent: WorkSessionAgentRef.nullable().optional(),
+  /**
+   * 07.16 (D-08): sent from a bot turn that read outside content (MCP results, attachments, webhooks, mail, web
+   * pages); shown to people. Absent = false.
+   */
+  tainted: z.boolean().optional(),
 });
 export type WorkPrompt = z.infer<typeof WorkPrompt>;
 
@@ -272,6 +295,18 @@ export type WorkSessionEventRecord = z.infer<typeof WorkSessionEventRecord>;
 export const WorkSessionViewerState = z.enum(["left_project"]);
 export type WorkSessionViewerState = z.infer<typeof WorkSessionViewerState>;
 
+/**
+ * 07.16 (D-13, PD-19): the conversation a bot-started session came from. A thread is a `channel` with `threadRootId`.
+ */
+export const WorkSessionOrigin = z.object({
+  conversationId: Id,
+  kind: z.enum(["channel", "dm", "group", "ai_chat"]),
+  name: z.string().max(200),
+  threadRootId: Id.nullable(),
+  messageId: Id,
+});
+export type WorkSessionOrigin = z.infer<typeof WorkSessionOrigin>;
+
 export const WorkSessionDetail = z.object({
   session: WorkSession,
   prompts: z.array(WorkPrompt),
@@ -283,6 +318,11 @@ export const WorkSessionDetail = z.object({
   viewerCan: z.array(Permission).optional(),
   /** Phase 07.9 (D-12): the caller created the session and has since left its project (read and archive only). */
   viewerState: WorkSessionViewerState.nullable().optional(),
+  /**
+   * 07.16 (D-13, PD-19): per viewer, only on `GET /work-sessions/:id`; set only when the viewer may read the
+   * conversation the bot started the session from, never on `ws:` or `user:` frames. null = none or not readable.
+   */
+  origin: WorkSessionOrigin.nullable().optional(),
 });
 export type WorkSessionDetail = z.infer<typeof WorkSessionDetail>;
 

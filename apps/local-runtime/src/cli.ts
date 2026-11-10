@@ -14,6 +14,11 @@
 //   ocw-runtime full-access on|off|status
 //                                  the device owner's Full access opt-in (ADR-0012); writes runtime.json and asks
 //                                  a running daemon to reload it. OCW_ALLOW_FULL_ACCESS overrides it per process.
+//   ocw-runtime isolated-server on|off|status
+//                                  07.16 (D-19): mark this machine as an isolated server (bots that read outside
+//                                  content may run Full access sessions here); honoured by the server only for a
+//                                  headless service daemon. Writes runtime.json and asks a running daemon to reload
+//                                  it. OCW_ISOLATED_SERVER overrides it per process.
 //   ocw-runtime updates status|check|now <claude-code|codex>
 //                                  the runtime CLIs' versions and update state (07.11); `check` asks the registry
 //                                  now, `now` updates one runtime when it is idle (local only, never from the server).
@@ -33,7 +38,7 @@
 //                                  unregister a project (via the running daemon, or directly when stopped)
 
 import { homedir } from "node:os";
-import { RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
+import { type DeviceHostKind, RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
 import { detectClaudeCode } from "./claude/detect.js";
 import {
   ensureOcwHome,
@@ -41,8 +46,11 @@ import {
   ocwHome,
   ProjectRegistry,
   resolveFullAccess,
+  resolveHostKind,
+  resolveIsolatedServer,
   resolveRuntimeUpdates,
   setFullAccessOptIn,
+  setIsolatedServer,
   setRuntimeUpdatesLevel,
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
@@ -119,6 +127,64 @@ async function fullAccess(sub: string | undefined): Promise<void> {
   if (sub !== "status" && out.fullAccessOptIn !== (sub === "on")) {
     process.stderr.write("Note: OCW_ALLOW_FULL_ACCESS in the daemon's environment overrides runtime.json.\n");
   }
+  process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+}
+
+const ISOLATED_SERVER_WARNING =
+  "Isolated server: bots that read outside content may run Full access sessions here. Turn this on only on a machine " +
+  "that holds nothing else that matters.";
+
+/**
+ * 07.16 (D-19, PD-18) `isolated-server on|off|status`: local only, exactly like `full-access`; the server can never call
+ * this. The server honours the mark only for a headless service daemon (`honoured`).
+ */
+async function isolatedServer(sub: string | undefined): Promise<void> {
+  if (sub !== "on" && sub !== "off" && sub !== "status") {
+    throw new Error("usage: ocw-runtime isolated-server on|off|status");
+  }
+  const home = ocwHome();
+  if (sub !== "status") {
+    if (sub === "on") process.stderr.write(`${ISOLATED_SERVER_WARNING}\n`);
+    await setIsolatedServer(home, sub === "on");
+  }
+  let mark: { on: boolean; source: unknown; host: DeviceHostKind | null; daemon: "running" | "stopped" };
+  try {
+    const res = await controlRequest(controlSocketPath(home), {
+      cmd: sub === "status" ? "status" : "reloadConfig",
+    });
+    if (!res.ok) throw new Error(res.error ?? "request failed");
+    const r = res.result as {
+      isolatedServer?: boolean;
+      isolatedServerSource?: string;
+      host?: DeviceHostKind | null;
+    };
+    mark = {
+      on: r.isolatedServer === true,
+      source: r.isolatedServerSource,
+      host: r.host ?? null,
+      daemon: "running",
+    };
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+    const local = resolveIsolatedServer(await loadConfig(home));
+    const host = await resolveHostKind({ env: process.env, home, entry: process.argv[1] });
+    mark = { on: local.on, source: local.source, host, daemon: "stopped" };
+  }
+  if (sub !== "status" && mark.on !== (sub === "on")) {
+    process.stderr.write("Note: OCW_ISOLATED_SERVER in the daemon's environment overrides runtime.json.\n");
+  }
+  if (sub === "on" && mark.on && mark.host !== "service") {
+    process.stderr.write(
+      "Note: this runtime does not run as a headless service; the server ignores the mark here.\n",
+    );
+  }
+  const out = {
+    isolatedServer: mark.on,
+    isolatedServerSource: mark.source,
+    host: mark.host,
+    honoured: mark.host === "service" && mark.on,
+    daemon: mark.daemon,
+  };
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
 }
 
@@ -449,6 +515,8 @@ async function main(argv: string[]): Promise<void> {
       return enrollCommand(rest);
     case "full-access":
       return fullAccess(rest[0]);
+    case "isolated-server":
+      return isolatedServer(rest[0]);
     case "updates":
       return updates(rest[0], rest[1]);
     case "remove-project":

@@ -28,6 +28,8 @@ import {
   TurnContext,
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
+  WORK_SESSION_TOOL_FLAGS,
+  WORK_SESSION_TOOL_NAMES,
 } from "./index";
 
 const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -700,5 +702,77 @@ describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
       sideEffecting: false,
       memberData: "none",
     });
+  });
+});
+
+describe("bot Work Zone tools and turn offer (07.16 D-05, PD-09, PD-17)", () => {
+  const P1 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61";
+  const P2 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a62";
+  const workZone = {
+    runtime: "claude-code",
+    device: { id: ID, name: "build-server", online: true },
+    projects: [
+      { id: P1, name: "billing-api" },
+      { id: P2, name: "web" },
+    ],
+    projectsMore: 0,
+    models: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    defaultModel: "claude-sonnet-4-5",
+    efforts: ["low", "high"],
+    fastMode: "allowed",
+    defaultMode: "default",
+    maxMode: "fullAccess",
+    outsideContent: false,
+    sessions: [{ id: ID2, status: "running", projectName: "billing-api" }],
+  };
+
+  it("the four names are built-ins with the hub's flags", () => {
+    expect(BUILTIN_TOOLS.workSessionStart).toBe("ocw_work_session_start");
+    expect(BUILTIN_TOOLS.workSessionPrompt).toBe("ocw_work_session_prompt");
+    expect(BUILTIN_TOOLS.workSessionRead).toBe("ocw_work_session_read");
+    expect(BUILTIN_TOOLS.workSessionStop).toBe("ocw_work_session_stop");
+    expect([...WORK_SESSION_TOOL_NAMES]).toEqual([
+      "ocw_work_session_start",
+      "ocw_work_session_prompt",
+      "ocw_work_session_read",
+      "ocw_work_session_stop",
+    ]);
+    expect(WORK_SESSION_TOOL_FLAGS).toEqual({
+      ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+      ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+    });
+  });
+
+  it("never approvable and never a dangerous name, on either host (PD-09)", () => {
+    for (const name of WORK_SESSION_TOOL_NAMES) {
+      expect(isApprovableTool(name), name).toBe(false);
+      expect(isApprovableTool(name.toUpperCase()), name).toBe(false);
+      expect(ToolPattern.safeParse(name).success, name).toBe(false);
+      expect(isDangerousToolName(name), name).toBe(false);
+      expect(isDangerousToolName(name, "sandbox"), name).toBe(false);
+    }
+  });
+
+  it("a turn carries the bot's Work Zone offer; a 07.15 turn parses unchanged", () => {
+    const offered = {
+      ...turn,
+      tools: [...turn.tools, ...WORK_SESSION_TOOL_NAMES],
+      toolFlags: { ...turn.toolFlags, ...WORK_SESSION_TOOL_FLAGS },
+      workZone,
+    };
+    expect(TurnContext.parse(offered)).toEqual(offered);
+    const legacy = TurnContext.parse(turn);
+    expect(legacy).toEqual(turn);
+    expect("workZone" in legacy).toBe(false);
+    expect(AgentMentionEvent.parse({ ...mentionEvent, turn: offered }).turn).toEqual(offered);
+  });
+
+  it("an offer over 20 projects is refused at workZone.projects", () => {
+    const projects = Array.from({ length: 21 }, () => ({ id: P1, name: "p" }));
+    const parsed = TurnContext.safeParse({ ...turn, workZone: { ...workZone, projects } });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.path).toEqual(["workZone", "projects"]);
   });
 });

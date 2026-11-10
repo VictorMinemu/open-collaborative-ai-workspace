@@ -57,9 +57,11 @@ export interface AgentMention {
    * body the server's sentence, and the turn is unattended (D-12: no browser tools). `consult` (Phase 07.7, D-07, D-13):
    * a consult question (or answer) delivered by agent-channel's consult code; the structural author is the chain's
    * human and the turn is unattended like an automation run. Set only by agent-channel's consult code; chat never sets
-   * it.
+   * it. `work_session` (Phase 07.16, D-09, D-17): a wake turn delivered by agent-channel's wake handler on the bot's Work
+   * Zone card; the structural author is the person who asked for the session, the body the server's summary, and the
+   * turn is unattended like an automation run. Set only there; chat never sets it.
    */
-  trigger?: "mention" | "reply_mode" | "automation" | "consult";
+  trigger?: "mention" | "reply_mode" | "automation" | "consult" | "work_session";
   /**
    * Phase 07.7 (D-01, D-07; ADR-0027): the chain this delivery belongs to, built by agent-channel's consult code from the
    * chain ledger, never from message text. Absent = a turn outside any chain (depth 0). Chat never sets it.
@@ -75,6 +77,12 @@ export interface AgentMention {
    * turn's local date and time (D-12). Never stored on the message.
    */
   clientTimeZone?: string | null;
+  /**
+   * Phase 07.16 (code review WR-09): the turn's event id, when the delivery is idempotent by construction (a Work Zone
+   * wake derives it from the wake itself, so a retry can never create a second turn). Single-bot deliveries only;
+   * absent = a fresh random id. Chat never sets it.
+   */
+  eventId?: string;
 }
 
 /**
@@ -166,6 +174,8 @@ export interface CardAction {
   tainted?: boolean | undefined;
   /** 07.8-25 (D-13): the request came from a turn that used a member's sign-in: the re-run turn has member data. */
   memberData?: boolean | undefined;
+  /** 07.16 D-20 (CR-02): the request came from a turn that read session output: the re-run turn keeps that mark. */
+  sessionOutputRead?: boolean | undefined;
   /**
    * 07.5-11: an approved `server_apply` request whose apply failed: the kind's result code (`cardAction.resultCode`), so
    * the bot hears what went wrong, not only "approved".

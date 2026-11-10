@@ -5,6 +5,7 @@ import {
   type AgentChannelToolCallResult,
   ATTACHMENT_READ_LIMITS,
   ATTACHMENT_READ_SENTENCES,
+  BOT_WORK_SESSION_SENTENCES,
   CONFINED_TOOL_FLAGS,
   CONFINED_TOOL_NAMES,
   SANDBOX_LIMITS,
@@ -1606,5 +1607,168 @@ describe("ocw_attachment_read (07.15 D-08, D-17, Pitfall 2): self-validated, its
     begin(g, readTurn({ tools: ["ocw_memory_list"] }));
     expect(await g.beforeToolCall(read(), ctx())).toMatchObject({ block: true });
     expect(g.activeTurn(SESSION)?.attachmentReads).toBe(0);
+  });
+});
+
+describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7)", () => {
+  const SIDE = { untrustedOutput: false, sideEffecting: true };
+  const READ = { untrustedOutput: false, sideEffecting: false };
+  const BOARD = { untrustedOutput: false, sideEffecting: true };
+  const WS = "0199a6f0-0000-7000-8000-00000000e501";
+  const START = { projectId: "0199a6f0-0000-7000-8000-00000000b111", prompt: "fix the login bug" };
+  const wsTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: [
+        "web_search",
+        "ocw_memory_save",
+        "ocw_board_card",
+        "ocw_start_work_zone",
+        "ocw_automation_propose",
+        "ocw_consult_agent",
+        "ocw_connector_call",
+        "ocw_work_session_start",
+        "ocw_work_session_prompt",
+        "ocw_work_session_read",
+        "ocw_work_session_stop",
+      ],
+      toolFlags: {
+        web_search: WEB,
+        ocw_memory_save: MEMORY,
+        ocw_board_card: BOARD,
+        ocw_start_work_zone: SIDE,
+        ocw_automation_propose: SIDE,
+        ocw_consult_agent: SIDE,
+        ocw_connector_call: SIDE,
+        m1a2b3c4d__create_issue: SIDE,
+        m1a2b3c4d__whoami: { untrustedOutput: true, sideEffecting: false },
+        ocw_work_session_start: SIDE,
+        ocw_work_session_prompt: SIDE,
+        ocw_work_session_read: READ,
+        ocw_work_session_stop: SIDE,
+      },
+      maxToolCalls: 20,
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = wsTurn(), tainted = false) =>
+    g.beginTurn(SESSION, {
+      eventId: "evt-1",
+      agentId: "a1",
+      turn: t,
+      connectorTools: ["m1a2b3c4d__create_issue", "m1a2b3c4d__whoami"],
+      requesterName: "Sam Lee",
+      tainted,
+    });
+  const wsCalls = () => [
+    call("ocw_work_session_start", START),
+    call("ocw_work_session_prompt", { workSessionId: WS, prompt: "next" }),
+    call("ocw_work_session_read", { workSessionId: WS }),
+    call("ocw_work_session_stop", { workSessionId: WS }),
+  ];
+  const TAINTED = "read-only after untrusted content";
+
+  it("the four are validated by their own routes: never sent to /tool-calls, counted against the turn's cap", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    for (const c of wsCalls()) expect(await g.beforeToolCall(c, ctx()), c.toolName).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(4);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    expect(g.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
+  });
+
+  it("take their static flags when the turn sent none: the read never taints, start, prompt and stop stay side-effecting", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, wsTurn({ toolFlags: { web_search: WEB, ocw_memory_save: MEMORY } }));
+    expect(
+      await g.beforeToolCall(call("ocw_work_session_read", { workSessionId: WS }), ctx()),
+    ).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    expect(await g.beforeToolCall(call("ocw_work_session_start", START), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("on a tainted turn start, prompt and stop still reach their routes (the route decides, D-08); every always side-effecting tool stays blocked", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, wsTurn(), true);
+    for (const c of wsCalls()) expect(await g.beforeToolCall(c, ctx()), c.toolName).toBeUndefined();
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
+      TAINTED,
+    );
+    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
+      "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
+    );
+    expect(await g.beforeToolCall(call("ocw_automation_propose", {}), ctx())).toMatchObject({ block: true });
+    expect(await g.beforeToolCall(call("ocw_consult_agent", {}), ctx())).toMatchObject({ block: true });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("an approval flag on a turn never makes the session tools approvable (PD-09): no arguments ever leave the cell", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const flags = { untrustedOutput: false, sideEffecting: true, approval: "always" as const };
+    begin(
+      g,
+      wsTurn({
+        toolFlags: {
+          ocw_work_session_start: flags,
+          ocw_work_session_prompt: flags,
+          ocw_work_session_read: READ,
+          ocw_work_session_stop: flags,
+        },
+      }),
+    );
+    for (const c of wsCalls()) expect(await g.beforeToolCall(c, ctx()), c.toolName).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("after a session's output was read (D-20) every other side-effecting call is refused locally; prompt and stop still reach their routes; start answers session_output", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    const t = g.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    t.sessionOutputRead = true;
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
+      TAINTED,
+    );
+    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
+      "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
+    );
+    const write = call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "create_issue", arguments: {} });
+    expect(await g.beforeToolCall(write, ctx())).toMatchObject({ block: true });
+    expect(await g.beforeToolCall(call("ocw_work_session_start", START), ctx())).toEqual({
+      block: true,
+      blockReason: BOT_WORK_SESSION_SENTENCES.session_output,
+    });
+    expect(
+      await g.beforeToolCall(call("ocw_work_session_prompt", { workSessionId: WS, prompt: "next" }), ctx()),
+    ).toBeUndefined();
+    expect(
+      await g.beforeToolCall(call("ocw_work_session_stop", { workSessionId: WS }), ctx()),
+    ).toBeUndefined();
+    expect(
+      await g.beforeToolCall(call("ocw_work_session_read", { workSessionId: WS }), ctx()),
+    ).toBeUndefined();
+    // Reading is not side-effecting: still allowed, and still through the gate as before.
+    expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+    const read = call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "whoami", arguments: {} });
+    expect(await g.beforeToolCall(read, ctx())).toBeUndefined();
+    expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+  });
+
+  it("the session-output mark is per turn: a new turn starts without it", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    const t = g.activeTurn(SESSION);
+    if (t) t.sessionOutputRead = true;
+    begin(g);
+    expect(g.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
+    expect(await g.beforeToolCall(call("ocw_work_session_start", START), ctx())).toBeUndefined();
   });
 });

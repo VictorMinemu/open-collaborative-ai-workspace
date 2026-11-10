@@ -124,6 +124,8 @@ export function controlReasonText(
       return "Not reported by this device";
     case "not_confirmed":
       return null;
+    case "bot_profile":
+      return "Above this bot's Work Zone profile";
     default:
       return null;
   }

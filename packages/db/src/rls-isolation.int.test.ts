@@ -717,7 +717,36 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.agent_chain_hops (organization_id, chain_id, root_agent_id, source_agent_id, target_agent_id, depth, mode, source_event_id, question_message_id, idempotency_key, deadline_at) values ($1, $2, $3, $3, $4, 1, 'consult', $5, $6, $7, now() + interval '5 minutes')",
     [org, chain, agent, personal, randomUUID(), msg, `${randomUUID()}:consult:0`],
   );
+
+  // Phase 07.16 (D-01, D-03, D-05): the team bot's Work Zone profile on the seeded device with the seeded project, the
+  // device owner's consent for it, and the bot side of the seeded session (asked for in the channel's message).
+  const bwzProfile = randomUUID();
+  await q(
+    "insert into app.bot_work_zone_profiles (id, organization_id, agent_id, sponsor_user_id, device_id, runtime, updated_by) values ($1, $2, $3, $4, $5, 'claude-code', $4)",
+    [bwzProfile, org, agent, user, device],
+  );
+  await q(
+    "insert into app.bot_work_zone_profile_projects (organization_id, profile_id, device_id, project_id) values ($1, $2, $3, $4)",
+    [org, bwzProfile, device, project],
+  );
+  await q(
+    "insert into app.device_bot_consents (organization_id, device_id, agent_id, granted_by) values ($1, $2, $3, $4)",
+    [org, device, agent, user],
+  );
+  await q(
+    `insert into app.bot_work_sessions (work_session_id, organization_id, agent_id, profile_id, sponsor_user_id, requester_user_id, origin_conversation_id, origin_message_id, origin_event_id)
+     values ($1, $2, $3, $4, $5, $5, $6, $7, $8)`,
+    [ws, org, agent, bwzProfile, user, conv, msg, randomUUID()],
+  );
 }
+
+/** Phase 07.16: the bot Work Zone profile, its projects, the device consents and the bot side of a session. */
+const BOT_WORK_ZONE_TABLES = [
+  "app.bot_work_zone_profiles",
+  "app.bot_work_zone_profile_projects",
+  "app.device_bot_consents",
+  "app.bot_work_sessions",
+] as const;
 
 /** Phase 07.7: the agent-to-agent ledger (chains and their hops). */
 const AGENT_CHAIN_TABLES = ["app.agent_chains", "app.agent_chain_hops"] as const;
@@ -3081,6 +3110,30 @@ describe("tenant isolation (RLS)", () => {
         );
       }),
     ).rejects.toMatchObject({ constraint: "agent_chain_hops_chain_fk" });
+  });
+
+  it("Phase 07.16: the four bot Work Zone tables are org-scoped, forced, seeded and invisible across tenants; the bot session also has the audience backstop (D-07, D-16)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of BOT_WORK_ZONE_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({
+        rls: true,
+        force: true,
+        policies: tbl === "app.bot_work_sessions" ? 2 : 1,
+      });
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+    }
+    const policies = await migrator.query(
+      "select policyname, permissive from pg_policies where schemaname = 'app' and tablename = 'bot_work_sessions' order by policyname",
+    );
+    expect(policies.rows).toEqual([
+      { policyname: "audience_backstop", permissive: "RESTRICTIVE" },
+      { policyname: "tenant_isolation", permissive: "PERMISSIVE" },
+    ]);
   });
 
   it("Phase 07.11 schema constraints: the update history is org-scoped and checked, the policy level too (D-02, D-06, PD-04)", async () => {

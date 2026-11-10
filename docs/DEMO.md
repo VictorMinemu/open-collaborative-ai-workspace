@@ -1002,6 +1002,49 @@ The demo has no real model: the automated tests use a fake model and a real Open
 5. **Audit.** The `bot.attachment_read` rows show ids and counts, never the file's name or content:
    `select action, result, metadata from app.audit_events where action like 'bot.attachment_%' order by occurred_at desc limit 5;`
 
+## Bot Work Zone orchestration (Phase 07.16)
+
+Phase 07.16 (ADR-0038). A bot starts and drives Work Zone sessions itself; nobody presses Start:
+
+- **A profile per bot.** The bot's sheet › **Work Zone** sets the device or server, the projects, the runtime, the
+  default model and options, the highest mode and the limits. Whoever saves it is the **sponsor**: sessions run in the
+  sponsor's name and rights. Only an admin turns on **Act on outside content**, after a warning.
+- **The device owner allows the bot.** Settings › Devices › the device › **Bots that may run sessions here** › Allow.
+  On a headless server an admin may do it too. **Allow Full access for this bot** is a separate checkbox.
+- **Full access** needs all of: the organization policy, the device's own opt-in (`ocw-runtime full-access on`), the
+  sponsor's Full access on the device, the per-bot checkbox and a profile whose highest mode is Full access. After the
+  bot read outside content, it also needs an isolated server (`ocw-runtime isolated-server on`, set only on the
+  server, [SERVER.md](SERVER.md#isolated-server-phase-0716)). Without the admin's flag, a start after outside content
+  becomes a proposal a person reviews.
+- **What you see.** A live card in the thread (runtime, project, device, model, mode, step, updated) with **Open
+  session**; the session page shows **Back to <conversation>**. The bot is woken when a turn ends, an approval waits,
+  the session fails, ends or goes offline (at most 20 wake-ups per session per day), and mentions people when it needs
+  help. Bots never approve runtime requests.
+- **Audit.** `bot.work_session_*`, `bot.work_zone_profile_*` and `device.bot_consent_*` rows carry ids, counts and
+  lengths, never prompt text, output, paths or titles.
+
+The automated tests use a fake runtime and a fake cell (e2e) and a real OpenClaw cell (smoke).
+
+**Owner check** (never run by an agent: it needs a real model and a real Claude Code subscription; record the result in
+`.planning/phases/07.16-bot-work-zone-orchestration/07.16-VALIDATION.md` › Manual-Only Verifications). On
+`https://ocw.autofy.ing`, with the headless server of Phase 07.12:
+
+1. **On the server.** `ocw-runtime full-access on` and `ocw-runtime isolated-server on` (read the warning: the server
+   must hold nothing else that matters). `ocw-runtime isolated-server status` shows `"honoured": true`.
+2. **Policy.** Settings › Work Zone policy › Full access: on.
+3. **Profile.** Open the team bot's sheet › Work Zone: the server, two projects, Claude Code, a model, highest mode
+   Full access. Save. Until step 4 the status line reads "The device's owner has not allowed this bot to run
+   sessions there."
+4. **Consent.** Settings › Devices › the server › Bots that may run sessions here: **Allow** the bot, then tick **Allow
+   Full access for this bot**. The server card shows **Isolated server** (Set on the device).
+5. **Ask.** In a channel, mention the bot and ask it to fix something small in one of the two projects. Expect the
+   live card in the thread, the session running in Full access (no approval prompts), and, when the turn ends, the
+   bot's report in the thread mentioning you.
+6. **Open and back.** Press **Open session** on the card: the session shows the bot's prompts "for" the sponsor. Press
+   **Back to #<channel>**: you land on the card.
+7. **Audit.** The rows show ids and counts only:
+   `select action, result, metadata from app.audit_events where action like 'bot.work_session_%' order by occurred_at desc limit 10;`
+
 ## Troubleshooting
 
 | Symptom | Fix |

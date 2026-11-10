@@ -5,6 +5,7 @@ import {
   BUILTIN_TOOLS,
   SANDBOX_TOOL_NAMES,
   type TurnAttachment,
+  WORK_SESSION_TOOL_NAMES,
 } from "../../packages/contracts/src/bot-capabilities";
 import { BrowserRefusal } from "../../packages/contracts/src/browser";
 import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
@@ -24,6 +25,10 @@ import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
  * listed file through `POST /agent-channel/v1/attachments/read` (any tool's `{{attachment:N}}` argument becomes that
  * file's id; an index outside the list is not sent and reads `refused (not_found)`), and a turn that lists files ends its
  * reply with ` [attachments: <name>:<access>,…]`.
+ *
+ * Bot Work Zone sessions (07.16-21, PD-26): `[[call ocw_work_session_start {"projectId":"…","prompt":"…"}]]` (and
+ * `_prompt`, `_read`, `_stop`) posts exactly the plugin's body to `POST /agent-channel/v1/work-sessions/<verb>`; an
+ * `agent.work_session.v1` wake is answered on the session's card (`Done: …`, `Needs approval: …`, `<transition>: …`).
  */
 
 export interface FakeCellEvent {
@@ -234,6 +239,12 @@ export interface FakeCellOptions {
   autoDone?: boolean;
   /** Never answer (nor report done) for these bot ids: their turns stay open (a Stop or timeout scenario). */
   holdAgents?: ReadonlySet<string>;
+  /**
+   * The `@handle` of a person by user id (07.16-21), for the Work Zone wake replies that mention the asker. The events
+   * carry no person's handle (the roster names only bots'); a person the map does not name is mentioned by the
+   * wake's decider of the same id, else by their display name.
+   */
+  userHandles?: Readonly<Record<string, string>>;
 }
 
 /** 07.7: the consult tool (self-validated by `POST /consultations`, never `/tool-calls`). */
@@ -319,6 +330,72 @@ const MEMORY_FILE_DONE: Record<MemoryFileTool, string> = {
   ocw_memory_propose: "proposed",
 };
 const isMemoryFileTool = (name: string): name is MemoryFileTool => Object.hasOwn(MEMORY_FILE_TOOLS, name);
+
+/**
+ * `agent.work_session.v1` (07.16, D-09): a session the bot started changed state. Built like a mention of the bot on its
+ * live card (`message.id` = the card, `message.author` = the person who asked), plus the transition and the people who
+ * may decide its approvals.
+ */
+export interface WorkSessionWakePayload extends MentionPayload {
+  workSession: {
+    workSessionId: string;
+    transition: "turn_done" | "waiting_approval" | "failed" | "ended" | "offline";
+    status: string;
+    summary: string;
+    pendingApprovals: number;
+    deciders: Array<{ id: string; handle: string; displayName: string }>;
+  };
+}
+export const WORK_SESSION_EVENT = "agent.work_session.v1";
+
+/**
+ * The bot's own Work Zone session tools (07.16-08) and the verb of the route each one calls (`POST /work-sessions/<verb>`,
+ * apps/openclaw-channel's work-session-tools.ts), with the keys each one sends besides the turn's ids. The start sends a
+ * choice (`model`, `effort`, `fastMode`, `contextWindow`, `permissionMode`) only when the model gives it, and never a
+ * device, a user, an audience or a worktree (the plugin's schema is closed).
+ */
+type WorkSessionTool = (typeof WORK_SESSION_TOOL_NAMES)[number];
+const isWorkSessionTool = (name: string): name is WorkSessionTool =>
+  (WORK_SESSION_TOOL_NAMES as readonly string[]).includes(name);
+const workSessionVerb = (tool: WorkSessionTool) => tool.slice("ocw_work_session_".length);
+const WORK_SESSION_KEYS: Record<WorkSessionTool, readonly string[]> = {
+  ocw_work_session_start: [
+    "projectId",
+    "prompt",
+    "model",
+    "effort",
+    "fastMode",
+    "contextWindow",
+    "permissionMode",
+  ],
+  ocw_work_session_prompt: ["workSessionId", "prompt"],
+  ocw_work_session_read: ["workSessionId", "cursor"],
+  ocw_work_session_stop: ["workSessionId"],
+};
+
+/** The last non-empty line of a read answer's newest output text ("" when it has none). */
+export function lastOutputLine(read: { output?: { texts?: Array<{ text: string }> } } | null): string {
+  const text = read?.output?.texts?.at(-1)?.text ?? "";
+  return (
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .at(-1) ?? ""
+  );
+}
+
+/**
+ * The pending approvals' tool names in a read answer, each once in the read's order (`Write, Bash`), else `a tool`.
+ * The wake's summary never names them (code review WR-01): the bot learns them only by reading the session (D-20).
+ */
+function approvalToolsOf(read: Loose | null): string {
+  const tools = read?.kind === "read" && Array.isArray(read.approvals) ? read.approvals : [];
+  const names = [
+    ...new Set(tools.map((a: { tool?: unknown }) => a.tool).filter((t) => typeof t === "string")),
+  ];
+  return names.length > 0 ? names.join(", ") : "a tool";
+}
 
 /** The Work Zone proposal tools (07.5-08/10) and the Agent Channel route each one calls (`POST /work-zone/<route>`). */
 const WORK_ZONE_TOOLS = {
@@ -696,6 +773,9 @@ export class FakeCellPlugin {
         // like a mention, except that the answer is another bot's text: its `[[call …]]` directives never run.
         await this.answerTurn(data as unknown as ConsultReplyPayload, type, false);
       }
+      if (type === WORK_SESSION_EVENT && this.opts.autoReply) {
+        await this.answerWake(data as unknown as WorkSessionWakePayload);
+      }
       if (type === "agent.automation_run.v1" && this.opts.autoReply) {
         // A run is answered like a mention (07.6-06): on the anchor (`inReplyToMessageId` = the event's message) for its
         // turn (`eventId`); the anchor is in the thread the event names (flat in a DM). Only the persona's own calls run:
@@ -756,7 +836,8 @@ export class FakeCellPlugin {
    * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); `ocw_connector_list|call` and
    * `ocw_http_request` call `/agent-channel/v1/connectors/list|call` and `/http-requests` (`connectorCall`, 07.4-14);
    * `ocw_work_zone_projects` / `ocw_start_work_zone` call `/agent-channel/v1/work-zone/projects|proposals`
-   * (`workZoneCall`, 07.5-12); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
+   * (`workZoneCall`, 07.5-12); `ocw_work_session_start|prompt|read|stop` call `/agent-channel/v1/work-sessions/<verb>`
+   * (`workSessionCall`, 07.16-21); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
    * (`sandbox` / `browser`, 07.8-08); `ocw_consult_agent` calls `/agent-channel/v1/consultations` (`consultCall`,
    * 07.7-10); `ocw_attachment_read` calls `/agent-channel/v1/attachments/read` (`attachmentRead`, 07.15-09); any other
    * tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
@@ -844,6 +925,10 @@ export class FakeCellPlugin {
       }
       if (isWorkZoneTool(name)) {
         lines.push(`Tool ${call.tool}: ${await this.workZoneCall(m, name, call.args)}`);
+        continue;
+      }
+      if (isWorkSessionTool(name)) {
+        lines.push(`Tool ${call.tool}: ${(await this.workSessionCall(m, name, call.args)).line}`);
         continue;
       }
       const params: { query?: string; url?: string } = {};
@@ -1074,6 +1159,113 @@ export class FakeCellPlugin {
     if (res.status !== 200) return `refused (${res.body?.error?.code ?? res.status})`;
     if (typeof res.body?.refused === "string") return `refused (${res.body.refused})`;
     return tool === "ocw_work_zone_projects" ? "listed" : "proposed";
+  }
+
+  /** Every bot Work Zone session route call (07.16-21): the tool, the route, the body sent and the answer. */
+  readonly workSessionRequests: Array<{
+    eventId: string;
+    tool: WorkSessionTool;
+    route: string;
+    sent: Record<string, unknown>;
+    status: number;
+    body: Loose | null;
+  }> = [];
+
+  /** Every `agent.work_session.v1` this fake cell answered (07.16-21): the transition and the reply's text. */
+  readonly workSessionWakes: Array<{
+    eventId: string;
+    transition: WorkSessionWakePayload["workSession"]["transition"];
+    workSessionId: string;
+    text: string;
+  }> = [];
+
+  /**
+   * `ocw_work_session_start | _prompt | _read | _stop` the way apps/openclaw-channel's work-session-tools.ts sends them
+   * (07.16-08): `POST /agent-channel/v1/work-sessions/<verb>` with the mention's `eventId` and `agentId` and only the
+   * tool's own keys the model gave (`WORK_SESSION_KEYS`; strings trimmed). Self-validated by its route, never
+   * `/tool-calls`. Lines: `started <projectName> (<mode>)`, `proposed`, `queued`, `read <status>: <last output line>`,
+   * `stopped`, `refused (<code>)` for an in-band refusal or the error envelope's code (else the HTTP status).
+   */
+  async workSessionCall(
+    m: MentionPayload,
+    tool: WorkSessionTool,
+    args: Record<string, unknown>,
+  ): Promise<{ line: string; body: Loose | null }> {
+    const route = `/work-sessions/${workSessionVerb(tool)}`;
+    const sent: Record<string, unknown> = { eventId: m.eventId, agentId: m.agent.id };
+    for (const key of WORK_SESSION_KEYS[tool]) {
+      const value = args[key];
+      if (value !== undefined) sent[key] = typeof value === "string" ? value.trim() : value;
+    }
+    const res = await this.request<Loose | null>("POST", route, sent);
+    this.workSessionRequests.push({
+      eventId: m.eventId,
+      tool,
+      route,
+      sent,
+      status: res.status,
+      body: res.body,
+    });
+    const b = res.body;
+    if (res.status !== 200 || !b) return { line: `refused (${b?.error?.code ?? res.status})`, body: b };
+    switch (b.kind) {
+      case "started":
+        return { line: `started ${b.projectName} (${b.mode})`, body: b };
+      case "proposed":
+      case "queued":
+      case "stopped":
+        return { line: String(b.kind), body: b };
+      case "read":
+        return { line: `read ${b.session?.status}: ${lastOutputLine(b)}`, body: b };
+      default:
+        return { line: `refused (${b.code ?? res.status})`, body: b };
+    }
+  }
+
+  /** The `@handle` a wake reply mentions a person by (`userHandles`, else the wake's decider, else the name). */
+  private handleOf(w: WorkSessionWakePayload, userId: string, displayName: string): string {
+    const known =
+      this.opts.userHandles?.[userId] ?? w.workSession.deciders.find((d) => d.id === userId)?.handle;
+    return known ?? (displayName.trim().toLowerCase().replace(/\s+/gu, "-") || "asker");
+  }
+
+  /**
+   * PD-26: answers `agent.work_session.v1` deterministically, on the card in its thread for the wake (`reply`: the
+   * event's thread, `inReplyToMessageId` = the card message, `eventId` = the wake). `turn_done` calls
+   * `ocw_work_session_read` (when the wake offers it) and replies `Done: <last output line> @<asker>`; `waiting_approval`
+   * reads it too (when offered: the summary is a count only, WR-01) and replies `Needs approval: <tools> @<decider> …`
+   * (`a tool` without the read; the bot never approves, D-10); `failed`, `ended` and `offline` reply
+   * `<transition>: <summary> @<asker>`. Never for a held bot.
+   */
+  private async answerWake(w: WorkSessionWakePayload): Promise<void> {
+    if (this.opts.holdAgents?.has(w.agent.id)) return;
+    const ws = w.workSession;
+    const asker = `@${this.handleOf(w, w.message.author.id, w.message.author.displayName)}`;
+    const read = (w.turn?.tools ?? []).includes(BUILTIN_TOOLS.workSessionRead)
+      ? () => this.workSessionCall(w, BUILTIN_TOOLS.workSessionRead, { workSessionId: ws.workSessionId })
+      : null;
+    let text: string;
+    if (ws.transition === "turn_done") {
+      let line = ws.summary;
+      if (read) {
+        const r = await read();
+        line = r.body?.kind === "read" ? lastOutputLine(r.body) || ws.summary : r.line;
+      }
+      text = `Done: ${line} ${asker}`;
+    } else if (ws.transition === "waiting_approval") {
+      const tools = approvalToolsOf(read ? (await read()).body : null);
+      const deciders = ws.deciders.map((d) => `@${d.handle}`);
+      text = `Needs approval: ${tools}${deciders.length > 0 ? ` ${deciders.join(" ")}` : ""}`;
+    } else {
+      text = `${ws.transition}: ${ws.summary} ${asker}`;
+    }
+    await this.reply(w, text);
+    this.workSessionWakes.push({
+      eventId: w.eventId,
+      transition: ws.transition,
+      workSessionId: ws.workSessionId,
+      text,
+    });
   }
 
   /** Every memory route call the simulated memory tools made, with the status and body it got (07.2-17). */

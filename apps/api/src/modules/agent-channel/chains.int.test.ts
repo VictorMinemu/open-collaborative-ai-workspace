@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { invite } from "../../testing-workzone";
+import { markSessionOutputRead } from "./claim";
 
 /**
  * 07.7-06 Task 1 (A2A-01, A2A-03; D-01, D-04, D-06, D-07, D-09, D-13, D-15; P-02, P-08, P-09): the answer comes back.
@@ -779,6 +780,26 @@ describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
     expect(forced.body.code).toBe("tainted");
   });
 
+  it("CR-02 (D-20): Archie's asking turn read Work Zone session output: the return turn starts with the mark", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [
+      archie.eventId,
+    ]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    expect((await turnRow(reply.eventId)).session_output_read).toBe(true);
+    // Its side effects are refused like the asking turn's (the same per-thread session holds the output).
+    const sideEffecting = Object.entries(reply.turn.toolFlags as Record<string, Json>)
+      .filter(([tool, f]) => f.sideEffecting === true && tool !== "ocw_consult_agent")
+      .map(([tool]) => tool);
+    expect(sideEffecting.length).toBeGreaterThan(0);
+    expect((await askTool(reply, sideEffecting[0] as string)).body).toMatchObject({
+      allowed: false,
+      reason: "tainted",
+    });
+  });
+
   describe("CR-A-01 follow-up: the asking turn reads outside content after the answer came back (late taint)", () => {
     beforeAll(async () => {
       await ok(victor.request("PATCH", `/api/v1/agents/${archieId}/capabilities`, { internet: true }));
@@ -819,6 +840,18 @@ describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
         allowed: false,
         reason: "tainted",
       });
+    });
+
+    it("CR-02 (D-20): the asking turn reads session output afterwards: its live return turn gets the mark too", async () => {
+      const { archie, reply } = await answeredWhileAsking();
+      // What `ocw_work_session_read` does after a successful read (work-session-read.ts).
+      await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        markSessionOutputRead(tx, archie.eventId),
+      );
+      expect((await turnRow(archie.eventId)).session_output_read).toBe(true);
+      expect((await turnRow(reply.eventId)).session_output_read).toBe(true);
+      // Nothing else is marked: the late mark is not a taint.
+      expect((await turnRow(reply.eventId)).tainted).toBe(false);
     });
 
     it("transitively: a return turn that asked again hands the late taint to its own live return turn", async () => {

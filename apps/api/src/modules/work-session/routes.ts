@@ -21,24 +21,41 @@ import {
   WorkSessionDiff,
   WorkSessionEventPayload,
   WorkSessionList,
+  type WorkSessionOrigin,
   type WorkZonePolicy,
   WorkZonePolicyView,
 } from "@ocw/contracts";
-import { devices, projects, streamEvents, type Tx, workApprovals, workPrompts, workSessions } from "@ocw/db";
+import {
+  botWorkSessions,
+  conversations,
+  devices,
+  projects,
+  streamEvents,
+  type Tx,
+  workApprovals,
+  workPrompts,
+  workSessions,
+} from "@ocw/db";
 import { and, asc, desc, eq, lte, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
+import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { loadControlsContext } from "./context";
 import {
+  archiveWorkSession,
+  assertNotSlashCommand,
+  submitWorkPrompt,
+  type WorkSessionControllerDeps,
+} from "./controller";
+import {
   buildRuntimeControls,
   buildSessionControls,
   type ControlsContext,
-  catalogFor,
   decideSettings,
   pickSettings,
   requestedSettings,
@@ -46,17 +63,12 @@ import {
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
 import { sessionNotFound } from "./hidden";
-import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
   createWorkSession,
   deviceUnusableMessage,
-  isSessionCommand,
-  joinConversation,
-  queueWorkPrompt,
-  SLASH_COMMAND_MESSAGE,
   settingsDenied,
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
@@ -75,6 +87,14 @@ const DIFF_TIMEOUT_MS = 20_000;
 
 /** A session the caller may not know about reads exactly like a missing one (same status, code and message). */
 const SESSION_NOT_FOUND = "Work session not found";
+
+/** The conversation kinds a bot session's origin may be read through (a thread is judged through its channel or DM). */
+const ORIGIN_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
+type OriginKind = (typeof ORIGIN_KINDS)[number];
+const isOriginKind = (kind: string): kind is OriginKind => (ORIGIN_KINDS as readonly string[]).includes(kind);
+
+/** An AI chat nobody titled reads like the AI chat list names it (ai-chat `DEFAULT_CHAT_TITLE`). */
+const UNTITLED_AI_CHAT = "New chat";
 
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
@@ -99,6 +119,70 @@ export function registerWorkSessionRoutes(
   const perms = createPermissionService(core);
   /** Session creation (07.5-05): the route and Work Zone proposals start sessions through `createWorkSession`. */
   const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
+  /** 07.16 PD-13: the prompt and archive bodies people and bots share. */
+  const controllerDeps: WorkSessionControllerDeps = { core, svc, startDeps };
+
+  const conversationAccess = createConversationAccess(core);
+
+  /**
+   * 07.16 (D-13, PD-19; E14): where a bot-started session came from, as `viewerId` may know it. Only a session with a
+   * `bot_work_sessions` row has one, and only a viewer who reads that conversation (a thread through its channel or
+   * DM) gets it; everyone else gets null. The name is the one the chat already shows this viewer (the channel's name,
+   * their DM list's name, the AI chat's title). The link points at the card (the asker's message once the card is
+   * gone). Built from stored ids only: no client return URL exists (T-07.16-18-03). Per viewer, so only the detail
+   * route answers it, never `ws:` or `user:` frames.
+   */
+  async function originFor(
+    tx: Tx,
+    viewerId: string,
+    workSessionId: string,
+  ): Promise<WorkSessionOrigin | null> {
+    const [bot] = await tx
+      .select({
+        conversationId: botWorkSessions.originConversationId,
+        threadRootId: botWorkSessions.originThreadRootId,
+        messageId: botWorkSessions.originMessageId,
+        cardMessageId: botWorkSessions.cardMessageId,
+      })
+      .from(botWorkSessions)
+      .where(eq(botWorkSessions.workSessionId, workSessionId))
+      .limit(1);
+    if (!bot) return null;
+    const convOf = async (id: string) =>
+      (
+        await tx
+          .select({
+            id: conversations.id,
+            kind: conversations.kind,
+            name: conversations.name,
+            parent: conversations.parentConversationId,
+          })
+          .from(conversations)
+          .where(eq(conversations.id, id))
+          .limit(1)
+      )[0];
+    let conv = await convOf(bot.conversationId);
+    if (conv?.kind === "thread") conv = conv.parent ? await convOf(conv.parent) : undefined;
+    if (!conv || !isOriginKind(conv.kind)) return null;
+    const kind = conv.kind;
+    if (!(await conversationAccess.isReadable(tx, viewerId, conv.id, { kinds: ORIGIN_KINDS }))) return null;
+    let name: string;
+    if (kind === "dm" || kind === "group") {
+      const [dm] = await listDms(tx, viewerId, { ids: [conv.id] });
+      name = dm?.counterpart.name ?? conv.name ?? (kind === "dm" ? "Direct message" : "Group");
+    } else if (kind === "ai_chat") {
+      name = conv.name ?? UNTITLED_AI_CHAT;
+    } else {
+      name = conv.name ?? "channel";
+    }
+    return {
+      conversationId: conv.id,
+      kind,
+      name: name.slice(0, 200),
+      threadRootId: bot.threadRootId,
+      messageId: bot.cardMessageId ?? bot.messageId,
+    };
+  }
 
   /** The request's own resolver decisions for its viewer (the per-viewer session fields, Phase 07.10). */
   const filterFor =
@@ -367,38 +451,23 @@ export function registerWorkSessionRoutes(
         metadata: { from, to, source },
       });
     }
+    // 07.16 code review WR-07: a bot's session shows its mode and model on its live card; the card follows the change.
+    await svc.syncBotCard(tx, s);
     return { session: (await svc.emitSession(tx, s.id))!, ctx, changed: true };
   }
 
   /**
    * Queue a prompt from the caller and dispatch it (or restart a finished session). Call with the session LOCKED
-   * and `work_session.prompt` asserted.
+   * and `work_session.prompt` asserted. The body is `submitWorkPrompt`, shared with the bot's routes (07.16 PD-13).
    */
-  async function submitPrompt(
+  function submitPrompt(
     req: FastifyRequest,
     tx: Tx,
     s: SessionRow,
     body: string,
     attachmentIds: readonly string[] = [],
   ): Promise<WorkPrompt> {
-    const auth = authOf(req);
-    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
-    assertNotSlashCommand(body, s.runtime);
-    if (attachmentIds.length > 0) {
-      // D-05, P-08: a model that says it cannot read images is refused before anything is queued or linked.
-      const [d] = await tx
-        .select({ catalog: devices.runtimeCatalog })
-        .from(devices)
-        .where(eq(devices.id, s.deviceId));
-      const current = currentSessionModel(catalogFor(d?.catalog, s.runtime), s);
-      if (current?.imageInput === false) throw imagesNotSupported(current);
-    }
-    await joinConversation(tx, auth, s);
-    const p = await queueWorkPrompt(tx, startDeps, auth, s, body, attachmentIds);
-    if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
-    else await svc.tryDispatch(tx, s);
-    await svc.emitSession(tx, s.id);
-    return (await svc.prompts(tx, s.id)).find((x) => x.id === p.id)!;
+    return submitWorkPrompt(tx, controllerDeps, authOf(req), s, body, { attachmentIds });
   }
 
   app.get(
@@ -465,7 +534,8 @@ export function registerWorkSessionRoutes(
             return parsed.success ? { seq: r.seq, at: parsed.data.at, event: parsed.data.event } : null;
           })
           .filter((e) => e !== null);
-        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState };
+        const origin = await originFor(tx, viewerId, session.id);
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin };
       }),
   );
 
@@ -796,41 +866,13 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const { s, facts } = await visible(req, tx, req.params.id);
         await perms.assertCan(req, tx, "work_session.archive", facts);
-        if (s.status === "archived") return { ok: true as const };
-        const cancelled = await tx
-          .update(workPrompts)
-          .set({ status: "cancelled", completedAt: sql`now()` })
-          .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
-          .returning();
-        for (const p of cancelled) await svc.emitPrompt(tx, p);
-        await hub.enqueue(tx, {
-          deviceId: s.deviceId,
-          workSessionId: s.id,
-          kind: "session.stop",
-          payload: {},
-        });
-        await core.audit.record(tx, {
-          action: "work_session.archived",
-          resourceType: "work_session",
-          resourceId: s.id,
-          sessionId: s.id,
-          deviceId: s.deviceId,
-        });
-        await svc.setStatus(tx, s, "archived");
+        await archiveWorkSession(tx, controllerDeps, s);
         return { ok: true as const };
       }),
   );
 
   // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
   registerVisibilityRoutes(app, core, { perms, svc });
-}
-
-/**
- * D-13: a prompt body that starts with a settings or refused slash command never enters the queue; it must go
- * through `POST /work-sessions/:id/commands`. Passthrough commands and slashes later in the text are prompts.
- */
-function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
-  if (isSessionCommand(body, runtime)) throw new HttpError(400, "slash_command", SLASH_COMMAND_MESSAGE);
 }
 
 /** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */

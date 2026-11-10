@@ -133,6 +133,7 @@ const HEAD_ONLY = [
   "20261103184214_agent_chain_hops_question_org_fk",
   "20261106163356_org_connector_auth",
   "20261107092259_agent_turns_attachment_budget",
+  "20261109173604_bot_work_zone",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -322,6 +323,11 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       await seed.query(
         "insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id, tools, tool_calls, tainted) values ($1, $2, $3, $4, $5, 'channel', $6, '{web_search}', 2, true)",
         [N1_TURN, ORG_A, HELPER_BOT, MAX_MEMBER, N1_SESSION_CONV, "aaaaaaaa-0000-4000-8000-000000000909"],
+      );
+      // Phase 07.16 (D-15, D-16): the N-1 dump has no Work Zone policy row; org A's policy saved at N-1 (Full access on).
+      await seed.query(
+        "insert into app.work_zone_policies (organization_id, allow_full_access, updated_by) values ($1, true, $2)",
+        [ORG_A, ADA_ADMIN],
       );
       // Phase 07.9 (D-13): the session's DTO stored on the org stream and on its own stream, and a units event.
       await seed.query(
@@ -748,6 +754,77 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       } finally {
         await c.end();
       }
+    });
+
+    it("starts every existing device, session, prompt, policy and turn with no bot facts, and adds no bot Work Zone rows (Phase 07.16, D-16)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const devices = await c.query(
+          "select id, name, full_access_opt_in, host_kind, isolated_server from app.devices order by id",
+        );
+        expect(devices.rows).toEqual([
+          {
+            id: N1_DEVICE,
+            name: "laptop",
+            full_access_opt_in: false,
+            host_kind: null,
+            isolated_server: false,
+          },
+        ]);
+        const sessions = await c.query(
+          "select id, title, created_by, started_by_agent_id, tainted_at from app.work_sessions order by id",
+        );
+        expect(sessions.rows).toEqual([
+          {
+            id: N1_SESSION,
+            title: "Fix the build",
+            created_by: ADA_ADMIN,
+            started_by_agent_id: null,
+            tainted_at: null,
+          },
+        ]);
+        const prompts = await c.query(
+          "select id, body, author_user_id, author_agent_id, tainted from app.work_prompts order by id",
+        );
+        expect(prompts.rows).toEqual([
+          {
+            id: N1_PROMPT,
+            body: "Fix the build",
+            author_user_id: ADA_ADMIN,
+            author_agent_id: null,
+            tainted: false,
+          },
+        ]);
+        const policies = await c.query(
+          "select organization_id, allow_full_access, bot_sessions_max from app.work_zone_policies order by organization_id",
+        );
+        expect(policies.rows).toEqual([
+          { organization_id: ORG_A, allow_full_access: true, bot_sessions_max: 10 },
+        ]);
+        const turns = await c.query(
+          "select event_id, tool_calls, tainted, session_output_read from app.agent_turns order by event_id",
+        );
+        expect(turns.rows).toEqual([
+          { event_id: N1_TURN, tool_calls: 2, tainted: true, session_output_read: false },
+        ]);
+        // `work_zone_proposals` is newer than N-1 (none can exist there): its new column is NOT NULL DEFAULT false, so a
+        // proposal stored by N-1 code against this schema reads untainted too.
+        const proposalCol = await c.query(
+          "select is_nullable, column_default from information_schema.columns where table_schema = 'app' and table_name = 'work_zone_proposals' and column_name = 'tainted'",
+        );
+        expect(proposalCol.rows).toEqual([{ is_nullable: "NO", column_default: "false" }]);
+        const empty = await c.query(
+          `select (select count(*)::int from app.bot_work_zone_profiles) as profiles,
+                  (select count(*)::int from app.bot_work_zone_profile_projects) as projects,
+                  (select count(*)::int from app.device_bot_consents) as consents,
+                  (select count(*)::int from app.bot_work_sessions) as bot_sessions`,
+        );
+        expect(empty.rows).toEqual([{ profiles: 0, projects: 0, consents: 0, bot_sessions: 0 }]);
+      } finally {
+        await c.end();
+      }
+      expect(await pgbossQueues()).toContain("work_session.bot_sync");
     });
 
     it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {

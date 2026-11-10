@@ -3,6 +3,7 @@ import {
   type AgentChannelToolCallRequest,
   ATTACHMENT_READ_LIMITS,
   ATTACHMENT_READ_SENTENCES,
+  BOT_WORK_SESSION_SENTENCES,
   CONFINED_TOOL_FLAGS,
   CONNECTOR_SAFE_NAME,
   CONNECTOR_TOOL_LIMITS,
@@ -24,6 +25,14 @@ import { consultTaintedSentence } from "./consult-tool.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 // record-tool.ts imports from this module too; the sentence is only called while a call runs (see the note there).
 import { recordTaintedSentence } from "./record-tool.js";
+// No imports of its own: safe to read while this module loads (work-session-tools.ts imports this module).
+import {
+  WORK_SESSION_PROMPT_TOOL,
+  WORK_SESSION_START_TOOL,
+  WORK_SESSION_STOP_TOOL,
+  WORK_SESSION_TOOL_NAMES,
+  type WorkSessionToolName,
+} from "./turn-scoped-tools.js";
 // work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
 import { workZoneTaintedSentence } from "./work-zone-tools.js";
 
@@ -51,6 +60,11 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * Attachment reads (07.15 D-08, D-17): `ocw_attachment_read` is self-validated by `/attachments/read`, takes its static
  * flags (untrusted output, never side-effecting; a turn's flags only add restrictions), and counts against its own
  * per-turn budget (`turn.maxAttachmentReads`, 20), never the cap of 8.
+ * Bot Work Zone sessions (07.16 D-08, D-20, PD-09, PD-15): `ocw_work_session_start|prompt|read|stop` are self-validated
+ * by their own routes, take their static flags (never approvable), and count against the cap of 8. On a tainted turn
+ * start, prompt and stop still reach their routes (`ROUTE_DECIDES_TAINT`: the route allows them with the profile's
+ * outside-content flag or answers with a proposal). After a successful `ocw_work_session_read` (`sessionOutputRead`)
+ * every other side-effecting call of the turn is refused here, except prompt and stop; start answers `session_output`.
  * Logs never include params, arguments or results.
  */
 
@@ -81,6 +95,12 @@ export interface ActiveTurn {
   /** 07.15 (D-17): `ocw_attachment_read` calls this turn, against `turn.maxAttachmentReads`; never `calls`. */
   attachmentReads: number;
   tainted: boolean;
+  /**
+   * 07.16 (D-20, PD-15): a Work Zone session's output was read this turn (set by `ocw_work_session_read` on a read
+   * answer). From then on every side-effecting call except `ocw_work_session_prompt` and `ocw_work_session_stop` is
+   * refused locally, as the API's claim refuses it.
+   */
+  sessionOutputRead: boolean;
 }
 
 export type ToolCallEvent = {
@@ -135,6 +155,38 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   // 07.15 (D-03, D-08, D-17): `/attachments/read` re-decides the turn, the tool on it and the file, claims the read on
   // its own budget and taints the turn itself; never `/tool-calls`.
   "ocw_attachment_read",
+  // 07.16 (PD-09): `/work-sessions/start|prompt|read|stop` re-decide the turn, the tool on it, the bot's profile, the
+  // caps and the outside-content rule, claim the call and audit it; never `/tool-calls` (it would count twice).
+  ...WORK_SESSION_TOOL_NAMES,
+]);
+/** 07.16: the bot's own Work Zone session tools. */
+const WORK_SESSION_TOOLS: ReadonlySet<string> = new Set(WORK_SESSION_TOOL_NAMES);
+/**
+ * Contracts `WORK_SESSION_TOOL_FLAGS`: start, prompt and stop act on a member's device; a read changes nothing and does
+ * not taint the turn (its output sets `sessionOutputRead` instead, D-20). A turn's flags only add restrictions.
+ */
+const WORK_SESSION_FLAGS: Record<WorkSessionToolName, TurnToolFlags> = {
+  ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+  ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+};
+/**
+ * 07.16 (D-08, PD-15, Pitfall 7): side-effecting, yet a tainted turn's call still reaches the route, because the route
+ * decides taint for these: start and prompt run only with the profile's `actOnOutsideContent` (Full access then only on
+ * an isolated server), otherwise start answers with a proposal a person reviews (the fallback a local block would
+ * lose) and prompt is refused; stop is never blocked by taint (a bot may always end its own session). The API refuses
+ * anyway when its rules say so (D-08). Every `ALWAYS_SIDE_EFFECTING` tool keeps its local block.
+ */
+const ROUTE_DECIDES_TAINT: ReadonlySet<string> = new Set([
+  WORK_SESSION_START_TOOL,
+  WORK_SESSION_PROMPT_TOOL,
+  WORK_SESSION_STOP_TOOL,
+]);
+/** 07.16 (D-20): the only side-effecting calls a turn may still make after it read a session's output. */
+const SESSION_OUTPUT_EXEMPT: ReadonlySet<string> = new Set([
+  WORK_SESSION_PROMPT_TOOL,
+  WORK_SESSION_STOP_TOOL,
 ]);
 /** 07.15: the read tool, counted on its own budget (`ActiveTurn.attachmentReads`). */
 const ATTACHMENT_READ_TOOL = "ocw_attachment_read";
@@ -264,6 +316,16 @@ function callFlags(
     return {
       untrustedOutput: ATTACHMENT_READ_FLAGS.untrustedOutput || delivered?.untrustedOutput === true,
       sideEffecting: ATTACHMENT_READ_FLAGS.sideEffecting || delivered?.sideEffecting === true,
+    };
+  }
+  if (WORK_SESSION_TOOLS.has(tool)) {
+    // 07.16 (PD-09): the static flags, made stricter (never looser) by the turn's. Never approvable, so a turn's approval
+    // mode is ignored.
+    const base = WORK_SESSION_FLAGS[tool as WorkSessionToolName];
+    const delivered = t.turn.toolFlags[tool];
+    return {
+      untrustedOutput: base.untrustedOutput || delivered?.untrustedOutput === true,
+      sideEffecting: base.sideEffecting || delivered?.sideEffecting === true,
     };
   }
   if (tool === "ocw_http_request") {
@@ -472,6 +534,7 @@ export function createToolGuard(
         sandboxCalls: 0,
         attachmentReads: 0,
         tainted: tainted === true,
+        sessionOutputRead: false,
       });
       signal?.addEventListener(
         "abort",
@@ -560,8 +623,9 @@ export function createToolGuard(
       }
       // 07.5 (D-04): a tool with an approval policy is decided by the API after taint (a person approves, or a grant
       // is used); the memory and board tools keep their local block whatever a turn says.
-      const approval = ALWAYS_SIDE_EFFECTING.has(tool) ? undefined : flags.approval;
-      if (t.tainted && flags.sideEffecting && !approval) {
+      const approval =
+        ALWAYS_SIDE_EFFECTING.has(tool) || WORK_SESSION_TOOLS.has(tool) ? undefined : flags.approval;
+      const taintedBlock = (): ToolBlock => {
         // 07.5-10: the proposal's refusal is the UI-SPEC sentence the model relays (R10).
         if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
         // 07.6: the UI-SPEC's model-facing sentence for a proposal after outside content.
@@ -574,6 +638,15 @@ export function createToolGuard(
         return block(
           `Tool ${tool} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
         );
+      };
+      if (flags.sideEffecting && !approval) {
+        // 07.16 (D-20): after a session's output only prompt and stop act; start reads the route's own sentence.
+        if (t.sessionOutputRead && !SESSION_OUTPUT_EXEMPT.has(tool)) {
+          if (tool === WORK_SESSION_START_TOOL) return block(BOT_WORK_SESSION_SENTENCES.session_output);
+          return taintedBlock();
+        }
+        // 07.16 (D-08): start, prompt and stop reach their routes, which decide outside content themselves.
+        if (t.tainted && !ROUTE_DECIDES_TAINT.has(tool)) return taintedBlock();
       }
       const selfValidated = confined || SELF_VALIDATED_TOOLS.has(tool);
       // The arguments a flagged call is decided on (the API canonicalizes them; the connector tools send their own).

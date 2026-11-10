@@ -139,6 +139,18 @@
 /apps/api/src/modules/agent-channel/attachments.ts       @VictorMinemu
 /apps/api/src/modules/agent-channel/attachment-access.ts @VictorMinemu
 /apps/api/src/modules/artifact/extract/                  @VictorMinemu
+# Phase 07.16 (ADR-0038): bots running Work Zone sessions: the start, prompt and stop routes run as the sponsor, the
+# redacted read model, the wake-ups, the profile and consent with the bypass chain, the prompt and archive bodies people
+# and bots share, the strict tool bodies and the cell's thin callers.
+/apps/api/src/modules/agent-channel/work-sessions.ts      @VictorMinemu
+/apps/api/src/modules/agent-channel/work-session-read.ts  @VictorMinemu
+/apps/api/src/modules/agent-channel/work-session-wakes.ts @VictorMinemu
+/apps/api/src/modules/work-session/bot-profile.ts         @VictorMinemu
+/apps/api/src/modules/work-session/bot-sessions.ts        @VictorMinemu
+/apps/api/src/modules/work-session/bot-read.ts            @VictorMinemu
+/apps/api/src/modules/work-session/controller.ts          @VictorMinemu
+/packages/contracts/src/bot-work-zone.ts                  @VictorMinemu
+/apps/openclaw-channel/src/work-session-tools.ts          @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu
