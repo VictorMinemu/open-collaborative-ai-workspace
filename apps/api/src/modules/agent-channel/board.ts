@@ -29,7 +29,7 @@ import {
   updateBoardCard,
 } from "../chat";
 import { AuthzDeniedError, type PermissionService } from "../organization";
-import { loadBotProfile } from "../work-session";
+import { loadBotProfile, profileStatus } from "../work-session";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 
@@ -129,6 +129,7 @@ async function auditRefusal(
  */
 export async function openedCardExemption(
   tx: Tx,
+  perms: PermissionService,
   p: { agentId: string; conversationId: string; turnMessageId: string; cardMessageId: string },
 ): Promise<boolean> {
   const [message] = await tx
@@ -157,7 +158,11 @@ export async function openedCardExemption(
     )
     .limit(1);
   if (!openedByBot) return false;
-  return (await loadBotProfile(tx, p.agentId))?.actOnOutsideContent === true;
+  // 07.17 code review WR-03: the flag counts only on a profile that is active now (the start route's own rule: the bot
+  // enabled, a live consent, the device not revoked, the sponsor an active member who may still start there).
+  const profile = await loadBotProfile(tx, p.agentId);
+  if (profile?.actOnOutsideContent !== true) return false;
+  return (await profileStatus(tx, perms, profile)).active;
 }
 
 /**
@@ -168,6 +173,7 @@ export async function openedCardExemption(
 async function gateTurn(
   tx: Tx,
   core: Core,
+  perms: PermissionService,
   cell: CellPrincipal,
   p: { route: BoardRoute; eventId: string; agentId: string; messageId?: string | undefined },
 ): Promise<{ turn: BoardTurn; auditFlags: BoardAuditFlags } | { refused: BoardTurnRefusal }> {
@@ -208,7 +214,7 @@ async function gateTurn(
     p.route === "update" &&
     p.messageId !== undefined &&
     (known.tainted || known.sessionOutputRead) &&
-    (await openedCardExemption(tx, {
+    (await openedCardExemption(tx, perms, {
       agentId: known.agentId,
       conversationId: known.conversationId,
       turnMessageId: known.messageId,
@@ -267,7 +273,9 @@ export function registerBoardAgentRoutes(app: App, ctx: { core: Core; perms: Per
     ) => Promise<T>,
   ): Promise<T> {
     const tenant = { organizationId: cell.organizationId };
-    const gate = await core.db.withTenant({ ...tenant, userId: null }, (tx) => gateTurn(tx, core, cell, p));
+    const gate = await core.db.withTenant({ ...tenant, userId: null }, (tx) =>
+      gateTurn(tx, core, perms, cell, p),
+    );
     if ("refused" in gate) throw REFUSED[gate.refused]();
     const { turn, auditFlags } = gate;
     try {

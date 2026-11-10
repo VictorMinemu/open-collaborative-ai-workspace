@@ -308,3 +308,7 @@ documented behaviour below. The accepted text above stays as written; where it d
   `automation.item_requeued` carry ids, the reason and the attempt only. The run history shows "N waiting". One
   additive migration (`20261110124940_automation_item_waiting`: the `attempt` column, a partial index, the status check
   widened by `waiting`).
+- **WR-03, § 8 condition 3.** "The bot's profile has `actOnOutsideContent`" now reads "the bot's profile is active
+  (`profileStatus`, the start route's rule: the bot enabled, a live consent, the device not revoked, the sponsor an
+  active member who may still start there, a live project, bot sessions on in the organization) and has
+  `actOnOutsideContent`". A profile that lost any of these lifts no taint and no session-output mark.

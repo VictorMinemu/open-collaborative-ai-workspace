@@ -846,10 +846,24 @@ describe("07.17 D-06: a tainted turn moves the card its automation opened, with 
       "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'mac', 'darwin', $4)",
       [deviceId, orgId, victorId, sha256Hex(randomUUID())],
     );
+    const projectId = randomUUID();
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'orders', 'orders')",
+      [projectId, orgId, deviceId],
+    );
+    // Active profiles (code review WR-03: the flag counts only on an active one): a live consent and a project.
     for (const agentId of [clerkId, otherId]) {
-      await su.query(
-        "insert into app.bot_work_zone_profiles (organization_id, agent_id, sponsor_user_id, device_id, runtime, updated_by) values ($1, $2, $3, $4, 'claude-code', $3)",
+      const profile = await su.query(
+        "insert into app.bot_work_zone_profiles (organization_id, agent_id, sponsor_user_id, device_id, runtime, updated_by) values ($1, $2, $3, $4, 'claude-code', $3) returning id",
         [orgId, agentId, victorId, deviceId],
+      );
+      await su.query(
+        "insert into app.bot_work_zone_profile_projects (organization_id, profile_id, device_id, project_id) values ($1, $2, $3, $4)",
+        [orgId, profile.rows[0].id, deviceId, projectId],
+      );
+      await su.query(
+        "insert into app.device_bot_consents (organization_id, device_id, agent_id, granted_by) values ($1, $2, $3, $4)",
+        [orgId, deviceId, agentId, victorId],
       );
     }
     clerkFanOut = await seedFanOut(clerkId, "Open new orders");

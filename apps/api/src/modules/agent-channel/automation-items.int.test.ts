@@ -1039,6 +1039,27 @@ describe("the per-order journey: Work Zone session, card moves, wake and team me
     });
   });
 
+  it("WR-03: a profile that is no longer active (the device owner withdrew consent) lifts no taint, even with the flag still set", async () => {
+    const { roots, events } = await openedAndDelivered(["4042"]);
+    const ev = events[0] as Json;
+    expect((await turnRow(ev.eventId as string))?.tainted).toBe(true);
+    await s.su.query(
+      "update app.device_bot_consents set revoked_at = now() where device_id = $1 and agent_id = $2 and revoked_at is null",
+      [serverId, atlas.id],
+    );
+    try {
+      const move = await moveCard(ev.eventId as string, roots[0] as string, columns.started);
+      expect(move.status, JSON.stringify(move.body)).toBe(403);
+      expect(codeOf(move)).toBe("tainted");
+      expect((await cardRow(roots[0] as string)).column_id).toBe(columns.backlog);
+    } finally {
+      await grantBotConsent(s.victor, serverId, atlas.id, { allowFullAccess: true });
+    }
+    // With the consent back the same move passes (the exemption itself is unchanged).
+    const again = await moveCard(ev.eventId as string, roots[0] as string, columns.started);
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+  });
+
   it("without the flag: the item turn's start becomes a Work Zone proposal and its move answers tainted", async () => {
     await createBotProfile(s.victor, atlas.id, profile({ actOnOutsideContent: false }));
     try {
