@@ -218,14 +218,6 @@ async function openDeviceBots(page: Page): Promise<{ card: Locator; block: Locat
   return { card, block };
 }
 
-/** The views (Mentions, …): rows on desktop, the segmented row inside the navigation drawer on phones. */
-async function openViews(page: Page): Promise<Locator> {
-  if (mobile) await page.getByTestId("mobile-nav-trigger").click();
-  const views = page.getByTestId(mobile ? "views-segmented" : "views-list").filter({ visible: true });
-  await expect(views).toBeVisible();
-  return views;
-}
-
 /** A finger-sized target on phones (44 × 44); `expectTouchTargets` checks a root's descendants, this the element. */
 async function expectFingerSized(target: Locator) {
   if (!mobile) return;
@@ -529,12 +521,14 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     await checkScreen(page, "0716-reply", THREAD, [row.getByTestId("agent-card")]);
     await captureReview(page, `0716-reply-${w}`);
 
-    // ---- her Mentions count rises (on a phone the open thread covers the navigation, so start from the home screen)
-    if (mobile) await page.goto("/chat");
-    const views = await openViews(page);
-    await expect(views.getByTestId("view-mentions").getByTestId("view-count")).toHaveText("1", {
-      timeout: 15_000,
-    });
+    // ---- the reply reaches her Mentions. She was looking at the thread when it landed, so it may already be read
+    // (no unread count, CI p242); the row is the proof that the bot's mention notified her.
+    await page.goto("/chat/mentions");
+    const inbox = page.getByTestId("inbox");
+    await expect(inbox).toBeVisible();
+    const mentionRow = inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" });
+    await expect(mentionRow).toBeVisible({ timeout: 15_000 });
+    await expect(mentionRow).toContainText("mentioned you");
   } finally {
     await ana.context.close();
   }
