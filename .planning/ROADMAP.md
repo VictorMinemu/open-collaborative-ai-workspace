@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 16/19 plans executed
+**Plans:** 17/19 plans executed
 
 Plans:
 **Wave 1**
@@ -1106,7 +1106,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 07.17-17-PLAN.md — Wave 5: One child turn per opened item (`automation.item` worker, `agent.automation_item.v1`, 07.16 Work Zone tools) and the per-order API journey
+- [x] 07.17-17-PLAN.md — Wave 5: One child turn per opened item (`automation.item` worker, `agent.automation_item.v1`, 07.16 Work Zone tools) and the per-order API journey
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
