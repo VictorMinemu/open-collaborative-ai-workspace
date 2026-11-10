@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { BUILTIN_TOOLS } from "@ocw/contracts";
+import {
+  BUILTIN_TOOLS,
+  CONVERSATION_OPEN_SENTENCES,
+  type ConversationOpenRefusal,
+  MAX_TOOL_CALLS_PER_TURN,
+} from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 
 /**
  * 07.17-16 (AFO-02, AFO-05; D-02, D-03, D-05, D-10, D-15; PD-07, PD-08, PD-10, PD-17): the phase's API end to end. A
@@ -287,5 +292,328 @@ describe("Run now → the run's bot opens one card per new order; the next run o
       existing: 2,
       refused: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: caps, races, targets, quiet runs, refusals
+
+const patchAutomation = async (id: string, changes: Json) => {
+  const version = (await ok(s.victor.request("GET", `/api/v1/automations/${id}`) as Promise<Res>))
+    .version as number;
+  return ok(
+    s.victor.request("PATCH", `/api/v1/automations/${id}`, {
+      expectedVersion: version,
+      ...changes,
+    }) as Promise<Res>,
+  );
+};
+
+const expectRefusal = async (res: Promise<Res>, eventId: string, code: ConversationOpenRefusal) => {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body).toEqual({ ok: false, code, sentence: CONVERSATION_OPEN_SENTENCES[code] });
+  const calls = await toolCalls(eventId);
+  expect(calls.at(-1)).toMatchObject({ decision: "denied", reason: code });
+};
+
+describe("caps and races (PD-08, E1–E4)", () => {
+  it("E3: per run 10, 11 items → 10 opened, the 11th refused run_cap, remainingRun 0", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    const keys = Array.from({ length: 11 }, (_, i) => `R-${i}`);
+    const out = await openOk(
+      ev,
+      keys.map((k) => item(k)),
+    );
+    const results = out.results as Json[];
+    expect(results.filter((r) => r.opened)).toHaveLength(10);
+    expect(results[10]).toEqual({
+      externalKey: "R-10",
+      opened: false,
+      conversationId: null,
+      threadRootMessageId: null,
+      refused: "run_cap",
+    });
+    expect(out.remainingRun).toBe(0);
+    expect(out.remainingDay).toBe(90);
+    expect(await conversationRows(automationId)).toHaveLength(10);
+  });
+
+  it("E4: per day 3 over two runs → 3 opened, one day_cap; after the automation's local midnight the cap resets", async () => {
+    const automationId = await createAutomation({ fanOut: { enabled: true, perRun: 3, perDay: 3 } });
+    const a = await runTurn(automationId);
+    const first = await openOk(a.ev, [item("D-1"), item("D-2")]);
+    expect((first.results as Json[]).every((r) => r.opened)).toBe(true);
+    expect(first.remainingDay).toBe(1);
+
+    const b = await runTurn(automationId);
+    const second = await openOk(b.ev, [item("D-3"), item("D-4")]);
+    expect((second.results as Json[]).map((r) => [r.externalKey, r.opened, r.refused])).toEqual([
+      ["D-3", true, null],
+      ["D-4", false, "day_cap"],
+    ]);
+    expect(second.remainingRun).toBe(0);
+    expect(second.remainingDay).toBe(0);
+    expect(await conversationRows(automationId)).toHaveLength(3);
+
+    // The day's rows moved before the automation's (Madrid) midnight: a new day counts from zero again.
+    await s.su.query(
+      "update app.automation_conversations set created_at = created_at - interval '1 day' where automation_id = $1",
+      [automationId],
+    );
+    const c = await runTurn(automationId);
+    const third = await openOk(c.ev, [item("D-4")]);
+    expect((third.results as Json[])[0]).toMatchObject({ externalKey: "D-4", opened: true, refused: null });
+    expect(third.remainingDay).toBe(2);
+  });
+
+  it("E2: two runs' turns call at once with the same key → exactly one opened, one card, one job", async () => {
+    const automationId = await createAutomation();
+    const [a, b] = (await runTurns(automationId, 2)).map((t) => t.ev) as [Json, Json];
+    const cardsBefore = await boardCardCount(fleetId);
+    const jobsBefore = await allItemJobs();
+    const answers = await Promise.all([openOk(a, [item("2042")]), openOk(b, [item("2042")])]);
+    const results = answers.map((x) => (x.results as Json[])[0] as Json);
+    expect(results.filter((r) => r.opened)).toHaveLength(1);
+    expect(results.filter((r) => !r.opened && r.refused === null)).toHaveLength(1);
+    // Both answer the same conversation and root.
+    expect(results[0]?.threadRootMessageId).toBeTruthy();
+    expect(results[0]?.threadRootMessageId).toBe(results[1]?.threadRootMessageId);
+    expect(await boardCardCount(fleetId)).toBe(cardsBefore + 1);
+    expect(await conversationRows(automationId)).toHaveLength(1);
+    expect(await allItemJobs()).toBe(jobsBefore + 1);
+  });
+
+  it("E1: the same key twice in one call → opened, then opened: false with the same ids", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    const out = await openOk(ev, [item("3042"), item(" 3042 ")]);
+    const [one, two] = out.results as [Json, Json];
+    expect(one.opened).toBe(true);
+    expect(two).toEqual({ ...one, opened: false });
+    expect(await conversationRows(automationId)).toHaveLength(1);
+  });
+
+  it("E10: a deleted opened card never opens again for the same key; its root reads null", async () => {
+    const automationId = await createAutomation();
+    const a = await runTurn(automationId);
+    const root = ((await openOk(a.ev, [item("4042")])).results as Json[])[0]?.threadRootMessageId as string;
+    await ok(s.victor.request("DELETE", `/api/v1/messages/${root}`) as Promise<Res>);
+    const cardsBefore = await boardCardCount(fleetId);
+    const b = await runTurn(automationId);
+    const again = ((await openOk(b.ev, [item("4042")])).results as Json[])[0];
+    expect(again).toEqual({
+      externalKey: "4042",
+      opened: false,
+      conversationId: fleetId,
+      threadRootMessageId: null,
+      refused: null,
+    });
+    expect(await boardCardCount(fleetId)).toBe(cardsBefore);
+    expect(await conversationRows(automationId)).toHaveLength(1);
+  });
+});
+
+describe("channel targets, quiet runs and bot-written text (D-10, E5, E6, P2)", () => {
+  let dispatchId: string;
+
+  beforeAll(async () => {
+    dispatchId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "dispatch",
+          visibility: "private",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const member of [
+      { kind: "agent", id: atlas.id },
+      { kind: "user", id: s.samId },
+    ]) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${dispatchId}/members`, member) as Promise<Res>);
+    }
+    // A unit handle a body could name (@logistics).
+    await ok(
+      s.victor.request("POST", "/api/v1/units", {
+        kind: "department",
+        name: "Logistics",
+        parentId: null,
+      }) as Promise<Res>,
+    );
+  });
+
+  const messageRows = async (ids: string[]) =>
+    (
+      await s.su.query(
+        "select id, conversation_id, thread_id, body, mentions, author_kind, author_id from app.messages where id = any($1) order by body",
+        [ids],
+      )
+    ).rows as Json[];
+
+  const notificationsOf = async (ids: string[]) =>
+    Number(
+      (await s.su.query("select count(*)::int as n from app.notifications where message_id = any($1)", [ids]))
+        .rows[0].n,
+    );
+
+  it("a channel target opens top-level messages: the bold title, then the fenced body; each its own thread root", async () => {
+    const automationId = await createAutomation({ target: { kind: "channel", conversationId: dispatchId } });
+    const { ev } = await runTurn(automationId);
+    const out = await openOk(ev, [item("1042"), item("1043", { body: "" })]);
+    const roots = (out.results as Json[]).map((r) => r.threadRootMessageId as string);
+    expect((out.results as Json[]).every((r) => r.opened && r.conversationId === dispatchId)).toBe(true);
+    const rows = await messageRows(roots);
+    expect(rows.map((m) => [m.id, m.conversation_id, m.thread_id, m.author_kind, m.author_id])).toEqual([
+      [roots[0], dispatchId, null, "agent", atlas.id],
+      [roots[1], dispatchId, null, "agent", atlas.id],
+    ]);
+    expect(rows[0]?.body).toBe("**Order 1042**\n\n```text\nCustomer order 1042: 2 pallets.\n```");
+    expect(rows[1]?.body).toBe("**Order 1043**");
+    expect((await conversationRows(automationId)).map((r) => r.root_message_id)).toEqual(roots);
+  });
+
+  it("E5: items [] answers the run with “Nothing new”; three quiet runs leave the automation active", async () => {
+    const automationId = await createAutomation();
+    for (let i = 0; i < 3; i++) {
+      const { runId, ev } = await runTurn(automationId);
+      expect(await ok(open(ev, []))).toEqual({ ok: true, results: [], remainingRun: 10, remainingDay: 100 });
+      const run = await runRow(runId);
+      expect(run.status).toBe("answered");
+      expect((await statusLabel(run.anchor_message_id as string)).status_label).toBe("Nothing new");
+    }
+    const a = (
+      await s.su.query("select status, consecutive_failures from app.automations where id = $1", [
+        automationId,
+      ])
+    ).rows[0];
+    expect(a).toEqual({ status: "active", consecutive_failures: 0 });
+    expect(await conversationRows(automationId)).toEqual([]);
+  });
+
+  it("E6: titles and bodies naming @sam, @logistics or @channel resolve no mention and notify nobody (board and channel)", async () => {
+    const hostile = (key: string) =>
+      item(key, { title: "@sam urgent", body: "@logistics now @channel, and @atlas too" });
+    const botWakes = async () =>
+      Number(
+        (
+          await s.su.query(
+            "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'agent.mention.v1'",
+            [`cell:${s.orgA}`],
+          )
+        ).rows[0].n,
+      );
+    for (const target of [
+      { kind: "board", conversationId: fleetId, columnId: backlogId },
+      { kind: "channel", conversationId: dispatchId },
+    ]) {
+      const automationId = await createAutomation({ target });
+      const { ev } = await runTurn(automationId);
+      const wakes = await botWakes();
+      const out = await openOk(ev, [hostile(`M-${randomUUID().slice(0, 6)}`)]);
+      const root = (out.results as Json[])[0]?.threadRootMessageId as string;
+      const [m] = await messageRows([root]);
+      expect(m?.mentions).toEqual([]);
+      expect(m?.body).not.toMatch(/(^|\s)@(sam|logistics|channel|atlas)\b/u);
+      expect(await notificationsOf([root])).toBe(0);
+      // A bot-written post wakes no bot.
+      expect(await botWakes()).toBe(wakes);
+      if (target.kind === "board") {
+        const card = (await s.su.query("select title from app.board_cards where message_id = $1", [root]))
+          .rows[0];
+        expect(card.title).toBe("⁠@sam urgent");
+      }
+    }
+  });
+});
+
+describe("refusals (PD-07, E8): each with its fixed sentence, recorded through the claim", () => {
+  it("a person's turn of Atlas → not_in_turn (the tool is not on it)", async () => {
+    const ev = await s.turnOf(s.sam, atlas.dm, atlas.id);
+    expect(ev.turn.tools).not.toContain(OPEN);
+    await expectRefusal(open(ev, [item("X-1")]), ev.eventId as string, "not_in_turn");
+  });
+
+  it("a turn with the tool but no run row → not_a_run", async () => {
+    const automationId = await createAutomation();
+    const { runId, ev } = await runTurn(automationId);
+    await s.su.query("update app.automation_runs set agent_event_id = null where id = $1", [runId]);
+    await expectRefusal(open(ev, [item("X-2")]), ev.eventId as string, "not_a_run");
+    expect(await conversationRows(automationId)).toEqual([]);
+  });
+
+  it("a paused automation → automation_inactive; fan-out turned off since delivery → fan_out_off", async () => {
+    const paused = await createAutomation();
+    const p = await runTurn(paused);
+    await ok(s.victor.request("POST", `/api/v1/automations/${paused}/pause`) as Promise<Res>);
+    await expectRefusal(open(p.ev, [item("X-3")]), p.ev.eventId as string, "automation_inactive");
+
+    const off = await createAutomation();
+    const o = await runTurn(off);
+    await patchAutomation(off, { fanOut: { enabled: false, perRun: 10, perDay: 100 } });
+    await expectRefusal(open(o.ev, [item("X-4")]), o.ev.eventId as string, "fan_out_off");
+    expect([...(await conversationRows(paused)), ...(await conversationRows(off))]).toEqual([]);
+  });
+
+  it("Atlas removed from the board → target_not_postable: nothing posted, no row, the refusal recorded", async () => {
+    const yardId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "yard",
+          visibility: "private",
+          layout: "board",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${yardId}/members`, {
+        kind: "agent",
+        id: atlas.id,
+      }) as Promise<Res>,
+    );
+    const yardBacklog = (
+      (await ok(s.victor.request("GET", `/api/v1/boards/${yardId}`) as Promise<Res>)).columns as Json[]
+    ).find((c) => c.category === "backlog")?.id as string;
+    const automationId = await createAutomation({
+      target: { kind: "board", conversationId: yardId, columnId: yardBacklog },
+    });
+    const { ev } = await runTurn(automationId);
+    await ok(
+      s.victor.request("DELETE", `/api/v1/channels/${yardId}/members/agent/${atlas.id}`) as Promise<Res>,
+    );
+    const cardsBefore = await boardCardCount(yardId);
+    const jobsBefore = await allItemJobs();
+    await expectRefusal(open(ev, [item("Y-1"), item("Y-2")]), ev.eventId as string, "target_not_postable");
+    expect(await boardCardCount(yardId)).toBe(cardsBefore);
+    expect(await conversationRows(automationId)).toEqual([]);
+    expect(await allItemJobs()).toBe(jobsBefore);
+    // The rolled-back claim is gone: the refusal's row is the only one, and the turn's count is untouched.
+    expect(await toolCalls(ev.eventId as string)).toHaveLength(1);
+    expect(
+      (await s.su.query("select tool_calls from app.agent_turns where event_id = $1", [ev.eventId])).rows[0],
+    ).toEqual({ tool_calls: 0 });
+  });
+
+  it("the turn's ninth tool call → cap_reached", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    await s.su.query("update app.agent_turns set tool_calls = $2 where event_id = $1", [
+      ev.eventId,
+      MAX_TOOL_CALLS_PER_TURN,
+    ]);
+    await expectRefusal(open(ev, [item("X-5")]), ev.eventId as string, "cap_reached");
+    expect(await conversationRows(automationId)).toEqual([]);
+  });
+
+  it("an unknown event or another bot's event → 404 unknown_turn", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    for (const r of [
+      await open({ eventId: randomUUID() }, [item("X-6")]),
+      await open(ev, [item("X-6")], { agentId: s.scoutId }),
+    ]) {
+      expect(r.status, JSON.stringify(r.body)).toBe(404);
+      expect(codeOf(r)).toBe("unknown_turn");
+    }
+    expect(await conversationRows(automationId)).toEqual([]);
   });
 });
