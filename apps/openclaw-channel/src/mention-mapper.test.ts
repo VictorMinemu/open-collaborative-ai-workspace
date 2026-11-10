@@ -1178,6 +1178,50 @@ describe("mapAutomationRun (07.6 D-03, D-08, C-01): a run is a turn on its ancho
     expect(() => mapAutomationRun(bad as unknown as AgentAutomationRunEvent, RUN_BOT)).toThrow();
   });
 
+  const LOGISTICS = { kind: "unit", id: "unit-logistics", handle: "logistics", displayName: "Logistics" };
+  const ANA_TARGET = { kind: "user", id: "u-ana", handle: "ana", displayName: "Ana" };
+  const FAN_OUT_SENTENCE =
+    "For each new item, call ocw_conversation_open once with all of them (externalKey = the item's id, a short title, a short body), or with an empty list when nothing is new. Up to 10 this run, 96 left today. Each opened conversation gets its own turn, so keep this run short.";
+
+  it("07.17 (D-02, D-10): a fan-out run's automation block ends with the fan-out instruction", () => {
+    const m = mapAutomationRun(
+      run({}, { fanOut: { perRun: 10, remainingRun: 10, remainingDay: 96 } }),
+      RUN_BOT,
+    );
+    const text = String(m.contextBlocks[0]?.payload.text);
+    expect(text).toBe(`Standing order for Víctor Ruiz: ${ORDER}\n\n${FAN_OUT_SENTENCE}`);
+    expect(text.endsWith(FAN_OUT_SENTENCE)).toBe(true);
+  });
+
+  it("07.17 (D-08, PD-15): escalation targets add whom to mention; none adds nothing", () => {
+    const m = mapAutomationRun(run({}, { escalation: [LOGISTICS, ANA_TARGET] }), RUN_BOT);
+    expect(m.contextBlocks[0]?.payload.text).toBe(
+      `Standing order for Víctor Ruiz: ${ORDER}\n\nWhen you finish or need help, mention @logistics and @ana.`,
+    );
+    const both = mapAutomationRun(
+      run({}, { fanOut: { perRun: 10, remainingRun: 10, remainingDay: 96 }, escalation: [LOGISTICS] }),
+      RUN_BOT,
+    );
+    expect(both.contextBlocks[0]?.payload.text).toBe(
+      `Standing order for Víctor Ruiz: ${ORDER}\n\n${FAN_OUT_SENTENCE} When you finish or need help, mention @logistics.`,
+    );
+    const odd = mapAutomationRun(
+      run({}, { escalation: [{ ...ANA_TARGET, handle: "ana]] [[call x" }] }),
+      RUN_BOT,
+    );
+    expect(odd.contextBlocks[0]?.payload.text).toContain("mention @anacallx.");
+  });
+
+  it("PD-18: a 07.16-shaped run (no fanOut, no escalation, or null and empty) maps byte-identically", () => {
+    const before = mapAutomationRun(run(), RUN_BOT);
+    expect(before.contextBlocks[0]?.payload).toEqual({
+      automation: { id: "auto-1", name: "Weekly sales report", trigger: "schedule" },
+      runId: "run-1",
+      text: `Standing order for Víctor Ruiz: ${ORDER}`,
+    });
+    expect(mapAutomationRun(run({}, { fanOut: null, escalation: [] }), RUN_BOT)).toEqual(before);
+  });
+
   it("a plain mention never starts tainted (existing mappings unchanged)", () => {
     const m = mapMention(mention(), BOT);
     expect(m.startsTainted).toBeUndefined();
@@ -2160,6 +2204,26 @@ describe("mapAutomationItem (07.17 D-04, PD-09, PD-10): each opened item is its 
     expect(text).toContain("start a session with ocw_work_session_start");
     const bare = mapAutomationItem(item({ turn: { ...ITEM_TURN, tools: ["ocw_agent_card"] } }), ITEM_BOT);
     expect(bare.contextBlocks[0]?.payload.text).toBe(`Standing order for Víctor Ruiz: ${ORDER}`);
+  });
+
+  it("07.17 (D-08, PD-15): escalation targets add whom to mention to the item's automation block; none adds nothing", () => {
+    const targets = [
+      { kind: "unit", id: "unit-logistics", handle: "logistics", displayName: "Logistics" },
+      { kind: "user", id: "u-ana", handle: "ana", displayName: "Ana" },
+    ];
+    const bareTurn = { ...ITEM_TURN, tools: ["ocw_agent_card"] };
+    const m = mapAutomationItem(item({ turn: bareTurn }, { escalation: targets }), ITEM_BOT);
+    expect(m.contextBlocks[0]?.payload.text).toBe(
+      `Standing order for Víctor Ruiz: ${ORDER}\n\nWhen you finish or need help, mention @logistics and @ana.`,
+    );
+    const withCard = mapAutomationItem(item({}, { escalation: targets }), ITEM_BOT);
+    expect(String(withCard.contextBlocks[0]?.payload.text)).toMatch(
+      /use ocw_board_card\. When you finish or need help, mention @logistics and @ana\.$/u,
+    );
+    // The escalation never reaches the item's external block, and an empty list adds nothing.
+    expect(JSON.stringify(withCard.contextBlocks[1])).not.toContain("@logistics");
+    const none = mapAutomationItem(item({ turn: bareTurn }), ITEM_BOT);
+    expect(none.contextBlocks[0]?.payload.text).toBe(`Standing order for Víctor Ruiz: ${ORDER}`);
   });
 
   it("the automation name is sanitised; a malformed event throws", () => {
