@@ -238,6 +238,25 @@ export async function deliverAutomationRun(
   await core.realtime.appendEvent(tx, `user:${p.runAsUserId}`, EventTypes.automationRunUpdated, runUpdated);
   // The caps travel only with the tool: a turn too full for it (MAX_TURN_TOOLS) is delivered as an ordinary run.
   const fanOut = p.fanOut && ev.turn?.tools.includes(BUILTIN_TOOLS.conversationOpen) ? p.fanOut : null;
+  if (p.fanOut && !fanOut) {
+    // Code review WR-07: the turn has only platform tools and no room for the open tool (turn-policy reserves its slot
+    // over any MCP tool): it opens nothing this run, and the reason is on record (ids only).
+    await core.audit.record(tx, {
+      action: "automation.fan_out_unavailable",
+      resourceType: "automation_run",
+      resourceId: run.id,
+      result: "denied",
+      actorKind: "system",
+      agentId: bot.id,
+      userId: p.runAsUserId,
+      metadata: {
+        runId: run.id,
+        automationId: p.automation.id,
+        eventId: ev.eventId,
+        reason: "too_many_tools",
+      },
+    });
+  }
   const payload: StoredAutomationRun = {
     ...ev,
     type: AgentChannelEventTypes.automationRun,

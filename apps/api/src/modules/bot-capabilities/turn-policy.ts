@@ -110,6 +110,11 @@ type Withheld = NonNullable<TurnContext["withheld"]>;
 /** Maximum tools per turn (`TurnContext.tools`). */
 const MAX_TURN_TOOLS = 64;
 
+const PLATFORM_TOOLS: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS));
+
+/** A tool of the platform (built in, `ocw_*` or a web tool) rather than an organization MCP server's tool. */
+const isPlatformTool = (name: string): boolean => PLATFORM_TOOLS.has(name) || name.startsWith("ocw_");
+
 const WEB_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 /** `ocw_memory_list` / `ocw_memory_read`: workspace memory (written or approved by people), changes nothing. */
@@ -1096,8 +1101,21 @@ export async function turnPolicy(
   }
 
   // Phase 07.17 (D-02, PD-07): `ocw_conversation_open` is turn-scoped, offered only with the caller's offer (a fan-out
-  // run) and a free slot; a full turn is still delivered without it. The route re-decides every call (the stored turn,
-  // its run, the automation, the caps under the automation lock).
+  // run). The route re-decides every call (the stored turn, its run, the automation, the caps under the automation
+  // lock). Code review WR-07: it is the run turn's primary tool, so its slot is reserved: on a full turn the
+  // lowest-priority tool (the last organization MCP tool offered, never a platform tool) gives its place. Only when no
+  // such tool exists is the turn delivered without it (the run delivery audits `automation.fan_out_unavailable`).
+  if (
+    p.conversationOpen &&
+    !computed.toolFlags[BUILTIN_TOOLS.conversationOpen] &&
+    computed.tools.length >= MAX_TURN_TOOLS
+  ) {
+    const evict = computed.tools.findLastIndex((name) => !isPlatformTool(name));
+    if (evict >= 0) {
+      const [name] = computed.tools.splice(evict, 1);
+      if (name) delete computed.toolFlags[name];
+    }
+  }
   if (
     p.conversationOpen &&
     !computed.toolFlags[BUILTIN_TOOLS.conversationOpen] &&

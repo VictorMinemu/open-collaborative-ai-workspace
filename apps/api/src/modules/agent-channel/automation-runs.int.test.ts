@@ -1213,7 +1213,7 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
     }
   });
 
-  it("MAX_TURN_TOOLS: a full run turn is still delivered, without the tool and without fanOut; one free slot offers it", async () => {
+  it("WR-07 (MAX_TURN_TOOLS): a full run turn keeps the open tool, the last connector tool giving it the slot; one free slot offers it as before", async () => {
     const bot = await s.newBot(`Bulky ${randomUUID().slice(0, 4)}`);
     await ok(
       s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, {
@@ -1249,8 +1249,12 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
     await grant(names);
     const full = await runTurn();
     expect(full.turn.tools).toHaveLength(64);
-    expect(full.turn.tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
-    expect(full.automationRun).not.toHaveProperty("fanOut");
+    // The run turn's primary tool is reserved: the lowest-priority tool (the last MCP tool offered) makes room.
+    expect(full.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(full.turn.tools).not.toContain(names.at(-1));
+    expect(full.turn.toolFlags).not.toHaveProperty(names.at(-1) as string);
+    expect(full.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
+    expect((await turnRow(full.eventId)).tools).toContain(BUILTIN_TOOLS.conversationOpen);
 
     await grant(names.slice(1));
     const room = await runTurn();

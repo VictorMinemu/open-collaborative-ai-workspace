@@ -334,3 +334,7 @@ documented behaviour below. The accepted text above stays as written; where it d
   already opened would open again; rotate it only together with a rehash. **Stored rows:** the fan-out migration has
   never shipped in a release, so no production row holds the old sha256; a development database that ran it keeps its
   rows (the 64-hex check still holds) and may open such an item once more.
+- **WR-07, § 4 (the open tool on a full turn).** `ocw_conversation_open` is the fan-out run turn's primary tool: when
+  the turn already holds 64 tools, the last organization MCP tool offered gives its slot (never a platform tool), so a
+  bot with many MCP tools still opens items. If only platform tools fill the turn, it is delivered without the tool
+  and `automation.fan_out_unavailable` is audited (ids, reason `too_many_tools`).
