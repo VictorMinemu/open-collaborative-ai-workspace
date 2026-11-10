@@ -376,6 +376,11 @@ async function lockBot(tx: Tx, agentId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${agentId}`}, 0))`);
 }
 
+/** The organization's lock of bot sessions (PD-10): always taken after `lockBot`, by a start and by a restart. */
+async function lockOrg(tx: Tx, organizationId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws_org:${organizationId}`}, 0))`);
+}
+
 /** `submitWorkPrompt`'s refusals of the body as the bot's codes; anything else is not a bot answer. */
 function promptRefusalOf(err: unknown): BotWorkSessionRefused | null {
   if (!(err instanceof HttpError)) return null;
@@ -414,9 +419,7 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
       // counts below are exact under concurrency: a second start waits here until the first one commits, then counts
       // its session. The counts see every session of the organization, not only those the sponsor sees.
       await lockBot(tx, turn.agentId);
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws_org:${turn.organizationId}`}, 0))`,
-      );
+      await lockOrg(tx, turn.organizationId);
       const load = await botSessionLoad(tx, turn.agentId, input.projectId);
       if (load.botActive >= profile.maxConcurrent) return refuse(refusedAnswer("too_many_sessions"));
       const policy = await loadWorkZonePolicy(tx);
@@ -592,8 +595,21 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         await sessionFacts(tx, sponsorUserId, s),
       );
       if (!allowed) return refusedAnswer("not_allowed");
+      // A finished session (failed, completed) is restarted by this prompt (`submitWorkPrompt`): it becomes active
+      // again, so it is held to the start's caps (code review CR-03). The organization's lock is taken after the bot's,
+      // as `start` does, so the counts are exact under concurrency; the session itself is not active, so it is not
+      // counted. Without a worktree it never restarts next to another active session on its tree (principle 4).
+      const restarts = s.status === "failed" || s.status === "completed";
+      if (restarts) await lockOrg(tx, turn.organizationId);
       // E2: the hour's prompts of this bot across its sessions, the start's own included (the start cap's count).
       const load = await botSessionLoad(tx, turn.agentId, s.projectId);
+      if (restarts) {
+        if (load.botActive >= profile.maxConcurrent) return refusedAnswer("too_many_sessions");
+        const policy = await loadWorkZonePolicy(tx);
+        const orgMax = policy.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault;
+        if (load.orgActive >= orgMax) return refusedAnswer("org_limit");
+        if (!s.worktree && load.treeBusy) return refusedAnswer("tree_busy");
+      }
       if (load.botPromptsHour >= profile.promptsPerHour) return refusedAnswer("prompt_rate");
       const sponsor = { userId: sponsorUserId, organizationId: turn.organizationId, clientKind: "agent" };
       try {

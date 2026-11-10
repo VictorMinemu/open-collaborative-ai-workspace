@@ -383,3 +383,9 @@ continues another one:
 - the approval's card, headline and review show "Outside content" when the asking turn read a session's output, so
   the person who decides is warned. The stored request's own `tainted` is unchanged, and a re-run is never tainted by
   a session read alone.
+
+**A bot's prompt that restarts a finished session is held to the start's caps (CR-03).** This completes §6 and §8
+("Prompting needs an active profile and the hourly rate"). A prompt to a `completed` or `failed` session restarts it,
+so it becomes active again. Under the bot's lock and then the organization's lock, the prompt is refused with
+`too_many_sessions`, `org_limit` or (without a worktree, another active session on the same tree) `tree_busy`,
+exactly as a start would be. People's prompts are unchanged.

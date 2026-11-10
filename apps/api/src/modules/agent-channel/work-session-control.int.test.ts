@@ -628,6 +628,74 @@ describe("prompt refusals; a stop stays allowed", () => {
     expect(stopCallRow!.decision).toBe("allowed");
   });
 
+  it("CR-03: a completed session restarts under the caps: below them it is queued, at the bot's cap → too_many_sessions", async () => {
+    await saveProfile({ maxConcurrent: 2 });
+    try {
+      const a = await botSession();
+      await su.query("update app.work_sessions set status = 'completed' where id = $1", [a.workSessionId]);
+      // Below the cap a finished session restarts as before (one other active session would be fine too).
+      await queued(await ask(), a.workSessionId);
+      expect((await stateOf(a.workSessionId)).status).not.toBe("completed");
+      await su.query("update app.work_sessions set status = 'completed' where id = $1", [a.workSessionId]);
+      await botSession();
+      await botSession();
+      // Two active sessions: restarting A would make three.
+      const before = await stateOf(a.workSessionId);
+      await refusedWith(promptCall(await ask(), a.workSessionId), "too_many_sessions");
+      expect(await stateOf(a.workSessionId)).toEqual(before);
+      // A failed session the same way.
+      await su.query("update app.work_sessions set status = 'failed' where id = $1", [a.workSessionId]);
+      await refusedWith(promptCall(await ask(), a.workSessionId), "too_many_sessions");
+      expect((await stateOf(a.workSessionId)).status).toBe("failed");
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("CR-03: at the organization's cap a finished session is not restarted → org_limit", async () => {
+    const a = await botSession();
+    await su.query("update app.work_sessions set status = 'completed' where id = $1", [a.workSessionId]);
+    await botSession({ id: echoId, handle: "echo" });
+    await ok(
+      victor.request("PUT", "/api/v1/work-zone-policy", {
+        allowFullAccess: true,
+        allowFastMode: true,
+        botSessionsMax: 1,
+      }),
+    );
+    try {
+      const before = await stateOf(a.workSessionId);
+      await refusedWith(promptCall(await ask(), a.workSessionId), "org_limit");
+      expect(await stateOf(a.workSessionId)).toEqual(before);
+    } finally {
+      await ok(
+        victor.request("PUT", "/api/v1/work-zone-policy", {
+          allowFullAccess: true,
+          allowFastMode: true,
+          botSessionsMax: 10,
+        }),
+      );
+    }
+  });
+
+  it("CR-03: without a worktree a finished session never restarts next to an active one on its tree → tree_busy", async () => {
+    await saveProfile({ worktree: false });
+    try {
+      const a = await botSession();
+      await su.query("update app.work_sessions set status = 'completed' where id = $1", [a.workSessionId]);
+      await botSession({ id: echoId, handle: "echo" });
+      await su.query(
+        "update app.work_sessions set worktree = false where started_by_agent_id = $1 and status <> 'archived'",
+        [echoId],
+      );
+      const before = await stateOf(a.workSessionId);
+      await refusedWith(promptCall(await ask(), a.workSessionId), "tree_busy");
+      expect(await stateOf(a.workSessionId)).toEqual(before);
+    } finally {
+      await saveProfile();
+    }
+  });
+
   it("after the turn read a session's output, prompt and stop are still allowed (D-20)", async () => {
     const { workSessionId } = await botSession();
     const eventId = await ask();
