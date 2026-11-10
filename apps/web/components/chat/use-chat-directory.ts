@@ -26,6 +26,8 @@ export interface UnitMentionCandidate {
   /** Distinct active members of the unit's subtree: who a mention of it can reach. */
   reach: number;
   viewerInReach: boolean;
+  /** Root → self (WR-09: a unit inside another named unit adds nothing to a message's reach). */
+  path?: readonly string[];
 }
 
 export interface OrgDirectory {
@@ -51,6 +53,8 @@ export function mentionUnitsOf(
   const out: UnitMentionCandidate[] = [];
   for (const u of units) {
     if (u.kind === "project" || !u.handle || handles.has(u.handle)) continue;
+    // WR-09: the server resolves a unit only for an author who may read it (`unit.read`, unit-scoped rules included).
+    if (!u.viewerCan.includes("unit.read")) continue;
     out.push({
       id: u.id,
       kind: u.kind,
@@ -58,6 +62,7 @@ export function mentionUnitsOf(
       handle: u.handle,
       reach: u.reach ?? 0,
       viewerInReach: u.viewerInReach ?? false,
+      path: u.path,
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.handle.localeCompare(b.handle));

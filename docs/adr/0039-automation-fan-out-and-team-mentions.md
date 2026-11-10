@@ -341,3 +341,7 @@ documented behaviour below. The accepted text above stays as written; where it d
 - **WR-08, § 2 (defaults only on create).** The 10 / 100 defaults apply on create only. An update's `fanOut`
   (`AutomationFanOutUpdate`) carries no defaults: a cap left out keeps its stored value, and the merged caps must keep
   `perRun <= perDay` (400 `bad_request` otherwise).
+- **WR-09, § 10 (the composer agrees with the server).** `GET /units` reports `unit.read` in each unit's `viewerCan`
+  (the resolver's decision, unit-scoped rules included), and the composer offers and chips only units the viewer may
+  read. Its confirmation (D-18) counts every unit the message names, a unit inside another named one once, capped at
+  200, and says "up to N people … Only those who can read this channel are notified": two teams of 15 now ask first.

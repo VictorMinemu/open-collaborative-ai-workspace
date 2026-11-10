@@ -87,7 +87,12 @@ describe("units: build and rearrange the hierarchy", () => {
     it_ = itUnit.id;
     expect(itUnit).toMatchObject({ kind: "department", name: "IT", parentId: null, path: [it_] });
     // ADR-0024: the Modules card shows from `unit.modules.manage` in viewerCan (07.3-02).
-    expect(itUnit.viewerCan).toEqual(["unit.manage", "unit.members.manage", "unit.modules.manage"]);
+    expect(itUnit.viewerCan).toEqual([
+      "unit.read",
+      "unit.manage",
+      "unit.members.manage",
+      "unit.modules.manage",
+    ]);
 
     const be = await ok(
       admin.request("POST", "/api/v1/units", { kind: "team", name: "Backend", parentId: it_ }),
@@ -194,7 +199,8 @@ describe("units: build and rearrange the hierarchy", () => {
   it("a developer reads the tree but cannot change it (403, audited)", async () => {
     const list = await ok(dev.request("GET", "/api/v1/units"));
     expect(list.units).toHaveLength(4);
-    expect(list.units[0].viewerCan).toEqual([]);
+    // WR-09: reading (and so mentioning) the unit is reported too.
+    expect(list.units[0].viewerCan).toEqual(["unit.read"]);
 
     const denied = await fails(
       dev.request("POST", "/api/v1/units", { kind: "department", name: "Shadow", parentId: null }),
@@ -333,9 +339,9 @@ describe("units: rename, delete, concurrency and memberships with leads", () => 
     const view = await ok(lead.request("GET", "/api/v1/units"));
     const byId = new Map(view.units.map((u: { id: string; viewerCan: string[] }) => [u.id, u.viewerCan]));
     // ADR-0024: a lead also manages modules on the units they lead (07.3-02).
-    expect(byId.get(eng)).toEqual(["unit.members.manage", "unit.modules.manage"]);
-    expect(byId.get(core)).toEqual(["unit.members.manage", "unit.modules.manage"]);
-    expect(byId.get(sales)).toEqual([]);
+    expect(byId.get(eng)).toEqual(["unit.read", "unit.members.manage", "unit.modules.manage"]);
+    expect(byId.get(core)).toEqual(["unit.read", "unit.members.manage", "unit.modules.manage"]);
+    expect(byId.get(sales)).toEqual(["unit.read"]);
 
     await ok(lead.request("POST", `/api/v1/units/${core}/members`, { userId: samId }));
     const members = await ok(lead.request("GET", `/api/v1/units/${core}/members`));

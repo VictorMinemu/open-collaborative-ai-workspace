@@ -139,21 +139,40 @@ export function buildMentionSuggestions(
   return q ? [...special, ...people, ...teams] : [...people, ...special, ...teams];
 }
 
-/** The largest reach among the units `body` names (handles as the API parses them, 07.17 D-18); 0 when none. */
+/**
+ * How many people the units `body` names can reach at most (handles as the API parses them, 07.17 D-18; code review
+ * WR-09): the sum of their reaches, a unit inside another named unit counted once, capped at what one message
+ * notifies (`TEAM_MENTION_LIMITS.recipientsPerMessage`). An upper bound: the server notifies only readers of the
+ * conversation, each person once. 0 when none.
+ */
 export function teamReachOf(body: string, unitMentions: readonly UnitMentionCandidate[] | undefined): number {
-  return largestTeamMention(body, unitMentions)?.reach ?? 0;
+  return Math.min(
+    TEAM_MENTION_LIMITS.recipientsPerMessage,
+    namedTeams(body, unitMentions).reduce((n, u) => n + u.reach, 0),
+  );
 }
 
-function largestTeamMention(
+/** The units `body` names, in mention order, without those inside another named unit. */
+function namedTeams(
   body: string,
   unitMentions: readonly UnitMentionCandidate[] | undefined,
-): UnitMentionCandidate | null {
-  if (!unitMentions?.length) return null;
-  const named = new Set(extractMentionHandles(body));
-  let best: UnitMentionCandidate | null = null;
-  for (const u of unitMentions) if (named.has(u.handle) && (!best || u.reach > best.reach)) best = u;
-  return best;
+): UnitMentionCandidate[] {
+  if (!unitMentions?.length) return [];
+  const byHandle = new Map(unitMentions.map((u) => [u.handle, u]));
+  const named: UnitMentionCandidate[] = [];
+  for (const h of extractMentionHandles(body)) {
+    const u = byHandle.get(h);
+    if (u && !named.includes(u)) named.push(u);
+  }
+  const ids = new Set(named.map((u) => u.id));
+  return named.filter((u) => !(u.path ?? []).some((id) => id !== u.id && ids.has(id)));
 }
+
+/** `@a`, `@a and @b`, `@a, @b and @c`. */
+const handleList = (units: readonly UnitMentionCandidate[]): string => {
+  const hs = units.map((u) => `@${u.handle}`);
+  return hs.length <= 1 ? (hs[0] ?? "") : `${hs.slice(0, -1).join(", ")} and ${hs.at(-1)}`;
+};
 
 export interface MentionConfirmation {
   kind: "all" | "team";
@@ -186,12 +205,13 @@ export function mentionConfirmation(
           : `@channel notifies all ${members} members of this channel, wherever they are.`,
     };
   }
-  const team = largestTeamMention(body, opts.unitMentions);
-  if (!team || team.reach <= TEAM_MENTION_LIMITS.confirmAbove) return null;
+  const teams = namedTeams(body, opts.unitMentions);
+  const reach = teamReachOf(body, opts.unitMentions);
+  if (teams.length === 0 || reach <= TEAM_MENTION_LIMITS.confirmAbove) return null;
   return {
     kind: "team",
-    title: `Notify ${team.reach} people?`,
-    description: `@${team.handle} reaches ${team.reach} people who can read this channel.`,
+    title: `Notify up to ${reach} people?`,
+    description: `${handleList(teams)} ${teams.length === 1 ? "reaches" : "reach"} up to ${reach} people. Only those who can read this channel are notified.`,
   };
 }
 

@@ -460,6 +460,12 @@ describe("escalation targets: validated at save, resolved at delivery (D-08, PD-
     );
   });
 
+  it("WR-09: GET /units says per unit whether the viewer may read (and so mention) it", async () => {
+    const units = (await ok(s.victor.request("GET", "/api/v1/units") as Promise<Res>)).units as Json[];
+    expect(units.find((u) => u.id === logistics)?.viewerCan).toContain("unit.read");
+    expect(units.find((u) => u.id === hidden)?.viewerCan).not.toContain("unit.read");
+  });
+
   it("saves people and teams who can read the target, in order, and returns them as views", async () => {
     const a = (
       await ok(

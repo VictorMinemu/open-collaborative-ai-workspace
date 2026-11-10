@@ -54,6 +54,8 @@ const OPS = unit({ kind: "department", name: "Operations", handle: "ops", reach:
 const PORTAL = unit({ kind: "project", name: "Logistics portal", handle: "logistics-portal", reach: 2 });
 const SAMS = unit({ kind: "team", name: "Sam's team", handle: "sam", reach: 4 });
 const OLD = unit({ kind: "team", name: "Legacy" });
+// WR-09: a unit the viewer may not read (a unit-scoped deny) is never offered.
+const HIDDEN = unit({ kind: "team", name: "Board room", handle: "board-room", reach: 5, viewerCan: [] });
 
 const SAM: MentionCandidate = {
   kind: "user",
@@ -88,7 +90,7 @@ const handles = new Map<string, MentionTarget>([
   ["sam", { kind: "user", displayName: "Sam Lee" }],
   ["atlas", { kind: "agent", displayName: "Atlas" }],
 ]);
-const UNITS = mentionUnitsOf([LOGISTICS, BLOG, OPS, PORTAL, SAMS, OLD], handles);
+const UNITS = mentionUnitsOf([LOGISTICS, BLOG, OPS, PORTAL, SAMS, OLD, HIDDEN], handles);
 
 function list(q: string, units: UnitMentionCandidate[] | undefined, special?: SpecialMention[]) {
   const suggestions = buildMentionSuggestions(q, [SAM, LOU, ATLAS], special, units);
@@ -98,7 +100,7 @@ function list(q: string, units: UnitMentionCandidate[] | undefined, special?: Sp
 }
 
 describe("mentionUnitsOf (07.17 D-07, PD-19)", () => {
-  it("keeps teams and departments with a handle, drops projects, shadowed handles and handle-less units", () => {
+  it("keeps teams and departments with a handle, drops projects, shadowed handles, handle-less and unreadable units", () => {
     expect(UNITS.map((u) => u.handle)).toEqual(["blog-team", "logistics", "ops"]);
     expect(UNITS.find((u) => u.handle === "logistics")).toEqual({
       id: LOGISTICS.id,
@@ -107,6 +109,7 @@ describe("mentionUnitsOf (07.17 D-07, PD-19)", () => {
       handle: "logistics",
       reach: 6,
       viewerInReach: true,
+      path: LOGISTICS.path,
     });
     expect(UNITS.find((u) => u.handle === "ops")).toMatchObject({ kind: "department", reach: 24 });
   });
@@ -244,13 +247,34 @@ describe("teamReachOf and the reach confirmation (07.17 D-18)", () => {
     { id: BLOG.id, kind: "team", name: "Blog team", handle: "blog-team", reach: 3, viewerInReach: false },
   ];
 
-  it("the largest reach among the units the body names; 0 when none", () => {
-    expect(teamReachOf("ship it @ops and @blog-team", units(24))).toBe(24);
+  it("WR-09: the reach of every unit the body names (a unit inside another named one counts once); 0 when none", () => {
+    expect(teamReachOf("ship it @ops and @blog-team", units(24))).toBe(27);
     expect(teamReachOf("only @blog-team.", units(24))).toBe(3);
     expect(teamReachOf("@OPS shouting", units(24))).toBe(24);
     expect(teamReachOf("no team here, @sam", units(24))).toBe(0);
     expect(teamReachOf("@ops", undefined)).toBe(0);
     expect(teamReachOf("mail ops@example.com", units(24))).toBe(0);
+    // A team inside a named department adds nothing; the total is capped at what one message notifies.
+    const nested: UnitMentionCandidate[] = [
+      { ...units(24)[0], path: [OPS.id] } as UnitMentionCandidate,
+      { ...units(24)[1], path: [OPS.id, BLOG.id] } as UnitMentionCandidate,
+    ];
+    expect(teamReachOf("@ops and @blog-team", nested)).toBe(24);
+    expect(teamReachOf("@ops", units(900))).toBe(TEAM_MENTION_LIMITS.recipientsPerMessage);
+  });
+
+  it("WR-09: two teams of 15 open the confirmation (30 people), one team of 15 does not", () => {
+    const two: UnitMentionCandidate[] = [
+      { id: OPS.id, kind: "team", name: "Pickers", handle: "pickers", reach: 15, viewerInReach: false },
+      { id: BLOG.id, kind: "team", name: "Packers", handle: "packers", reach: 15, viewerInReach: false },
+    ];
+    expect(mentionConfirmation("@pickers", { unitMentions: two })).toBeNull();
+    expect(mentionConfirmation("@pickers @packers", { unitMentions: two })).toEqual({
+      kind: "team",
+      title: "Notify up to 30 people?",
+      description:
+        "@pickers and @packers reach up to 30 people. Only those who can read this channel are notified.",
+    });
   });
 
   it("21 people opens the confirmation, 20 sends at once (TEAM_MENTION_LIMITS.confirmAbove)", () => {
@@ -261,12 +285,15 @@ describe("teamReachOf and the reach confirmation (07.17 D-18)", () => {
     expect(mentionConfirmation("@ops", {})).toBeNull();
   });
 
-  it("the team dialog reads Notify 24 people? / @ops reaches 24 people who can read this channel.", () => {
+  it("the team dialog reads Notify up to 24 people? / @ops reaches up to 24 people …", () => {
     expect(mentionConfirmation("@ops look", { unitMentions: units(24) })).toEqual({
       kind: "team",
-      title: "Notify 24 people?",
-      description: "@ops reaches 24 people who can read this channel.",
+      title: "Notify up to 24 people?",
+      description: "@ops reaches up to 24 people. Only those who can read this channel are notified.",
     });
+    expect(mentionConfirmation("@ops", { unitMentions: units(900) })?.title).toBe(
+      `Notify up to ${TEAM_MENTION_LIMITS.recipientsPerMessage} people?`,
+    );
   });
 
   it("@channel and a large team in one body: one dialog, the @channel one", () => {

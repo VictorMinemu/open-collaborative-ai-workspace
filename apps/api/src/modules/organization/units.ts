@@ -117,6 +117,9 @@ export type UnitRow = typeof orgUnits.$inferSelect;
 
 /** The permissions a unit row reports in `viewerCan` (the web renders these, never re-implements policy). */
 const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = [
+  // 07.17 code review WR-09: whether the viewer may read (and so @mention) the unit, as `unitMentionGate` decides it,
+  // so the composer never offers a team the server would not resolve (a unit-scoped deny).
+  "unit.read",
   "unit.manage",
   "unit.members.manage",
   "unit.modules.manage",
