@@ -40,7 +40,8 @@
       "ocw_attachment_read",
       "ocw_automation_propose",
       "ocw_record_update",
-      "ocw_consult_agent"
+      "ocw_consult_agent",
+      "ocw_conversation_open"
     ]
   },
   "activation": {

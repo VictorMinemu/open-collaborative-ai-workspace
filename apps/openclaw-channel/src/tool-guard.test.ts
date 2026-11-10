@@ -1772,3 +1772,101 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect(await g.beforeToolCall(call("ocw_work_session_start", START), ctx())).toBeUndefined();
   });
 });
+
+describe("ocw_conversation_open (07.17 D-02, D-05, PD-07, PD-10): self-validated, static flags, the route decides taint", () => {
+  const OPEN = "ocw_conversation_open";
+  const SIDE = { untrustedOutput: false, sideEffecting: true };
+  const MCP_READ = { untrustedOutput: true, sideEffecting: false };
+  const ITEMS = { items: [{ externalKey: "1042", title: "Order 1042", body: "" }] };
+  const runTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["ocw_memory_save", "ocw_board_card", "ocw_consult_agent", "ocw_connector_call", OPEN],
+      toolFlags: {
+        ocw_memory_save: MEMORY,
+        ocw_board_card: SIDE,
+        ocw_consult_agent: SIDE,
+        ocw_connector_call: SIDE,
+        m1a2b3c4d__list_orders: MCP_READ,
+        [OPEN]: SIDE,
+      },
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = runTurn(), tainted = false) =>
+    g.beginTurn(SESSION, {
+      eventId: "evt-1",
+      agentId: "a1",
+      turn: t,
+      connectorTools: ["m1a2b3c4d__list_orders"],
+      tainted,
+    });
+
+  it("is validated by its own route: never sent to /tool-calls, counted against the turn's cap, never taints", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(1);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+  });
+
+  it("after the run read the MCP (tainted) the call still reaches its route; memory and consult stay blocked locally", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    const read = call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "list_orders", arguments: {} });
+    expect(await g.beforeToolCall(read, ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toMatch(
+      /read-only after untrusted content/u,
+    );
+    expect(await g.beforeToolCall(call("ocw_consult_agent", {}), ctx())).toMatchObject({ block: true });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("a turn delivered tainted (taintedAtStart) reaches the route too", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, runTurn(), true);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+  });
+
+  it("takes its static flags: a turn saying not side-effecting or approvable changes nothing; one saying untrusted only adds", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(
+      g,
+      runTurn({
+        toolFlags: { [OPEN]: { untrustedOutput: false, sideEffecting: false, approval: "always" as const } },
+      }),
+    );
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    // Never approvable: no arguments ever leave the cell through /tool-calls.
+    expect(fake.requests).toHaveLength(0);
+    const t = g.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    t.sessionOutputRead = true;
+    // Still side-effecting: after a session's output it is refused locally (the claim refuses it too).
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toMatch(
+      /read-only after untrusted content/u,
+    );
+    begin(g, runTurn({ toolFlags: { [OPEN]: { untrustedOutput: true, sideEffecting: true } } }));
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+  });
+
+  it("a turn that does not offer it is blocked, and the cap of 8 holds", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, runTurn({ tools: ["ocw_memory_save"] }));
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toBe(
+      `Tool ${OPEN} is not allowed on this turn.`,
+    );
+    begin(g, runTurn({ maxToolCalls: 1 }));
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toBe(
+      `Tool ${OPEN} blocked: the turn reached its limit of 1 tool calls.`,
+    );
+  });
+});

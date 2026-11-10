@@ -3,7 +3,7 @@
  * (07.1-13, 07.5-10, 07.6-20). `ocw_board_card` is offered only on a board channel's turns (07.1-10), the two Work Zone
  * proposal tools only on turns whose human holds `work_session.create` (07.5-08), the two 07.6 tools and the 07.7 consult
  * tool only where their own rules hold (below), the 07.16 Work Zone session tools only to a bot with an active Work Zone
- * profile, so `GET /cell` (the bot's tools in
+ * profile, the 07.17 open tool only on a fan-out automation's run turns, so `GET /cell` (the bot's tools in
  * any conversation, for no human) never lists them, while OpenClaw can only run a tool the bot's entry configures
  * (`alsoAllow`) and a turn may only narrow that list (`toolsAllow`).
  *
@@ -47,6 +47,12 @@ export const WORK_SESSION_TOOL_NAMES = [
   WORK_SESSION_STOP_TOOL,
 ] as const;
 export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
+/**
+ * 07.17 (D-02, PD-07): `ocw_conversation_open`, offered by 07.17-11 only on the run turn of an automation with fan-out
+ * on (one conversation per new item); never on item, wake or person turns, never in `GET /cell`. Same value as the
+ * mirror's `CONVERSATION_OPEN_TOOL` (agent-channel-protocol.ts), declared here without imports for the gate's sets.
+ */
+export const CONVERSATION_OPEN_TOOL = "ocw_conversation_open";
 const DELIVERED_TURN_TOOL = "ocw_agent_card";
 
 /** The bot's snapshot tools plus the turn-scoped ones it may be offered (only for a bot that is offered any tool). */
@@ -60,6 +66,7 @@ export function withTurnScopedTools(tools: readonly string[] | undefined): strin
     CONSULT_TOOL_NAME,
     ATTACHMENT_TOOL_NAME,
     ...WORK_SESSION_TOOL_NAMES,
+    CONVERSATION_OPEN_TOOL,
   ]) {
     if (!list.includes(name)) list.push(name);
   }

@@ -17,6 +17,8 @@ import {
   AgentChannelConnectorListResponse,
   type AgentChannelConsultRequest,
   AgentChannelConsultResponse,
+  type AgentChannelConversationOpen,
+  AgentChannelConversationOpenResponse,
   type AgentChannelHttpRequest,
   AgentChannelHttpResponse,
   type AgentChannelMcpProbeResult,
@@ -205,6 +207,12 @@ export const ATTACHMENT_READ_TIMEOUT_MS = 35_000;
  * device's first answer; 30 s waits past it, so the bot reads what the API decided.
  */
 export const WORK_SESSION_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 07.17 (PD-07): one `/conversations/open` call posts up to 25 cards or messages in one transaction; the budget is
+ * longer than a plain write's, still under OpenClaw's per-tool budget.
+ */
+export const CONVERSATION_OPEN_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
@@ -706,6 +714,26 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         WORK_SESSION_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelWorkSessionStopResponse.parse(raw);
+    },
+    /**
+     * `ocw_conversation_open` (07.17 D-02, PD-07): the run turn's ids and the items it found; the API takes the
+     * automation, the run, the target and the person from the stored turn, dedupes by key and applies the caps. One
+     * attempt (the route claims a tool call each time). Refusals are a 200 `{ok: false, code, sentence}`; an ended turn
+     * throws (404 `unknown_turn`). Never logs the items.
+     */
+    async conversationOpen(
+      body: AgentChannelConversationOpen,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelConversationOpenResponse> {
+      const raw = await request(
+        "POST",
+        "/conversations/open",
+        body,
+        signal,
+        1,
+        CONVERSATION_OPEN_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelConversationOpenResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

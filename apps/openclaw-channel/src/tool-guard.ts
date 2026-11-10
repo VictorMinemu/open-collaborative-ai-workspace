@@ -27,6 +27,7 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
 import { recordTaintedSentence } from "./record-tool.js";
 // No imports of its own: safe to read while this module loads (work-session-tools.ts imports this module).
 import {
+  CONVERSATION_OPEN_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_START_TOOL,
   WORK_SESSION_STOP_TOOL,
@@ -65,6 +66,9 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * start, prompt and stop still reach their routes (`ROUTE_DECIDES_TAINT`: the route allows them with the profile's
  * outside-content flag or answers with a proposal). After a successful `ocw_work_session_read` (`sessionOutputRead`)
  * every other side-effecting call of the turn is refused here, except prompt and stop; start answers `session_output`.
+ * Automation fan-out (07.17 D-02, D-05, PD-07): `ocw_conversation_open` is self-validated by `/conversations/open`,
+ * takes its static flags (side-effecting, never approvable), counts against the cap of 8, and on a tainted run turn
+ * still reaches its route, which decides outside content (the run read the MCP it fans out from).
  * Logs never include params, arguments or results.
  */
 
@@ -158,6 +162,9 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   // 07.16 (PD-09): `/work-sessions/start|prompt|read|stop` re-decide the turn, the tool on it, the bot's profile, the
   // caps and the outside-content rule, claim the call and audit it; never `/tool-calls` (it would count twice).
   ...WORK_SESSION_TOOL_NAMES,
+  // 07.17 (PD-07): `/conversations/open` re-decides the turn, the tool on it, the automation, fan-out, the caps and the
+  // outside-content rule, claims the call and audits it; never `/tool-calls` (it would count twice).
+  CONVERSATION_OPEN_TOOL,
 ]);
 /** 07.16: the bot's own Work Zone session tools. */
 const WORK_SESSION_TOOLS: ReadonlySet<string> = new Set(WORK_SESSION_TOOL_NAMES);
@@ -182,12 +189,20 @@ const ROUTE_DECIDES_TAINT: ReadonlySet<string> = new Set([
   WORK_SESSION_START_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_STOP_TOOL,
+  // 07.17 (D-05, PD-10): the route allows the open on a tainted run turn (the run read the MCP it fans out from) and
+  // only in the run's own target, which the stored turn names (never the model); it claims with `outsideContent`.
+  CONVERSATION_OPEN_TOOL,
 ]);
 /** 07.16 (D-20): the only side-effecting calls a turn may still make after it read a session's output. */
 const SESSION_OUTPUT_EXEMPT: ReadonlySet<string> = new Set([
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_STOP_TOOL,
 ]);
+/**
+ * Contracts `CONVERSATION_OPEN_FLAGS` (07.17): it posts in the automation's target; the answer is the platform's own
+ * ids, never outside content. A turn's flags only add restrictions.
+ */
+const CONVERSATION_OPEN_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 /** 07.15: the read tool, counted on its own budget (`ActiveTurn.attachmentReads`). */
 const ATTACHMENT_READ_TOOL = "ocw_attachment_read";
 /** Contracts `ATTACHMENT_READ_FLAGS`: a read returns a person's file (untrusted) and changes nothing. */
@@ -326,6 +341,15 @@ function callFlags(
     return {
       untrustedOutput: base.untrustedOutput || delivered?.untrustedOutput === true,
       sideEffecting: base.sideEffecting || delivered?.sideEffecting === true,
+    };
+  }
+  if (tool === CONVERSATION_OPEN_TOOL) {
+    // 07.17 (PD-07): the static flags, made stricter (never looser) by the turn's. Never approvable, so a turn's approval
+    // mode is ignored.
+    const delivered = t.turn.toolFlags[tool];
+    return {
+      untrustedOutput: CONVERSATION_OPEN_FLAGS.untrustedOutput || delivered?.untrustedOutput === true,
+      sideEffecting: CONVERSATION_OPEN_FLAGS.sideEffecting || delivered?.sideEffecting === true,
     };
   }
   if (tool === "ocw_http_request") {
