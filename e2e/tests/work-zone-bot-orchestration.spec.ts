@@ -526,7 +526,8 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     await page.goto("/chat/mentions");
     const inbox = page.getByTestId("inbox");
     await expect(inbox).toBeVisible();
-    const mentionRow = inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" });
+    // A retry of this test adds a second "Done: Mode: fullAccess" row (the earlier attempt's reply): either proves it.
+    const mentionRow = inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" }).first();
     await expect(mentionRow).toBeVisible({ timeout: 15_000 });
     await expect(mentionRow).toContainText("mentioned you");
   } finally {
