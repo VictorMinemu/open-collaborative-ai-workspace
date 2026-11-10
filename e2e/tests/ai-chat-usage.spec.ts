@@ -65,6 +65,17 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await sam?.dispose();
   await admin?.dispose();
+  // The cap test restores the default in its `finally`, but when it times out its request context is already closed
+  // and the 1-a-day cap stayed on, failing later specs that use the org model (Work Zone memory summaries, CI p262).
+  // Restore it again here with a fresh context.
+  if (!FAKE_URL) return;
+  const restore = await apiAs(ADMIN);
+  try {
+    const res = await restore.put("/api/v1/ai-chat/policy", { data: { orgKeyDailyGenerations: 200 } });
+    expect(res.ok(), `restore the daily cap: ${res.status()}`).toBe(true);
+  } finally {
+    await restore.dispose();
+  }
 });
 
 test("every answer shows its tokens and cost: METERED with ~$ on the org key, ChatGPT plan without cost", async ({
