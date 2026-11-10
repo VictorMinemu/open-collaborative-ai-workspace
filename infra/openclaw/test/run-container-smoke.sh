@@ -93,12 +93,17 @@
 # `ocw_memory_save` is blocked in the cell and `ocw_work_session_prompt` still reaches its route (D-20); an
 # `agent.work_session.v1` is answered on the session's card with the "Work Zone session update" block (D-09); no
 # person's prompt, host path or session output outside a read's answer reaches a model request or the cell log (P1, P2).
+# Scenario automation-fan-out (07.17-15 / AFO-02, AFO-05, D-02, D-05, PD-07): `ocw_conversation_open` is in the bot's
+# alsoAllow (turn-scoped) and offered only on the fan-out run turn; a run turn that reads outside content first
+# (`web_search`) still opens its items through one `POST /conversations/open` with exactly `agentId,eventId,items` (items:
+# `body,externalKey,title`), never a conversation, automation, run or user key and never `/tool-calls`; the reply on the
+# run's anchor relays one "opened" line per item and the model sees the fan-out instruction and the escalation sentence.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
 #                            marketplace, breaker, bot_sandbox, bot_browser, bot_attachments, automation,
-#                            automation-tools, consult, bot_work_sessions
+#                            automation-tools, consult, bot_work_sessions, automation-fan-out
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -2614,6 +2619,98 @@ api_exec "
 await fetch('http://127.0.0.1:4000/__test/work-sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
 "
 echo "PASS bot_work_sessions"
+fi
+
+if want automation-fan-out; then
+# 07.17 (D-02, D-04, D-05, PD-07, PD-09): a fan-out run opens one conversation per new item through
+# `POST /conversations/open` (the plugin tool `ocw_conversation_open`, self-validated, never `/tool-calls`), also after
+# reading outside content, and each opened item is then its own turn in its own thread with the item kept as data. The
+# fake model acts only on directives in the message body (the standing order sits in the automation context block), so
+# the run fixture carries its directives in `message.text`, standing for a model following its standing order.
+FO_AGENT=0199a6f0-0000-7000-8000-00000000a001
+FO_CONV=0199a6f0-0000-7000-8000-00000000c771
+FO_ROOT_1042=0199a6f0-0000-7000-8000-00000000d781
+FO_ROOT_1043=0199a6f0-0000-7000-8000-00000000d782
+# Marks the model's captures so far (`fo_requests <mark>` then returns only the ones written after it).
+fo_mark() { docker exec "${P}-model" sh -c "mkdir -p /tmp/capture && ls /tmp/capture > /tmp/fo-mark-$1"; }
+fo_requests() { # <mark> → JSON [{file, text}] of the fake model's request captures written since the mark
+  docker exec -i "${P}-model" node -e '
+const fs = require("fs");
+const before = new Set(fs.readFileSync(`/tmp/fo-mark-${process.argv[1]}`, "utf8").split("\n"));
+const files = fs.readdirSync("/tmp/capture").filter((f) => !before.has(f) && /-(openai|anthropic)\.json$/.test(f)).sort();
+process.stdout.write(JSON.stringify(files.map((file) => ({ file, text: fs.readFileSync(`/tmp/capture/${file}`, "utf8") }))));
+' "$1"
+}
+
+echo "== [automation-fan-out] ocw_conversation_open is in the bot's alsoAllow (turn-scoped: only a fan-out run turn offers it)"
+ALSO="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const lists = Object.entries(cfg.agents?.entries ?? {}).filter(([id]) => id.startsWith("ocw-")).map(([, a]) => a.tools?.alsoAllow ?? []);
+console.log(JSON.stringify(lists.map((l) => l.includes("ocw_conversation_open"))));
+')"
+echo "   alsoAllow  : $ALSO (has ocw_conversation_open, per bot)"
+[[ "$ALSO" == *true* ]] || { echo "FAIL: ocw_conversation_open is not in the bot's alsoAllow"; exit 1; }
+
+echo "== [automation-fan-out] a fan-out run reads outside content, then opens two conversations through the route"
+# The API's answer names the conversation (the run's channel) and the two roots the item turns below reply in.
+api_exec "
+const answer = { ok: true, remainingRun: 8, remainingDay: 98, results: [
+  { externalKey: '1042', opened: true, conversationId: '$FO_CONV', threadRootMessageId: '$FO_ROOT_1042', refused: null },
+  { externalKey: '1043', opened: true, conversationId: '$FO_CONV', threadRootMessageId: '$FO_ROOT_1043', refused: null },
+] };
+await fetch('http://127.0.0.1:4000/__test/conversations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer }) });
+"
+fo_mark run
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/automation-run-fan-out.json" 0199a6f0-0000-7000-8000-00000000d771 /__test/event)"
+echo "$STATE" | FO_AGENT="$FO_AGENT" FO_CONV="$FO_CONV" FO_ROOT_1042="$FO_ROOT_1042" FO_ROOT_1043="$FO_ROOT_1043" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e771";
+const ANCHOR = "0199a6f0-0000-7000-8000-00000000d771";
+const replies = s.messages.filter((x) => x.inReplyToMessageId === ANCHOR);
+const m = replies[0];
+if (!m) { console.log("FAIL: no reply to the fan-out run"); process.exit(1); }
+const opens = (s.conversationOpens ?? []).filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV).map((c) => c.tool);
+const keys = (b) => Object.keys(b ?? {}).sort().join();
+const FORBIDDEN = ["conversationId", "automationId", "runId", "userId", "threadRootMessageId", "columnId"];
+const body = opens[0];
+const items = Array.isArray(body?.items) ? body.items : [];
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ opens: opens.map(keys), items: items.map(keys), gated }));
+const opened = m.text.match(/opened 10\d\d\b/g) ?? [];
+const ok =
+  replies.length === 1 && m.eventId === EV && m.conversationId === process.env.FO_CONV &&
+  m.threadRootMessageId === ANCHOR && m.idempotencyKey === `evt:${EV}` &&
+  // Offered on this run turn only: exactly the two tools of the turn.
+  m.text.endsWith("[tools: 2 | ocw_conversation_open,web_search]") &&
+  // Outside content first (through the gate), then the open still reaches its route (D-05).
+  m.text.includes("Tool web_search said:") && gated.includes("web_search") && !gated.includes("ocw_conversation_open") &&
+  opens.length === 1 && keys(body) === "agentId,eventId,items" && body.agentId === process.env.FO_AGENT &&
+  items.length === 2 && items.every((i) => keys(i) === "body,externalKey,title") &&
+  JSON.stringify(items.map((i) => [i.externalKey, i.title, i.body])) === JSON.stringify([
+    ["1042", "Order 1042", "Vehicle 4471, brake noise."],
+    ["1043", "Order 1043", "Vehicle 4480, inspection."],
+  ]) &&
+  [body, ...items].every((b) => FORBIDDEN.every((k) => !(k in b))) &&
+  // The reply relays the route answer: one "opened" line per item, each naming its root.
+  opened.length === 2 &&
+  new RegExp(`opened 1042 \\S+ ${process.env.FO_ROOT_1042}`).test(m.text) &&
+  new RegExp(`opened 1043 \\S+ ${process.env.FO_ROOT_1043}`).test(m.text) &&
+  m.text.includes("8 left this run, 98 today");
+if (!ok) { console.log("FAIL: expected one open body with the turn ids and the items only, relayed as two opened lines on the anchor"); process.exit(1); }
+'
+# The run's model requests carry the fan-out instruction and the escalation sentence in the automation block.
+fo_requests run | node -e '
+const reqs = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((r) => r.text.includes("0199a6f0-0000-7000-8000-00000000c771"));
+const fanOut = reqs.filter((r) => r.text.includes("call ocw_conversation_open once with all of them") && r.text.includes("Up to 10 this run, 100 left today."));
+const escalated = reqs.filter((r) => r.text.includes("When you finish or need help, mention @logistics."));
+console.log(`   run block  : ${reqs.length} model request(s) of the run, ${fanOut.length} with the fan-out instruction, ${escalated.length} with the escalation sentence`);
+if (fanOut.length === 0 || escalated.length === 0) { console.log("FAIL: the run turn did not carry the fan-out instruction and the escalation sentence"); process.exit(1); }
+'
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/conversations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+"
+echo "PASS automation-fan-out"
 fi
 
 if [[ "$SANDBOX" == "1" ]]; then
