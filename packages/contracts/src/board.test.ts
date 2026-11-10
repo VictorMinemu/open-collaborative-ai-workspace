@@ -34,7 +34,7 @@ import {
   UpdateRecordTemplateRequest,
 } from "./board";
 import { BUILTIN_TOOLS, isDangerousToolName } from "./bot-capabilities";
-import { ChannelSummary, CreateChannelRequest, PostMessageRequest } from "./chat";
+import { ChannelSummary, CreateChannelRequest, extractMentionHandles, PostMessageRequest } from "./chat";
 import { EventTypes } from "./realtime";
 
 const RULE = "{prefix}-{seq:0000} · {field:customer} · {summary}";
@@ -195,6 +195,12 @@ describe("cardMessageBody", () => {
 
   it("ignores values without a definition", () => {
     expect(cardMessageBody({ title: "T", description: "", fields: { secret: "x" }, defs: DEFS })).toBe("T");
+  });
+
+  it("07.17-16 (P2): keeps the word joiner that defuses a mention in a bot-written title; other format characters go", () => {
+    const body = cardMessageBody({ title: "⁠@sam urgent‮", description: "", fields: {}, defs: DEFS });
+    expect(body).toBe("⁠@sam urgent");
+    expect(extractMentionHandles(body)).toEqual([]);
   });
 
   it("always fits the chat message body limit", () => {
