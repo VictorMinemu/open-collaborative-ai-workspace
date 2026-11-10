@@ -1,6 +1,8 @@
 import { type Notification, type OrgUnit, TEAM_MENTION_LIMITS } from "@ocw/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { UnitDialogsProvider } from "../organization/unit-dialogs";
 import { buildTree } from "../organization/unit-meta";
 import { UnitTree } from "../organization/unit-tree";
 import {
@@ -319,16 +321,22 @@ describe("the inbox line of a team mention (07.17 D-07, PD-19)", () => {
 });
 
 describe("the handle on Settings › Organization (07.17 D-14)", () => {
-  const tree = (units: OrgUnit[]) =>
-    renderToStaticMarkup(
-      <UnitTree
-        roots={buildTree(units).roots}
-        selectedId={null}
-        collapsed={new Set()}
-        onSelect={() => {}}
-        onToggle={() => {}}
-      />,
+  const tree = (units: OrgUnit[]) => {
+    const model = buildTree(units);
+    return renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <UnitDialogsProvider tree={model} onCreated={() => {}} onMoved={() => {}} onDeleted={() => {}}>
+          <UnitTree
+            roots={model.roots}
+            selectedId={null}
+            collapsed={new Set()}
+            onSelect={() => {}}
+            onToggle={() => {}}
+          />
+        </UnitDialogsProvider>
+      </QueryClientProvider>,
     );
+  };
   const DEPT = "00000000-0000-4000-8000-0000000000e0";
   const TEAM = "00000000-0000-4000-8000-0000000000e1";
   const PROJ = "00000000-0000-4000-8000-0000000000e2";

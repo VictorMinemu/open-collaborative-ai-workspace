@@ -97,11 +97,15 @@ function hrefOf(n: Notification): string {
   );
 }
 
-/** What happened, after the actor's name: a share names the chat (06-08), everything else is the kind's label. */
-function actionOf(n: Notification): string {
+/**
+ * What happened, after the actor's name: a share names the chat (06-08), a team mention names the team that reached
+ * the reader (07.17 PD-19; "mentioned your team" once it is gone), everything else is the kind's label.
+ */
+export function actionOf(n: Notification): string {
   if (n.kind === "ai_chat_shared" && n.conversation.kind === "ai_chat") {
     return `shared “${n.conversation.label}” with you`;
   }
+  if (n.kind === "team_mention" && n.unit?.handle) return `mentioned @${n.unit.handle}`;
   return KIND_LABEL[n.kind];
 }
 

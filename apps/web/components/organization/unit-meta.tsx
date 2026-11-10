@@ -62,6 +62,29 @@ export function KindIcon({
   );
 }
 
+/**
+ * A team's or department's `@handle` in muted mono (07.17 D-14), after its name; nothing for projects (never
+ * mentionable) or units from an older server. Truncates inside a `min-w-0` row.
+ */
+export function UnitHandle({
+  unit,
+  className,
+}: {
+  unit: Pick<OrgUnit, "kind" | "handle">;
+  className?: string;
+}) {
+  if (unit.kind === "project" || !unit.handle) return null;
+  return (
+    <span
+      data-testid="unit-handle"
+      title="Mention handle"
+      className={cn("min-w-0 truncate font-mono font-normal text-[11.5px] text-muted-foreground", className)}
+    >
+      {`@${unit.handle}`}
+    </span>
+  );
+}
+
 export function kindCount(kind: UnitKind, n: number): string {
   return `${n} ${n === 1 ? KIND_META[kind].label.toLowerCase() : KIND_META[kind].plural}`;
 }

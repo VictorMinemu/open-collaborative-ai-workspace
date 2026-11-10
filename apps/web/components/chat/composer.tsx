@@ -1,6 +1,12 @@
 "use client";
 
-import { type Attachment, MENTION_ALL_WARN_AT, mentionAllOf } from "@ocw/contracts";
+import {
+  type Attachment,
+  extractMentionHandles,
+  MENTION_ALL_WARN_AT,
+  mentionAllOf,
+  TEAM_MENTION_LIMITS,
+} from "@ocw/contracts";
 import { ArrowUp, AtSign, Building2, Megaphone, Paperclip, Users } from "lucide-react";
 import {
   type ClipboardEvent,
@@ -133,6 +139,62 @@ export function buildMentionSuggestions(
   return q ? [...special, ...people, ...teams] : [...people, ...special, ...teams];
 }
 
+/** The largest reach among the units `body` names (handles as the API parses them, 07.17 D-18); 0 when none. */
+export function teamReachOf(body: string, unitMentions: readonly UnitMentionCandidate[] | undefined): number {
+  return largestTeamMention(body, unitMentions)?.reach ?? 0;
+}
+
+function largestTeamMention(
+  body: string,
+  unitMentions: readonly UnitMentionCandidate[] | undefined,
+): UnitMentionCandidate | null {
+  if (!unitMentions?.length) return null;
+  const named = new Set(extractMentionHandles(body));
+  let best: UnitMentionCandidate | null = null;
+  for (const u of unitMentions) if (named.has(u.handle) && (!best || u.reach > best.reach)) best = u;
+  return best;
+}
+
+export interface MentionConfirmation {
+  kind: "all" | "team";
+  title: string;
+  description: string;
+}
+
+/**
+ * What to ask before sending `body`, or null to send at once: `@channel` / `@here` where allowed above
+ * MENTION_ALL_WARN_AT members (unchanged), else a team whose reach is above TEAM_MENTION_LIMITS.confirmAbove
+ * (07.17 D-18). One dialog when both apply: the broadcast's, as it reaches everyone.
+ */
+export function mentionConfirmation(
+  body: string,
+  opts: {
+    specialMentions?: readonly SpecialMention[] | undefined;
+    memberCount?: number | undefined;
+    unitMentions?: readonly UnitMentionCandidate[] | undefined;
+  },
+): MentionConfirmation | null {
+  const all = mentionAllOf(body);
+  const members = opts.memberCount ?? 0;
+  if (opts.specialMentions?.length && members > MENTION_ALL_WARN_AT && all) {
+    return {
+      kind: "all",
+      title: `Notify ${members} people?`,
+      description:
+        all === "here"
+          ? `@here notifies everyone in this channel who is online now, out of ${members} members.`
+          : `@channel notifies all ${members} members of this channel, wherever they are.`,
+    };
+  }
+  const team = largestTeamMention(body, opts.unitMentions);
+  if (!team || team.reach <= TEAM_MENTION_LIMITS.confirmAbove) return null;
+  return {
+    kind: "team",
+    title: `Notify ${team.reach} people?`,
+    description: `@${team.handle} reaches ${team.reach} people who can read this channel.`,
+  };
+}
+
 /** "Team · 6" / "Department · 24": the unit's kind and how many people a mention of it reaches. */
 export const unitMentionMeta = (u: UnitMentionCandidate) =>
   `${u.kind === "department" ? "Department" : "Team"} · ${u.reach}`;
@@ -197,6 +259,14 @@ export function Composer({
   const pendingCaret = useRef<{ pos: number; detect: boolean } | null>(null);
 
   const [confirming, setConfirming] = useState<string | null>(null);
+  const confirmation = confirming
+    ? mentionConfirmation(confirming, { specialMentions, memberCount, unitMentions })
+    : null;
+  // The dialog keeps its last text while it animates out.
+  const lastConfirmation = useRef<MentionConfirmation | null>(null);
+  if (confirmation) lastConfirmation.current = confirmation;
+  const shownConfirmation = confirmation ?? lastConfirmation.current;
+  const team = shownConfirmation?.kind === "team";
 
   const filesConfig = useAttachmentsConfig();
   const canAttach = !!conversationId && attachments && !disabled && filesConfig.data?.enabled === true;
@@ -265,8 +335,9 @@ export function Composer({
   const send = () => {
     const body = value.trim();
     if (!canSend) return;
-    // Pitfall 6: notifying a whole channel is confirmed above MENTION_ALL_WARN_AT members (like Slack).
-    if (specialMentions?.length && (memberCount ?? 0) > MENTION_ALL_WARN_AT && mentionAllOf(body)) {
+    // Pitfall 6: notifying a whole channel is confirmed above MENTION_ALL_WARN_AT members (like Slack); a team
+    // reaching more than TEAM_MENTION_LIMITS.confirmAbove people is confirmed too (07.17 D-18).
+    if (mentionConfirmation(body, { specialMentions, memberCount, unitMentions })) {
       setQuery(null);
       setConfirming(body);
       return;
@@ -440,32 +511,32 @@ export function Composer({
       {footer}
 
       <Dialog open={confirming !== null} onOpenChange={(o) => !o && setConfirming(null)}>
-        <DialogContent data-testid="mention-all-confirm">
+        <DialogContent data-testid={team ? "team-mention-confirm" : "mention-all-confirm"}>
           <DialogHeader>
-            <DialogTitle>Notify {memberCount} people?</DialogTitle>
-            <DialogDescription>
-              {confirming && mentionAllOf(confirming) === "here"
-                ? `@here notifies everyone in this channel who is online now, out of ${memberCount} members.`
-                : `@channel notifies all ${memberCount} members of this channel, wherever they are.`}
-            </DialogDescription>
+            <DialogTitle>{shownConfirmation?.title}</DialogTitle>
+            <DialogDescription>{shownConfirmation?.description}</DialogDescription>
           </DialogHeader>
           <blockquote className="line-clamp-4 whitespace-pre-wrap break-words rounded-lg border bg-muted/40 px-3.5 py-2.5 text-[14px] text-foreground/90">
             {confirming}
           </blockquote>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirming(null)} data-testid="mention-all-cancel">
+            <Button
+              variant="outline"
+              onClick={() => setConfirming(null)}
+              data-testid={team ? "team-mention-cancel" : "mention-all-cancel"}
+            >
               Cancel
             </Button>
             <Button
-              data-testid="mention-all-send"
+              data-testid={team ? "team-mention-send" : "mention-all-send"}
               onClick={() => {
                 const body = confirming;
                 setConfirming(null);
                 if (body) commit(body);
               }}
             >
-              <Megaphone />
-              Send and notify
+              {team ? <Users /> : <Megaphone />}
+              {team ? "Send" : "Send and notify"}
             </Button>
           </DialogFooter>
         </DialogContent>
