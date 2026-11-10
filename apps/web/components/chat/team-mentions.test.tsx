@@ -368,7 +368,9 @@ describe("the handle on Settings › Organization (07.17 D-14)", () => {
     expect(tag).toContain("font-mono");
     expect(tag).toContain("text-muted-foreground");
     expect(tag).toContain("truncate");
-    expect(tag).toContain("min-w-0");
+    // Gives way to the name on narrow rows, but never shrinks to a bare "@." (at least 48 px).
+    expect(tag).toContain("min-w-12");
+    expect(tag).toContain("shrink-[3]");
     expect(html).toContain("Portal");
   });
 

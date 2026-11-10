@@ -656,7 +656,7 @@ function UnitOption({
         <Icon className="size-3.5" />
       </span>
       <span className="min-w-0 truncate font-medium">{u.name}</span>
-      <span className="min-w-0 shrink-[3] truncate text-muted-foreground text-xs">@{u.handle}</span>
+      <span className="min-w-14 shrink-[3] truncate text-muted-foreground text-xs">@{u.handle}</span>
       <span
         className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground tabular-nums"
         title={`Reaches ${u.reach} ${u.reach === 1 ? "person" : "people"}`}

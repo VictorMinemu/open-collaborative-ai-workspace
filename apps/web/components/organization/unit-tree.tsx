@@ -136,7 +136,7 @@ export function UnitTree({
               if (e.target === e.currentTarget) setFocusedId(u.id);
             }}
             className={cn(
-              "group relative flex h-11 cursor-pointer select-none items-center gap-1.5 rounded-lg pr-1 text-[14px] outline-none transition-colors lg:h-9 lg:text-[13.5px]",
+              "group relative flex h-11 min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-lg pr-1 text-[14px] outline-none transition-colors lg:h-9 lg:text-[13.5px]",
               "focus-visible:ring-[3px] focus-visible:ring-ring/40",
               selected
                 ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
@@ -176,7 +176,7 @@ export function UnitTree({
                 {u.name}
               </span>
               {/* 07.17 (D-14): the mention handle gives way to the name when the row is narrow. */}
-              <UnitHandle unit={u} className="shrink-[3]" />
+              <UnitHandle unit={u} className="min-w-12 shrink-[3]" />
             </span>
             <span
               aria-hidden
