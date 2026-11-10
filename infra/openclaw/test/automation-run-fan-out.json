@@ -3,7 +3,11 @@
   "data": {
     "eventId": "0199a6f0-0000-7000-8000-00000000e771",
     "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
-    "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c771", "kind": "channel", "name": "fleet-orders" },
+    "conversation": {
+      "id": "0199a6f0-0000-7000-8000-00000000c771",
+      "kind": "channel",
+      "name": "fleet-orders"
+    },
     "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d771" },
     "message": {
       "id": "0199a6f0-0000-7000-8000-00000000d771",
