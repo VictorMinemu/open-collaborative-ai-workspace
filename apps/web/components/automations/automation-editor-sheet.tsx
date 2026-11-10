@@ -3,8 +3,10 @@
 import {
   AUTOMATION_LIMITS,
   type Automation,
+  type AutomationFanOutInput,
   type AutomationOptions,
   type AutomationTarget,
+  type AutomationTargetOptions,
   type AutomationTriggerInput,
   type AutomationTriggerKind,
   type CreateAutomationRequest,
@@ -61,6 +63,7 @@ import {
   useRunNow,
   useSaveAutomation,
   useSchedulePreview,
+  useTargetOptions,
 } from "@/lib/automation-queries";
 import {
   EMPTY_INBOUND,
@@ -79,6 +82,16 @@ import {
 import { useAgents } from "@/lib/bots-queries";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import {
+  FAN_OUT_DEFAULT,
+  type FanOutErrors,
+  FanOutSection,
+  type FanOutValue,
+  fanOutAllowed,
+  fanOutForSave,
+  fanOutPerDayOf,
+  fanOutValueOf,
+} from "./fan-out-section";
 import { RunHistory } from "./run-history";
 import type { ScheduleErrors } from "./schedule-builder";
 import { EMPTY_TARGET, type TargetErrors, TargetPicker, type TargetValue } from "./target-picker";
@@ -95,6 +108,8 @@ interface Values {
   /** Webhook and mail triggers (07.6-18): What happens + mapping, and the mailbox. */
   inbound: InboundValue;
   mailbox: MailboxValue;
+  /** 07.17 (D-02, PD-05): one conversation per new item, with its caps. */
+  fanOut: FanOutValue;
 }
 
 type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay", string>> & {
@@ -102,6 +117,7 @@ type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay"
   target?: TargetErrors;
   inbound?: InboundErrors;
   mailbox?: MailboxErrors;
+  fanOut?: FanOutErrors;
 };
 
 type Mode = "new" | "edit" | "readonly";
@@ -131,11 +147,18 @@ function valuesOf(a: Automation): Values {
     maxRunsPerDay: String(a.maxRunsPerDay),
     inbound: inboundValueOf(a.inbound),
     mailbox: mailboxValueOf(a.trigger.mailbox),
+    fanOut: fanOutValueOf(a.fanOut),
   };
 }
 
 function valuesOfDraft(d: AutomationDraftDefaults): Values {
-  return { ...d, triggerKind: "schedule", inbound: EMPTY_INBOUND, mailbox: EMPTY_MAILBOX };
+  return {
+    ...d,
+    triggerKind: "schedule",
+    inbound: EMPTY_INBOUND,
+    mailbox: EMPTY_MAILBOX,
+    fanOut: FAN_OUT_DEFAULT,
+  };
 }
 
 /**
@@ -164,6 +187,7 @@ function blank(): Values {
     maxRunsPerDay: String(AUTOMATION_LIMITS.maxRunsPerDayDefault),
     inbound: EMPTY_INBOUND,
     mailbox: EMPTY_MAILBOX,
+    fanOut: FAN_OUT_DEFAULT,
   };
 }
 
@@ -184,6 +208,23 @@ function targetOf(t: TargetValue): AutomationTarget | null {
         ? { kind: "board", conversationId: t.conversationId, columnId: t.columnId }
         : null;
   }
+}
+
+/**
+ * The target's names for the editor's copy (`#orders`, the board column `Backlog`): from the bot's target options, else
+ * from the stored label (`#orders`, `Fleet · Backlog`, `Thread in #orders`) while they load or for a read-only viewer.
+ */
+export function targetNamesOf(
+  t: TargetValue,
+  conversations: AutomationTargetOptions["conversations"] | undefined,
+): { conversation: string | null; column: string | null } {
+  if (t.kind === "dm") return { conversation: "your DM", column: null };
+  const c = conversations?.find((x) => x.conversationId === t.conversationId);
+  const [first, second] = t.label ? t.label.replace(/^Thread in /, "").split(" · ") : [];
+  const conversation = c ? (c.layout === "board" ? c.name : `#${c.name}`) : (first ?? null);
+  const column =
+    t.kind === "board" ? (c?.columns.find((x) => x.id === t.columnId)?.name ?? second ?? null) : null;
+  return { conversation, column };
 }
 
 function triggerOf(v: Values): AutomationTriggerInput | null {
@@ -307,6 +348,14 @@ export function AutomationEditorSheet({
   const botName = bot?.displayName ?? "The bot";
   const caps = options.data?.caps;
   const maxRuns = caps?.maxRunsPerDayCap ?? AUTOMATION_LIMITS.maxRunsPerDayCeiling;
+  // "For each new item" shows only where the API allows fan-out (PD-05); the API still decides.
+  const fanOutOn = fanOutAllowed({
+    actionKind: automation?.actionKind ?? "agent_turn",
+    triggerKind: values.triggerKind,
+    targetKind: values.target.kind,
+  });
+  const targetOptions = useTargetOptions(open && !readonly && values.agentId ? values.agentId : null);
+  const names = targetNamesOf(values.target, targetOptions.data?.conversations);
 
   const cron = values.triggerKind === "schedule" ? scheduleToCron(values.schedule) : null;
   const livePreview = useSchedulePreview(
@@ -344,7 +393,12 @@ export function AutomationEditorSheet({
     onClose();
   }
 
-  function validate(): { trigger: AutomationTriggerInput; target: AutomationTarget; runs: number } | null {
+  function validate(): {
+    trigger: AutomationTriggerInput;
+    target: AutomationTarget;
+    runs: number;
+    fanOut: AutomationFanOutInput | undefined;
+  } | null {
     const e: Errors = {};
     const name = values.name.trim();
     if (!name) e.name = "Give the automation a name";
@@ -390,6 +444,12 @@ export function AutomationEditorSheet({
     const runs = Number(raw);
     if (!/^\d+$/.test(raw) || runs < 1 || runs > maxRuns)
       e.maxRunsPerDay = `Use a whole number from 1 to ${maxRuns}`;
+    const fan = fanOutForSave({
+      allowed: fanOutOn,
+      value: values.fanOut,
+      initial: mode === "new" ? null : initial.fanOut,
+    });
+    if (!fan.ok) e.fanOut = fan.errors;
     setErrors(e);
     if (Object.keys(e).length > 0) return null;
     // A schedule the preview refused (too frequent) is refused by the save the same way: say it before asking.
@@ -408,7 +468,7 @@ export function AutomationEditorSheet({
       setFormError("Couldn't save the automation. Try again.");
       return null;
     }
-    return { trigger, target, runs };
+    return { trigger, target, runs, fanOut: fan.ok ? fan.fanOut : undefined };
   }
 
   const errorCtx = () => ({
@@ -432,6 +492,7 @@ export function AutomationEditorSheet({
           maxRunsPerDay: ok.runs,
           ...(ok.trigger.kind !== "schedule" ? { inbound: inboundOf(values.inbound, ok.target.kind) } : {}),
           ...(draftId && draftView ? { fromApprovalId: draftId } : {}),
+          ...(ok.fanOut ? { fanOut: ok.fanOut } : {}),
         };
         const res = await save.mutateAsync({ body });
         // A webhook's secret leaves the mutation cache at once (07.6-18): it lives only in this sheet's state.
@@ -480,6 +541,7 @@ export function AutomationEditorSheet({
         body.inbound = inboundOf(values.inbound, ok.target.kind);
       }
       if (values.maxRunsPerDay.trim() !== initial.maxRunsPerDay.trim()) body.maxRunsPerDay = ok.runs;
+      if (ok.fanOut) body.fanOut = ok.fanOut;
       const res = await save.mutateAsync({ id: automation.id, body });
       if (res.webhookSecret) save.reset();
       setLastSave(res);
@@ -567,7 +629,7 @@ export function AutomationEditorSheet({
       ? expectedTurnsPerDay({
           schedule: values.triggerKind === "schedule" ? values.schedule : null,
           maxRunsPerDay: Number(runsRaw),
-          fanOutPerDay: 0,
+          fanOutPerDay: fanOutPerDayOf(fanOutOn, values.fanOut),
         })
       : null;
   const showTabs = !!id && !!automation;
@@ -827,6 +889,21 @@ export function AutomationEditorSheet({
                     disabled={readonly}
                   />
                 </SheetSection>
+
+                {fanOutOn && (values.target.kind === "channel" || values.target.kind === "board") ? (
+                  <SheetSection title="For each new item">
+                    <FanOutSection
+                      value={values.fanOut}
+                      onChange={(fanOut) => set({ fanOut })}
+                      targetKind={values.target.kind}
+                      conversationName={names.conversation}
+                      columnName={names.column}
+                      automationName={values.name}
+                      errors={errors.fanOut ?? {}}
+                      disabled={readonly}
+                    />
+                  </SheetSection>
+                ) : null}
 
                 <SheetSection title="Runs as">
                   <div className="grid gap-1.5" data-testid="automation-run-as">
