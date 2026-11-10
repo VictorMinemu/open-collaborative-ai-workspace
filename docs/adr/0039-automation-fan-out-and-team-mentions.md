@@ -318,3 +318,8 @@ documented behaviour below. The accepted text above stays as written; where it d
   handle (409 `username_taken`), and a name-derived username steps past one (`logistics-2`). The allocator still does
   not skip people's handles: they are derived from names and e-mails that change after a unit exists, so the
   resolve-time rule above is what holds; a SQL twin of `userHandle` would also be needed to keep § 9's parity.
+- **WR-05, § 9 (one allocator).** Replaces "A TypeScript allocator under the organization lock must give the same
+  result for the same state": `createUnit` takes its handle from `app.org_unit_handle` under the unit lock, the same
+  function as the backfill and the fill trigger, so "Straße" is `strasse` on every path. The contracts' `unitHandle` is
+  only the composer's preview (approximate for letters that do not decompose). A handle unique violation from a writer
+  outside the lock answers 409 `unit_handle_taken` instead of a 500.

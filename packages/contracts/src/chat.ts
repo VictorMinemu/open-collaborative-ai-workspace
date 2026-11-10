@@ -668,7 +668,9 @@ const trimHandleEnds = (s: string) => s.replace(/^[._-]+|[._-]+$/g, "");
  * "R&D / Labs" → "rd-labs"; a name with no usable character gives "team"; a reserved handle gets "-1" (like
  * `userHandle`). The API generates it once at creation (then "-2", "-3", … until it is unique among the organization's
  * unit handles and bot usernames) and stores it on the unit: it is never derived again at read time, so renames and
- * moves keep it.
+ * moves keep it. 07.17 code review WR-05: the stored handle comes from the SQL allocator (`app.org_unit_handle`, on
+ * `app.unaccent`); this is only a client-side preview, approximate for letters that do not decompose ("Straße" previews
+ * "strae", is stored "strasse").
  */
 export function unitHandle(name: string): string {
   const base = trimHandleEnds(

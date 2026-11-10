@@ -20,7 +20,6 @@ import {
   UnitMemberParams,
   UnitRole,
   UpdateUnitMemberRequest,
-  unitHandle,
 } from "@ocw/contracts";
 import {
   agents,
@@ -40,7 +39,7 @@ import {
   workProjectRepos,
   workProjectTeams,
 } from "@ocw/db";
-import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
@@ -157,37 +156,18 @@ export async function requireUnit(tx: Tx, id: string): Promise<UnitRow> {
   return unit;
 }
 
-/** How many `nextHandleCandidate`s one allocation round checks (two queries per round; one round in practice). */
-const HANDLE_ROUND = 32;
-
 /**
- * Phase 07.17 (D-14, PD-12): the handle a new unit named `name` gets: the first `nextHandleCandidate` of
- * `unitHandle(name)` that no other unit of the organization holds and that is not a live bot's username (a deleted
- * bot's username is free again). The same rules as `app.org_unit_handle`. The caller holds `lockUnits`, the lock every
- * unit insert takes, so the handle cannot be taken between this read and the insert.
+ * Phase 07.17 (D-14, PD-12; code review WR-05): the handle a new unit named `name` gets, from the one allocator that
+ * also backfilled every unit and fills any insert that omits it (`app.org_unit_handle`: `app.unaccent`, so "Straße" →
+ * "strasse"; the first free of base, base-2, … among the organization's unit handles and live bot usernames). The
+ * caller holds `lockUnits`, the lock every unit insert takes, so the handle cannot be taken between this read and the
+ * insert. `unitHandle` in the contracts is only the client-side preview (approximate for letters that do not decompose).
  */
 export async function allocateUnitHandle(tx: Tx, organizationId: string, name: string): Promise<string> {
-  const base = unitHandle(name);
-  for (let first = 1; ; first += HANDLE_ROUND) {
-    const candidates = Array.from({ length: HANDLE_ROUND }, (_, i) => nextHandleCandidate(base, first + i));
-    const units = await tx
-      .select({ handle: orgUnits.handle })
-      .from(orgUnits)
-      .where(and(eq(orgUnits.organizationId, organizationId), inArray(orgUnits.handle, candidates)));
-    const bots = await tx
-      .select({ handle: sql<string>`lower(${agents.username})` })
-      .from(agents)
-      .where(
-        and(
-          eq(agents.organizationId, organizationId),
-          isNull(agents.deletedAt),
-          inArray(sql`lower(${agents.username})`, candidates),
-        ),
-      );
-    const held = new Set([...units, ...bots].map((r) => r.handle));
-    const free = candidates.find((c) => !held.has(c));
-    if (free) return free;
-  }
+  const res = await tx.execute(sql`select app.org_unit_handle(${organizationId}::uuid, ${name}) as handle`);
+  const handle = (res.rows[0] as { handle: string | null } | undefined)?.handle;
+  if (!handle) throw new Error("unit handle allocation returned nothing");
+  return handle;
 }
 
 async function unitCounts(tx: Tx, unitId?: string) {
@@ -321,6 +301,10 @@ export async function createUnit(
       .returning();
   } catch (err) {
     if (isUniqueViolation(err) && constraintOf(err) === "org_units_sibling_name_uq") throw nameTaken(name);
+    // WR-05: a handle taken by a writer outside the unit lock (a raw insert, an N-1 writer): try again, never a 500.
+    if (isUniqueViolation(err) && constraintOf(err) === "org_units_handle_uq") {
+      throw conflict("That team's handle was just taken; try again", "unit_handle_taken");
+    }
     throw err;
   }
   if (!row) throw new Error("unit insert returned no row");

@@ -800,6 +800,20 @@ describe("units: @handles are generated once (Phase 07.17, D-14, PD-12, E19)", (
     expect(await listed(third.id)).toBe("logistics-3");
   });
 
+  it("WR-05: names whose letters do not decompose get the SQL allocator's handle (one source of truth)", async () => {
+    for (const [name, handle] of [
+      ["Straße", "strasse"],
+      ["Æsir", "aesir"],
+      ["Łódź", "lodz"],
+      ["Søren", "soren"],
+    ] as const) {
+      expect(await sqlHandle(name)).toBe(handle);
+      const made = await create("team", name, north);
+      expect(made.handle, name).toBe(handle);
+      expect(await stored(made.id)).toBe(handle);
+    }
+  });
+
   it("a sibling name clash is still unit_name_taken; nothing is created", async () => {
     const count = async () => (await su.query("select count(*)::int as n from app.org_units")).rows[0].n;
     const before = await count();
