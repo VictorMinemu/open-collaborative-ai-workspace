@@ -9,7 +9,9 @@ import {
   type AutomationRunUpdatedEvent,
   BUILTIN_TOOLS,
   cellTopic,
+  type EscalationTargetView,
   EventTypes,
+  FAN_OUT_LIMITS,
   type ModelRef,
 } from "@ocw/contracts";
 import {
@@ -96,6 +98,11 @@ export interface DeliverAutomationRunInput {
    * run and its turn are exactly what they were before the phase (E9).
    */
   fanOut?: { perRun: number; remainingRun: number; remainingDay: number } | null;
+  /**
+   * Phase 07.17 (D-08, PD-15): the automation's escalation targets as resolved at this delivery by the runner
+   * (`escalationFor`: gone or no longer valid targets already dropped). On the event only when not empty.
+   */
+  escalation?: EscalationTargetView[];
 }
 
 export type DeliverAutomationRunResult =
@@ -258,6 +265,9 @@ export async function deliverAutomationRun(
               remainingDay: fanOut.remainingDay,
             },
           }
+        : {}),
+      ...(p.escalation && p.escalation.length > 0
+        ? { escalation: p.escalation.slice(0, FAN_OUT_LIMITS.escalationMax) }
         : {}),
     },
   };

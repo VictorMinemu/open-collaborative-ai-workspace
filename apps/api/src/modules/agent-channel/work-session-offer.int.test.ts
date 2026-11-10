@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type BotWorkZoneProfileInput,
+  BUILTIN_TOOLS,
+  CONVERSATION_OPEN_FLAGS,
   type SessionAudienceInput,
   TurnWorkZone,
   WORK_SESSION_TOOL_FLAGS,
@@ -274,9 +276,13 @@ const reasonOf = (agentId = atlasId) =>
 
 /**
  * An unattended delivery of Atlas (an automation run or a consult hop) on a fresh message of Ana's, through the one
- * delivery code (`buildMentionEvents`) with the trigger and chain those callers set.
+ * delivery code (`buildMentionEvents`) with the trigger and chain those callers set. `conversationOpen`: the fan-out
+ * offer `deliverAutomationRun` sets on a fan-out automation's run (07.17-11).
  */
-async function unattendedTurn(trigger: "automation" | "consult"): Promise<Json> {
+async function unattendedTurn(
+  trigger: "automation" | "consult",
+  conversationOpen?: AgentMention["conversationOpen"],
+): Promise<Json> {
   const msg = await ok(
     ana.request("POST", `/api/v1/conversations/${engId}/messages`, {
       body: `the invoice totals are off ${randomUUID().slice(0, 6)}`,
@@ -306,6 +312,7 @@ async function unattendedTurn(trigger: "automation" | "consult"): Promise<Json> 
           },
         }
       : {}),
+    ...(conversationOpen ? { conversationOpen } : {}),
   };
   const events = await stack.built.core.db.withTenant({ organizationId: orgId, userId: anaId }, (tx) =>
     buildMentionEvents(tx, mention, { core: stack.built.core, perms: perms() }),
@@ -382,6 +389,14 @@ describe("no offer when the asker, the profile or the delivery does not allow on
 
   it("an automation run's turn of the same bot: no offer (07.17 owns automations)", async () => {
     await expectNoOffer(await unattendedTurn("automation"));
+  });
+
+  it("07.17-11: a fan-out run's turn of the same bot gets ocw_conversation_open and still none of the four (ADR-0038 §12)", async () => {
+    expect(await reasonOf()).toBe("active");
+    const ev = await unattendedTurn("automation", { automationId: randomUUID(), runId: randomUUID() });
+    expect(ev.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(ev.turn.toolFlags[BUILTIN_TOOLS.conversationOpen]).toEqual(CONVERSATION_OPEN_FLAGS);
+    await expectNoOffer(ev);
   });
 
   it("a consult hop's turn of the same bot: no offer (hops are unattended)", async () => {

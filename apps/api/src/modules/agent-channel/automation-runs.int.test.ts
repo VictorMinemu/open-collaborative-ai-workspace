@@ -4,6 +4,7 @@ import {
   type AutomationRunTrigger,
   BUILTIN_TOOLS,
   CONVERSATION_OPEN_FLAGS,
+  type EscalationTargetView,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_TOOL_NAMES,
   WORK_SESSION_TOOL_NAMES,
@@ -143,6 +144,7 @@ async function deliver(
     threadRootId?: string;
     runAs?: string;
     agentId?: string;
+    escalation?: EscalationTargetView[];
   } = {},
 ): Promise<DeliverAutomationRunResult> {
   const runAs = p.runAs ?? s.victorId;
@@ -163,6 +165,7 @@ async function deliver(
         inbound: p.inbound ?? null,
         taintedAtStart: p.taintedAtStart ?? false,
         timeZone: "Europe/Madrid",
+        ...(p.escalation ? { escalation: p.escalation } : {}),
       },
     ),
   );
@@ -1139,6 +1142,75 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
     const direct = await turnWithoutOffer(ev);
     expect(Object.keys(ev.turn).sort()).toEqual(Object.keys(direct).sort());
     expect(withoutClock(ev.turn)).toEqual(withoutClock(direct));
+  });
+
+  it("escalation (D-08, PD-15): a run carries the targets' views; Sam out of the board → only the unit; none → no key", async () => {
+    const unit = async (kind: string, name: string, parentId: string | null) =>
+      (await ok(s.victor.request("POST", "/api/v1/units", { kind, name, parentId }) as Promise<Res>))
+        .id as string;
+    const logistics = await unit("team", "Logistics", await unit("department", "Operations", null));
+    const handle = (await s.su.query("select handle from app.org_units where id = $1", [logistics])).rows[0]
+      .handle as string;
+    const unitView = { kind: "unit", id: logistics, handle, displayName: "Logistics" };
+    const escalation = [
+      { kind: "unit", id: logistics },
+      { kind: "user", id: s.samId },
+    ];
+    // A fan-out automation and an ordinary one: escalation is on any agent-turn automation's runs.
+    for (const fanOut of [{ enabled: true }, { enabled: false }]) {
+      const automationId = await createAutomation({ fanOut, escalation });
+      const ev = await runNowEvent(automationId);
+      expect(ev.automationRun.escalation).toEqual([
+        unitView,
+        { kind: "user", id: s.samId, handle: "sam", displayName: "Sam Lee" },
+      ]);
+      expect("fanOut" in ev.automationRun).toBe(fanOut.enabled);
+
+      // Sam loses access to the board: the next run names only the unit (resolved again at delivery).
+      await ok(
+        s.victor.request("DELETE", `/api/v1/channels/${ordersId}/members/user/${s.samId}`) as Promise<Res>,
+      );
+      try {
+        expect((await runNowEvent(automationId)).automationRun.escalation).toEqual([unitView]);
+      } finally {
+        await ok(
+          s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, {
+            kind: "user",
+            id: s.samId,
+          }) as Promise<Res>,
+        );
+      }
+    }
+    // Every target gone: no key at all, like an automation without targets.
+    const lonely = await createAutomation({ escalation: [{ kind: "unit", id: logistics }] });
+    await s.su.query("delete from app.org_units where id = $1", [logistics]);
+    expect(await runNowEvent(lonely)).not.toHaveProperty("automationRun.escalation");
+    expect((await runNowEvent(await createAutomation())).automationRun).not.toHaveProperty("escalation");
+  });
+
+  it("a webhook run's event keeps its inbound block and gains escalation only when targets exist", async () => {
+    const view: EscalationTargetView = {
+      kind: "user",
+      id: s.samId,
+      handle: "sam",
+      displayName: "Sam Lee",
+    };
+    const hook = { source: "webhook" as const, title: "Order #42", text: "A new order", from: null };
+    for (const escalation of [[view], [], undefined]) {
+      const r = await scheduledRun({ trigger: "webhook" });
+      const inbound = { ...hook, receivedAt: new Date().toISOString() };
+      const out = await deliver(r, {
+        trigger: "webhook",
+        inbound,
+        taintedAtStart: true,
+        ...(escalation ? { escalation } : {}),
+      });
+      expect(out.delivered).toBe(true);
+      const [ev] = (await runEvents(r.runId)) as [Json];
+      expect(ev.automationRun.inbound).toEqual(inbound);
+      if (escalation?.length) expect(ev.automationRun.escalation).toEqual([view]);
+      else expect(ev.automationRun).not.toHaveProperty("escalation");
+    }
   });
 
   it("MAX_TURN_TOOLS: a full run turn is still delivered, without the tool and without fanOut; one free slot offers it", async () => {

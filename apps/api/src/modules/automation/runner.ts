@@ -13,6 +13,7 @@ import type {
   SettledFireResult,
 } from "./actions";
 import { decideFire, localDayStart, outcomeOf, recordOutcome } from "./budget";
+import { escalationFor } from "./escalation";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
 import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
@@ -467,6 +468,8 @@ export function agentTurnAction(core: Core, deps: AutomationSeamDeps): ActionKin
           taintedAtStart: inbound?.taintedAtStart ?? false,
           timeZone: a.timeZone,
           fanOut: await fanOutOffer(tx, a, new Date()),
+          // D-08, PD-15: whom the bot names when done or stuck, re-validated at this delivery (T-07.17-11-03).
+          escalation: await escalationFor(tx, { core, perms: deps.perms }, a),
         },
       );
       if (!out.delivered)
