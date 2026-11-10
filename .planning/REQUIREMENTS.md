@@ -417,7 +417,7 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [ ] **AFO-01**: A scheduled automation can run every 5 minutes or more (was 15)
 - [ ] **AFO-02**: One automation run can open a new conversation per new item it finds (a new thread in its channel target, or a new card in its board target), capped per run, with a per-automation dedupe key (the item's external id) so the same item never opens twice; each new conversation gets its own bot turn that carries the item as untrusted content and keeps the run's tools, including the Work Zone profile of 07.16
 - [ ] **AFO-03**: A bot can move and set waiting on every card its automation opened, from any turn in that card's thread, also after reading outside content when its profile allows it (BWZ-05)
-- [ ] **AFO-04**: People and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
+- [ ] **AFO-04**: In channel posts (threads and board cards included; not DMs, group DMs or AI chats), people and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
 - [ ] **AFO-05**: Proven by integration tests and an e2e spec (fake MCP of orders → card → Work Zone session → team mention on finish), desktop and mobile; ADR-0039 records the decisions
 
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
