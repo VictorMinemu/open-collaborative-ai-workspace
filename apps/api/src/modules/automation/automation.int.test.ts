@@ -235,6 +235,11 @@ describe("Víctor creates a weekly automation through REST (Task 1, tracer)", ()
       triggerKind: "schedule",
       targetKind: "channel",
       conversationId: sales,
+      // 07.17 (PD-17, PD-18): the fan-out settings as counts, off for a 07.16-shaped body.
+      fanOut: false,
+      perRun: 10,
+      perDay: 100,
+      escalationCount: 0,
     });
     expect(JSON.stringify(audit!.metadata)).not.toMatch(/Weekly|closed deals/);
     expect(await userEvents(victorId, automationId)).toEqual([{ automationId }]);

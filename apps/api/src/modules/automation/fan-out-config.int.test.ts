@@ -570,3 +570,122 @@ describe("escalation targets: validated at save, resolved at delivery (D-08, PD-
     expect((await automationRow(b.id)).escalation_targets).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: opened per run, audit, tenant isolation
+
+describe("runs report what they opened; the settings are audited and isolated per organization (PD-17)", () => {
+  const runsOf = async (id: string, as = s.victor) =>
+    (await ok(as.request("GET", `/api/v1/automations/${id}/runs`) as Promise<Res>)).runs as Json[];
+  const audits = async (action: string, id: string) =>
+    (
+      await s.su.query(
+        "select metadata from app.audit_events where action = $1 and resource_id = $2 order by occurred_at, id",
+        [action, id],
+      )
+    ).rows.map((r) => r.metadata as Json);
+  const hash = (n: number) => n.toString(16).padStart(64, "0");
+
+  it("GET /runs counts the conversations a fan-out run opened; runs of other automations say null", async () => {
+    const a = await created({ name: "Opened count", fanOut: { enabled: true } });
+    const first = await runNow(a.id);
+    const second = await runNow(a.id);
+    expect(await drain()).toBe(2);
+    for (const n of [1, 2]) {
+      await s.su.query(
+        `insert into app.automation_conversations (organization_id, automation_id, run_id, external_key_hash, conversation_id)
+         values ($1, $2, $3, $4, $5)`,
+        [s.orgA, a.id, first, hash(n), ordersId],
+      );
+    }
+    const runs = await runsOf(a.id);
+    expect(runs.find((r) => r.id === first)?.opened).toBe(2);
+    expect(runs.find((r) => r.id === second)?.opened).toBe(0);
+
+    const plain = await created({ name: "Not fanned out" });
+    const plainRun = await runNow(plain.id);
+    expect(await drain()).toBe(1);
+    expect((await runsOf(plain.id)).find((r) => r.id === plainRun)?.opened).toBeNull();
+  });
+
+  it("automation.created and automation.updated carry fanOut, perRun, perDay and escalationCount, never a name or a handle", async () => {
+    const team = (
+      await ok(
+        s.victor.request("POST", "/api/v1/units", {
+          kind: "department",
+          name: "Fulfilment Desk",
+          parentId: null,
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const a = (
+      await ok(
+        create({
+          name: "Audited fan-out",
+          target: { kind: "channel", conversationId: salesId },
+          fanOut: { enabled: true, perRun: 4, perDay: 12 },
+          escalation: [
+            { kind: "unit", id: team },
+            { kind: "user", id: s.samId },
+          ],
+        }),
+        201,
+      )
+    ).automation as Json;
+    const [createdAudit] = (await audits("automation.created", a.id)) as [Json];
+    expect(createdAudit).toMatchObject({ fanOut: true, perRun: 4, perDay: 12, escalationCount: 2 });
+    await ok(
+      patch(a.id, {
+        fanOut: { enabled: false, perRun: 4, perDay: 12 },
+        escalation: [{ kind: "unit", id: team }],
+      }),
+    );
+    const [updatedAudit] = (await audits("automation.updated", a.id)) as [Json];
+    expect(updatedAudit).toMatchObject({ fanOut: false, perRun: 4, perDay: 12, escalationCount: 1 });
+    expect(updatedAudit.changed).toEqual(expect.arrayContaining(["escalation", "fanOut"]));
+    for (const m of [createdAudit, updatedAudit]) {
+      const text = JSON.stringify(m);
+      expect(text).not.toMatch(/Fulfilment|fulfilment-desk|Sam Lee|"sam"|Audited fan-out/);
+      expect(m).not.toHaveProperty("handle");
+      expect(m).not.toHaveProperty("displayName");
+    }
+    // A 07.16-shaped automation: off, the defaults, none.
+    const plain = await created({ name: "Plain audit" });
+    expect((await audits("automation.created", plain.id))[0]).toMatchObject({
+      fanOut: false,
+      perRun: 10,
+      perDay: 100,
+      escalationCount: 0,
+    });
+  });
+
+  it("organization B cannot read or change organization A's fan-out settings or runs (404)", async () => {
+    const a = await created({ name: "Tenant fan-out", fanOut: { enabled: true, perRun: 3, perDay: 9 } });
+    const run = await runNow(a.id);
+    expect(await drain()).toBe(1);
+    const version = (await automationRow(a.id)).version as number;
+    for (const [method, path, payload] of [
+      ["GET", `/api/v1/automations/${a.id}`, undefined],
+      ["GET", `/api/v1/automations/${a.id}/runs`, undefined],
+      [
+        "PATCH",
+        `/api/v1/automations/${a.id}`,
+        { expectedVersion: version, fanOut: { enabled: false }, escalation: [{ kind: "user", id: s.eveId }] },
+      ],
+    ] as const) {
+      const r = (await s.eve.request(method, path, payload)) as Res;
+      expect(r.status, `${method} ${path}`).toBe(404);
+    }
+    // Nothing changed, and Eve's list does not show it.
+    expect(await automationRow(a.id)).toMatchObject({
+      fan_out_enabled: true,
+      fan_out_per_run: 3,
+      fan_out_per_day: 9,
+      escalation_targets: [],
+      version,
+    });
+    const eveList = (await ok(s.eve.request("GET", "/api/v1/automations") as Promise<Res>))
+      .automations as Json[];
+    expect(eveList.some((x) => x.id === a.id)).toBe(false);
+    expect((await runsOf(a.id)).some((r) => r.id === run)).toBe(true);
+  });
+});

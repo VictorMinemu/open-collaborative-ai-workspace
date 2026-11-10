@@ -26,6 +26,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  automationConversations,
   automationRuns,
   automations,
   boardColumns,
@@ -207,6 +208,17 @@ export function fanOutAllowed(p: {
     (p.targetKind === "channel" || p.targetKind === "board")
   );
 }
+
+/**
+ * The settings as audit metadata (07.17 PD-17): the switch, the two caps and how many escalation targets: counts only,
+ * never a target's id, handle or name.
+ */
+const fanOutAudit = (row: AutomationRow) => ({
+  fanOut: row.fanOutEnabled,
+  perRun: row.fanOutPerRun,
+  perDay: row.fanOutPerDay,
+  escalationCount: row.escalationTargets.length,
+});
 
 /** The stored columns of the owner's fan-out settings. */
 const fanOutColumns = (f: AutomationFanOutInput) => ({
@@ -687,6 +699,7 @@ export function createAutomationService(
           triggerKind: created.triggerKind,
           targetKind: created.targetKind,
           conversationId: created.conversationId,
+          ...fanOutAudit(created),
           // A bot's proposal it came from (07.6-12): confirmed as proposed, or saved with the person's changes.
           ...(opts.fromApproval
             ? { approvalId: opts.fromApproval.approvalId, edited: opts.fromApproval.edited }
@@ -839,6 +852,7 @@ export function createAutomationService(
           triggerKind: after.triggerKind,
           targetKind: after.targetKind,
           conversationId: after.conversationId,
+          ...fanOutAudit(after),
           // Which fields changed (their names only, never their values).
           changed: Object.keys(changes)
             .filter((k) => changes[k as keyof typeof changes] !== undefined)
@@ -1013,6 +1027,21 @@ export function createAutomationService(
         .orderBy(desc(automationRuns.createdAt), desc(automationRuns.id))
         .limit(page + 1);
       const shown = rows.slice(0, page);
+      // 07.17 (D-10): how many conversations each fan-out run opened, one grouped read over the page (null otherwise).
+      const opened = new Map<string, number>();
+      if (row.fanOutEnabled && shown.length > 0) {
+        const counts = await tx
+          .select({ runId: automationConversations.runId, n: count() })
+          .from(automationConversations)
+          .where(
+            inArray(
+              automationConversations.runId,
+              shown.map((r) => r.run.id),
+            ),
+          )
+          .groupBy(automationConversations.runId);
+        for (const c of counts) opened.set(c.runId, Number(c.n));
+      }
       return {
         runs: shown.map(
           ({ run, anchorConversationId, anchorThreadId }): AutomationRun => ({
@@ -1024,6 +1053,7 @@ export function createAutomationService(
             createdAt: new Date(run.createdAt).toISOString(),
             answeredAt: iso(run.answeredAt),
             tainted: run.tainted,
+            opened: row.fanOutEnabled ? (opened.get(run.id) ?? 0) : null,
             anchor:
               run.anchorMessageId && anchorConversationId
                 ? {
