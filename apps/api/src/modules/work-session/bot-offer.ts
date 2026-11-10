@@ -73,7 +73,9 @@ export async function workZoneOfferFor(
     }
   }
   const modes = controls.permissionModes.filter((m) => m.available).map((m) => m.value);
-  const maxMode: PermissionMode = modes.at(-1) ?? profile.defaultMode;
+  // No mode available (e.g. the runtime gone from the device): the bot is told the lowest mode, never the profile's
+  // default (which may be Full access) as an "at most" (code review IN-04). The start route still decides.
+  const maxMode: PermissionMode = modes.at(-1) ?? "default";
   const defaultMode: PermissionMode =
     PERMISSION_MODE_RANK[profile.defaultMode] <= PERMISSION_MODE_RANK[maxMode]
       ? profile.defaultMode

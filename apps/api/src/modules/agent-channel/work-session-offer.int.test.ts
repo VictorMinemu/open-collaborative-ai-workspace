@@ -736,6 +736,33 @@ describe("the device's live facts in the turn", () => {
     }
   });
 
+  it("IN-04: no mode available (the runtime reports none) → maxMode default, never the profile's default mode", async () => {
+    await createBotProfile(victor, atlasId, profile({ defaultMode: "acceptEdits" }));
+    const report = async (modes: number) => {
+      server.capabilities(
+        [
+          { ...CLAUDE_CATALOG, permissionModes: modes === 0 ? [] : CLAUDE_CATALOG.permissionModes },
+          CODEX_CATALOG,
+        ],
+        true,
+      );
+      await eventually(async () => {
+        const r = await su.query("select runtime_catalog from app.devices where id = $1", [serverId]);
+        const claude = (r.rows[0].runtime_catalog as Json[]).find((c) => c.runtime === "claude-code");
+        return (claude?.permissionModes as unknown[] | undefined)?.length === modes;
+      });
+    };
+    try {
+      await report(0);
+      const wz = await expectOffer(await mentionTurn(atlasId));
+      expect(wz.maxMode).toBe("default");
+      expect(wz.defaultMode).toBe("default");
+    } finally {
+      await report(CLAUDE_CATALOG.permissionModes.length);
+      await createBotProfile(victor, atlasId, profile());
+    }
+  });
+
   it("the device offline: the offer stays with device.online false (the start route answers device_offline)", async () => {
     await server.close();
     // The hub marks a device offline after its reconnect grace (10 s).
