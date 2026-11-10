@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 17/19 plans executed
+**Plans:** 18/19 plans executed
 
 Plans:
 **Wave 1**
@@ -1110,7 +1110,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 07.17-18-PLAN.md — Wave 6: The browser journey e2e (fake orders MCP → cards → Work Zone → moves → @team; desktop 1440 and mobile 390, light and dark)
+- [x] 07.17-18-PLAN.md — Wave 6: The browser journey e2e (fake orders MCP → cards → Work Zone → moves → @team; desktop 1440 and mobile 390, light and dark)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
