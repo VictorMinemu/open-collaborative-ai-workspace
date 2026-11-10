@@ -167,6 +167,45 @@ describe("Markdown: mentions", () => {
     expect(me).toContain('data-testid="mention"');
     expect(me).not.toEqual(other);
   });
+
+  it("a team handle renders a unit chip in a message (07.17 PD-19); never inside code", () => {
+    const LOGISTICS: MentionTarget = { kind: "unit", displayName: "Logistics", unitKind: "team" };
+    const html = render(
+      "ping @logistics, cc @sam and `@logistics`",
+      {},
+      {
+        handles: new Map([
+          ["sam", SAM],
+          ["logistics", LOGISTICS],
+        ]),
+        myHandle: null,
+      },
+    );
+    expect(html.match(/data-testid="mention"/g)).toHaveLength(2);
+    expect(html).toMatch(/data-testid="mention"[^>]*title="Logistics · team"[^>]*data-mention-kind="unit"/);
+    expect(html).toMatch(/data-testid="mention" title="Sam Lee"[^>]*>@sam</);
+  });
+
+  it("the unit chip takes the self style when the viewer is in the team, not when only the handle matches", () => {
+    const mine = render(
+      "@logistics",
+      {},
+      {
+        handles: new Map([["logistics", { kind: "unit", displayName: "Logistics", viewerInReach: true }]]),
+        myHandle: null,
+      },
+    );
+    const theirs = render(
+      "@logistics",
+      {},
+      {
+        handles: new Map([["logistics", { kind: "unit", displayName: "Logistics", viewerInReach: false }]]),
+        myHandle: null,
+      },
+    );
+    expect(mine).toContain("bg-amber-400/25");
+    expect(theirs).not.toContain("bg-amber-400/25");
+  });
 });
 
 describe("Markdown: the shared subset", () => {
