@@ -708,20 +708,28 @@ $fn$;
 -- organization. Counts and one flag only (never a title, a person or a prompt): this bot's active sessions, the
 -- organization's active bot sessions, this bot's prompts of the last hour, and whether an active session works on the
 -- project's own tree (`worktree = false`). `p_states` are the API's active states (`ACTIVE_STATES`, one copy).
+-- It bypasses RLS and backs every cap, so it fails closed (07.16 code review WR-10): without a tenant setting it
+-- raises instead of counting zero and letting every cap pass.
 CREATE OR REPLACE FUNCTION app.bot_work_session_load(p_agent uuid, p_project uuid, p_states text[])
 RETURNS TABLE (bot_active integer, org_active integer, bot_prompts_hour integer, tree_busy boolean)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
-  WITH org AS (SELECT nullif(current_setting('app.organization_id', true), '')::uuid AS id)
-  SELECT
-    (SELECT count(*)::int FROM app.work_sessions ws, org
-      WHERE ws.organization_id = org.id AND ws.started_by_agent_id = p_agent AND ws.status = ANY (p_states)),
-    (SELECT count(*)::int FROM app.work_sessions ws, org
-      WHERE ws.organization_id = org.id AND ws.started_by_agent_id IS NOT NULL AND ws.status = ANY (p_states)),
-    (SELECT count(*)::int FROM app.work_prompts wp, org
-      WHERE wp.organization_id = org.id AND wp.author_agent_id = p_agent AND wp.created_at > now() - interval '1 hour'),
-    EXISTS (SELECT 1 FROM app.work_sessions ws, org
-      WHERE ws.organization_id = org.id AND ws.project_id = p_project AND NOT ws.worktree
-        AND ws.status = ANY (p_states))
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+DECLARE
+  v_org uuid := nullif(current_setting('app.organization_id', true), '')::uuid;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'tenant context required' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN QUERY SELECT
+    (SELECT count(*)::int FROM app.work_sessions ws
+      WHERE ws.organization_id = v_org AND ws.started_by_agent_id = p_agent AND ws.status = ANY (p_states)),
+    (SELECT count(*)::int FROM app.work_sessions ws
+      WHERE ws.organization_id = v_org AND ws.started_by_agent_id IS NOT NULL AND ws.status = ANY (p_states)),
+    (SELECT count(*)::int FROM app.work_prompts wp
+      WHERE wp.organization_id = v_org AND wp.author_agent_id = p_agent AND wp.created_at > now() - interval '1 hour'),
+    EXISTS (SELECT 1 FROM app.work_sessions ws
+      WHERE ws.organization_id = v_org AND ws.project_id = p_project AND NOT ws.worktree
+        AND ws.status = ANY (p_states));
+END
 $fn$;
 
 REVOKE ALL ON FUNCTION app.work_project_access(uuid, uuid) FROM PUBLIC;

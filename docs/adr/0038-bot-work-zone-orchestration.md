@@ -466,3 +466,7 @@ and a transient skip kept the state marked as woken. Now:
   other skips (budget, the asker can no longer read, no card) still mark the state as woken.
 
 No column was added: the marker lives in the existing state key.
+
+**The caps' counter fails closed (WR-10).** This completes §6. `app.bot_work_session_load` is `SECURITY DEFINER` and
+bypasses RLS. Without `app.organization_id` it counted zero and every cap passed. It now raises
+(`insufficient_privilege`) when no tenant is set.

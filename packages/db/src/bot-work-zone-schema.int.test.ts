@@ -558,6 +558,26 @@ describe("bot Work Zone isolation as ocw_app (07.16, D-07, D-16)", () => {
     ).toBeNull();
   });
 
+  it("WR-10: app.bot_work_session_load fails closed without a tenant (it bypasses RLS and backs every cap)", async () => {
+    const load = (q: Q) =>
+      q(
+        "select bot_active, org_active, bot_prompts_hour, tree_busy from app.bot_work_session_load($1, $2, $3::text[])",
+        [A.agent, A.project, "{provisioning,idle,running,waiting_approval,host_offline}"],
+      );
+    // With the tenant set it counts organization A's sessions.
+    const counted = await as(A.id, null, load);
+    expect(counted.rows).toHaveLength(1);
+    // Without one (unset or empty), it raises instead of answering zero and letting every cap pass.
+    await app.query("begin");
+    try {
+      await app.query("select set_config('app.organization_id', '', true)");
+      expect(await errorCode(() => load(app.query.bind(app) as Q))).toBe("42501");
+    } finally {
+      await app.query("rollback");
+    }
+    expect(await errorCode(() => load(app.query.bind(app) as Q))).toBe("42501");
+  });
+
   it("the app role cannot TRUNCATE the four tables (TRUNCATE ignores RLS)", async () => {
     for (const tbl of NEW_TABLES) {
       expect(await errorCode(() => as(A.id, null, (q) => q(`truncate ${tbl}`))), tbl).toBe("42501");
