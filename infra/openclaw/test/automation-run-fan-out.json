@@ -1,0 +1,67 @@
+{
+  "type": "agent.automation_run.v1",
+  "data": {
+    "eventId": "0199a6f0-0000-7000-8000-00000000e771",
+    "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+    "conversation": {
+      "id": "0199a6f0-0000-7000-8000-00000000c771",
+      "kind": "channel",
+      "name": "fleet-orders"
+    },
+    "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d771" },
+    "message": {
+      "id": "0199a6f0-0000-7000-8000-00000000d771",
+      "text": "Scheduled task “Fleet orders” for Víctor Ruiz. [[call web_search {\"query\":\"new orders\"}]] [[call ocw_conversation_open {\"items\":[{\"externalKey\":\"1042\",\"title\":\"Order 1042\",\"body\":\"Vehicle 4471, brake noise.\"},{\"externalKey\":\"1043\",\"title\":\"Order 1043\",\"body\":\"Vehicle 4480, inspection.\"}]}]]",
+      "createdAt": "2026-11-10T08:00:00.000Z",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz"
+      },
+      "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+    },
+    "threadHistory": [],
+    "roster": [
+      {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz",
+        "role": "owner"
+      },
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001",
+        "displayName": "Archie",
+        "handle": "archie"
+      }
+    ],
+    "turn": {
+      "tools": ["web_search", "ocw_conversation_open"],
+      "toolFlags": {
+        "web_search": { "untrustedOutput": true, "sideEffecting": false },
+        "ocw_conversation_open": { "untrustedOutput": false, "sideEffecting": true }
+      },
+      "memory": [],
+      "now": null,
+      "maxToolCalls": 8,
+      "maxWebCalls": 5
+    },
+    "automationRun": {
+      "automationId": "0199a6f0-0000-7000-8000-0000000a7701",
+      "runId": "0199a6f0-0000-7000-8000-0000000b7701",
+      "name": "Fleet orders",
+      "trigger": "schedule",
+      "instructions": "Every hour, find the new fleet orders and open a conversation for each one.",
+      "inbound": null,
+      "fanOut": { "perRun": 10, "remainingRun": 10, "remainingDay": 100 },
+      "escalation": [
+        {
+          "kind": "unit",
+          "id": "0199a6f0-0000-7000-8000-00000000b7a1",
+          "handle": "logistics",
+          "displayName": "Logistics"
+        }
+      ]
+    }
+  }
+}

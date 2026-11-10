@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentAutomationItemEvent,
   AgentChannelAttachmentRead,
   AgentChannelAttachmentReadResponse,
   AgentChannelEventTypes,
@@ -9,6 +10,7 @@ import {
   ATTACHMENT_READ_SENTENCES,
   AttachmentImageType,
   AttachmentReadRefusal,
+  automationItemSentence,
   SANDBOX_LIMITS,
   WorkSessionTransition,
 } from "./index";
@@ -241,5 +243,65 @@ describe("Work Zone wake event (07.16 D-09, D-10, PD-16)", () => {
     ).toBe(false);
     expect(AgentWorkSessionEvent.safeParse({ ...base, type: "agent.mention.v1" }).success).toBe(false);
     expect(AgentMentionEvent.safeParse(base).success).toBe(false);
+  });
+});
+
+describe("automation item event (07.17 D-04, D-08, PD-09, PD-16)", () => {
+  const ROOT = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a70";
+  const PERSON = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a71";
+  const AUTOMATION = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a72";
+  const RUN = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a73";
+  const ITEM = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a74";
+  const item = (text = "Order 1042 from the ERP.", escalation: unknown[] = []) => ({
+    eventId: EVENT,
+    seq: 9,
+    type: "agent.automation_item.v1",
+    organizationId: FILE,
+    cellId: FILE,
+    agent: { id: AGENT, handle: "atlas", displayName: "Atlas" },
+    conversation: { id: FILE, kind: "channel", name: "fleet" },
+    thread: { rootMessageId: ROOT },
+    message: {
+      id: ROOT,
+      text: automationItemSentence("New orders"),
+      createdAt: "2026-11-10T08:00:00.000Z",
+      author: { kind: "user", id: PERSON, displayName: "Ana" },
+      mentions: [],
+    },
+    threadHistory: [],
+    roster: [],
+    automationItem: {
+      automationId: AUTOMATION,
+      runId: RUN,
+      itemId: ITEM,
+      name: "New orders",
+      instructions: "Prepare each order for dispatch.",
+      item: { title: "Order 1042", text, openedAt: "2026-11-10T08:00:00.000Z" },
+      escalation,
+    },
+  });
+
+  it("has its own event type on the cell stream", () => {
+    expect(AgentChannelEventTypes.automationItem).toBe("agent.automation_item.v1");
+  });
+
+  it("a mention-shaped event with the item parses, with and without escalation targets", () => {
+    const event = item();
+    expect(AgentAutomationItemEvent.parse(event)).toEqual(event);
+    const escalated = item("Order 1042.", [
+      { kind: "unit", id: PERSON, handle: "logistics", displayName: "Logistics" },
+    ]);
+    expect(AgentAutomationItemEvent.parse(escalated)).toEqual(escalated);
+  });
+
+  it("refuses a 4 001-character item, six targets, a missing item and the mention type", () => {
+    expect(AgentAutomationItemEvent.safeParse(item("x".repeat(4000))).success).toBe(true);
+    expect(AgentAutomationItemEvent.safeParse(item("x".repeat(4001))).success).toBe(false);
+    const target = { kind: "user", id: PERSON, handle: "ana", displayName: "Ana" };
+    expect(AgentAutomationItemEvent.safeParse(item("x", Array(6).fill(target))).success).toBe(false);
+    const { automationItem: _item, ...bare } = item();
+    expect(AgentAutomationItemEvent.safeParse({ ...bare }).success).toBe(false);
+    expect(AgentAutomationItemEvent.safeParse({ ...item(), type: "agent.mention.v1" }).success).toBe(false);
+    expect(AgentMentionEvent.safeParse(item()).success).toBe(false);
   });
 });

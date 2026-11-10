@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 22/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 22/22 plans complete
 
 Plans:
 **Wave 1**
@@ -1073,11 +1073,48 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 0 plans
+**Plans:** 18/19 plans executed
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.17 to break down)
+- [x] 07.17-01-PLAN.md — Wave 1: Contracts (`ocw_conversation_open` request/answer, fan-out and escalation settings, `agent.automation_item.v1`, `MessageMention` with `unit`, `unitHandle`, `team_mention`), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-26)
+- [x] 07.17-02-PLAN.md — Wave 1: The one migration (`automation_conversations`, fan-out columns, `org_units.handle` backfill, `notifications.unit_id`, caps 5 min / 288 in DB and code), RLS, the `automation.item` queue, upgrade proof
+- [x] 07.17-03-PLAN.md — Wave 1: ADR-0039 (Accepted; supersedes the quoted ADR-0028/0022/0038 clauses), AGENTS.md row, COVERAGE.md
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 07.17-04-PLAN.md — Wave 2: Every 5 minutes in the editor (interval presets, summary, runs-a-day prefill, daily-limit warning), self-hosting limits
+- [x] 07.17-05-PLAN.md — Wave 2: Fan-out and escalation settings on automations, the "<name> · Runs" thread, run `opened` counts
+- [x] 07.17-06-PLAN.md — Wave 2: Unit handles generated once in the organization API, `reach` and `viewerInReach`
+- [x] 07.17-07-PLAN.md — Wave 2: Team mentions resolve on channel posts (people and bots, ≤ 3 teams per bot message), never in DMs/AI chats, never to the cell
+- [x] 07.17-08-PLAN.md — Wave 2: Bots move and set waiting on the cards their automation opened (D-06, D-12)
+- [x] 07.17-09-PLAN.md — Wave 2: Plugin: the `ocw_conversation_open` tool and the board/open guard rules
+- [x] 07.17-10-PLAN.md — Wave 2: Plugin: item turns, the fan-out instruction and the escalation sentence
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 07.17-11-PLAN.md — Wave 3: The fan-out offer on run turns (`conversationOpen`, `automationRun.fanOut`, escalation)
+- [x] 07.17-12-PLAN.md — Wave 3: Team mention notifications (subtree ∩ readers, ≤ 200, `team_mention`, inbox `unit`)
+- [x] 07.17-13-PLAN.md — Wave 3: Web: `@team` in the composer, chips, reach confirmation, inbox label, handles on the organization page
+- [x] 07.17-14-PLAN.md — Wave 3: Web: the editor's "For each new item" and "When it needs people" sections, run history counts
+- [x] 07.17-15-PLAN.md — Wave 3: Real-cell smoke `automation-fan-out`
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 07.17-16-PLAN.md — Wave 4: The open route `POST /agent-channel/v1/conversations/open` (dedupe, caps, races, taint, audit): the phase's API end to end
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 07.17-17-PLAN.md — Wave 5: One child turn per opened item (`automation.item` worker, `agent.automation_item.v1`, 07.16 Work Zone tools) and the per-order API journey
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 07.17-18-PLAN.md — Wave 6: The browser journey e2e (fake orders MCP → cards → Work Zone → moves → @team; desktop 1440 and mobile 390, light and dark)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 07.17-19-PLAN.md — Wave 7: Phase gate: every CI workflow green, README/DEMO/STATUS, CODEOWNERS and guard, signed VALIDATION
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 

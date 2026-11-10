@@ -16,6 +16,10 @@
 //                                                         (a note-back never breaks the next compare-and-set)
 //   list_records  {}                                    → { ids }
 //   __mutate      { id, fields }                        → test hook: a change made "elsewhere"; bumps updated_at
+//   __add         { id, fields }                        → test hook (07.17-18): a new record made "elsewhere" (a new
+//                                                         order); unset fields are "" (total "0.00"), updated_at is
+//                                                         now; an id that exists is isError "exists: <id>". Callable
+//                                                         only: tools/list never lists it (UNLISTED_HOOKS)
 // Unknown ids are isError "not found: <id>". Writable fields: status, delivery_date, total (a decimal string), customer.
 import { randomUUID } from "node:crypto";
 
@@ -115,6 +119,11 @@ export const FAKE_ERP_TOOLS = [
   },
 ];
 const TOOL_NAMES = new Set(FAKE_ERP_TOOLS.map((t) => t.name));
+/**
+ * Test hooks callable through tools/call but never listed by tools/list (07.17-18): a connector another spec probes or
+ * records from FAKE_ERP_TOOLS sees exactly the tools it did before, and no bot is ever offered them.
+ */
+const UNLISTED_HOOKS = new Set(["__add"]);
 
 const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 const rpcResult = (id, result) => ({ jsonrpc: "2.0", id, result });
@@ -186,9 +195,32 @@ export function createFakeErpMcp(opts = {}) {
 
   const view = (record) => ({ ...record, notes: [...(state.notes.get(record.id) ?? [])] });
 
+  /** `__add` (07.17-18): a record created elsewhere; never replaces one (an existing id is an error). */
+  function add(args) {
+    if (typeof args.id !== "string" || !args.id) return fail("__add: `id` must be a non-empty string");
+    const fields = args.fields && typeof args.fields === "object" ? args.fields : null;
+    if (!fields) return fail("__add: `fields` must be an object");
+    const bad = badFields(fields);
+    if (bad) return fail(`__add: ${bad}`);
+    if (state.records.has(args.id)) return fail(`exists: ${args.id}`, { error: "exists", id: args.id });
+    const record = {
+      id: args.id,
+      status: "",
+      delivery_date: "",
+      total: "0.00",
+      customer: "",
+      ...fields,
+      updated_at: new Date().toISOString(),
+    };
+    state.records.set(record.id, record);
+    state.notes.set(record.id, []);
+    return ok(view(record));
+  }
+
   function callTool(name, args) {
     state.calls.push({ name, arguments: args });
     if (name === "list_records") return ok({ ids: [...state.records.keys()] });
+    if (name === "__add") return add(args);
     if (typeof args.id !== "string") return fail(`${name}: \`id\` must be a string`);
     const record = state.records.get(args.id);
     if (!record) return fail(`not found: ${args.id}`, { error: "not_found", id: args.id });
@@ -251,7 +283,8 @@ export function createFakeErpMcp(opts = {}) {
         return rpcResult(id, { tools: FAKE_ERP_TOOLS });
       case "tools/call": {
         const name = params?.name;
-        if (!TOOL_NAMES.has(name)) return rpcError(id, -32602, `Unknown tool: ${name}`);
+        if (!TOOL_NAMES.has(name) && !UNLISTED_HOOKS.has(name))
+          return rpcError(id, -32602, `Unknown tool: ${name}`);
         const args = params?.arguments && typeof params.arguments === "object" ? params.arguments : {};
         return rpcResult(id, callTool(name, args));
       }

@@ -17,12 +17,19 @@ export const NotificationKind = z.enum([
   // Phase 6: an AI chat was shared with you (MULTI-01); a card you follow changed status (AGENT-04).
   "ai_chat_shared",
   "card_updated",
+  // Phase 07.17 (D-07, PD-14): a team or department the reader is in was @mentioned in a channel they read.
+  "team_mention",
 ]);
 export type NotificationKind = z.infer<typeof NotificationKind>;
 
-/** Strongest kind wins when one message notifies a user for several reasons. */
+/**
+ * Strongest kind wins when one message notifies a user for several reasons. Ranks are only an order (the API sorts by
+ * them and the upsert compares positions), so a value between two others is fine.
+ */
 export const NOTIFICATION_KIND_RANK: Record<NotificationKind, number> = {
   mention: 6,
+  /** 07.17 (PD-14): weaker than a direct mention, stronger than everything a channel message offers. */
+  team_mention: 5.5,
   dm: 5,
   group_dm: 4,
   channel: 3,
@@ -33,13 +40,24 @@ export const NOTIFICATION_KIND_RANK: Record<NotificationKind, number> = {
 };
 
 /** Kinds that count toward a conversation's `mentionCount`. */
-export const MENTION_KINDS = ["mention", "channel", "here", "dm", "group_dm"] as const;
+export const MENTION_KINDS = ["mention", "channel", "here", "dm", "group_dm", "team_mention"] as const;
 
 /** Unread and mention counts are capped here (UI shows "99+"). */
 export const UNREAD_CAP = 100;
 export const SNIPPET_MAX = 140;
 /** The composer warns before `@channel`/`@here` in a channel with at least this many members. */
 export const MENTION_ALL_WARN_AT = 20;
+
+/**
+ * Phase 07.17 (D-13, D-17, D-18): a bot's message resolves at most `botUnitsPerMessage` distinct units; one message
+ * notifies at most `recipientsPerMessage` people through its team mentions; the composer asks before sending a message
+ * whose team mentions reach more than `confirmAbove` people.
+ */
+export const TEAM_MENTION_LIMITS = {
+  botUnitsPerMessage: 3,
+  recipientsPerMessage: 200,
+  confirmAbove: 20,
+} as const;
 
 export const Notification = z.object({
   id: Id,
@@ -51,6 +69,14 @@ export const Notification = z.object({
   snippet: z.string().max(SNIPPET_MAX),
   createdAt: IsoDateTime,
   readAt: IsoDateTime.nullable(),
+  /**
+   * 07.17 (D-07, PD-14): on `team_mention`, the unit that reached the reader, resolved at read time from
+   * `notifications.unit_id`; null when it is gone, absent on older servers and other kinds.
+   */
+  unit: z
+    .object({ id: Id, handle: z.string().max(64), name: z.string().max(200) })
+    .nullable()
+    .optional(),
 });
 export type Notification = z.infer<typeof Notification>;
 

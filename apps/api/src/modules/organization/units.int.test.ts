@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -86,7 +87,12 @@ describe("units: build and rearrange the hierarchy", () => {
     it_ = itUnit.id;
     expect(itUnit).toMatchObject({ kind: "department", name: "IT", parentId: null, path: [it_] });
     // ADR-0024: the Modules card shows from `unit.modules.manage` in viewerCan (07.3-02).
-    expect(itUnit.viewerCan).toEqual(["unit.manage", "unit.members.manage", "unit.modules.manage"]);
+    expect(itUnit.viewerCan).toEqual([
+      "unit.read",
+      "unit.manage",
+      "unit.members.manage",
+      "unit.modules.manage",
+    ]);
 
     const be = await ok(
       admin.request("POST", "/api/v1/units", { kind: "team", name: "Backend", parentId: it_ }),
@@ -193,7 +199,8 @@ describe("units: build and rearrange the hierarchy", () => {
   it("a developer reads the tree but cannot change it (403, audited)", async () => {
     const list = await ok(dev.request("GET", "/api/v1/units"));
     expect(list.units).toHaveLength(4);
-    expect(list.units[0].viewerCan).toEqual([]);
+    // WR-09: reading (and so mentioning) the unit is reported too.
+    expect(list.units[0].viewerCan).toEqual(["unit.read"]);
 
     const denied = await fails(
       dev.request("POST", "/api/v1/units", { kind: "department", name: "Shadow", parentId: null }),
@@ -332,9 +339,9 @@ describe("units: rename, delete, concurrency and memberships with leads", () => 
     const view = await ok(lead.request("GET", "/api/v1/units"));
     const byId = new Map(view.units.map((u: { id: string; viewerCan: string[] }) => [u.id, u.viewerCan]));
     // ADR-0024: a lead also manages modules on the units they lead (07.3-02).
-    expect(byId.get(eng)).toEqual(["unit.members.manage", "unit.modules.manage"]);
-    expect(byId.get(core)).toEqual(["unit.members.manage", "unit.modules.manage"]);
-    expect(byId.get(sales)).toEqual([]);
+    expect(byId.get(eng)).toEqual(["unit.read", "unit.members.manage", "unit.modules.manage"]);
+    expect(byId.get(core)).toEqual(["unit.read", "unit.members.manage", "unit.modules.manage"]);
+    expect(byId.get(sales)).toEqual(["unit.read"]);
 
     await ok(lead.request("POST", `/api/v1/units/${core}/members`, { userId: samId }));
     const members = await ok(lead.request("GET", `/api/v1/units/${core}/members`));
@@ -757,5 +764,221 @@ describe("units: a project created in Settings › Organization auto-leads its c
     );
     expect((await audit("unit_membership.added")).length).toBe(before);
     expect((await su.query("select 1 from app.org_units where name = 'Sneaky'")).rowCount).toBe(0);
+  });
+});
+
+describe("units: @handles are generated once (Phase 07.17, D-14, PD-12, E19)", () => {
+  let north: string;
+  let south: string;
+  let west: string;
+
+  // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
+  const create = async (kind: string, name: string, parentId: string | null): Promise<Record<string, any>> =>
+    ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }));
+  const listed = async (id: string) =>
+    ((await ok(admin.request("GET", "/api/v1/units"))).units as Array<{ id: string; handle: string }>).find(
+      (u) => u.id === id,
+    )?.handle;
+  const stored = async (id: string) =>
+    (await su.query("select handle from app.org_units where id = $1", [id])).rows[0]?.handle as string;
+  /** What the SQL allocator (backfill and fill trigger) would give right now: the two must never disagree. */
+  const sqlHandle = async (name: string) =>
+    (await su.query("select app.org_unit_handle($1, $2) as h", [orgId, name])).rows[0].h as string;
+
+  beforeAll(async () => {
+    north = (await create("department", "Ops North", null)).id;
+    south = (await create("department", "Ops South", null)).id;
+    west = (await create("department", "Ops West", null)).id;
+  });
+
+  it("a new team gets its name's handle; the same name under other parents gets -2, -3", async () => {
+    const first = await create("team", "Logistics", north);
+    expect(first.handle).toBe("logistics");
+    expect(await listed(first.id)).toBe("logistics");
+    expect(await stored(first.id)).toBe("logistics");
+
+    expect(await sqlHandle("Logistics")).toBe("logistics-2");
+    const second = await create("team", "Logistics", south);
+    expect(second.handle).toBe("logistics-2");
+    expect(await sqlHandle("Logistics")).toBe("logistics-3");
+    const third = await create("team", "Logistics", west);
+    expect(third.handle).toBe("logistics-3");
+    expect(await listed(third.id)).toBe("logistics-3");
+  });
+
+  it("WR-05: names whose letters do not decompose get the SQL allocator's handle (one source of truth)", async () => {
+    for (const [name, handle] of [
+      ["Straße", "strasse"],
+      ["Æsir", "aesir"],
+      ["Łódź", "lodz"],
+      ["Søren", "soren"],
+    ] as const) {
+      expect(await sqlHandle(name)).toBe(handle);
+      const made = await create("team", name, north);
+      expect(made.handle, name).toBe(handle);
+      expect(await stored(made.id)).toBe(handle);
+    }
+  });
+
+  it("a sibling name clash is still unit_name_taken; nothing is created", async () => {
+    const count = async () => (await su.query("select count(*)::int as n from app.org_units")).rows[0].n;
+    const before = await count();
+    const refused = await fails(
+      admin.request("POST", "/api/v1/units", { kind: "team", name: "logistics", parentId: south }),
+      409,
+    );
+    expect(refused.code).toBe("unit_name_taken");
+    expect(await count()).toBe(before);
+  });
+
+  it("reserved and punctuated names, and a long name that stays one typeable @token", async () => {
+    expect((await create("team", "here", north)).handle).toBe("here-1");
+    expect((await create("team", "R&D / Labs", north)).handle).toBe("rd-labs");
+    const long = "Operations and Logistics for the North Region";
+    expect((await create("team", long, north)).handle).toBe("operations-and-logistics-for-the-north-r");
+    expect(await sqlHandle(long)).toBe("operations-and-logistics-for-the-north-2");
+    const again = await create("team", long, south);
+    expect(again.handle).toBe("operations-and-logistics-for-the-north-2");
+    expect(again.handle.length).toBe(40);
+  });
+
+  it("a live bot's username is skipped; a deleted bot's username is free again", async () => {
+    const bot = await su.query(
+      "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id) values ($1, 'Scout', 'scout', 'Help', 'mock', 'mock-1') returning id",
+      [orgId],
+    );
+    expect((await create("team", "Scout", north)).handle).toBe("scout-2");
+    await su.query("update app.agents set deleted_at = now() where id = $1", [bot.rows[0].id]);
+    expect(await sqlHandle("Scout")).toBe("scout");
+    expect((await create("team", "Scout", south)).handle).toBe("scout");
+    // A unit holds "scout" now and another "scout-2": the next one takes the next free suffix.
+    expect((await create("team", "Scout", west)).handle).toBe("scout-3");
+  });
+
+  it("renames and moves never change a handle; a delete frees it", async () => {
+    const unit = (await create("department", "Dispatch", null)).id;
+    expect(await stored(unit)).toBe("dispatch");
+    const renamed = await ok(admin.request("PATCH", `/api/v1/units/${unit}`, { name: "Shipping" }));
+    expect(renamed).toMatchObject({ name: "Shipping", handle: "dispatch" });
+    const moved = await ok(admin.request("POST", `/api/v1/units/${unit}/move`, { parentId: north }));
+    expect(moved).toMatchObject({ parentId: north, handle: "dispatch" });
+    expect(await listed(unit)).toBe("dispatch");
+    expect(await stored(unit)).toBe("dispatch");
+
+    // A new "Dispatch" while the renamed unit still holds the handle gets a suffix; once it is gone, the handle is free.
+    expect((await create("team", "Dispatch", south)).handle).toBe("dispatch-2");
+    await ok(admin.request("DELETE", `/api/v1/units/${unit}`));
+    expect((await create("team", "Dispatch", west)).handle).toBe("dispatch");
+  });
+});
+
+describe("units: who a unit reaches, and whether the viewer is one of them (Phase 07.17, D-13, PD-14)", () => {
+  let field: string;
+  let teamA: string;
+  let teamB: string;
+  let ben: TestClient;
+  let eva: TestClient;
+  const ids: Record<string, string> = {};
+
+  const create = async (client: TestClient, kind: string, name: string, parentId: string | null) =>
+    (await ok(client.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+  const join = (client: TestClient, unitId: string, userId: string) =>
+    ok(client.request("POST", `/api/v1/units/${unitId}/members`, { userId }));
+  /** `[reach, viewerInReach, memberCount, leadCount]` per unit id, as `GET /units` lists it for `client`. */
+  const reachOf = async (client: TestClient) =>
+    new Map(
+      (
+        (await ok(client.request("GET", "/api/v1/units"))).units as Array<{
+          id: string;
+          reach: number;
+          viewerInReach: boolean;
+          memberCount: number;
+          leadCount: number;
+        }>
+      ).map((u) => [u.id, [u.reach, u.viewerInReach, u.memberCount, u.leadCount]]),
+    );
+
+  beforeAll(async () => {
+    for (const name of ["ana", "ben", "cam", "dan", "eva", "fay"]) {
+      const invited = await invite(`${name}.reach@example.test`, "standard", name);
+      ids[name] = invited.id;
+      if (name === "ben") ben = invited.client;
+      if (name === "eva") eva = invited.client;
+    }
+    field = await create(admin, "department", "Field", null);
+    teamA = await create(admin, "team", "Field A", field);
+    teamB = await create(admin, "team", "Field B", field);
+    for (const name of ["ana", "ben", "fay"]) await join(admin, teamA, ids[name] as string);
+    for (const name of ["ben", "cam"]) await join(admin, teamB, ids[name] as string);
+    await join(admin, field, ids.dan as string);
+    // Fay is deactivated: still a membership row (memberCount), never someone a mention reaches.
+    await su.query(
+      "update app.org_members set deactivated_at = now() where organization_id = $1 and user_id = $2",
+      [orgId, ids.fay],
+    );
+  });
+
+  it("counts the distinct active members of the subtree; memberCount and leadCount are unchanged", async () => {
+    const forBen = await reachOf(ben);
+    expect(forBen.get(field)).toEqual([4, true, 1, 0]);
+    expect(forBen.get(teamA)).toEqual([2, true, 3, 0]);
+    expect(forBen.get(teamB)).toEqual([2, true, 2, 0]);
+
+    const forEva = await reachOf(eva);
+    expect(forEva.get(field)).toEqual([4, false, 1, 0]);
+    expect(forEva.get(teamA)).toEqual([2, false, 3, 0]);
+    expect(forEva.get(teamB)).toEqual([2, false, 2, 0]);
+    // Every unit carries both fields, including the ones nobody belongs to.
+    for (const [, [reach, viewerInReach]] of forEva) {
+      expect(typeof reach).toBe("number");
+      expect(typeof viewerInReach).toBe("boolean");
+    }
+  });
+
+  it("the single-unit view carries reach and viewerInReach too", async () => {
+    const view = await ok(admin.request("PATCH", `/api/v1/units/${teamB}`, { name: "Field B" }));
+    expect(view).toMatchObject({ id: teamB, reach: 2, viewerInReach: false, memberCount: 2 });
+    const created = await ok(
+      admin.request("POST", "/api/v1/units", { kind: "team", name: "Field C", parentId: field }),
+    );
+    expect(created).toMatchObject({ reach: 0, viewerInReach: false, memberCount: 0 });
+    expect((await reachOf(admin)).get(field)?.[0]).toBe(4);
+  });
+
+  it("organization B never sees A's units, and A's reach never counts B's members", async () => {
+    const { client: zed, id: zedId } = await invite("zed.reach@example.test", "standard", "Zed");
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [zedId]);
+    await su.query("delete from app.org_members where user_id = $1", [zedId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      zedId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Zed', 'admin')",
+      [orgB, zedId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, zedId]);
+
+    const bDept = await create(zed, "department", "Field", null);
+    await join(zed, bDept, zedId);
+    // A membership row planted with B's organization on A's team (no API writes this): RLS hides it from A.
+    await su.query(
+      "insert into app.unit_memberships (organization_id, unit_id, user_id) values ($1, $2, $3)",
+      [orgB, teamA, zedId],
+    );
+
+    const forZed = await ok(zed.request("GET", "/api/v1/units"));
+    expect(forZed.units.map((u: { id: string }) => u.id)).toEqual([bDept]);
+    expect(forZed.units[0]).toMatchObject({ handle: "field", reach: 1, viewerInReach: true });
+
+    const forBen = await reachOf(ben);
+    expect(forBen.has(bDept)).toBe(false);
+    expect(forBen.get(field)).toEqual([4, true, 1, 0]);
+    expect(forBen.get(teamA)).toEqual([2, true, 3, 0]);
   });
 });

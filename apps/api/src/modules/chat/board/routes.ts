@@ -126,6 +126,8 @@ export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
           input: req.body,
           clientKind: auth.clientKind,
           sessionId: auth.sessionId,
+          // Phase 07.17 (PD-13): decides the author's `unit.read` for `@team` in the card's text.
+          perms: ctx.perms,
         });
         if (created) {
           const dir = await loadDirectory(tx);
@@ -151,6 +153,7 @@ export function registerBoardRoutes(app: App, ctx: BoardRouteCtx): void {
           actor: { kind: "user", id: auth.userId },
           input: req.body,
           sessionId: auth.sessionId,
+          perms: ctx.perms,
           // Text edits notify like the generic message edit: only people newly mentioned, never a bot (Pitfall 8).
           onTextEdited: async (etx, edit) =>
             core.chatEvents.messageEdited(etx, {

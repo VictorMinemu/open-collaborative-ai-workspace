@@ -7,6 +7,10 @@ export const FAKE_ERP_DEFAULT_TOKEN: string;
 
 export type FakeErpToolName = "get_record" | "update_record" | "add_note" | "list_records" | "__mutate";
 
+/**
+ * The listed tools (tools/list). The `__add { id, fields }` test hook (07.17-18: a new record made elsewhere, an existing
+ * id is an error) is callable through tools/call but never listed, so connectors that record these tools are unchanged.
+ */
 export const FAKE_ERP_TOOLS: ReadonlyArray<{
   name: FakeErpToolName;
   title: string;
@@ -28,7 +32,7 @@ export interface FakeErpRecord {
   delivery_date: string;
   total: string;
   customer: string;
-  /** ISO 8601; bumped by update_record and __mutate, never by add_note. */
+  /** ISO 8601; bumped by update_record and __mutate, never by add_note; set by __add (07.17-18). */
   updated_at: string;
 }
 

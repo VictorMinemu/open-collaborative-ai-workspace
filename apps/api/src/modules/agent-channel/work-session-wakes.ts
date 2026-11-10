@@ -38,6 +38,7 @@ import { createConversationAccess } from "../chat";
 import type { MemoryService } from "../memory";
 import type { PermissionService } from "../organization";
 import { composeWorkSessionCard, sessionDeciders, wsTopic } from "../work-session";
+import { requeueAfterSession } from "./automation-items";
 import { updatePlatformCardNotified } from "./card-followers";
 import { buildMentionEvents } from "./mentions";
 
@@ -698,6 +699,10 @@ export async function syncBotWorkSession(
   data: JobData<"work_session.bot_sync">,
 ): Promise<"woken" | "skipped" | "none"> {
   const { organizationId, workSessionId } = data;
+  // 07.17 code review WR-02: a session of the bot that ended frees a slot for the items that waited for one.
+  await core.db.withTenant({ organizationId, userId: null }, (tx) =>
+    requeueAfterSession(tx, core, workSessionId),
+  );
   const plan = await core.db.withTenant({ organizationId, userId: null }, (tx) =>
     decide(tx, core, deps, workSessionId),
   );

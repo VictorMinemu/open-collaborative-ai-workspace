@@ -59,9 +59,13 @@ export interface AgentMention {
    * human and the turn is unattended like an automation run. Set only by agent-channel's consult code; chat never sets
    * it. `work_session` (Phase 07.16, D-09, D-17): a wake turn delivered by agent-channel's wake handler on the bot's Work
    * Zone card; the structural author is the person who asked for the session, the body the server's summary, and the
-   * turn is unattended like an automation run. Set only there; chat never sets it.
+   * turn is unattended like an automation run. Set only there; chat never sets it. `automation_item` (Phase 07.17,
+   * D-04, PD-09): an item a fan-out run opened, delivered by agent-channel's item delivery (`deliverAutomationItem`) on
+   * the item's own root; the structural author is the automation's run-as person, the body the server's sentence, the
+   * turn tainted from its first call and unattended like a run, offered the bot's Work Zone tools (ADR-0039). Set only
+   * there; chat never sets it.
    */
-  trigger?: "mention" | "reply_mode" | "automation" | "consult" | "work_session";
+  trigger?: "mention" | "reply_mode" | "automation" | "consult" | "work_session" | "automation_item";
   /**
    * Phase 07.7 (D-01, D-07; ADR-0027): the chain this delivery belongs to, built by agent-channel's consult code from the
    * chain ledger, never from message text. Absent = a turn outside any chain (depth 0). Chat never sets it.
@@ -83,6 +87,12 @@ export interface AgentMention {
    * absent = a fresh random id. Chat never sets it.
    */
   eventId?: string;
+  /**
+   * Phase 07.17 (D-02, PD-07): the fan-out run this turn may open conversations for (`ocw_conversation_open`). Set only
+   * by agent-channel's run delivery (`deliverAutomationRun`) for runs of fan-out automations, and read only on
+   * `trigger: "automation"` deliveries. Chat never sets it.
+   */
+  conversationOpen?: { automationId: string; runId: string } | null;
 }
 
 /**

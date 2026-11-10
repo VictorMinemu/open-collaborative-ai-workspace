@@ -5,6 +5,7 @@ const ADA = "00000000-0000-4000-8000-00000000000a";
 const SAM = "00000000-0000-4000-8000-00000000000b";
 const ALEX = "00000000-0000-4000-8000-00000000000c";
 const BOB = "00000000-0000-4000-8000-00000000000d";
+const LOGISTICS = "00000000-0000-4000-8000-0000000000f1";
 
 const base: RecipientsInput = {
   authorUserId: ADA,
@@ -92,5 +93,39 @@ describe("computeRecipients (CHAT-08)", () => {
     expect(
       asObject(computeRecipients({ ...base, authorUserId: null, convKind: "dm", humanMemberIds: [SAM] })),
     ).toEqual({ [SAM]: "dm" });
+  });
+
+  describe("team mentions (07.17 D-07, PD-14)", () => {
+    it("the unit's members get team_mention, a directly mentioned one gets mention, the author nothing", () => {
+      const r = computeRecipients({
+        ...base,
+        authorUserId: SAM,
+        teamMentions: [{ unitId: LOGISTICS, userIds: [ADA, SAM, ALEX] }],
+        mentionedUserIds: [ALEX],
+      });
+      expect(asObject(r)).toEqual({ [ADA]: "team_mention", [ALEX]: "mention" });
+    });
+
+    it("team_mention beats @channel and a thread reply; a DM or group never offers it (units resolve on channel posts only)", () => {
+      const r = computeRecipients({
+        ...base,
+        mentionAll: "channel",
+        isThreadReply: true,
+        threadParticipantIds: [SAM],
+        teamMentions: [{ unitId: LOGISTICS, userIds: [SAM, BOB] }],
+      });
+      expect(asObject(r)).toEqual({ [ALEX]: "channel", [BOB]: "team_mention", [SAM]: "team_mention" });
+      const dm = computeRecipients({
+        ...base,
+        convKind: "dm",
+        humanMemberIds: [ADA, SAM],
+        teamMentions: [{ unitId: LOGISTICS, userIds: [SAM] }],
+      });
+      expect(asObject(dm)).toEqual({ [SAM]: "dm" });
+    });
+
+    it("no team mentions offers nothing new", () => {
+      expect(computeRecipients({ ...base, teamMentions: [] }).size).toBe(0);
+    });
   });
 });

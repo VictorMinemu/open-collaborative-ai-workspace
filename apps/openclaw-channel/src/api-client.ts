@@ -6,6 +6,7 @@ import {
   AgentChannelAttachmentReadResponse,
   type AgentChannelAutomationPropose,
   AgentChannelAutomationProposeResponse,
+  AgentChannelBoardCard,
   AgentChannelBoardCardResponse,
   type AgentChannelBoardCreateCard,
   type AgentChannelBoardPatchCard,
@@ -17,6 +18,8 @@ import {
   AgentChannelConnectorListResponse,
   type AgentChannelConsultRequest,
   AgentChannelConsultResponse,
+  type AgentChannelConversationOpen,
+  AgentChannelConversationOpenResponse,
   type AgentChannelHttpRequest,
   AgentChannelHttpResponse,
   type AgentChannelMcpProbeResult,
@@ -96,6 +99,11 @@ export class AgentChannelHttpError extends Error {
     readonly denial?: AgentChannelApprovalDenial,
     /** 07.6: a refusal whose body carries the server's sentence (`{ok: false, code, sentence}`), if well-formed. */
     readonly answer?: AgentChannelSentenceAnswer,
+    /**
+     * 07.17 (D-06): the current card of a 409 `board_card_version_conflict` (`error.details.card`), if well-formed: a
+     * board move on a turn that may not read the board retries once with its version.
+     */
+    readonly conflictCard?: AgentChannelBoardCard,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
@@ -157,6 +165,17 @@ export function sentenceAnswerOf(body: string): AgentChannelSentenceAnswer | und
   }
 }
 
+/** `error.details.card` of a board version conflict (07.17 D-06), when well-formed; never any other content. */
+export function conflictCardOf(body: string): AgentChannelBoardCard | undefined {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: { card?: unknown } } } | null)?.error?.details;
+    const parsed = AgentChannelBoardCard.safeParse(details?.card);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 408/425/429 and 5xx are retried; every other 4xx is a permanent failure. */
 export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -205,6 +224,12 @@ export const ATTACHMENT_READ_TIMEOUT_MS = 35_000;
  * device's first answer; 30 s waits past it, so the bot reads what the API decided.
  */
 export const WORK_SESSION_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 07.17 (PD-07): one `/conversations/open` call posts up to 25 cards or messages in one transaction; the budget is
+ * longer than a plain write's, still under OpenClaw's per-tool budget.
+ */
+export const CONVERSATION_OPEN_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
@@ -273,6 +298,7 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           approvalOf(raw.slice(0, 4_000)),
           denialOf(raw.slice(0, 4_000)),
           sentenceAnswerOf(raw.slice(0, 4_000)),
+          res.status === 409 ? conflictCardOf(raw.slice(0, 64_000)) : undefined,
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;
@@ -706,6 +732,26 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         WORK_SESSION_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelWorkSessionStopResponse.parse(raw);
+    },
+    /**
+     * `ocw_conversation_open` (07.17 D-02, PD-07): the run turn's ids and the items it found; the API takes the
+     * automation, the run, the target and the person from the stored turn, dedupes by key and applies the caps. One
+     * attempt (the route claims a tool call each time). Refusals are a 200 `{ok: false, code, sentence}`; an ended turn
+     * throws (404 `unknown_turn`). Never logs the items.
+     */
+    async conversationOpen(
+      body: AgentChannelConversationOpen,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelConversationOpenResponse> {
+      const raw = await request(
+        "POST",
+        "/conversations/open",
+        body,
+        signal,
+        1,
+        CONVERSATION_OPEN_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelConversationOpenResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

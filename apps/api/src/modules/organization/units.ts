@@ -94,12 +94,32 @@ export function applyMove<T extends UnitNode>(
   });
 }
 
+/**
+ * Longest allocated unit handle: one `@mention` token (`MENTION_TOKEN_RE` reads at most 40 characters), so every handle
+ * can be typed. The same cut as `app.org_unit_handle`, the SQL allocator of the backfill and the fill trigger.
+ */
+const UNIT_HANDLE_TYPED_MAX = 40;
+
+/**
+ * Phase 07.17 (D-14, PD-12): the `n`-th handle tried for a unit whose name gives `base` (`unitHandle`): `base` first,
+ * then `base-2`, `base-3`, … with the base cut to `40 - len("-n")` and its trailing `._-` trimmed, so the handle stays
+ * one typeable token. Mirrors `app.org_unit_handle` exactly (the integration test compares the two).
+ */
+export function nextHandleCandidate(base: string, n: number): string {
+  if (n <= 1) return base;
+  const suffix = `-${n}`;
+  return `${base.slice(0, UNIT_HANDLE_TYPED_MAX - suffix.length).replace(/[._-]+$/, "")}${suffix}`;
+}
+
 // ---------------------------------------------------------------- data access
 
 export type UnitRow = typeof orgUnits.$inferSelect;
 
 /** The permissions a unit row reports in `viewerCan` (the web renders these, never re-implements policy). */
 const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = [
+  // 07.17 code review WR-09: whether the viewer may read (and so @mention) the unit, as `unitMentionGate` decides it,
+  // so the composer never offers a team the server would not resolve (a unit-scoped deny).
+  "unit.read",
   "unit.manage",
   "unit.members.manage",
   "unit.modules.manage",
@@ -139,6 +159,20 @@ export async function requireUnit(tx: Tx, id: string): Promise<UnitRow> {
   return unit;
 }
 
+/**
+ * Phase 07.17 (D-14, PD-12; code review WR-05): the handle a new unit named `name` gets, from the one allocator that
+ * also backfilled every unit and fills any insert that omits it (`app.org_unit_handle`: `app.unaccent`, so "Straße" →
+ * "strasse"; the first free of base, base-2, … among the organization's unit handles and live bot usernames). The
+ * caller holds `lockUnits`, the lock every unit insert takes, so the handle cannot be taken between this read and the
+ * insert. `unitHandle` in the contracts is only the client-side preview (approximate for letters that do not decompose).
+ */
+export async function allocateUnitHandle(tx: Tx, organizationId: string, name: string): Promise<string> {
+  const res = await tx.execute(sql`select app.org_unit_handle(${organizationId}::uuid, ${name}) as handle`);
+  const handle = (res.rows[0] as { handle: string | null } | undefined)?.handle;
+  if (!handle) throw new Error("unit handle allocation returned nothing");
+  return handle;
+}
+
 async function unitCounts(tx: Tx, unitId?: string) {
   const rows = await tx
     .select({
@@ -152,10 +186,47 @@ async function unitCounts(tx: Tx, unitId?: string) {
   return new Map(rows.map((r) => [r.unitId, { members: Number(r.members), leads: Number(r.leads) }]));
 }
 
+export interface UnitReach {
+  reach: number;
+  viewerInReach: boolean;
+}
+
+/**
+ * Phase 07.17 (D-13, PD-14): who a mention of each unit reaches, in one grouped query: the distinct active members of
+ * the unit's subtree (memberships of the units whose `path` holds it; deactivated members never count) and whether the
+ * viewer is one of them. Tenant RLS filters every table read; the explicit organization joins keep a row of another
+ * organization out even if one were ever planted on this tree. A unit absent from the map reaches no one.
+ */
+async function unitReach(
+  tx: Tx,
+  viewerUserId: string | null,
+  unitIds?: readonly string[],
+): Promise<Map<string, UnitReach>> {
+  const res = await tx.execute(sql`
+    select u.id as unit_id,
+           count(distinct m.user_id)::int as reach,
+           coalesce(bool_or(m.user_id = ${viewerUserId}::uuid), false) as viewer_in_reach
+      from app.org_units u
+      join app.org_units d on d.organization_id = u.organization_id and d.path @> array[u.id]
+      join app.unit_memberships m on m.organization_id = u.organization_id and m.unit_id = d.id
+      join app.org_members om
+        on om.organization_id = m.organization_id and om.user_id = m.user_id and om.deactivated_at is null
+     ${unitIds ? sql`where u.id = any(${uuidArray(unitIds)})` : sql``}
+     group by u.id`);
+  const rows = res.rows as Array<{ unit_id: string; reach: number; viewer_in_reach: boolean }>;
+  return new Map(
+    rows.map((r) => [
+      String(r.unit_id),
+      { reach: Number(r.reach), viewerInReach: r.viewer_in_reach === true },
+    ]),
+  );
+}
+
 function toOrgUnit(
   row: UnitRow,
   counts: { members: number; leads: number } | undefined,
   viewerCan: Permission[],
+  reach: UnitReach | undefined,
 ) {
   return OrgUnit.parse({
     id: row.id,
@@ -166,6 +237,9 @@ function toOrgUnit(
     memberCount: counts?.members ?? 0,
     leadCount: counts?.leads ?? 0,
     viewerCan,
+    handle: row.handle,
+    reach: reach?.reach ?? 0,
+    viewerInReach: reach?.viewerInReach ?? false,
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
   });
@@ -174,8 +248,9 @@ function toOrgUnit(
 /** One unit as the API returns it, decided for the request's principal. */
 export async function unitView(req: FastifyRequest, tx: Tx, perms: PermissionService, row: UnitRow) {
   const counts = await unitCounts(tx, row.id);
+  const reach = await unitReach(tx, req.auth?.userId ?? null, [row.id]);
   const viewerCan = await perms.viewerCan(req, tx, unitResource(row), UNIT_VIEWER_PERMISSIONS);
-  return toOrgUnit(row, counts.get(row.id), viewerCan);
+  return toOrgUnit(row, counts.get(row.id), viewerCan, reach.get(row.id));
 }
 
 /** Durable `units.updated` on `org:<id>` (the web refetches the tree and `/me/permissions`). */
@@ -209,22 +284,30 @@ export async function createUnit(
   }
   const idRes = await tx.execute(sql`select uuidv7() as id`);
   const id = String((idRes.rows[0] as { id: string }).id);
+  const { organizationId } = tenantOf(tx);
+  // D-14: generated once, here, under the lock; renames and moves never touch it.
+  const handle = await allocateUnitHandle(tx, organizationId, name);
   let row: UnitRow | undefined;
   try {
     [row] = await tx
       .insert(orgUnits)
       .values({
         id,
-        organizationId: tenantOf(tx).organizationId,
+        organizationId,
         parentId: parent?.id ?? null,
         kind,
         name,
         path: [...(parent?.path ?? []), id],
         createdBy,
+        handle,
       })
       .returning();
   } catch (err) {
-    if (isUniqueViolation(err)) throw nameTaken(name);
+    if (isUniqueViolation(err) && constraintOf(err) === "org_units_sibling_name_uq") throw nameTaken(name);
+    // WR-05: a handle taken by a writer outside the unit lock (a raw insert, an N-1 writer): try again, never a 500.
+    if (isUniqueViolation(err) && constraintOf(err) === "org_units_handle_uq") {
+      throw conflict("That team's handle was just taken; try again", "unit_handle_taken");
+    }
     throw err;
   }
   if (!row) throw new Error("unit insert returned no row");
@@ -287,10 +370,11 @@ export function registerUnitRoutes(
         const lastSeq = await core.realtime.lastSeq(tx, orgTopic(tenantOf(tx).organizationId));
         const rows = await tx.select().from(orgUnits).orderBy(asc(orgUnits.createdAt), asc(orgUnits.id));
         const counts = await unitCounts(tx);
+        const reach = await unitReach(tx, req.auth?.userId ?? null);
         const units = [];
         for (const row of rows) {
           const viewerCan = await perms.viewerCan(req, tx, unitResource(row), UNIT_VIEWER_PERMISSIONS);
-          units.push(toOrgUnit(row, counts.get(row.id), viewerCan));
+          units.push(toOrgUnit(row, counts.get(row.id), viewerCan, reach.get(row.id)));
         }
         return { units, lastSeq };
       }),

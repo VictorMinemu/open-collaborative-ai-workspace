@@ -30,6 +30,7 @@ import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } fr
 import type { OnlineSet } from "../realtime";
 import { computeRecipients } from "./recipients";
 import { snippetOf } from "./snippet";
+import { teamMentionAudience, teamMentionUnits } from "./team-mentions";
 
 /**
  * Notification writes (CHAT-08). Runs inside the message transaction through the chat-events seam: recipients are
@@ -48,6 +49,8 @@ export const MENTIONS_FILTER_KINDS = [
   "channel",
   "here",
   "ai_chat_shared",
+  // 07.17 (PD-14): a team or department you are in was @mentioned.
+  "team_mention",
 ] as const satisfies readonly NotificationKind[];
 
 /**
@@ -103,6 +106,8 @@ interface Target {
   threadRootId: string | null;
   actor: MessageAuthor;
   recipients: Map<string, NotificationKind>;
+  /** 07.17 (PD-14): the unit that reached each `team_mention` recipient (stored as `unit_id`, an id only). */
+  unitOf?: ReadonlyMap<string, string>;
 }
 
 /** Recipients that are active members who may read the conversation now (the resolver decides, P-03). */
@@ -133,26 +138,33 @@ async function deliver(tx: Tx, deps: NotificationDeps, t: Target): Promise<void>
   const { core } = deps;
   const ids = await eligible(tx, deps, t.conv.id, [...t.recipients.keys()]);
   if (ids.length === 0) return;
+  const unitIdOf = (id: string) =>
+    t.recipients.get(id) === "team_mention" ? (t.unitOf?.get(id) ?? null) : null;
   const values = ids.map(
     (id) =>
-      sql`(${t.conv.organizationId}::uuid, ${id}::uuid, ${t.recipients.get(id)}, ${t.conv.id}::uuid, ${t.messageId}::uuid, ${t.threadRootId}::uuid, ${t.actor.kind}, ${t.actor.id}::uuid)`,
+      sql`(${t.conv.organizationId}::uuid, ${id}::uuid, ${t.recipients.get(id)}, ${t.conv.id}::uuid, ${t.messageId}::uuid, ${t.threadRootId}::uuid, ${t.actor.kind}, ${t.actor.id}::uuid, ${unitIdOf(id)}::uuid)`,
   );
   // One row per (user, message): a stronger reason upgrades the row and makes it unread again; a weaker or equal
-  // one changes nothing (and announces nothing).
+  // one changes nothing (and announces nothing). The unit follows the kind (only a `team_mention` names one).
   const res = await tx.execute(sql`
     insert into app.notifications
-      (organization_id, user_id, kind, conversation_id, message_id, thread_root_id, actor_kind, actor_id)
+      (organization_id, user_id, kind, conversation_id, message_id, thread_root_id, actor_kind, actor_id, unit_id)
     values ${sql.join(values, sql`, `)}
-    on conflict (user_id, message_id) do update set kind = excluded.kind, read_at = null
+    on conflict (user_id, message_id) do update set kind = excluded.kind, unit_id = excluded.unit_id, read_at = null
       where array_position(${RANK_ARRAY}, excluded.kind) > array_position(${RANK_ARRAY}, app.notifications.kind)
-    returning id, user_id, kind, created_at`);
+    returning id, user_id, kind, unit_id, created_at`);
   const rows = res.rows as Array<{
     id: string;
     user_id: string;
     kind: NotificationKind;
+    unit_id: string | null;
     created_at: unknown;
   }>;
   if (rows.length === 0) return;
+  const units = await teamMentionUnits(
+    tx,
+    rows.filter((r) => r.kind === "team_mention").map((r) => r.unit_id),
+  );
 
   const userIds = rows.map((r) => r.user_id);
   const prefs = new Map(
@@ -202,7 +214,8 @@ async function deliver(tx: Tx, deps: NotificationDeps, t: Target): Promise<void>
     const p = prefs.get(r.user_id);
     const m = memberships.get(r.user_id);
     const { popup } = decideNotify({
-      event: r.kind,
+      // 07.17 (PD-14): a team mention pops exactly like a direct mention.
+      event: r.kind === "team_mention" ? "mention" : r.kind,
       // An AI chat follows the direct-conversation default ("all"): only addressed kinds ever reach it.
       conversationKind: t.conv.kind === "ai_chat" ? "group" : t.conv.kind,
       level: (m?.level ?? "default") as ConversationNotifyLevel,
@@ -221,6 +234,7 @@ async function deliver(tx: Tx, deps: NotificationDeps, t: Target): Promise<void>
       snippet,
       createdAt: iso(r.created_at),
       readAt: null,
+      ...(r.kind === "team_mention" ? { unit: (r.unit_id && units.get(r.unit_id)) || null } : {}),
     };
     const ev: NotificationCreatedEvent = { notification, popup };
     await core.realtime.appendEvent(tx, `user:${r.user_id}`, EventTypes.notificationCreated, ev);
@@ -416,8 +430,25 @@ export function createNotificationService(
       }
       const threadRootId = input.threadRootId;
       const dir = await loadDirectory(tx);
+      const authorUserId = input.author.kind === "user" ? input.author.id : null;
+      // 07.17 (PD-14): units resolve on channel posts only (chat's gate, PD-13); their members who can read this
+      // channel (the resolver, decided before the 200 cap: code review CR-02) are offered `team_mention`, and
+      // `deliver`'s `eligible` checks again.
+      const unitIds =
+        conv.kind === "channel" ? input.mentions.filter((m) => m.kind === "unit").map((m) => m.id) : [];
+      const teamMentions =
+        unitIds.length > 0
+          ? await teamMentionAudience(tx, {
+              unitIds,
+              authorUserId,
+              conversationId: conv.id,
+              readable: (userId) => nd.access.isReadable(tx, userId, conv.id, { kinds: NOTIFIABLE_KINDS }),
+            })
+          : [];
+      const unitOf = new Map<string, string>();
+      for (const t of teamMentions) for (const u of t.userIds) if (!unitOf.has(u)) unitOf.set(u, t.unitId);
       const recipients = computeRecipients({
-        authorUserId: input.author.kind === "user" ? input.author.id : null,
+        authorUserId,
         convKind: conv.kind,
         humanMemberIds: await humanMemberIds(tx, conv.id),
         mentionedUserIds: input.mentions.filter((m) => m.kind === "user").map((m) => m.id),
@@ -428,6 +459,7 @@ export function createNotificationService(
             : new Set(),
         threadParticipantIds: threadRootId ? await threadParticipantIds(tx, threadRootId, message.id) : [],
         isThreadReply: threadRootId !== null,
+        teamMentions,
       });
       const actor = message.author ?? authorOf(dir, input.author.kind, input.author.id);
       if (recipients.size > 0) {
@@ -438,6 +470,7 @@ export function createNotificationService(
           threadRootId,
           actor,
           recipients,
+          unitOf,
         });
       }
       if (conv.kind === "channel" && threadRootId === null) {
@@ -475,7 +508,8 @@ export function createNotificationService(
     },
 
     async onEdited(tx, input) {
-      // Only people mentioned now and not before (Pitfall 8); an edit never notifies @channel/@here.
+      // Only people mentioned now and not before (Pitfall 8); an edit never notifies @channel/@here, nor a team
+      // (07.17 PD-14: a unit mention added by an edit is stored and reaches nobody).
       const before = new Set(input.previousMentions.filter((m) => m.kind === "user").map((m) => m.id));
       const recipients = new Map<string, NotificationKind>();
       for (const m of input.message.mentions) {

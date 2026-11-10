@@ -316,18 +316,28 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(g.activeTurn(SESSION)?.tainted).toBe(false);
   });
 
-  it("ocw_board_card stays side-effecting even when a turn's flags say otherwise (blocked once tainted)", async () => {
+  it("07.17 D-06: once tainted, ocw_board_card still reaches its routes (they decide; the tool refuses create itself), whatever the turn's flags say, and never as an approvable call", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });
     const lying = turn({
-      tools: ["web_search", "ocw_board_card"],
-      toolFlags: { web_search: WEB, ocw_board_card: { untrustedOutput: false, sideEffecting: false } },
+      tools: ["web_search", "ocw_board_card", "ocw_memory_save"],
+      toolFlags: {
+        web_search: WEB,
+        ocw_memory_save: MEMORY,
+        ocw_board_card: { untrustedOutput: false, sideEffecting: false, approval: "always" as const },
+      },
     });
     g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: lying });
     expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
-    const board = await g.beforeToolCall(call("ocw_board_card", { action: "create" }), ctx());
-    expect(board?.blockReason).toMatch(/read-only after untrusted content/u);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    for (const action of ["move", "set_waiting", "create", "read"]) {
+      expect(await g.beforeToolCall(call("ocw_board_card", { action }), ctx()), action).toBeUndefined();
+    }
+    // The memory tools keep their local block; nothing but the web call went to /tool-calls (no arguments, no approval).
+    const memory = await g.beforeToolCall(call("ocw_memory_save", { text: "planted" }), ctx());
+    expect(memory?.blockReason).toMatch(/read-only after untrusted content/u);
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+    expect(fake.requests[0]).not.toHaveProperty("arguments");
   });
 
   describe("ocw_automation_propose (07.6 AUTO-03, D-02)", () => {
@@ -1697,7 +1707,8 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
       TAINTED,
     );
-    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    // 07.17 D-06 / D-12: the board routes decide a move (the tool refuses create itself).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
     expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
       "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
     );
@@ -1725,7 +1736,7 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect(fake.requests).toHaveLength(0);
   });
 
-  it("after a session's output was read (D-20) every other side-effecting call is refused locally; prompt and stop still reach their routes; start answers session_output", async () => {
+  it("after a session's output was read (D-20) every other side-effecting call is refused locally; prompt, stop and (07.17 D-12) the board tool still reach their routes; start answers session_output", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });
     begin(g);
@@ -1735,7 +1746,8 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
       TAINTED,
     );
-    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    // 07.17 D-06 / D-12: the board routes decide a move (the tool refuses create itself).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
     expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
       "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
     );
@@ -1770,5 +1782,105 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     begin(g);
     expect(g.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
     expect(await g.beforeToolCall(call("ocw_work_session_start", START), ctx())).toBeUndefined();
+  });
+});
+
+describe("ocw_conversation_open (07.17 D-02, D-05, PD-07, PD-10): self-validated, static flags, the route decides taint", () => {
+  const OPEN = "ocw_conversation_open";
+  const SIDE = { untrustedOutput: false, sideEffecting: true };
+  const MCP_READ = { untrustedOutput: true, sideEffecting: false };
+  const ITEMS = { items: [{ externalKey: "1042", title: "Order 1042", body: "" }] };
+  const runTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["ocw_memory_save", "ocw_board_card", "ocw_consult_agent", "ocw_connector_call", OPEN],
+      toolFlags: {
+        ocw_memory_save: MEMORY,
+        ocw_board_card: SIDE,
+        ocw_consult_agent: SIDE,
+        ocw_connector_call: SIDE,
+        m1a2b3c4d__list_orders: MCP_READ,
+        [OPEN]: SIDE,
+      },
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = runTurn(), tainted = false) =>
+    g.beginTurn(SESSION, {
+      eventId: "evt-1",
+      agentId: "a1",
+      turn: t,
+      connectorTools: ["m1a2b3c4d__list_orders"],
+      tainted,
+    });
+
+  it("is validated by its own route: never sent to /tool-calls, counted against the turn's cap, never taints", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(1);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+  });
+
+  it("after the run read the MCP (tainted) the call still reaches its route; memory and consult stay blocked locally", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    const read = call("ocw_connector_call", { connector: "m1a2b3c4d", tool: "list_orders", arguments: {} });
+    expect(await g.beforeToolCall(read, ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toMatch(
+      /read-only after untrusted content/u,
+    );
+    expect(await g.beforeToolCall(call("ocw_consult_agent", {}), ctx())).toMatchObject({ block: true });
+    // 07.17 D-06: the board tool's moves reach their route too (it decides the exemption).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("a turn delivered tainted (taintedAtStart) reaches the route too", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, runTurn(), true);
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+  });
+
+  it("takes its static flags: a turn saying not side-effecting or approvable changes nothing; one saying untrusted only adds", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(
+      g,
+      runTurn({
+        toolFlags: { [OPEN]: { untrustedOutput: false, sideEffecting: false, approval: "always" as const } },
+      }),
+    );
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    // Never approvable: no arguments ever leave the cell through /tool-calls.
+    expect(fake.requests).toHaveLength(0);
+    const t = g.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    t.sessionOutputRead = true;
+    // Still side-effecting: after a session's output it is refused locally (the claim refuses it too).
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toMatch(
+      /read-only after untrusted content/u,
+    );
+    begin(g, runTurn({ toolFlags: { [OPEN]: { untrustedOutput: true, sideEffecting: true } } }));
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+  });
+
+  it("a turn that does not offer it is blocked, and the cap of 8 holds", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, runTurn({ tools: ["ocw_memory_save"] }));
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toBe(
+      `Tool ${OPEN} is not allowed on this turn.`,
+    );
+    begin(g, runTurn({ maxToolCalls: 1 }));
+    expect(await g.beforeToolCall(call(OPEN, ITEMS), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call(OPEN, ITEMS), ctx()))?.blockReason).toBe(
+      `Tool ${OPEN} blocked: the turn reached its limit of 1 tool calls.`,
+    );
   });
 });

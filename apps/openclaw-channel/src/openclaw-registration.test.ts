@@ -7,8 +7,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CellAgent } from "./agent-channel-protocol.js";
 import { createAgentChannelClient } from "./api-client.js";
-import { openClawAgentIdFor } from "./mention-mapper.js";
+import { mapMention, openClawAgentIdFor } from "./mention-mapper.js";
+import { planReconcile } from "./reconciler.js";
 import { type FakeAgentChannelApi, startFakeAgentChannelApi } from "./testing/fake-agent-channel-api.js";
 import {
   ALL_REGISTRATION_MODES,
@@ -117,9 +119,67 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_automation_propose",
       "ocw_record_update",
       "ocw_consult_agent",
+      "ocw_conversation_open",
     ];
     expect(tools("full")).toEqual(owned);
+    for (const name of owned) expect(manifest.contracts?.tools, name).toContain(name);
     expect(tools("tool-discovery")).toEqual(owned);
+  });
+
+  it("07.17 PD-07: every non-disabled bot's alsoAllow configures ocw_conversation_open (turn-scoped); a run may use it only on a turn that offers it", () => {
+    const bot: CellAgent = {
+      id: BOT,
+      handle: "atlas",
+      displayName: "Atlas",
+      avatarUrl: null,
+      description: null,
+      instructions: null,
+      status: "ready",
+      modelRef: "fake/mock-1",
+      model: { provider: "mock", providerId: "fake", id: "mock-1" },
+      capabilities: { tools: ["ocw_agent_card"] },
+    };
+    const provider = {
+      id: "fake",
+      kind: "mock" as const,
+      api: "openai-completions" as const,
+      baseUrl: "http://fake-model:18999/v1",
+      apiKey: "mock-key-not-secret",
+      models: ["mock-1"],
+    };
+    const agentEntry = planReconcile({}, { agents: [bot], providers: [provider] }).upsertAgents[
+      openClawAgentIdFor(BOT)
+    ];
+    expect(agentEntry?.tools).toMatchObject({ alsoAllow: expect.arrayContaining(["ocw_conversation_open"]) });
+    const asTurn = (tools: string[]) =>
+      mapMention(
+        {
+          seq: 1,
+          type: "agent.mention.v1",
+          organizationId: "o",
+          cellId: "c",
+          eventId: "evt-run-1",
+          agent: { id: BOT, handle: "atlas", displayName: "Atlas" },
+          conversation: { id: "c3", kind: "channel", name: "fleet" },
+          thread: { rootMessageId: "d21" },
+          message: {
+            id: "m1",
+            text: "Run the automation",
+            createdAt: "2026-11-10T09:00:00.000Z",
+            author: { kind: "user", id: "u-1", displayName: "Sam" },
+            mentions: [{ kind: "agent", id: BOT }],
+          },
+          threadHistory: [],
+          roster: [],
+          turn: { ...WEB_TURN, tools },
+        },
+        bot,
+      ).allowedTools;
+    expect(asTurn(["ocw_agent_card"])).toEqual(["ocw_agent_card"]);
+    expect(asTurn(["ocw_agent_card", "ocw_conversation_open"])).toEqual([
+      "ocw_agent_card",
+      "ocw_conversation_open",
+    ]);
   });
 
   it("no registration diagnostics in any mode", () => {

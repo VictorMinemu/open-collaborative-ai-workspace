@@ -75,6 +75,11 @@ REVOKE TRUNCATE ON app.work_zone_proposals FROM ocw_app;
 -- a bot, device, project, session or conversation, and for the API's own profile and consent changes.
 REVOKE TRUNCATE ON app.bot_work_zone_profiles, app.bot_work_zone_profile_projects, app.device_bot_consents, app.bot_work_sessions FROM ocw_app;
 
+-- Automation fan-out (Phase 07.17, D-03): TRUNCATE ignores RLS, and the opened rows are the dedupe history that keeps an
+-- item from ever being opened twice, so the app role never truncates them (stated explicitly, as for 07.16). DELETE stays
+-- granted for the cascades of an automation, a run or a conversation.
+REVOKE TRUNCATE ON app.automation_conversations FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
@@ -830,6 +835,9 @@ REVOKE TRUNCATE ON app.watched_record_changes FROM ocw_app;
 -- - `lookup_webhook_endpoint`: the endpoint and organization behind a public id. `active` is false for a tombstoned
 --   (`deleted_at`) or unlinked endpoint, so the route answers 410 instead of 404 (Pitfall 4); an unknown id has no row.
 -- - `expired_automation_events`: inbound items whose content is due for the 30-day purge (Pitfall 3).
+-- - `day_waiting_automation_items` (07.17 code review WR-02): opened items of active automations waiting for the bot's
+--   daily limit since before their automation's local midnight (`automations.time_zone`, else UTC), at most the
+--   automation's `fan_out_per_day` per automation (the `automation.tick` cron queues them again).
 CREATE OR REPLACE FUNCTION app.due_automations(p_limit integer, p_now timestamptz)
 RETURNS TABLE (id uuid, organization_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
@@ -901,6 +909,25 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.expired_automation_events(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.expired_automation_events(integer, timestamptz) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.day_waiting_automation_items(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT w.id, w.organization_id FROM (
+    SELECT c.id, c.organization_id, c.updated_at, a.fan_out_per_day,
+      row_number() OVER (PARTITION BY c.automation_id ORDER BY c.updated_at, c.id) AS n
+    FROM app.automation_conversations c
+    JOIN app.automations a ON a.organization_id = c.organization_id AND a.id = c.automation_id
+    WHERE c.status = 'waiting' AND c.reason = 'agent_daily_limit' AND a.status = 'active'
+      AND c.updated_at < (date_trunc('day', p_now AT TIME ZONE coalesce(a.time_zone, 'UTC'))
+        AT TIME ZONE coalesce(a.time_zone, 'UTC'))
+  ) w
+  WHERE w.n <= w.fan_out_per_day
+  ORDER BY w.updated_at, w.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.day_waiting_automation_items(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.day_waiting_automation_items(integer, timestamptz) TO ocw_app;
 
 -- Phase 07.7 (A2A-03, D-04, D-11, ADR-0027): the pre-tenant read of the `consult.tick` job (one global cron, every
 -- minute, UTC). Same shape as the 07.6 tick functions above: pending agent-to-agent hops whose deadline has passed,

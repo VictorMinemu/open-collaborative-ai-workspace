@@ -118,7 +118,12 @@ export const DEFAULT_BOARD_COLUMNS: readonly TemplateColumn[] = [
 // ---------------------------------------------------------------- naming rule and card text (pure)
 
 const LINE_BREAK_RE = /\r\n|[\n\r\u2028\u2029]/;
-const CONTROL_RE = /[\p{Cc}\p{Cf}]/gu;
+/**
+ * Control and format characters, except U+2060 WORD JOINER: the API's `defuseMentions` puts it before the `@` of a
+ * handle in bot-written and outside text (07.6 inbound titles, 07.17 fan-out titles), and replacing it with a space here
+ * would turn `⁠@sam` back into a mention in the card's message body (07.17-16, P2).
+ */
+const CONTROL_RE = /(?!⁠)[\p{Cc}\p{Cf}]/gu;
 
 /** At most `max` UTF-16 units, never ending inside a surrogate pair. */
 function clip(text: string, max: number): string {

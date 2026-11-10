@@ -235,6 +235,11 @@ describe("Víctor creates a weekly automation through REST (Task 1, tracer)", ()
       triggerKind: "schedule",
       targetKind: "channel",
       conversationId: sales,
+      // 07.17 (PD-17, PD-18): the fan-out settings as counts, off for a 07.16-shaped body.
+      fanOut: false,
+      perRun: 10,
+      perDay: 100,
+      escalationCount: 0,
     });
     expect(JSON.stringify(audit!.metadata)).not.toMatch(/Weekly|closed deals/);
     expect(await userEvents(victorId, automationId)).toEqual([{ automationId }]);
@@ -265,14 +270,25 @@ describe("Víctor creates a weekly automation through REST (Task 1, tracer)", ()
     expect(new Date(first!).toISOString()).toBe(nextFridayFivePmMadrid(new Date()));
     expect(second! - first!).toBeGreaterThanOrEqual(7 * 86_400_000 - 3_600_000);
     expect(third! - second!).toBeLessThanOrEqual(7 * 86_400_000 + 3_600_000);
+    // Phase 07.17 (D-01, D-11, AFO-01, E22): every 5 minutes is the default minimum; every 4 is still refused.
+    const everyFive = await ok(
+      victor.request("POST", "/api/v1/automations/schedule-preview", {
+        cron: "*/5 * * * *",
+        timeZone: "Europe/Madrid",
+      }),
+    );
+    expect(everyFive.ok).toBe(true);
+    expect(everyFive.next).toHaveLength(3);
+    const [a, b] = (everyFive.next as string[]).map((t) => Date.parse(t));
+    expect(b! - a!).toBe(5 * 60_000);
     expect(
       await ok(
         victor.request("POST", "/api/v1/automations/schedule-preview", {
-          cron: "*/5 * * * *",
+          cron: "*/4 * * * *",
           timeZone: "Europe/Madrid",
         }),
       ),
-    ).toEqual({ ok: false, code: "schedule_too_frequent", minMinutes: 15 });
+    ).toEqual({ ok: false, code: "schedule_too_frequent", minMinutes: 5 });
     expect(
       await ok(
         victor.request("POST", "/api/v1/automations/schedule-preview", {
@@ -723,11 +739,22 @@ describe("caps and webhook rights (Task 4, P-09)", () => {
       403,
       "webhook_not_allowed",
     );
-    const tooMany = await fails(
-      sam.request("POST", "/api/v1/automations", weekly({ target: { kind: "dm" }, maxRunsPerDay: 97 })),
-      400,
+    // Phase 07.17 (D-11): the default cap is 288 a day; an organization whose admin chose 96 still caps at 96.
+    await su.query(
+      "insert into app.bot_policies (organization_id, max_runs_per_day_cap) values ($1, 96) on conflict (organization_id) do update set max_runs_per_day_cap = 96",
+      [orgA],
     );
-    expect(tooMany.error.details).toEqual({ max: 96 });
+    try {
+      const tooMany = await fails(
+        sam.request("POST", "/api/v1/automations", weekly({ target: { kind: "dm" }, maxRunsPerDay: 97 })),
+        400,
+      );
+      expect(tooMany.error.details).toEqual({ max: 96 });
+    } finally {
+      await su.query("update app.bot_policies set max_runs_per_day_cap = 288 where organization_id = $1", [
+        orgA,
+      ]);
+    }
   });
 
   it("the 11th automation of one person is refused with 409 automation_cap", async () => {
@@ -752,9 +779,9 @@ describe("caps and webhook rights (Task 4, P-09)", () => {
     expect(samOpts.caps).toEqual({
       maxAutomationsPerUser: 10,
       used: 10,
-      minScheduleMinutes: 15,
+      minScheduleMinutes: 5,
       maxInboundPerHour: 30,
-      maxRunsPerDayCap: 96,
+      maxRunsPerDayCap: 288,
     });
     const samBots = new Map((samOpts.bots as Json[]).map((b) => [b.id, b]));
     expect(samBots.get(scoutId)).toEqual({

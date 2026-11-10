@@ -6,6 +6,7 @@ import type { ModelGateway } from "../model-gateway";
 import type { PermissionService } from "../organization";
 import type { AutomationSeamDeps } from "./actions";
 import { type AutomationProposals, registerAutomationApprovalKind } from "./approval-kind";
+import { type AutomationFanOut, createAutomationFanOut, registerFanOutWorker } from "./fan-out";
 import { registerInbound } from "./inbound";
 import { registerMailboxRoutes } from "./mailboxes";
 import { registerAutomationRoutes } from "./routes";
@@ -37,6 +38,7 @@ export {
   type ProposalRefusal,
   type ProposingTurn,
 } from "./approval-kind";
+export { type AutomationFanOut, externalKeyHash, type FanOutOpenInput, itemEventId } from "./fan-out";
 export { firstRunAt, missedPolicy, nextRunAfter, nextRuns, validateSchedule } from "./schedule";
 export {
   type AutomationCaps,
@@ -59,15 +61,23 @@ export interface AutomationDeps {
 export function createAutomationModule(
   core: Core,
   deps: AutomationDeps,
-): { module: ApiModule; service: AutomationService; proposals: AutomationProposals } {
+): {
+  module: ApiModule;
+  service: AutomationService;
+  proposals: AutomationProposals;
+  /** 07.17 (PD-07): the open call of a fan-out run, served by the Agent Channel's `/conversations/open`. */
+  fanOut: AutomationFanOut;
+} {
   const service = createAutomationService(core, deps.perms, createConversationAccess(core), deps.approvals);
   const seams: AutomationSeamDeps = { ...deps, service };
   // Each seam is wired here once; its plan fills its own file (09 runner, 10 webhooks, 11 mailboxes, 12 the approval
   // kind, 21 inbound) and never edits this index (P-01). 12 also returns the proposal entry point the Agent Channel serves.
   const proposals = registerAutomationApprovalKind(deps.approvals, service, { core, perms: deps.perms });
+  const fanOut = createAutomationFanOut(core, { perms: deps.perms });
   return {
     service,
     proposals,
+    fanOut,
     module: {
       name: "automation",
       register(app) {
@@ -77,6 +87,8 @@ export function createAutomationModule(
         // Workers and ticks register during module registration, before `core.jobs` starts (onReady).
         registerRunner(core, seams);
         registerInbound(core, seams);
+        // 07.17 (D-04, PD-09): one bot turn per opened item.
+        registerFanOutWorker(core, seams);
       },
     },
   };

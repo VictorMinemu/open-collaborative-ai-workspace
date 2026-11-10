@@ -7,8 +7,11 @@ import {
   type AutomationRunReason,
   type AutomationRunTrigger,
   type AutomationRunUpdatedEvent,
+  BUILTIN_TOOLS,
   cellTopic,
+  type EscalationTargetView,
   EventTypes,
+  FAN_OUT_LIMITS,
   type ModelRef,
 } from "@ocw/contracts";
 import {
@@ -89,6 +92,17 @@ export interface DeliverAutomationRunInput {
   taintedAtStart: boolean;
   /** The automation's IANA zone: the turn's local time (falls back to UTC). */
   timeZone: string | null;
+  /**
+   * Phase 07.17 (D-02, PD-07, PD-08): a run of a fan-out automation, computed by the runner (`fanOutOffer`): the turn
+   * is offered `ocw_conversation_open` and the event carries these caps in `automationRun.fanOut`. Absent or null = the
+   * run and its turn are exactly what they were before the phase (E9).
+   */
+  fanOut?: { perRun: number; remainingRun: number; remainingDay: number } | null;
+  /**
+   * Phase 07.17 (D-08, PD-15): the automation's escalation targets as resolved at this delivery by the runner
+   * (`escalationFor`: gone or no longer valid targets already dropped). On the event only when not empty.
+   */
+  escalation?: EscalationTargetView[];
 }
 
 export type DeliverAutomationRunResult =
@@ -185,6 +199,7 @@ export async function deliverAutomationRun(
     trigger: "automation",
     taintedAtStart: p.taintedAtStart,
     clientTimeZone: p.timeZone,
+    ...(p.fanOut ? { conversationOpen: { automationId: p.automation.id, runId: run.id } } : {}),
   };
   const events = await buildMentionEvents(tx, mention, {
     core,
@@ -221,6 +236,27 @@ export async function deliverAutomationRun(
   // Streams in the order a post locks them (conversation, `user:`, cell), so no two writers wait on each other.
   const runUpdated: AutomationRunUpdatedEvent = { automationId: p.automation.id, runId: run.id };
   await core.realtime.appendEvent(tx, `user:${p.runAsUserId}`, EventTypes.automationRunUpdated, runUpdated);
+  // The caps travel only with the tool: a turn too full for it (MAX_TURN_TOOLS) is delivered as an ordinary run.
+  const fanOut = p.fanOut && ev.turn?.tools.includes(BUILTIN_TOOLS.conversationOpen) ? p.fanOut : null;
+  if (p.fanOut && !fanOut) {
+    // Code review WR-07: the turn has only platform tools and no room for the open tool (turn-policy reserves its slot
+    // over any MCP tool): it opens nothing this run, and the reason is on record (ids only).
+    await core.audit.record(tx, {
+      action: "automation.fan_out_unavailable",
+      resourceType: "automation_run",
+      resourceId: run.id,
+      result: "denied",
+      actorKind: "system",
+      agentId: bot.id,
+      userId: p.runAsUserId,
+      metadata: {
+        runId: run.id,
+        automationId: p.automation.id,
+        eventId: ev.eventId,
+        reason: "too_many_tools",
+      },
+    });
+  }
   const payload: StoredAutomationRun = {
     ...ev,
     type: AgentChannelEventTypes.automationRun,
@@ -240,6 +276,18 @@ export async function deliverAutomationRun(
             receivedAt: p.inbound.receivedAt,
           }
         : null,
+      ...(fanOut
+        ? {
+            fanOut: {
+              perRun: fanOut.perRun,
+              remainingRun: fanOut.remainingRun,
+              remainingDay: fanOut.remainingDay,
+            },
+          }
+        : {}),
+      ...(p.escalation && p.escalation.length > 0
+        ? { escalation: p.escalation.slice(0, FAN_OUT_LIMITS.escalationMax) }
+        : {}),
     },
   };
   await core.realtime.appendEvent(

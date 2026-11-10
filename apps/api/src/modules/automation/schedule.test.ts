@@ -106,6 +106,10 @@ describe("validateSchedule (the save and the preview share it)", () => {
     ["0 30 * * *", "Europe/Madrid", 15, { ok: false, code: "invalid_cron" }],
     ["0 9 * *", "Europe/Madrid", 15, { ok: false, code: "invalid_cron" }],
     ["0 17 * * 5", "Europe/Madird", 15, { ok: false, code: "invalid_time_zone" }],
+    // 07.17 (D-01, AFO-01): the organization default is 5 minutes.
+    ["*/5 * * * *", "Europe/Madrid", 5, { ok: true }],
+    ["*/4 * * * *", "Europe/Madrid", 5, { ok: false, code: "schedule_too_frequent" }],
+    ["*/10 * * * *", "Europe/Madrid", 5, { ok: true }],
   ])("%s in %s (min %i) → %o", (cron, timeZone, min, expected) => {
     expect(validateSchedule({ cron, timeZone }, min, now)).toEqual(expected);
   });
@@ -122,6 +126,16 @@ describe("validateSchedule (the save and the preview share it)", () => {
     ]) {
       expect(validateSchedule({ cron, timeZone: "Europe/Madrid" }, 15, now), cron).toEqual({ ok: true });
     }
+  });
+
+  it("the Every few minutes presets (07.17) are valid at the 5-minute default; 5 is refused above it", () => {
+    for (const cron of ["*/5 * * * *", "*/10 * * * *", "*/15 * * * *", "*/30 * * * *"]) {
+      expect(validateSchedule({ cron, timeZone: "Europe/Madrid" }, 5, now), cron).toEqual({ ok: true });
+    }
+    expect(validateSchedule({ cron: "*/5 * * * *", timeZone: "Europe/Madrid" }, 10, now)).toEqual({
+      ok: false,
+      code: "schedule_too_frequent",
+    });
   });
 
   it("Every month · Last day (07.6-15) runs on each month's last day in the zone", () => {

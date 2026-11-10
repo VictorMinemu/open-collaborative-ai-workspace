@@ -1,4 +1,4 @@
-import { type Automation, type AutomationRun, AutomationRunReason } from "@ocw/contracts";
+import { AUTOMATION_LIMITS, type Automation, type AutomationRun, AutomationRunReason } from "@ocw/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,15 +10,22 @@ import {
   baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
+  expectedTurnsPerDay,
+  INTERVAL_MINUTES,
+  intervalOptions,
   nextRelative,
   rowOpenTarget,
   runOpenHref,
   runReasonSentence,
+  runsPerDayOfSchedule,
+  runsPerDayPrefill,
+  SCHEDULE_PRESETS,
   type ScheduleValue,
   scheduleSummary,
   scheduleToCron,
   yourTimeSuffix,
 } from "@/lib/automation-queries";
+import { DailyLimitWarning } from "./automation-editor-sheet";
 import { RunHistory } from "./run-history";
 import { NextRuns } from "./schedule-builder";
 import { conversationOptionLabel, EMPTY_TARGET, TargetPicker } from "./target-picker";
@@ -151,6 +158,149 @@ describe("schedule presets ↔ cron (UI-SPEC Surface 2)", () => {
   });
 });
 
+describe("every few minutes (07.17, D-01, PD-04, PD-19)", () => {
+  it("the preset list starts with Every few minutes; the intervals are 5, 10, 15 and 30", () => {
+    expect(SCHEDULE_PRESETS[0]).toEqual({ value: "every_minutes", label: "Every few minutes" });
+    expect(SCHEDULE_PRESETS.map((p) => p.value)).toEqual([
+      "every_minutes",
+      "hourly",
+      "daily",
+      "weekdays",
+      "weekly",
+      "monthly",
+      "custom",
+    ]);
+    expect([...INTERVAL_MINUTES]).toEqual([5, 10, 15, 30]);
+  });
+
+  it("every N minutes makes */N and a stored */N opens as that preset; */7 and */20 stay Custom", () => {
+    expect(scheduleToCron(sched({ preset: "every_minutes", everyMinutes: 10 }))).toBe("*/10 * * * *");
+    for (const n of INTERVAL_MINUTES) {
+      const v = cronToSchedule(`*/${n} * * * *`, "Europe/Madrid");
+      expect(v, String(n)).toMatchObject({
+        preset: "every_minutes",
+        everyMinutes: n,
+        timeZone: "Europe/Madrid",
+      });
+      expect(scheduleToCron(v)).toBe(`*/${n} * * * *`);
+    }
+    for (const cron of ["*/7 * * * *", "*/20 * * * *", "*/10 9-17 * * *", "*/10 * * * 1-5"]) {
+      expect(cronToSchedule(cron, "UTC").preset, cron).toBe("custom");
+    }
+    // A new automation keeps its weekly default; 10 minutes is the interval the preset starts with.
+    expect(defaultSchedule("UTC")).toMatchObject({ preset: "weekly", everyMinutes: 10 });
+  });
+
+  it("intervals below the workspace minimum are disabled and say why", () => {
+    expect(intervalOptions(10)).toEqual([
+      { value: 5, label: "Every 5 minutes · Below your workspace's minimum (10 min)", disabled: true },
+      { value: 10, label: "Every 10 minutes", disabled: false },
+      { value: 15, label: "Every 15 minutes", disabled: false },
+      { value: 30, label: "Every 30 minutes", disabled: false },
+    ]);
+    expect(intervalOptions(undefined).filter((o) => o.disabled)).toEqual([]);
+  });
+
+  it("the schedule builder shows the interval select for Every few minutes, and no time field", () => {
+    const html = render(
+      <TriggerStep
+        form={{
+          triggerKind: "schedule",
+          schedule: sched({ preset: "every_minutes", everyMinutes: 10 }),
+          setTriggerKind: () => undefined,
+          setSchedule: () => undefined,
+          scheduleErrors: {},
+          preview: { state: "idle" },
+          disabled: false,
+          minMinutes: 10,
+        }}
+        canWebhook
+        lastSave={null}
+        mode="new"
+      />,
+    );
+    expect(html).toContain('data-testid="schedule-interval"');
+    expect(text(/data-testid="schedule-interval"[\s\S]*?<\/button>/.exec(html)?.[0] ?? "")).toContain(
+      "Every 10 minutes",
+    );
+    expect(html).not.toContain('data-testid="schedule-time"');
+  });
+
+  it("runs a day of each schedule; picking an interval pre-fills min(cap, floor(1440 / N)), never otherwise", () => {
+    expect(runsPerDayOfSchedule(sched({ preset: "every_minutes", everyMinutes: 10 }))).toBe(144);
+    expect(runsPerDayOfSchedule(sched({ preset: "every_minutes", everyMinutes: 5 }))).toBe(288);
+    expect(runsPerDayOfSchedule(sched({ preset: "hourly" }))).toBe(24);
+    for (const preset of ["daily", "weekdays", "weekly", "monthly"] as const) {
+      expect(runsPerDayOfSchedule(sched({ preset })), preset).toBe(1);
+    }
+    expect(runsPerDayOfSchedule(sched({ preset: "custom", cron: "*/7 * * * *" }))).toBeNull();
+
+    const weekly = sched({ preset: "weekly" });
+    const ten = sched({ preset: "every_minutes", everyMinutes: 10 });
+    expect(runsPerDayPrefill(weekly, ten, 288)).toBe(144);
+    expect(runsPerDayPrefill(weekly, ten, 96)).toBe(96);
+    expect(runsPerDayPrefill(ten, { ...ten, everyMinutes: 30 }, 288)).toBe(48);
+    // Same interval (the zone changed), or a preset that is not an interval: the stored runs a day stay.
+    expect(runsPerDayPrefill(ten, { ...ten, timeZone: "UTC" }, 288)).toBeNull();
+    expect(runsPerDayPrefill(ten, weekly, 288)).toBeNull();
+  });
+
+  it("the frequency message reads the workspace's minimum, with 5 minutes as the only fallback", () => {
+    expect(AUTOMATION_LIMITS.minScheduleMinutesDefault).toBe(5);
+    const msg = (minMinutes?: number) =>
+      text(
+        render(
+          <NextRuns
+            preview={{ state: "error", code: "schedule_too_frequent" }}
+            timeZone="UTC"
+            {...(minMinutes !== undefined ? { minMinutes } : {})}
+          />,
+        ),
+      );
+    expect(msg()).toContain("Runs can be at most every 5 minutes in this workspace.");
+    expect(msg(20)).toContain("Runs can be at most every 20 minutes in this workspace.");
+    const ctx = { bot: "Scout", conversation: "#sales" };
+    expect(automationErrorText(new ApiRequestError(400, "schedule_too_frequent", "x"), ctx)).toBe(
+      "Runs can be at most every 5 minutes in this workspace.",
+    );
+  });
+});
+
+describe("the bot's daily limit before saving (07.17, D-11, PD-19)", () => {
+  const ten = sched({ preset: "every_minutes", everyMinutes: 10 });
+
+  it("expected turns a day: the schedule's runs within runs a day, plus the fan-out", () => {
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 144, fanOutPerDay: 0 })).toBe(144);
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 96, fanOutPerDay: 0 })).toBe(96);
+    expect(
+      expectedTurnsPerDay({ schedule: sched({ preset: "weekly" }), maxRunsPerDay: 24, fanOutPerDay: 0 }),
+    ).toBe(1);
+    const custom = sched({ preset: "custom", cron: "*/7 * * * *" });
+    expect(expectedTurnsPerDay({ schedule: custom, maxRunsPerDay: 50, fanOutPerDay: 0 })).toBe(50);
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 144, fanOutPerDay: 100 })).toBe(244);
+    // A webhook or mail trigger has no schedule: runs a day is the bound.
+    expect(expectedTurnsPerDay({ schedule: null, maxRunsPerDay: 30, fanOutPerDay: 0 })).toBe(30);
+  });
+
+  it("over the bot's limit: an amber status callout naming the bot, its limit and the expected turns", () => {
+    const html = render(<DailyLimitWarning botName="Scout" dailyLimit={100} expected={144} />);
+    expect(html).toContain('data-testid="automation-daily-limit-warning"');
+    expect(html).toContain('role="status"');
+    expect(html).toMatch(/dark:text-amber-/);
+    expect(text(html)).toBe(
+      "Scout can take 100 turns a day. This automation can use up to 144. Raise the bot's daily limit in its sheet, or runs stop when it is reached.",
+    );
+  });
+
+  it("within the limit, or a bot with no limit: no callout", () => {
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={200} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={144} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={null} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={undefined} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={100} expected={null} />)).toBe("");
+  });
+});
+
 describe("scheduleSummary (UI-SPEC § Copy › Trigger summaries)", () => {
   it("words every preset as the list, the card and the editor show it", () => {
     expect(scheduleSummary("15 * * * *")).toBe("Every hour at :15");
@@ -160,7 +310,7 @@ describe("scheduleSummary (UI-SPEC § Copy › Trigger summaries)", () => {
     expect(scheduleSummary("0 9 * * 1,4")).toBe("Mondays and Thursdays at 9:00 AM");
     expect(scheduleSummary("0 18 3 * *")).toBe("Monthly on day 3 at 6:00 PM");
     expect(scheduleSummary("45 23 L * *")).toBe("Monthly on the last day at 11:45 PM");
-    expect(scheduleSummary("*/20 * * * *")).toBe("Custom schedule (*/20 * * * *)");
+    expect(scheduleSummary("*/7 * * * *")).toBe("Custom schedule (*/7 * * * *)");
   });
 });
 
@@ -219,12 +369,14 @@ describe("NextRuns: the API preview in the automation's zone (DST, R13)", () => 
     const often = text(
       render(
         <NextRuns
-          preview={{ state: "error", code: "schedule_too_frequent", minMinutes: 15 }}
+          preview={{ state: "error", code: "schedule_too_frequent", minMinutes: 5 }}
           timeZone="UTC"
+          minMinutes={10}
         />,
       ),
     );
-    expect(often).toContain("Runs can be at most every 15 minutes in this workspace.");
+    // The preview's own answer wins over the options' minimum.
+    expect(often).toContain("Runs can be at most every 5 minutes in this workspace.");
     const invalid = text(
       render(<NextRuns preview={{ state: "error", code: "invalid_cron" }} timeZone="UTC" />),
     );
@@ -338,8 +490,8 @@ describe("refusals in words (UI-SPEC § Copy › API errors)", () => {
     expect(automationErrorText(err("automation_cap", { max: 10 }), ctx)).toBe(
       "You've reached 10 automations. Delete one to add another.",
     );
-    expect(automationErrorText(err("schedule_too_frequent", { minMinutes: 15 }), ctx)).toBe(
-      "Runs can be at most every 15 minutes in this workspace.",
+    expect(automationErrorText(err("schedule_too_frequent", { minMinutes: 5 }), ctx)).toBe(
+      "Runs can be at most every 5 minutes in this workspace.",
     );
     expect(automationErrorText(err("agent_not_member"), ctx)).toBe(
       "Scout isn't a member of #sales. Add it from Bots first.",

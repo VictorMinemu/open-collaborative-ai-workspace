@@ -241,7 +241,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const mentionCtx = useMemo(() => {
     const handles = new Map(directory.handles);
     for (const m of members.data?.members ?? []) {
-      if (!handles.has(m.handle)) handles.set(m.handle, { kind: m.kind, displayName: m.displayName });
+      // A channel member always wins over a team under the same handle (the API's precedence, 07.17 PD-13).
+      if (!handles.has(m.handle) || handles.get(m.handle)?.kind === "unit") {
+        handles.set(m.handle, { kind: m.kind, displayName: m.displayName });
+      }
     }
     const myHandle =
       members.data?.members.find((m) => m.kind === "user" && m.id === me.id)?.handle ??
@@ -638,6 +641,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const canModerate = channel.viewerCan?.includes("message.delete_any") ?? false;
   // @channel / @here only where the server allows them (`channel.mention_all`, deny-able by rules).
   const specialMentions = channel.viewerCan?.includes("channel.mention_all") ? SPECIAL_MENTIONS : undefined;
+  // 07.17 (D-07, PD-19): teams and departments are offered in channels and their threads (board cards included),
+  // never in DMs, group DMs or AI chats; those whose handle a channel member holds are left out.
+  const memberHandles = new Set(memberList.map((m) => m.handle));
+  const unitMentions = directory.units.filter((u) => !memberHandles.has(u.handle));
   const channelTypers = typers;
 
   const intro =
@@ -980,6 +987,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                     footer={<ComposerHint />}
                     specialMentions={specialMentions}
                     memberCount={memberList.length || channel.memberCount}
+                    unitMentions={unitMentions}
                   />
                 )}
               </div>
@@ -994,6 +1002,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
             rootId={threadId}
             me={me}
             candidates={candidates}
+            unitMentions={unitMentions}
             typers={typers}
             pending={pending}
             canPost={canPost}

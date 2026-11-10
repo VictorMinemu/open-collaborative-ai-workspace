@@ -15,6 +15,7 @@ import {
 } from "./agent-cards";
 import { A2A_MAX_DEPTH, ConsultMode } from "./agent-chains";
 import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
+import { EscalationTargetView, FAN_OUT_LIMITS } from "./automation-fan-out";
 import { AUTOMATION_LIMITS, AutomationRunTrigger, AutomationSchedule, JsonPointer } from "./automations";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
@@ -102,6 +103,11 @@ export const AgentChannelEventTypes = {
    * ended or went offline. Built like a mention of the bot on its live card; older plugins skip the unknown type.
    */
   workSession: "agent.work_session.v1",
+  /**
+   * Phase 07.17 (D-04, PD-09): a fan-out run opened a conversation for a new item; one turn per item in its thread,
+   * built like a mention of the bot on the opened root. Older plugins skip the unknown type.
+   */
+  automationItem: "agent.automation_item.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -271,6 +277,24 @@ export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).ex
     trigger: AutomationRunTrigger,
     instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
     inbound: AgentAutomationRunInbound.nullable(),
+    /**
+     * Phase 07.17 (D-02, PD-08, PD-09): present only on runs of fan-out automations, whose turn offers
+     * `ocw_conversation_open`: how many conversations this run may still open and how many the automation may still
+     * open today. Absent (or null) = not a fan-out run; older plugins strip it.
+     */
+    fanOut: z
+      .object({
+        perRun: z.number().int().min(1).max(FAN_OUT_LIMITS.perRunMax),
+        remainingRun: z.number().int().nonnegative(),
+        remainingDay: z.number().int().nonnegative(),
+      })
+      .nullable()
+      .optional(),
+    /**
+     * Phase 07.17 (D-08, PD-15): present only on automations with escalation targets: the people and teams to mention
+     * when the work is done or needs help, resolved at delivery (gone or no longer valid targets dropped).
+     */
+    escalation: z.array(EscalationTargetView).max(FAN_OUT_LIMITS.escalationMax).optional(),
   }),
 });
 export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
@@ -327,6 +351,32 @@ export const AgentWorkSessionEvent = AgentMentionEvent.omit({ type: true }).exte
   }),
 });
 export type AgentWorkSessionEvent = z.infer<typeof AgentWorkSessionEvent>;
+
+/**
+ * Phase 07.17 (D-04, D-08, PD-09, PD-16): a fan-out run opened this conversation for a new item, delivered to the bot as
+ * its own turn in the opened thread. Built by the API like a mention of the bot on the opened root: the structural
+ * author is the automation's run-as person, `turn` is computed for them (unattended, tainted from the start: the item
+ * is outside content), `message.text` is `automationItemSentence(name)`. The item travels only in
+ * `automationItem.item` (title and text read back from the root, untrusted), never in `message.text` or the standing
+ * order. `escalation` names the people and teams to mention when done or stuck. Older plugins skip the unknown type.
+ */
+export const AgentAutomationItemEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.automationItem),
+  automationItem: z.object({
+    automationId: Id,
+    runId: Id,
+    itemId: Id,
+    name: z.string().max(AUTOMATION_LIMITS.nameMax),
+    instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
+    item: z.object({
+      title: z.string().max(FAN_OUT_LIMITS.titleMax),
+      text: z.string().max(FAN_OUT_LIMITS.bodyMax),
+      openedAt: IsoDateTime,
+    }),
+    escalation: z.array(EscalationTargetView).max(FAN_OUT_LIMITS.escalationMax),
+  }),
+});
+export type AgentAutomationItemEvent = z.infer<typeof AgentAutomationItemEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

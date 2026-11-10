@@ -67,7 +67,7 @@ import {
 } from "./directory";
 import { dmAgentOf, ensureDm, ensureGroup, ensureHumanDm, listDms } from "./dm";
 import { claimMentionAll, isOwnRetry } from "./mention-all";
-import { resolveMentions } from "./mentions";
+import { resolveMentions, unitMentionGate } from "./mentions";
 import { type MessageActionsContext, registerMessageActionRoutes } from "./message-actions";
 import { registerPinRoutes } from "./pins";
 import { registerReactionRoutes } from "./reactions";
@@ -618,11 +618,20 @@ export function createChatModule(core: Core): ApiModule {
         );
       }
     }
+    // Phase 07.17 (D-17, PD-13): a bot's `@team` resolves on channel posts for units its turn's human may read, at most
+    // three per message; no turn human = no units. Its people are resolved as before, and it never broadcasts.
+    const unitOpts = await unitMentionGate(tx, perms, {
+      body: input.body,
+      dir,
+      conversationKind: conv.kind,
+      humanUserId: input.onBehalfOfUserId ?? null,
+      agentAuthor: true,
+    });
     const result = await postMessage(tx, deps, dir, {
       conv,
       author: { kind: "agent", id: agent.id },
       body: input.body,
-      mentions: resolveMentions(input.body, dir),
+      mentions: resolveMentions(input.body, dir, unitOpts),
       threadRootId,
       // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
       clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,
@@ -1188,11 +1197,19 @@ export function createChatModule(core: Core): ApiModule {
               if (!retry) await claimMentionAll(core, conv.id);
             }
             const dir = await loadDirectory(tx);
+            // Phase 07.17 (PD-13): `@team` resolves on channel posts only, for units the author may read.
+            const unitOpts = await unitMentionGate(tx, perms, {
+              body: req.body.body,
+              dir,
+              conversationKind: conv.kind,
+              humanUserId: auth.userId,
+              agentAuthor: false,
+            });
             const result = await postMessage(tx, deps, dir, {
               conv,
               author: { kind: "user", id: auth.userId },
               body: req.body.body,
-              mentions: resolveMentions(req.body.body, dir),
+              mentions: resolveMentions(req.body.body, dir, unitOpts),
               threadRootId: req.body.threadRootId,
               clientMessageId: req.body.clientMessageId,
               clientKind: auth.clientKind,

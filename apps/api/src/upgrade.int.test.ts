@@ -58,6 +58,11 @@ const N1_PROMPT = "aaaaaaaa-0000-4000-8000-000000000906";
 const N1_TOOL_CALL = "aaaaaaaa-0000-4000-8000-000000000907";
 /** Phase 07.8: a bot turn delivered at N-1 (it must come out with no sandbox calls and no member data). */
 const N1_TURN = "aaaaaaaa-0000-4000-8000-000000000908";
+/** Phase 07.17: units and a notification written at N-1 (handles backfilled, no unit on the notification). */
+const N1_DEPARTMENT = "aaaaaaaa-0000-4000-8000-000000000911";
+const N1_TEAM = "aaaaaaaa-0000-4000-8000-000000000912";
+const N1_B_TEAM = "bbbbbbbb-0000-4000-8000-000000000911";
+const N1_NOTIFICATION = "aaaaaaaa-0000-4000-8000-000000000913";
 /**
  * Phase 07.9 (D-08, D-13): before 07.9 every session update was also stored on the organization stream with the full
  * session DTO (title, branch, device name). One such event, next to an org-stream event of another type and the
@@ -134,6 +139,8 @@ const HEAD_ONLY = [
   "20261106163356_org_connector_auth",
   "20261107092259_agent_turns_attachment_budget",
   "20261109173604_bot_work_zone",
+  "20261110081210_automation_fan_out",
+  "20261110124940_automation_item_waiting",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -328,6 +335,25 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       await seed.query(
         "insert into app.work_zone_policies (organization_id, allow_full_access, updated_by) values ($1, true, $2)",
         [ORG_A, ADA_ADMIN],
+      );
+      // Phase 07.17 (D-11, D-14): the N-1 dump has no units, bot policy or notifications. Org A gets a department and a
+      // team named like its live bot's username, org B a team; org A's bot policy saved at N-1 (no automation caps
+      // existed yet: 07.6 added them with 15 / 96) and one mention notification of Max.
+      await seed.query(
+        "insert into app.org_units (id, organization_id, parent_id, kind, name, path, created_at) values ($1, $3, null, 'department', 'Logística Norte', ARRAY[$1]::uuid[], '2026-10-06 11:00:00+00'), ($2, $3, $1, 'team', 'Helper Bot', ARRAY[$1, $2]::uuid[], '2026-10-06 11:05:00+00')",
+        [N1_DEPARTMENT, N1_TEAM, ORG_A],
+      );
+      await seed.query(
+        "insert into app.org_units (id, organization_id, kind, name, path) values ($1, $2, 'team', 'Ops', ARRAY[$1]::uuid[])",
+        [N1_B_TEAM, ORG_B],
+      );
+      await seed.query("insert into app.bot_policies (organization_id, updated_by) values ($1, $2)", [
+        ORG_A,
+        ADA_ADMIN,
+      ]);
+      await seed.query(
+        "insert into app.notifications (id, organization_id, user_id, kind, conversation_id, message_id, actor_kind, actor_id) select $1, organization_id, $3, 'mention', conversation_id, id, 'user', $4 from app.messages where organization_id = $2 order by id limit 1",
+        [N1_NOTIFICATION, ORG_A, MAX_MEMBER, ADA_ADMIN],
       );
       // Phase 07.9 (D-13): the session's DTO stored on the org stream and on its own stream, and a units event.
       await seed.query(
@@ -825,6 +851,47 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         await c.end();
       }
       expect(await pgbossQueues()).toContain("work_session.bot_sync");
+    });
+
+    it("starts every automation with fan-out off, gives every unit a handle, moves default caps to 5 / 288 and opens nothing (Phase 07.17, D-11, D-14)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const units = await c.query("select id, handle from app.org_units order by id");
+        expect(units.rows).toEqual([
+          { id: N1_DEPARTMENT, handle: "logistica-norte" },
+          // The dump's live team bot is `helper-bot`: a unit never takes a bot's username.
+          { id: N1_TEAM, handle: "helper-bot-2" },
+          { id: N1_B_TEAM, handle: "ops" },
+        ]);
+        const policies = await c.query(
+          "select organization_id, min_schedule_minutes, max_runs_per_day_cap from app.bot_policies order by organization_id",
+        );
+        expect(policies.rows).toEqual([
+          { organization_id: ORG_A, min_schedule_minutes: 5, max_runs_per_day_cap: 288 },
+        ]);
+        const notifications = await c.query("select id, kind, unit_id from app.notifications order by id");
+        expect(notifications.rows).toEqual([{ id: N1_NOTIFICATION, kind: "mention", unit_id: null }]);
+        // `automations` is newer than N-1 (none can exist there): its new columns are defaulted, so an automation stored
+        // by N-1 code against this schema reads fan-out off, 10 / 100, no escalation and no run log.
+        const cols = await c.query(
+          "select column_name, is_nullable, column_default from information_schema.columns where table_schema = 'app' and table_name = 'automations' and column_name in ('fan_out_enabled','fan_out_per_run','fan_out_per_day','escalation_targets','run_log_message_id') order by column_name",
+        );
+        expect(cols.rows).toEqual([
+          { column_name: "escalation_targets", is_nullable: "NO", column_default: "'[]'::jsonb" },
+          { column_name: "fan_out_enabled", is_nullable: "NO", column_default: "false" },
+          { column_name: "fan_out_per_day", is_nullable: "NO", column_default: "100" },
+          { column_name: "fan_out_per_run", is_nullable: "NO", column_default: "10" },
+          { column_name: "run_log_message_id", is_nullable: "YES", column_default: null },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.automations where fan_out_enabled) as fan_out, (select count(*)::int from app.automation_conversations) as opened",
+        );
+        expect(empty.rows).toEqual([{ fan_out: 0, opened: 0 }]);
+      } finally {
+        await c.end();
+      }
+      expect(await pgbossQueues()).toContain("automation.item");
     });
 
     it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {

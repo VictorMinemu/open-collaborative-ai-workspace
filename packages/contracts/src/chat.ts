@@ -52,6 +52,24 @@ export type ConversationMember = z.infer<typeof ConversationMember>;
 export const Mention = z.object({ kind: MemberKind, id: Id });
 export type Mention = z.infer<typeof Mention>;
 
+/**
+ * Phase 07.17 (D-07, PD-13): what a message's own `mentions` may hold: a person, a bot or a unit (a team or department
+ * named by its `@handle`). Only the message's own type: the cell's `Mention` (and `MemberKind`) stay person or bot, so a
+ * unit never reaches a bot's turn or wakes one (P4); `principalMentions` is the only way from one to the other.
+ */
+export const MessageMentionKind = z.enum(["user", "agent", "unit"]);
+export type MessageMentionKind = z.infer<typeof MessageMentionKind>;
+
+export const MessageMention = z.object({ kind: MessageMentionKind, id: Id });
+export type MessageMention = z.infer<typeof MessageMention>;
+
+/** The people and bots of a message's mentions, in order (units dropped): what the cell's events carry. */
+export function principalMentions(ms: readonly MessageMention[]): Mention[] {
+  const out: Mention[] = [];
+  for (const m of ms) if (m.kind !== "unit") out.push({ kind: m.kind, id: m.id });
+  return out;
+}
+
 export const MessageStatus = z.enum(["sent", "streaming", "completed", "failed"]);
 export type MessageStatus = z.infer<typeof MessageStatus>;
 
@@ -104,7 +122,8 @@ export const Message = z.object({
   /** Resolved for display by the API (users from org_members, agents from agents). */
   author: MessageAuthor.optional(),
   body: z.string(),
-  mentions: z.array(Mention),
+  /** Server-resolved: people, bots and (channel posts only, 07.17 PD-13) teams or departments. */
+  mentions: z.array(MessageMention),
   status: MessageStatus,
   /** Root message id when this message is a reply in a thread. */
   threadId: Id.nullable(),
@@ -633,5 +652,36 @@ export function userHandle(member: { displayName: string; email?: string | null 
       .replace(/^[._-]+|[._-]+$/g, "")
       .slice(0, 40);
   const handle = clean(fromEmail) || clean(member.displayName) || "user";
+  return isReservedHandle(handle) ? `${handle}-1` : handle;
+}
+
+/** Longest stored unit handle: a 40-character base plus an allocation suffix ("-2", "-3", …). */
+export const UNIT_HANDLE_MAX = 48;
+/** A stored unit handle: lowercase `[a-z0-9._-]`, starting and ending with a letter or digit, at most 48 characters. */
+export const UNIT_HANDLE_RE = /^[a-z0-9](?:[a-z0-9._-]{0,46}[a-z0-9])?$/;
+
+const UNIT_HANDLE_BASE_MAX = 40;
+const trimHandleEnds = (s: string) => s.replace(/^[._-]+|[._-]+$/g, "");
+
+/**
+ * Phase 07.17 (D-14, PD-12): the mention handle a unit's name suggests. "Logística Norte" → "logistica-norte",
+ * "R&D / Labs" → "rd-labs"; a name with no usable character gives "team"; a reserved handle gets "-1" (like
+ * `userHandle`). The API generates it once at creation (then "-2", "-3", … until it is unique among the organization's
+ * unit handles and bot usernames) and stores it on the unit: it is never derived again at read time, so renames and
+ * moves keep it. 07.17 code review WR-05: the stored handle comes from the SQL allocator (`app.org_unit_handle`, on
+ * `app.unaccent`); this is only a client-side preview, approximate for letters that do not decompose ("Straße" previews
+ * "strae", is stored "strasse").
+ */
+export function unitHandle(name: string): string {
+  const base = trimHandleEnds(
+    name
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9._-]/g, "")
+      .replace(/-+/g, "-"),
+  );
+  const handle = trimHandleEnds(base.slice(0, UNIT_HANDLE_BASE_MAX)) || "team";
   return isReservedHandle(handle) ? `${handle}-1` : handle;
 }

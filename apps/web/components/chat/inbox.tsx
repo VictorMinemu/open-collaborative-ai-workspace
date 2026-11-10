@@ -37,6 +37,7 @@ const KIND_LABEL: Record<Notification["kind"], string> = {
   thread_reply: "replied in a thread",
   ai_chat_shared: "shared an AI chat with you",
   card_updated: "updated a card you follow",
+  team_mention: "mentioned your team",
 };
 
 const FILTERS: Array<{ id: NotificationFilter; label: string }> = [
@@ -96,11 +97,15 @@ function hrefOf(n: Notification): string {
   );
 }
 
-/** What happened, after the actor's name: a share names the chat (06-08), everything else is the kind's label. */
-function actionOf(n: Notification): string {
+/**
+ * What happened, after the actor's name: a share names the chat (06-08), a team mention names the team that reached
+ * the reader (07.17 PD-19; "mentioned your team" once it is gone), everything else is the kind's label.
+ */
+export function actionOf(n: Notification): string {
   if (n.kind === "ai_chat_shared" && n.conversation.kind === "ai_chat") {
     return `shared “${n.conversation.label}” with you`;
   }
+  if (n.kind === "team_mention" && n.unit?.handle) return `mentioned @${n.unit.handle}`;
   return KIND_LABEL[n.kind];
 }
 
@@ -260,8 +265,14 @@ export function Inbox() {
           description={unread > 0 ? `${unread > 99 ? "99+" : unread} unread` : "You're all caught up"}
           actions={
             unread > 0 ? (
-              <Button variant="ghost" size="sm" onClick={markAll} data-testid="inbox-mark-all">
-                <CheckCheck />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={markAll}
+                data-testid="inbox-mark-all"
+                aria-label="Mark all read"
+              >
+                <CheckCheck aria-hidden />
                 <span className="hidden sm:inline">Mark all read</span>
               </Button>
             ) : null

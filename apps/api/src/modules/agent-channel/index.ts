@@ -26,7 +26,7 @@ import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { linkTurnAttachments } from "../artifact";
-import type { AutomationProposals } from "../automation";
+import type { AutomationFanOut, AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
@@ -54,6 +54,7 @@ import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
 import { registerConsultRoutes } from "./consult";
 import { registerConsultTick } from "./consult-tick";
+import { registerConversationOpenRoute } from "./conversations-open";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
 import { registerMcpCellRoutes } from "./mcp";
@@ -74,10 +75,22 @@ import { registerWorkZoneRoutes } from "./work-zone";
 export { currentPhrase } from "./activity";
 export { consultTargets, decideAgentMessage } from "./agent-message";
 export {
+  type DeliverAutomationItemDeps,
+  type DeliverAutomationItemInput,
+  type DeliverAutomationItemResult,
+  deliverAutomationItem,
+  requeueAfterSession,
+  requeueAutomationItem,
+  skipAutomationItem,
+  waitAutomationItem,
+  waitItemForTurn,
+} from "./automation-items";
+export {
   type DeliverAutomationRunInput,
   type DeliverAutomationRunResult,
   deliverAutomationRun,
   inboundRooted,
+  lockRunAndAutomation,
   markRunAnswered,
   runAnchorTrigger,
   runSentence,
@@ -164,6 +177,11 @@ export function createAgentChannelModule(
      * `/automations/propose` route is not served.
      */
     automations?: AutomationProposals | null;
+    /**
+     * Automation fan-out (07.17, PD-07): the automation module's open call; absent = the `/conversations/open` route is
+     * not served.
+     */
+    fanOut?: AutomationFanOut | null;
     /**
      * Watched-record writes (07.6-14): the watched module's compare-and-set; absent = the `/records/update` route is not
      * served.
@@ -582,6 +600,8 @@ export function createAgentChannelModule(
           }
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
+          // Automation fan-out (07.17, D-02, PD-07): a fan-out run opens one conversation per new item in its target.
+          if (opts.fanOut) registerConversationOpenRoute(scope, core, opts.fanOut);
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
           // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
           registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });

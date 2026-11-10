@@ -248,6 +248,7 @@ describe("What happens (UI-SPEC Surface 2)", () => {
     triggerKind: "webhook" as const,
     schedule: {
       preset: "weekly" as const,
+      everyMinutes: 10,
       minute: "00",
       time: "17:00",
       days: [5],

@@ -14,6 +14,7 @@ import {
   CellConfigChangedEvent,
   CellSnapshot,
   CONFINED_TOOL_FLAGS,
+  CONVERSATION_OPEN_FLAGS,
   DANGEROUS_TOOL_NAMES,
   DEFAULT_BOT_POLICY,
   DEFAULT_CAPABILITIES,
@@ -774,5 +775,30 @@ describe("bot Work Zone tools and turn offer (07.16 D-05, PD-09, PD-17)", () => 
     const parsed = TurnContext.safeParse({ ...turn, workZone: { ...workZone, projects } });
     expect(parsed.success).toBe(false);
     expect(parsed.error?.issues[0]?.path).toEqual(["workZone", "projects"]);
+  });
+});
+
+describe("the fan-out open tool (07.17 D-02, PD-07)", () => {
+  it("is a built-in, side-effecting, never untrusted output", () => {
+    expect(BUILTIN_TOOLS.conversationOpen).toBe("ocw_conversation_open");
+    expect(CONVERSATION_OPEN_FLAGS).toEqual({ untrustedOutput: false, sideEffecting: true });
+  });
+
+  it("is never approvable and never a dangerous name, on either host", () => {
+    const name = BUILTIN_TOOLS.conversationOpen;
+    expect(isApprovableTool(name)).toBe(false);
+    expect(isApprovableTool(name.toUpperCase())).toBe(false);
+    expect(ToolPattern.safeParse(name).success).toBe(false);
+    expect(isDangerousToolName(name)).toBe(false);
+    expect(isDangerousToolName(name, "sandbox")).toBe(false);
+  });
+
+  it("a turn can offer it with its flags", () => {
+    const offered = {
+      ...turn,
+      tools: [...turn.tools, BUILTIN_TOOLS.conversationOpen],
+      toolFlags: { ...turn.toolFlags, [BUILTIN_TOOLS.conversationOpen]: CONVERSATION_OPEN_FLAGS },
+    };
+    expect(TurnContext.parse(offered)).toEqual(offered);
   });
 });

@@ -29,6 +29,8 @@ export const JOB_QUEUE_NAMES = [
   "consult.tick",
   // 07.16 (D-09, PD-16): a bot session's state changed; the handler refreshes its card and decides a wake (ids only).
   "work_session.bot_sync",
+  // 07.17 (D-04, PD-09): one opened item's own bot turn (ids only).
+  "automation.item",
 ] as const;
 export type JobQueueName = (typeof JOB_QUEUE_NAMES)[number];
 

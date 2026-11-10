@@ -8,6 +8,7 @@ import {
 import {
   AUTOMATION_LIMITS,
   Automation,
+  AutomationErrorCode,
   AutomationList,
   AutomationOptions,
   AutomationRun,
@@ -682,11 +683,123 @@ describe("scheduleSummary (UI-SPEC trigger summaries, shared by the run card and
   });
 
   it("anything else is a custom schedule with its cron", () => {
-    expect(scheduleSummary("*/20 * * * *")).toBe("Custom schedule (*/20 * * * *)");
+    expect(scheduleSummary("*/7 * * * *")).toBe("Custom schedule (*/7 * * * *)");
     expect(scheduleSummary("0 9 * 1 *")).toBe("Custom schedule (0 9 * 1 *)");
     expect(scheduleSummary("0 9 29 * *")).toBe("Custom schedule (0 9 29 * *)");
     expect(scheduleSummary("0 9-17 * * 1-5")).toBe("Custom schedule (0 9-17 * * 1-5)");
     expect(scheduleSummary("0 25 * * *")).toBe("Custom schedule (0 25 * * *)");
     expect(scheduleSummary("not a cron")).toBe("Custom schedule (not a cron)");
+  });
+});
+
+describe("fan-out and escalation on automations (07.17 D-01, D-02, D-08, PD-05, PD-15, PD-16)", () => {
+  const T1 = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e61";
+  const T2 = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e62";
+  const fanOut = { enabled: true, perRun: 5, perDay: 50 };
+  const escalation = [
+    { kind: "unit", id: T1 },
+    { kind: "user", id: T2 },
+  ];
+  const dto = {
+    id: ID,
+    name: "New orders",
+    actionKind: "agent_turn",
+    agent: { id: ID2, displayName: "Atlas", personal: false },
+    runAs: { id: ID, displayName: "Víctor Ruiz" },
+    instructions: "Open a conversation for every new order.",
+    trigger: {
+      kind: "schedule",
+      schedule: { cron: "*/10 * * * *", timeZone: "Europe/Madrid" },
+      webhook: null,
+      mailbox: null,
+    },
+    target: { kind: "board", conversationId: ID2, columnId: T1, label: "#fleet · Backlog" },
+    inbound: null,
+    maxRunsPerDay: 144,
+    status: "active",
+    pausedBy: null,
+    pausedAt: null,
+    consecutiveFailures: 0,
+    nextRunAt: NOW,
+    lastRun: null,
+    inboundToday: 0,
+    version: 1,
+    createdAt: NOW,
+    updatedAt: NOW,
+    viewerCan: ["edit", "run", "pause", "delete"],
+  } as const;
+
+  it("the new error codes and the five-minute organization default", () => {
+    expect(AutomationErrorCode.options).toContain("fan_out_not_allowed");
+    expect(AutomationErrorCode.options).toContain("escalation_not_allowed");
+    expect(AUTOMATION_LIMITS.minScheduleMinutesDefault).toBe(5);
+  });
+
+  it("a 07.16 create body parses unchanged; one with fanOut and escalation keeps them", () => {
+    const legacy = CreateAutomationRequest.parse(weekly);
+    expect("fanOut" in legacy).toBe(false);
+    expect("escalation" in legacy).toBe(false);
+    const parsed = CreateAutomationRequest.parse({ ...weekly, fanOut: { enabled: true }, escalation });
+    expect(parsed.fanOut).toEqual({ enabled: true, perRun: 10, perDay: 100 });
+    expect(parsed.escalation).toEqual(escalation);
+    expect(
+      CreateAutomationRequest.safeParse({ ...weekly, fanOut: { enabled: true, perRun: 26 } }).success,
+    ).toBe(false);
+    expect(
+      CreateAutomationRequest.safeParse({ ...weekly, escalation: [escalation[0], escalation[0]] }).success,
+    ).toBe(false);
+  });
+
+  it("an update with only fanOut or only escalation is something to update", () => {
+    expect(UpdateAutomationRequest.parse({ expectedVersion: 2, fanOut }).fanOut).toEqual(fanOut);
+    expect(UpdateAutomationRequest.parse({ expectedVersion: 2, escalation: [] }).escalation).toEqual([]);
+    expect(UpdateAutomationRequest.safeParse({ expectedVersion: 2 }).success).toBe(false);
+  });
+
+  it("a 07.16 automation parses without fanOut or escalation; a 07.17 one with both", () => {
+    const legacy = Automation.parse(dto);
+    expect(legacy.fanOut).toBeUndefined();
+    expect(legacy.escalation).toBeUndefined();
+    const views = [
+      { kind: "unit", id: T1, handle: "logistics", displayName: "Logistics" },
+      { kind: "user", id: T2, handle: "ana", displayName: "Ana Pérez" },
+    ];
+    const full = { ...dto, fanOut, escalation: views };
+    expect(Automation.parse(full)).toEqual(full);
+    expect(Automation.safeParse({ ...full, escalation: Array(6).fill(views[0]) }).success).toBe(false);
+  });
+
+  it("a run counts what it opened: a number, null (not a fan-out run) or absent", () => {
+    const run = {
+      id: ID,
+      trigger: "manual",
+      status: "answered",
+      reason: null,
+      scheduledFor: null,
+      createdAt: NOW,
+      answeredAt: NOW,
+      tainted: true,
+      anchor: { conversationId: ID2, messageId: ID, threadRootId: ID },
+    } as const;
+    expect(AutomationRun.parse({ ...run, opened: 2 }).opened).toBe(2);
+    expect(AutomationRun.parse({ ...run, opened: null }).opened).toBeNull();
+    expect(AutomationRun.parse(run).opened).toBeUndefined();
+    expect(AutomationRun.safeParse({ ...run, opened: -1 }).success).toBe(false);
+  });
+
+  it("an every-N-minutes schedule reads in words (shared by the run card, the list and the editor)", () => {
+    expect(scheduleSummary("*/10 * * * *")).toBe("Every 10 minutes");
+    expect(scheduleSummary("*/5 * * * *")).toBe("Every 5 minutes");
+    expect(scheduleSummary("*/15 * * * *")).toBe("Every 15 minutes");
+    expect(scheduleSummary("*/30 * * * *")).toBe("Every 30 minutes");
+    expect(scheduleSummary("*/20 * * * *")).toBe("Every 20 minutes");
+    expect(scheduleSummary("*/1 * * * *")).toBe("Every minute");
+    expect(scheduleSummary(" */10  *  *  *  * ")).toBe("Every 10 minutes");
+    // A step that does not divide the hour restarts at :00, so it is not "every N minutes".
+    expect(scheduleSummary("*/7 * * * *")).toBe("Custom schedule (*/7 * * * *)");
+    expect(scheduleSummary("*/0 * * * *")).toBe("Custom schedule (*/0 * * * *)");
+    expect(scheduleSummary("*/60 * * * *")).toBe("Custom schedule (*/60 * * * *)");
+    expect(scheduleSummary("*/10 9-17 * * *")).toBe("Custom schedule (*/10 9-17 * * *)");
+    expect(scheduleSummary("*/010 * * * *")).toBe("Custom schedule (*/010 * * * *)");
   });
 });

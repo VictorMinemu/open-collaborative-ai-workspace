@@ -24,16 +24,24 @@ export { BOARD_TOOL_NAME };
  *   - resolves the active OCW turn from the trusted tool context (session key; the conversation as fallback) and sends
  *     only its event and agent: the API reads the board and the human from the stored turn, so the model can never
  *     choose another conversation, person or agent (a parameter naming one is refused locally),
- *   - refuses locally without a turn, when the turn does not offer it, once the turn is tainted, for an invalid
- *     request and for any card text on a move or a waiting state (agents never edit card text, P-03),
+ *   - refuses locally without a turn, when the turn does not offer it, for an invalid request and for any card text
+ *     on a move or a waiting state (agents never edit card text, P-03),
+ *   - on a tainted turn or after a Work Zone session read (07.17 D-06, D-12, PD-11) refuses `create` and `read`
+ *     locally and never posts them (the routes refuse them too), while a move or a waiting change still reaches its
+ *     route, which allows it only for the turn thread's card this bot's automation opened, with the profile's
+ *     `actOnOutsideContent` (else `tainted`). Such a turn cannot read the board, so without a version it remembers it
+ *     names version 1 (a card the automation just opened) and, on a 409 `board_card_version_conflict` whose details
+ *     carry that card, retries ONCE with the current version (the API's documented client rule),
  *   - changes only the turn thread's card (its version read from the board) or a card it created in this conversation
  *     (the version it was answered),
  *   - keys each create `<eventId>:board:<n>`, one `n` per tool call of the turn from 1 (an OpenClaw retry of the same
  *     call reuses it, so the API's idempotency stores one card),
  *   - answers with short fixed texts (plus ids, and the board's columns on a read), never the API's error body. Logs
  *     carry ids and status codes only.
- * The call-time gate (`before_tool_call`) has already counted it and checked the turn and the taint; the board routes
- * count it against the turn's budget themselves (tool-guard.ts: self-validated).
+ * The call-time gate (`before_tool_call`) has already counted it and checked the turn; it lets a tainted or session-read
+ * turn's call through to this tool (tool-guard.ts `ROUTE_DECIDES_TAINT`, `ROUTE_DECIDES_SESSION_OUTPUT`). The board
+ * routes count each request against the turn's budget themselves (tool-guard.ts: self-validated), so a conflict retry
+ * spends one more call there.
  */
 
 export type BoardToolContext = Pick<OpenClawPluginToolContext, "sessionKey" | "nativeChannelId" | "agentId">;
@@ -111,6 +119,12 @@ const CONFLICT = "Not done: the card changed since you last saw it. Try again.";
 type CallCounter = { next: number; byCall: Map<string, number> };
 type KnownCard = { version: number; conversationId: string };
 type BoardToolState = { calls: WeakMap<ActiveTurn, CallCounter>; known: Map<string, KnownCard> };
+
+/**
+ * 07.17 (D-06): the version a tainted or session-read turn names for the thread's card when it remembers none (it may
+ * not read the board): a card its automation just opened is at 1; any other answers the 409 with the current card.
+ */
+const UNREAD_VERSION = 1;
 
 /** Card versions remembered per process (oldest dropped first). */
 const KNOWN_MAX = 2_000;
@@ -229,7 +243,10 @@ export function registerBoardTool(
         if (!t) return result("Not done: there is no active conversation turn.");
         if (!t.turn.tools.includes(BOARD_TOOL_NAME))
           return result("Not done: the board tool is not offered here.");
-        if (t.tainted) return result(NOT_TAINTED);
+        // 07.17 (D-06, D-12): outside content or a session's output never creates a card or reads the board; a move
+        // or a waiting change goes to the route, which decides (the gate no longer blocks the call).
+        const restricted = t.tainted || t.sessionOutputRead;
+        if (restricted && (act === "create" || act === "read")) return result(NOT_TAINTED);
         const conversationId = t.conversationId;
         if (!conversationId) return result("Not done: this turn has no board.");
         const client = deps.client();
@@ -314,24 +331,43 @@ export function registerBoardTool(
           );
         }
         if (!client) return result(refusal(null, "change"));
-        try {
-          if (!known) {
-            const board = await read(client);
-            if (!board.card || board.card.messageId !== cardId)
-              return result("Not done: this thread is not a card.");
-            known = { version: board.card.version, conversationId };
-          }
-          const { card } = await client.boardPatchCard(
+        const patch = (expectedVersion: number) =>
+          client.boardPatchCard(
             cardId,
             {
               ...turn,
-              expectedVersion: known.version,
+              expectedVersion,
               ...(p.action === "move"
                 ? { move: { columnId: p.columnId, afterCardId: p.afterCardId ?? null } }
                 : { waitingOn: p.waitingOn }),
             },
             signal,
           );
+        try {
+          if (!known && !restricted) {
+            const board = await read(client);
+            if (!board.card || board.card.messageId !== cardId)
+              return result("Not done: this thread is not a card.");
+            known = { version: board.card.version, conversationId };
+          }
+          let answered: Awaited<ReturnType<typeof patch>>;
+          try {
+            answered = await patch(known?.version ?? UNREAD_VERSION);
+          } catch (error) {
+            // 07.17 (D-06): a turn that may not read the board retries ONCE with the current card's version.
+            const current = error instanceof AgentChannelHttpError ? error.conflictCard : undefined;
+            if (
+              !restricted ||
+              !(error instanceof AgentChannelHttpError) ||
+              error.code !== "board_card_version_conflict" ||
+              current?.messageId !== cardId
+            ) {
+              throw error;
+            }
+            log().info?.(`board: ${act} of ${cardId} for ${t.eventId} retried at v${current.version}`);
+            answered = await patch(current.version);
+          }
+          const { card } = answered;
           remember(t.agentId, cardId, { version: card.version, conversationId });
           log().info?.(`board: ${act} ${cardId} to v${card.version} for ${t.eventId}`);
           return result(p.action === "move" ? "Card moved." : "Waiting state set.", {

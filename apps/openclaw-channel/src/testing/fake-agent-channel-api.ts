@@ -43,7 +43,8 @@
  *   POST /agent-channel/v1/board/cards    records the card (`boardCards`; idempotent on agentId + idempotencyKey, 201
  *                                          then 200, version 1, the first column by default)
  *   PATCH /agent-channel/v1/board/cards/:id  move / waiting state of a stored board card (409
- *                                          board_card_version_conflict, 403 not_author on any text key)
+ *                                          board_card_version_conflict with the current card in details.card, 403
+ *                                          not_author on any text key)
  *   POST /agent-channel/v1/connectors/list  records the body (`connectorLists`) and answers one connected connector
  *                                          (`m1a2b3c4d` "Smoke CRM", tool whoami) and one key (`k_abcdefgh23`)
  *   POST /agent-channel/v1/connectors/call  records the body (`connectorCalls`) and answers `{content: "whoami: sub_smoke"}`
@@ -102,6 +103,14 @@
  *                                          `workSessions.status` knob makes every route answer that status with an error
  *                                          body carrying FAKE_ERROR_CANARY. POST /__test/work-sessions {answers?, status?}
  *                                          replaces the knobs ({} resets them; the records stay)
+ *   POST /agent-channel/v1/conversations/open  (07.17) records every body (`conversationOpens`, refused ones included)
+ *                                          and answers `conversationOpen.answer`, else every item opened in
+ *                                          FAKE_OPENED_CONVERSATION with the root FAKE_OPENED_ROOTS[i] of its index (10 and
+ *                                          100 minus the items left); 400 for any key beyond the contract's (a conversation,
+ *                                          a column, a run), 404 `unknown_turn` for a turn ended with `endTurn`. POST
+ *                                          /__test/conversations {answer?, status?} replaces the knobs ({} resets them;
+ *                                          the records stay); `status` makes the route answer that status with an error
+ *                                          body carrying FAKE_ERROR_CANARY
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -489,6 +498,38 @@ function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string,
       return { kind: "stopped", workSessionId: body.workSessionId };
   }
 }
+/** 07.17: the open route's knobs (`POST /__test/conversations` replaces them). */
+export type FakeConversationOpen = {
+  /** What the route answers instead of its default (any body, e.g. `{ok: false, code, sentence}`). */
+  answer?: unknown;
+  /** When set, the route answers this HTTP status with an error body (FAKE_ERROR_CANARY). */
+  status?: number;
+};
+/** The conversation (the automation's board) every default open answer names. */
+export const FAKE_OPENED_CONVERSATION = "0199a6f0-0000-7000-8000-00000000c0f1";
+/** The thread root of the i-th item of a default open answer (fixed, so a smoke can reply in it). */
+export const FAKE_OPENED_ROOTS: readonly string[] = Array.from(
+  { length: 25 },
+  (_, i) => `0199a6f0-0000-7000-8000-00000000d${(0x100 + i).toString(16)}`,
+);
+/** The keys an open body may carry (contracts `AgentChannelConversationOpen` and its items, strict objects). */
+const CONVERSATION_OPEN_KEYS: readonly string[] = ["eventId", "agentId", "items"];
+const CONVERSATION_OPEN_ITEM_KEYS: readonly string[] = ["externalKey", "title", "body"];
+/** The default answer: every item opened (contracts `FAN_OUT_LIMITS` defaults: 10 per run, 100 per day). */
+function fakeConversationOpenAnswer(items: Array<Record<string, unknown>>): unknown {
+  return {
+    ok: true,
+    results: items.map((item, i) => ({
+      externalKey: item.externalKey,
+      opened: true,
+      conversationId: FAKE_OPENED_CONVERSATION,
+      threadRootMessageId: FAKE_OPENED_ROOTS[i] ?? null,
+      refused: null,
+    })),
+    remainingRun: Math.max(0, 10 - items.length),
+    remainingDay: Math.max(0, 100 - items.length),
+  };
+}
 /** The keys a read body may carry (contracts `AgentChannelAttachmentRead`, a strict object). */
 const ATTACHMENT_READ_KEYS: readonly string[] = ["eventId", "agentId", "attachmentId"];
 /** Contracts `ATTACHMENT_READ_SENTENCES.not_found` (the fake imports types only). */
@@ -640,6 +681,10 @@ export type FakeAgentChannelApi = {
   attachments: FakeAttachments;
   /** The bot Work Zone session routes' records and knobs (07.16). */
   workSessions: FakeWorkSessions;
+  /** Every POST /conversations/open body, in order (refused ones included; 07.17). */
+  conversationOpens: Array<Record<string, unknown>>;
+  /** The open route's knobs (07.17). */
+  conversationOpen: FakeConversationOpen;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -875,6 +920,8 @@ export async function startFakeAgentChannelApi(
     browser: { calls: [], results: {} } as FakeBrowser,
     attachments: { calls: [], results: {} } as FakeAttachments,
     workSessions: fakeWorkSessions(),
+    conversationOpens: [] as Array<Record<string, unknown>>,
+    conversationOpen: {} as FakeConversationOpen,
     consultations: [] as Array<Record<string, unknown>>,
     consultOutcome: undefined as ConsultOutcome | undefined,
     turnsDone: [] as StoredTurnDone[],
@@ -1010,6 +1057,15 @@ export async function startFakeAgentChannelApi(
           else delete ws.status;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/conversations") {
+          // 07.17: replace the open route's knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as FakeConversationOpen;
+          state.conversationOpen = {
+            ...(body.answer !== undefined ? { answer: body.answer } : {}),
+            ...(typeof body.status === "number" ? { status: body.status } : {}),
+          };
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/consult-outcome") {
           // 07.7: the consult route's answer ({} resets it; the records stay).
           const body = ((await readJson(req)) ?? {}) as { status?: unknown; body?: unknown };
@@ -1078,6 +1134,7 @@ export async function startFakeAgentChannelApi(
             browser: state.browser,
             attachments: state.attachments,
             workSessions: state.workSessions,
+            conversationOpens: state.conversationOpens,
             consultations: state.consultations,
             turnsDone: state.turnsDone,
             mcpProbes: state.mcpProbes,
@@ -1387,6 +1444,45 @@ export async function startFakeAgentChannelApi(
           });
         }
         return json(res, 200, ws.answers[workSessionRoute] ?? fakeWorkSessionAnswer(workSessionRoute, body));
+      }
+      if (req.method === "POST" && route === "/conversations/open") {
+        // 07.17 (PD-07): only the turn's ids and the items; the real API derives the automation, the run and the target.
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        state.conversationOpens.push(structuredClone(body));
+        const items = Array.isArray(body.items) ? (body.items as unknown[]) : undefined;
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          !items ||
+          items.length > 25 ||
+          Object.keys(body).some((k) => !CONVERSATION_OPEN_KEYS.includes(k)) ||
+          items.some(
+            (i) =>
+              !i ||
+              typeof i !== "object" ||
+              typeof (i as Record<string, unknown>).externalKey !== "string" ||
+              typeof (i as Record<string, unknown>).title !== "string" ||
+              Object.keys(i).some((k) => !CONVERSATION_OPEN_ITEM_KEYS.includes(k)),
+          )
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        const knobs = state.conversationOpen;
+        if (knobs.status !== undefined) {
+          return json(res, knobs.status, {
+            error: { code: "internal", message: `failed by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (state.endedTurns.has(body.eventId)) {
+          return json(res, 404, {
+            error: { code: "unknown_turn", message: `turn ended ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(
+          res,
+          200,
+          knobs.answer ?? fakeConversationOpenAnswer(items as Array<Record<string, unknown>>),
+        );
       }
       if (req.method === "POST" && route === "/attachments/read") {
         // 07.15 (D-03): only the turn's ids and the attachment id; the real API derives everything else.
@@ -1766,7 +1862,15 @@ export async function startFakeAgentChannelApi(
         state.boardPatches.push({ ...body, messageId, status });
         if (status === 403) return json(res, 403, { error: { code: "not_author" } });
         if (status === 404) return json(res, 404, { error: { code: "card_not_in_board" } });
-        if (status === 409) return json(res, 409, { error: { code: "board_card_version_conflict" } });
+        // Like the real API: the current card in `details.card` (07.17 D-06: a tainted turn retries with its version).
+        if (status === 409) {
+          return json(res, 409, {
+            error: {
+              code: "board_card_version_conflict",
+              details: { card: boardCardOut(card as StoredBoardCard) },
+            },
+          });
+        }
         const c = card as StoredBoardCard;
         if (body.move) c.columnId = body.move.columnId;
         if (body.waitingOn) c.waitingOn = body.waitingOn;
@@ -1980,6 +2084,15 @@ export async function startFakeAgentChannelApi(
     },
     get workSessions() {
       return state.workSessions;
+    },
+    get conversationOpens() {
+      return state.conversationOpens;
+    },
+    get conversationOpen() {
+      return state.conversationOpen;
+    },
+    set conversationOpen(value: FakeConversationOpen) {
+      state.conversationOpen = value;
     },
     get mcpServers() {
       return state.mcpServers;

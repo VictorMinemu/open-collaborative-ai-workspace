@@ -738,6 +738,23 @@ async function seedOrg(c: pg.Client, org: string) {
      values ($1, $2, $3, $4, $5, $5, $6, $7, $8)`,
     [ws, org, agent, bwzProfile, user, conv, msg, randomUUID()],
   );
+
+  // Phase 07.17 (D-02, D-03): a fan-out automation posting to the channel, one Run now and the one item it opened, with
+  // the channel's message as its root (the item's key is stored only as a sha256 hex).
+  const fanOut = randomUUID();
+  await q(
+    "insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, trigger_kind, schedule_cron, time_zone, target_kind, conversation_id, fan_out_enabled) values ($1, $2, 'Open new orders', $3, $4, $4, 'schedule', '*/10 * * * *', 'Europe/Madrid', 'channel', $5, true)",
+    [fanOut, org, agent, user, conv],
+  );
+  const fanOutRun = randomUUID();
+  await q(
+    "insert into app.automation_runs (id, organization_id, automation_id, trigger) values ($1, $2, $3, 'manual')",
+    [fanOutRun, org, fanOut],
+  );
+  await q(
+    "insert into app.automation_conversations (organization_id, automation_id, run_id, external_key_hash, conversation_id, root_message_id) values ($1, $2, $3, $4, $5, $6)",
+    [org, fanOut, fanOutRun, "c".repeat(64), conv, msg],
+  );
 }
 
 /** Phase 07.16: the bot Work Zone profile, its projects, the device consents and the bot side of a session. */

@@ -1045,6 +1045,59 @@ The automated tests use a fake runtime and a fake cell (e2e) and a real OpenClaw
 7. **Audit.** The rows show ids and counts only:
    `select action, result, metadata from app.audit_events where action like 'bot.work_session_%' order by occurred_at desc limit 10;`
 
+## Automation fan-out and team mentions (Phase 07.17)
+
+Phase 07.17 (ADR-0039, [self-hosting/automations.md](self-hosting/automations.md)). An automation opens one
+conversation per new item and its bot works each one; people and bots mention whole teams:
+
+- **Every few minutes.** Bots › Automations › the editor's **Every few minutes** (5, 10, 15 or 30) pre-fills the runs a
+  day. An amber note warns when the bot's daily limit is lower than the turns the automation can use, and says how many.
+- **For each new item.** On an agent schedule delivered to a channel or a board, **Open a conversation for each new
+  item** gives the run's bot one call that opens a thread (channel) or a card in the chosen column (board) per item:
+  never the same item twice, at most the per-run and per-day caps (10 and 100 by default). The runs themselves post
+  into one **"<name> · Runs"** thread, and each reads *Opened 2 conversations* or *Nothing new*.
+- **One turn per item.** Each opened item gets its own bot turn in its own thread, as the automation's creator. It
+  counts as outside content, so a Work Zone start needs the profile's **Act on outside content** (else a proposal), and
+  the bot may move the card it opened (to Doing, to Done) only with that same flag. It never edits the card's text.
+- **When it needs people.** Up to five people or teams the bot mentions when it finishes or needs help.
+- **`@team`.** In channels, threads and board cards, `@` offers **Teams** after people and bots (`@logistics`, with
+  its size). The team's members who can read the conversation get a *mentioned @logistics* notification; a bot is
+  never woken by a team, and a bot mentions at most 3 teams a message.
+- **Audit.** `automation.conversation_opened`, `automation.item_delivered` / `item_skipped` and the board audit carry
+  ids and counts, never an item's key, title or body.
+
+The automated tests use a fake ERP MCP and a fake cell (e2e) and a real OpenClaw cell (smoke).
+
+**Owner check** (never run by an agent: it needs the real orders MCP, a real model and the real Work Zone server; record
+the result in `.planning/phases/07.17-automation-fan-out-and-team-mentions/07.17-VALIDATION.md` › Manual-Only
+Verifications). On `https://ocw.autofy.ing`, with the headless server and the team bot of Phase 07.16:
+
+1. **The orders MCP.** Settings › MCP servers: register the orders MCP and grant its list and read tools to the team
+   bot (Capabilities). Connect it either once for the organization (**Organization sign-in** or **Client credentials**)
+   or with your own account; with your own account, allow it in the board when the bot asks (**Allow … in #board**).
+   You are the automation's run-as person.
+2. **The bot's Work Zone profile.** The bot's sheet › Work Zone: the headless server, the vehicles' project, the
+   runtime and model. As an admin turn on **Act on outside content** and read its warning: the orders and documents the
+   bot reads can steer what it runs; it only writes in the bot's own sessions and the cards its automation opened. Set
+   **Sessions at once** to the number of orders you expect at the same time (up to 10): an order whose start is refused
+   for that limit waits ("N waiting" in the run history) and gets a new turn when one of the bot's sessions ends, at
+   most 5 times. An idle session still counts, so the bot should stop each session when its order is done.
+3. **The daily limit.** Bots › the bot › Capabilities › **Daily limit**: above the editor's number (every 10 minutes is
+   144 run turns a day, plus one turn per order and the session's wake-ups).
+4. **The automation.** Bots › Automations › New automation: the team bot, **Every few minutes** › every 10 minutes,
+   Deliver to the board's **Backlog** column, **For each new item** › **Open a conversation for each new item** on,
+   **When it needs people** › **Mention when it finishes or needs help** = the team. Instructions: "List the new orders
+   with the orders MCP and open one card for each. In each card: read the vehicle's documents, start the Work Zone
+   session, move the card to Doing; when the session is done, move it to Done and mention the team."
+5. **Run it.** Press **Run now** (or wait 10 minutes). Expect one card per new order in Backlog and a reply in the
+   "<name> · Runs" thread. On the next runs no card is opened twice (*Nothing new* when there are no new orders).
+6. **Each card.** The card's thread shows the bot's turn, the live Work Zone card with **Open session**, the move to
+   Doing, and when the session ends the move to Done and the bot's `@team` message.
+7. **The team.** A team member gets the mention in the inbox (*mentioned @<team>*); a person outside the board does
+   not.
+8. **Audit.** The rows show ids and counts only:
+   `select action, result, metadata from app.audit_events where action like 'automation.%' order by occurred_at desc limit 10;`
+
 ## Troubleshooting
 
 | Symptom | Fix |

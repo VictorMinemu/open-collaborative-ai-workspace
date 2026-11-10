@@ -2,6 +2,7 @@ import {
   AUTOMATION_LIMITS,
   type Automation,
   type AutomationActionKind,
+  type AutomationFanOutInput,
   type AutomationInbound,
   type AutomationList,
   type AutomationListQuery,
@@ -11,6 +12,7 @@ import {
   type AutomationRunListQuery,
   type AutomationRunReason,
   type AutomationTarget,
+  type AutomationTargetKind,
   type AutomationTargetOptions,
   type AutomationTargetView,
   type AutomationViewerAction,
@@ -24,6 +26,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  automationConversations,
   automationRuns,
   automations,
   boardColumns,
@@ -59,6 +62,7 @@ import {
   type TriggerDeps,
 } from "./actions";
 import { AUTOMATION_CREATE_KIND, closeDraft } from "./approval-kind";
+import { escalationFor, escalationNotAllowed, validateEscalation } from "./escalation";
 import { mailTrigger } from "./mailboxes";
 import { firstRunAt, nextRuns, validateSchedule } from "./schedule";
 import { webhookTrigger } from "./webhooks";
@@ -77,12 +81,15 @@ export interface AutomationCaps {
   maxRunsPerDayCap: number;
 }
 
-/** The `bot_policies` column defaults: an organization without a policy row gets these. */
+/**
+ * The `bot_policies` column defaults: an organization without a policy row gets these. Phase 07.17 (D-01, D-11): every 5
+ * minutes and 288 runs a day, as the database default and the 07.17 migration's update of default-valued rows say.
+ */
 export const DEFAULT_AUTOMATION_CAPS: AutomationCaps = {
   maxAutomationsPerUser: 10,
-  minScheduleMinutes: 15,
+  minScheduleMinutes: 5,
   maxInboundPerHour: 30,
-  maxRunsPerDayCap: 96,
+  maxRunsPerDayCap: 288,
 };
 
 export interface AutomationService {
@@ -179,6 +186,46 @@ const runsPerDayError = (max: number) =>
   new HttpError(400, "bad_request", `Use a whole number from 1 to ${max}`, { max });
 const versionConflict = () =>
   new HttpError(409, "version", "This automation changed while you were editing. Reload it.");
+const fanOutNotAllowed = () =>
+  new HttpError(
+    400,
+    "fan_out_not_allowed",
+    "Only scheduled automations that post in a channel or a board can open a conversation for each item",
+  );
+
+/**
+ * Phase 07.17 (D-02, D-16, PD-05): fan-out only where no outside content arrives with the trigger: an agent turn on a
+ * schedule (Run now included) into a channel or a board. The database check `automations_fan_out_check` says the same.
+ */
+export function fanOutAllowed(p: {
+  actionKind: AutomationActionKind;
+  triggerKind: AutomationRow["triggerKind"];
+  targetKind: AutomationTargetKind;
+}): boolean {
+  return (
+    p.actionKind === "agent_turn" &&
+    p.triggerKind === "schedule" &&
+    (p.targetKind === "channel" || p.targetKind === "board")
+  );
+}
+
+/**
+ * The settings as audit metadata (07.17 PD-17): the switch, the two caps and how many escalation targets: counts only,
+ * never a target's id, handle or name.
+ */
+const fanOutAudit = (row: AutomationRow) => ({
+  fanOut: row.fanOutEnabled,
+  perRun: row.fanOutPerRun,
+  perDay: row.fanOutPerDay,
+  escalationCount: row.escalationTargets.length,
+});
+
+/** The stored columns of the owner's fan-out settings. */
+const fanOutColumns = (f: AutomationFanOutInput) => ({
+  fanOutEnabled: f.enabled,
+  fanOutPerRun: f.perRun,
+  fanOutPerDay: f.perDay,
+});
 
 /** The columns of a target (stable ids only, principle 11). */
 export function targetColumns(target: AutomationTarget, conversationId: string | null) {
@@ -232,6 +279,7 @@ export function createAutomationService(
 ): AutomationService {
   const kinds = createActionRegistry();
   const triggerDeps: TriggerDeps = { core, perms };
+  const escalationDeps = { core, perms };
   /** R3: the endpoint or mailbox behind a webhook or mail trigger lives and dies with its automation, in its tx. */
   const adapterOf = (kind: "webhook" | "mail"): TriggerAdapter<unknown> =>
     kind === "webhook" ? webhookTrigger : mailTrigger;
@@ -487,6 +535,8 @@ export function createAutomationService(
             }
           : null,
         inboundToday: inbound.get(row.id) ?? 0,
+        fanOut: { enabled: row.fanOutEnabled, perRun: row.fanOutPerRun, perDay: row.fanOutPerDay },
+        escalation: await escalationFor(tx, escalationDeps, row),
         version: row.version,
         createdAt: new Date(row.createdAt).toISOString(),
         updatedAt: new Date(row.updatedAt).toISOString(),
@@ -551,6 +601,12 @@ export function createAutomationService(
         );
       }
       const trigger = input.trigger;
+      if (
+        input.fanOut?.enabled &&
+        !fanOutAllowed({ actionKind, triggerKind: trigger.kind, targetKind: input.target.kind })
+      ) {
+        throw fanOutNotAllowed();
+      }
       if (trigger.kind === "webhook" && !(await canWebhook(perms, tx, actor))) {
         throw new HttpError(403, "webhook_not_allowed", "Only team leads and admins can create webhooks.");
       }
@@ -585,6 +641,16 @@ export function createAutomationService(
         target: input.target,
       });
       if (!decided.ok) throw targetError(decided.code);
+      // 07.17 (D-08, PD-15): whom the bot may mention, decided against this target and the caller.
+      if (input.escalation && input.escalation.length > 0) {
+        if (actionKind !== "agent_turn") throw escalationNotAllowed();
+        await validateEscalation(tx, escalationDeps, {
+          runAsUserId: actor.userId,
+          targetKind: input.target.kind,
+          conversationId: decided.conversationId,
+          targets: input.escalation,
+        });
+      }
 
       const [row] = await writingTarget(() =>
         tx
@@ -608,6 +674,9 @@ export function createAutomationService(
             config: opts.config ?? {},
             maxRunsPerDay: input.maxRunsPerDay,
             nextRunAt,
+            // 07.17 (PD-05): absent = off, the column defaults.
+            ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
+            ...(input.escalation ? { escalationTargets: input.escalation } : {}),
           })
           .returning(),
       );
@@ -630,6 +699,7 @@ export function createAutomationService(
           triggerKind: created.triggerKind,
           targetKind: created.targetKind,
           conversationId: created.conversationId,
+          ...fanOutAudit(created),
           // A bot's proposal it came from (07.6-12): confirmed as proposed, or saved with the person's changes.
           ...(opts.fromApproval
             ? { approvalId: opts.fromApproval.approvalId, edited: opts.fromApproval.edited }
@@ -670,8 +740,32 @@ export function createAutomationService(
       await owned(tx, actor, id, "Only its owner can edit an automation");
       const before = await locked(tx, id);
       if (before.version !== input.expectedVersion) throw versionConflict();
+      // 07.17 (PD-05): the resulting row decides, so a fan-out automation never moves to a trigger or a target where
+      // outside content arrives with the run (and the database check is never the one to refuse).
+      if (
+        (input.fanOut?.enabled ?? before.fanOutEnabled) &&
+        !fanOutAllowed({
+          actionKind: before.actionKind,
+          triggerKind: input.trigger?.kind ?? before.triggerKind,
+          targetKind: input.target?.kind ?? before.targetKind,
+        })
+      ) {
+        throw fanOutNotAllowed();
+      }
       if (before.actionKind === "digest") {
         throw new HttpError(400, "bad_request", "Change the digest in its own settings");
+      }
+      // Code review WR-08: a cap left out keeps its stored value; the merged caps are checked here (the database check
+      // would answer a 500).
+      const fanOut: AutomationFanOutInput | null = input.fanOut
+        ? {
+            enabled: input.fanOut.enabled,
+            perRun: input.fanOut.perRun ?? before.fanOutPerRun,
+            perDay: input.fanOut.perDay ?? before.fanOutPerDay,
+          }
+        : null;
+      if (fanOut && fanOut.perRun > fanOut.perDay) {
+        throw new HttpError(400, "bad_request", "The per-run cap can't exceed the per-day cap");
       }
       const trigger = input.trigger;
       const kind = trigger?.kind ?? before.triggerKind;
@@ -718,6 +812,15 @@ export function createAutomationService(
       // Every save re-decides the target for the owner and the bot (P-08), whatever changed.
       const decided = await decideTarget(tx, perms, { agentId, userId: actor.userId, target });
       if (!decided.ok) throw targetError(decided.code);
+      // 07.17 (PD-15): new targets are decided against the resulting target; absent = kept (and re-checked at delivery).
+      if (input.escalation && input.escalation.length > 0) {
+        await validateEscalation(tx, escalationDeps, {
+          runAsUserId: before.runAsUserId,
+          targetKind: target.kind,
+          conversationId: decided.conversationId,
+          targets: input.escalation,
+        });
+      }
 
       const after = await bump(tx, before, {
         name: input.name ?? before.name,
@@ -732,6 +835,11 @@ export function createAutomationService(
         inboundAskBot: inbound?.askBot ?? true,
         inboundConfig: inbound?.config ?? {},
         maxRunsPerDay: input.maxRunsPerDay ?? before.maxRunsPerDay,
+        ...(fanOut ? fanOutColumns(fanOut) : {}),
+        ...(input.escalation ? { escalationTargets: input.escalation } : {}),
+        // The run log root is a message of the target conversation (its key carries both): another conversation
+        // starts a new thread on its next fan-out run. Turning fan-out off and on again keeps it (PD-05).
+        ...(decided.conversationId !== before.conversationId ? { runLogMessageId: null } : {}),
       });
       // R3: the trigger's entity changes with the automation, in this transaction.
       let made: { webhookSecret?: string } = {};
@@ -756,6 +864,7 @@ export function createAutomationService(
           triggerKind: after.triggerKind,
           targetKind: after.targetKind,
           conversationId: after.conversationId,
+          ...fanOutAudit(after),
           // Which fields changed (their names only, never their values).
           changed: Object.keys(changes)
             .filter((k) => changes[k as keyof typeof changes] !== undefined)
@@ -930,6 +1039,30 @@ export function createAutomationService(
         .orderBy(desc(automationRuns.createdAt), desc(automationRuns.id))
         .limit(page + 1);
       const shown = rows.slice(0, page);
+      // 07.17 (D-10): how many conversations each fan-out run opened, one grouped read over the page (null otherwise).
+      const opened = new Map<string, number>();
+      // WR-02: of those, the items waiting for a free session or the bot's next day.
+      const waiting = new Map<string, number>();
+      if (row.fanOutEnabled && shown.length > 0) {
+        const counts = await tx
+          .select({
+            runId: automationConversations.runId,
+            n: count(),
+            waiting: sql<number>`count(*) filter (where ${automationConversations.status} = 'waiting')`,
+          })
+          .from(automationConversations)
+          .where(
+            inArray(
+              automationConversations.runId,
+              shown.map((r) => r.run.id),
+            ),
+          )
+          .groupBy(automationConversations.runId);
+        for (const c of counts) {
+          opened.set(c.runId, Number(c.n));
+          waiting.set(c.runId, Number(c.waiting));
+        }
+      }
       return {
         runs: shown.map(
           ({ run, anchorConversationId, anchorThreadId }): AutomationRun => ({
@@ -941,6 +1074,8 @@ export function createAutomationService(
             createdAt: new Date(run.createdAt).toISOString(),
             answeredAt: iso(run.answeredAt),
             tainted: run.tainted,
+            opened: row.fanOutEnabled ? (opened.get(run.id) ?? 0) : null,
+            waiting: row.fanOutEnabled ? (waiting.get(run.id) ?? 0) : null,
             anchor:
               run.anchorMessageId && anchorConversationId
                 ? {

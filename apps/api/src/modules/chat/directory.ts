@@ -1,6 +1,6 @@
 import { type MessageAuthor, type OrgRole, userHandle } from "@ocw/contracts";
 import { agents, orgMembers, orgUnits, type Tx } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 /** Display info for every principal of the org (humans from org_members, agents from agents). */
 export interface DirectoryEntry {
@@ -22,6 +22,18 @@ export interface DirectoryEntry {
   deleted?: boolean;
 }
 
+/**
+ * Phase 07.17 (D-07, PD-13): a team or department that `@handle` can name. Never a `project` unit (it has a handle but
+ * never resolves). The path feeds `unitResource`, so `unit.read` is decided by the resolver like everywhere else.
+ */
+export interface UnitDirectoryEntry {
+  kind: "team" | "department";
+  id: string;
+  name: string;
+  handle: string;
+  path: readonly string[];
+}
+
 export interface Directory {
   users: Map<string, DirectoryEntry>;
   agents: Map<string, DirectoryEntry>;
@@ -30,11 +42,16 @@ export interface Directory {
    * excluded: they can never be mentioned (D-01).
    */
   byHandle: Map<string, DirectoryEntry>;
+  /**
+   * Phase 07.17 (PD-13): handle → team or department. Checked only after `byHandle` (agents → users → units) and only
+   * when the caller passes unit options to `resolveMentions`. Absent on display-only directories: no unit resolves.
+   */
+  unitsByHandle?: Map<string, UnitDirectoryEntry>;
 }
 
 /** Loads the org directory inside the caller's tenant transaction (RLS scopes it to the org). */
 export async function loadDirectory(tx: Tx): Promise<Directory> {
-  const [userRows, agentRows] = await Promise.all([
+  const [userRows, agentRows, unitRows] = await Promise.all([
     tx
       .select({
         userId: orgMembers.userId,
@@ -58,6 +75,17 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
       })
       .from(agents)
       .leftJoin(orgUnits, eq(orgUnits.id, agents.unitId)),
+    // Teams and departments only: a `project` unit never resolves as a mention (PD-13).
+    tx
+      .select({
+        id: orgUnits.id,
+        kind: orgUnits.kind,
+        name: orgUnits.name,
+        handle: orgUnits.handle,
+        path: orgUnits.path,
+      })
+      .from(orgUnits)
+      .where(inArray(orgUnits.kind, ["team", "department"])),
   ]);
   const users = new Map<string, DirectoryEntry>();
   const agentMap = new Map<string, DirectoryEntry>();
@@ -92,7 +120,12 @@ export async function loadDirectory(tx: Tx): Promise<Directory> {
     // Personal bots live only in their owner's DM (D-01): never resolved as a text @mention.
     if (!a.deletedAt && a.scope !== "personal") byHandle.set(e.handle, e);
   }
-  return { users, agents: agentMap, byHandle };
+  const unitsByHandle = new Map<string, UnitDirectoryEntry>();
+  for (const u of unitRows) {
+    if (u.kind === "project") continue;
+    unitsByHandle.set(u.handle, { kind: u.kind, id: u.id, name: u.name, handle: u.handle, path: u.path });
+  }
+  return { users, agents: agentMap, byHandle, unitsByHandle };
 }
 
 /** Resolver facts of a directory agent (D-01, AGENT-01). */

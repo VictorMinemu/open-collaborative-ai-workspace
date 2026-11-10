@@ -16,6 +16,12 @@ export interface RecipientsInput {
   /** Root author and earlier repliers of the thread (users only; duplicates allowed). */
   threadParticipantIds: string[];
   isThreadReply: boolean;
+  /**
+   * 07.17 (D-07, D-13, PD-14): the people each mentioned team or department reaches (`teamMentionAudience`, at most
+   * 200 in total, author already excluded). Offered as `team_mention` on channel posts only; a direct mention is
+   * stronger, `@channel` / `@here` / a thread reply are weaker (NOTIFICATION_KIND_RANK).
+   */
+  teamMentions?: ReadonlyArray<{ unitId: string; userIds: readonly string[] }>;
 }
 
 /**
@@ -41,6 +47,9 @@ export function computeRecipients(i: RecipientsInput): Map<string, NotificationK
     for (const u of i.humanMemberIds) if (i.onlineUserIds.has(u)) offer(u, "here");
   }
   if (i.isThreadReply) for (const u of i.threadParticipantIds) offer(u, "thread_reply");
+  if (i.convKind === "channel") {
+    for (const t of i.teamMentions ?? []) for (const u of t.userIds) offer(u, "team_mention");
+  }
   for (const u of i.mentionedUserIds) offer(u, "mention");
   return out;
 }

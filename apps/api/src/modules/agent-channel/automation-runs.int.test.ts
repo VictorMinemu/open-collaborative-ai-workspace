@@ -1,13 +1,18 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type AgentAutomationRunInbound,
   type AutomationRunTrigger,
+  BUILTIN_TOOLS,
+  CONVERSATION_OPEN_FLAGS,
+  type EscalationTargetView,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_TOOL_NAMES,
+  WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type AutomationRunPayload, FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
+import type { AgentMention } from "../../lib/chat-agent-bridge";
 import {
   codeOf,
   type Json,
@@ -18,10 +23,14 @@ import {
   startSandboxStack,
 } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { turnPolicy } from "../bot-capabilities";
 import { ensureAgentDm, updatePlatformCard } from "../chat";
 import { createPermissionService, type PermissionService } from "../organization";
+import { consultTargets } from "./agent-message";
 import { type DeliverAutomationRunResult, deliverAutomationRun } from "./automation-runs";
 import { updatePlatformCardNotified } from "./card-followers";
+import { conversationAudience } from "./memory-files";
+import { buildMentionEvents } from "./mentions";
 
 /**
  * 07.6-06 (AUTO-01, AUTO-02; D-02, D-03, D-07, D-08, D-12; P-03, P-08, P-11, P-12, P-22): the proactive-delivery
@@ -135,6 +144,7 @@ async function deliver(
     threadRootId?: string;
     runAs?: string;
     agentId?: string;
+    escalation?: EscalationTargetView[];
   } = {},
 ): Promise<DeliverAutomationRunResult> {
   const runAs = p.runAs ?? s.victorId;
@@ -155,6 +165,7 @@ async function deliver(
         inbound: p.inbound ?? null,
         taintedAtStart: p.taintedAtStart ?? false,
         timeZone: "Europe/Madrid",
+        ...(p.escalation ? { escalation: p.escalation } : {}),
       },
     ),
   );
@@ -920,5 +931,411 @@ describe("ensureAgentDm opens a person's DM with a bot under the DM rules (P-08)
     await expect(
       asPerson(s.victorId, (tx) => ensureAgentDm(tx, chatDeps(), { agentId: off.id, userId: s.victorId })),
     ).rejects.toMatchObject({ code: "agent_unavailable" });
+  });
+});
+
+// ---------------------------------------------------------------- 07.17-11: the fan-out offer on run turns
+
+/**
+ * 07.17-11 (AFO-02; D-02, D-08, PD-07, PD-08, PD-15, PD-18, E9): a run of a fan-out automation is offered
+ * `ocw_conversation_open` with its remaining caps, and every other turn is what it was before the phase. The runs go
+ * through the real runner (Run now, then the `automation.fire` job), so the offer is the one the runner computes.
+ */
+describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its caps (D-02, PD-07, PD-08)", () => {
+  let ordersId: string;
+  let intakeId: string;
+
+  const drain = () => core().jobs.drain("automation.fire");
+  const createAutomation = async (extra: Json = {}): Promise<string> =>
+    (
+      (
+        await ok(
+          s.victor.request("POST", "/api/v1/automations", {
+            name: "New orders",
+            agentId: s.scoutId,
+            instructions: "Find the new orders and open one conversation for each.",
+            trigger: { kind: "schedule", schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" } },
+            target: { kind: "board", conversationId: ordersId, columnId: intakeId },
+            maxRunsPerDay: 24,
+            ...extra,
+          }) as Promise<Res>,
+          201,
+        )
+      ).automation as Json
+    ).id as string;
+  /** Run now, drained: the run's one delivered event. */
+  const runNowEvent = async (automationId: string): Promise<Json> => {
+    await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [s.scoutId]);
+    const runId = (
+      await ok(s.victor.request("POST", `/api/v1/automations/${automationId}/run`) as Promise<Res>, 202)
+    ).runId as string;
+    await drain();
+    const events = await runEvents(runId);
+    expect(events, JSON.stringify(await runRow(runId))).toHaveLength(1);
+    return events[0] as Json;
+  };
+  /** An earlier run of the automation (answered) and `n` conversations it opened at `createdAt`. */
+  const seedOpened = async (automationId: string, n: number, createdAt: string) => {
+    const runId = (
+      await s.su.query(
+        `insert into app.automation_runs (organization_id, automation_id, trigger, status)
+         values ($1, $2, 'manual', 'answered') returning id`,
+        [s.orgA, automationId],
+      )
+    ).rows[0].id as string;
+    for (let i = 0; i < n; i++) {
+      await s.su.query(
+        `insert into app.automation_conversations
+           (organization_id, automation_id, run_id, external_key_hash, conversation_id, status, created_at)
+         values ($1, $2, $3, $4, $5, 'delivered', $6)`,
+        [
+          s.orgA,
+          automationId,
+          runId,
+          createHash("sha256").update(randomUUID()).digest("hex"),
+          ordersId,
+          createdAt,
+        ],
+      );
+    }
+  };
+  /** The start of today in Madrid (the automations' zone), as PostgreSQL computes it. */
+  const madridMidnight = async () =>
+    (
+      await s.su.query(
+        "select (date_trunc('day', now() at time zone 'Europe/Madrid') at time zone 'Europe/Madrid') as t",
+      )
+    ).rows[0].t as Date;
+
+  /**
+   * The turn `turnPolicy` gives the same delivery without the offer (the new parameter bypassed): the inputs
+   * `buildMentionEvents` passes for an automation run (unattended, no attachments, no Work Zone, the consult targets of
+   * the one decision), for the event's own message. A fresh event id: the ledger row is a separate turn.
+   */
+  const turnWithoutOffer = (ev: Json) =>
+    asPerson(s.victorId, async (tx) => {
+      const conversationId = ev.conversation.id as string;
+      const targets = await consultTargets(tx, perms, {
+        sourceAgentId: s.scoutId,
+        humanUserId: s.victorId,
+        conversationId,
+        chain: null,
+      });
+      const decision = await turnPolicy(
+        tx,
+        core(),
+        perms,
+        {
+          agentId: s.scoutId,
+          humanUserId: s.victorId,
+          conversationId,
+          conversationKind: ev.conversation.kind as string,
+          messageId: ev.message.id as string,
+          eventId: randomUUID(),
+          clientTimeZone: "Europe/Madrid",
+          taintedAtStart: false,
+          unattended: true,
+          chain: null,
+          consultTargets: targets,
+          attachments: [],
+          workZone: null,
+        },
+        {
+          audience: null,
+          memory: {
+            service: s.stack.built.memory,
+            audience: () => conversationAudience(tx, { conversationId }),
+          },
+        },
+      );
+      if (!decision.deliver) throw new Error("the direct turn was not delivered");
+      return JSON.parse(JSON.stringify(decision.turn)) as Json;
+    });
+  /** Every key but the clock (`now` is taken per call). */
+  const withoutClock = (turn: Json): Json => {
+    const { now: _now, ...rest } = turn;
+    return rest;
+  };
+
+  beforeAll(async () => {
+    await s.su.query(
+      `insert into app.bot_policies (organization_id, max_automations_per_user) values ($1, 1000)
+       on conflict (organization_id) do update set max_automations_per_user = 1000`,
+      [s.orgA],
+    );
+    ordersId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "orders-fo",
+          visibility: "private",
+          layout: "board",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const member of [
+      { kind: "agent", id: s.scoutId },
+      { kind: "user", id: s.samId },
+    ]) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, member) as Promise<Res>);
+    }
+    const col = await s.victor.request("POST", `/api/v1/boards/${ordersId}/columns`, {
+      name: "Intake",
+      category: "backlog",
+    });
+    expect([200, 201], JSON.stringify(col.body)).toContain(col.status);
+    const columns = (await ok(s.victor.request("GET", `/api/v1/boards/${ordersId}`) as Promise<Res>))
+      .columns as Json[];
+    intakeId = columns.find((c) => c.name === "Intake")?.id as string;
+    expect(intakeId).toBeTruthy();
+  });
+
+  it("Run now of a board fan-out automation (10 / 100, three opened today, one yesterday): the tool, its flags and { 10, 10, 97 }", async () => {
+    const automationId = await createAutomation({ fanOut: { enabled: true, perRun: 10, perDay: 100 } });
+    const midnight = await madridMidnight();
+    await seedOpened(automationId, 3, new Date(midnight.getTime() + 60_000).toISOString());
+    // Yesterday in the automation's zone: never counted against today.
+    await seedOpened(automationId, 1, new Date(midnight.getTime() - 60_000).toISOString());
+
+    const ev = await runNowEvent(automationId);
+    expect(ev.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(ev.turn.toolFlags[BUILTIN_TOOLS.conversationOpen]).toEqual(CONVERSATION_OPEN_FLAGS);
+    expect(ev.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 97 });
+    expect((await turnRow(ev.eventId)).tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    // ADR-0038 §12 for runs: never a Work Zone tool on a run turn.
+    for (const name of WORK_SESSION_TOOL_NAMES) expect(ev.turn.tools).not.toContain(name);
+    expect(ev.turn).not.toHaveProperty("workZone");
+
+    // E9: the offer only adds the tool; the rest of the turn is the one the same delivery gets without it.
+    const direct = await turnWithoutOffer(ev);
+    expect(direct.tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(withoutClock(ev.turn)).toEqual({
+      ...withoutClock(direct),
+      tools: [...(direct.tools as string[]), BUILTIN_TOOLS.conversationOpen],
+      toolFlags: { ...direct.toolFlags, [BUILTIN_TOOLS.conversationOpen]: CONVERSATION_OPEN_FLAGS },
+    });
+  });
+
+  it("remainingRun is capped by what is left of the day; a spent day still offers the tool with { perRun, 0, 0 }", async () => {
+    const automationId = await createAutomation({ fanOut: { enabled: true, perRun: 5, perDay: 6 } });
+    const midnight = await madridMidnight();
+    await seedOpened(automationId, 4, new Date(midnight.getTime() + 60_000).toISOString());
+    expect((await runNowEvent(automationId)).automationRun.fanOut).toEqual({
+      perRun: 5,
+      remainingRun: 2,
+      remainingDay: 2,
+    });
+    await seedOpened(automationId, 3, new Date(midnight.getTime() + 120_000).toISOString());
+    const spent = await runNowEvent(automationId);
+    expect(spent.automationRun.fanOut).toEqual({ perRun: 5, remainingRun: 0, remainingDay: 0 });
+    expect(spent.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+  });
+
+  it("E9: the same automation with fan-out off: no tool, no fanOut key, and the turn equals the turn without the offer", async () => {
+    const automationId = await createAutomation();
+    const ev = await runNowEvent(automationId);
+    expect(ev.turn.tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(ev.turn.toolFlags).not.toHaveProperty(BUILTIN_TOOLS.conversationOpen);
+    expect(Object.keys(ev.automationRun).sort()).toEqual(
+      ["automationId", "inbound", "instructions", "name", "runId", "trigger"].sort(),
+    );
+    expect((await turnRow(ev.eventId)).tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+    const direct = await turnWithoutOffer(ev);
+    expect(Object.keys(ev.turn).sort()).toEqual(Object.keys(direct).sort());
+    expect(withoutClock(ev.turn)).toEqual(withoutClock(direct));
+  });
+
+  it("escalation (D-08, PD-15): a run carries the targets' views; Sam out of the board → only the unit; none → no key", async () => {
+    const unit = async (kind: string, name: string, parentId: string | null) =>
+      (await ok(s.victor.request("POST", "/api/v1/units", { kind, name, parentId }) as Promise<Res>))
+        .id as string;
+    const logistics = await unit("team", "Logistics", await unit("department", "Operations", null));
+    const handle = (await s.su.query("select handle from app.org_units where id = $1", [logistics])).rows[0]
+      .handle as string;
+    const unitView = { kind: "unit", id: logistics, handle, displayName: "Logistics" };
+    const escalation = [
+      { kind: "unit", id: logistics },
+      { kind: "user", id: s.samId },
+    ];
+    // A fan-out automation and an ordinary one: escalation is on any agent-turn automation's runs.
+    for (const fanOut of [{ enabled: true }, { enabled: false }]) {
+      const automationId = await createAutomation({ fanOut, escalation });
+      const ev = await runNowEvent(automationId);
+      expect(ev.automationRun.escalation).toEqual([
+        unitView,
+        { kind: "user", id: s.samId, handle: "sam", displayName: "Sam Lee" },
+      ]);
+      expect("fanOut" in ev.automationRun).toBe(fanOut.enabled);
+
+      // Sam loses access to the board: the next run names only the unit (resolved again at delivery).
+      await ok(
+        s.victor.request("DELETE", `/api/v1/channels/${ordersId}/members/user/${s.samId}`) as Promise<Res>,
+      );
+      try {
+        expect((await runNowEvent(automationId)).automationRun.escalation).toEqual([unitView]);
+      } finally {
+        await ok(
+          s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, {
+            kind: "user",
+            id: s.samId,
+          }) as Promise<Res>,
+        );
+      }
+    }
+    // Every target gone: no key at all, like an automation without targets.
+    const lonely = await createAutomation({ escalation: [{ kind: "unit", id: logistics }] });
+    await s.su.query("delete from app.org_units where id = $1", [logistics]);
+    expect(await runNowEvent(lonely)).not.toHaveProperty("automationRun.escalation");
+    expect((await runNowEvent(await createAutomation())).automationRun).not.toHaveProperty("escalation");
+  });
+
+  it("a webhook run's event keeps its inbound block and gains escalation only when targets exist", async () => {
+    const view: EscalationTargetView = {
+      kind: "user",
+      id: s.samId,
+      handle: "sam",
+      displayName: "Sam Lee",
+    };
+    const hook = { source: "webhook" as const, title: "Order #42", text: "A new order", from: null };
+    for (const escalation of [[view], [], undefined]) {
+      const r = await scheduledRun({ trigger: "webhook" });
+      const inbound = { ...hook, receivedAt: new Date().toISOString() };
+      const out = await deliver(r, {
+        trigger: "webhook",
+        inbound,
+        taintedAtStart: true,
+        ...(escalation ? { escalation } : {}),
+      });
+      expect(out.delivered).toBe(true);
+      const [ev] = (await runEvents(r.runId)) as [Json];
+      expect(ev.automationRun.inbound).toEqual(inbound);
+      if (escalation?.length) expect(ev.automationRun.escalation).toEqual([view]);
+      else expect(ev.automationRun).not.toHaveProperty("escalation");
+    }
+  });
+
+  it("WR-07 (MAX_TURN_TOOLS): a full run turn keeps the open tool, the last connector tool giving it the slot; one free slot offers it as before", async () => {
+    const bot = await s.newBot(`Bulky ${randomUUID().slice(0, 4)}`);
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, {
+        kind: "agent",
+        id: bot.id,
+      }) as Promise<Res>,
+    );
+    const automationId = await createAutomation({ agentId: bot.id, fanOut: { enabled: true } });
+    const runTurn = async () => {
+      await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [bot.id]);
+      return runNowEvent(automationId);
+    };
+    const base = ((await runTurn()).turn.tools as string[]).length - 1;
+    const serverMcp = randomUUID();
+    await s.su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+       values ($1, $2, 'Bulk', 'bulk', 'streamable-http', 'https://bulk.example.test/mcp', 'ready', 'org_secret')`,
+      [serverMcp, s.orgA],
+    );
+    const names = Array.from({ length: 64 - base }, (_, i) => `bulk__t${String(i).padStart(2, "0")}`);
+    for (const name of names) {
+      await s.su.query(
+        "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
+        [s.orgA, serverMcp, name.slice("bulk__".length), name],
+      );
+    }
+    const grant = (tools: string[]) =>
+      ok(
+        s.victor.request("PATCH", `/api/v1/agents/${bot.id}/capabilities`, {
+          tools: tools.map((tool) => ({ sourceKind: "mcp", sourceId: serverMcp, tool })),
+        }) as Promise<Res>,
+      );
+    await grant(names);
+    const full = await runTurn();
+    expect(full.turn.tools).toHaveLength(64);
+    // The run turn's primary tool is reserved: the lowest-priority tool (the last MCP tool offered) makes room.
+    expect(full.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(full.turn.tools).not.toContain(names.at(-1));
+    expect(full.turn.toolFlags).not.toHaveProperty(names.at(-1) as string);
+    expect(full.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
+    expect((await turnRow(full.eventId)).tools).toContain(BUILTIN_TOOLS.conversationOpen);
+
+    await grant(names.slice(1));
+    const room = await runTurn();
+    expect(room.turn.tools).toHaveLength(64);
+    expect(room.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(room.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
+  });
+
+  it("a person's mention of the same bot in the fan-out run's thread never has the tool", async () => {
+    const automationId = await createAutomation({ fanOut: { enabled: true } });
+    const run = await runNowEvent(automationId);
+    expect(run.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    for (const who of [s.victor, s.sam]) {
+      const human = await mentionTurn(who, ordersId, run.thread.rootMessageId as string);
+      expect(human.turn.tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+      expect(human.turn.toolFlags).not.toHaveProperty(BUILTIN_TOOLS.conversationOpen);
+      expect((await turnRow(human.eventId)).tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+    }
+  });
+
+  it("T-07.17-11-01: a mention, reply-mode, consult or wake delivery never gets the tool, even carrying the offer", async () => {
+    const automationId = await createAutomation({ fanOut: { enabled: true } });
+    const run = await runNowEvent(automationId);
+    const root = run.thread.rootMessageId as string;
+    const msg = await ok(
+      s.victor.request("POST", `/api/v1/conversations/${ordersId}/messages`, {
+        body: `the totals look off ${randomUUID().slice(0, 6)}`,
+        threadRootId: root,
+      }) as Promise<Res>,
+    );
+    // Reply mode `all` for this case only (the rest of the file's unmentioned posts must stay unanswered).
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, {
+        replyMode: "all",
+      }) as Promise<Res>,
+    );
+    try {
+      for (const trigger of ["mention", "reply_mode", "consult", "work_session"] as const) {
+        await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [s.scoutId]);
+        const forged: AgentMention = {
+          organizationId: s.orgA,
+          conversationId: ordersId,
+          threadRootId: root,
+          messageId: msg.id as string,
+          agentIds: [s.scoutId],
+          author: { kind: "user", id: s.victorId, displayName: "Víctor Ruiz" },
+          body: msg.body as string,
+          createdAt: new Date().toISOString(),
+          delivery: "thread",
+          trigger,
+          ...(trigger === "consult"
+            ? {
+                chain: {
+                  chainId: null,
+                  depth: 1 as const,
+                  answeringHopId: null,
+                  returningHopId: null,
+                  rootAgentId: s.scoutId,
+                  usedTargetIds: [],
+                },
+              }
+            : {}),
+          conversationOpen: { automationId, runId: run.automationRun.runId as string },
+        };
+        const events = await asPerson(s.victorId, (tx) =>
+          buildMentionEvents(tx, forged, { core: core(), perms, memory: s.stack.built.memory }),
+        );
+        expect(events, trigger).toHaveLength(1);
+        const [ev] = events as unknown as [Json];
+        expect(ev.turn.tools, trigger).not.toContain(BUILTIN_TOOLS.conversationOpen);
+        expect(ev.turn.toolFlags, trigger).not.toHaveProperty(BUILTIN_TOOLS.conversationOpen);
+        expect((await turnRow(ev.eventId as string)).tools, trigger).not.toContain(
+          BUILTIN_TOOLS.conversationOpen,
+        );
+      }
+    } finally {
+      await ok(
+        s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, {
+          replyMode: "mentions",
+        }) as Promise<Res>,
+      );
+    }
   });
 });

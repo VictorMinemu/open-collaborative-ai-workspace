@@ -35,6 +35,8 @@ export interface TriggerForm {
   scheduleErrors: ScheduleErrors;
   preview: SchedulePreviewState;
   disabled: boolean;
+  /** 07.17 (PD-19): the workspace's minimum interval from the options (undefined while they load). */
+  minMinutes?: number | undefined;
   /** 07.6-18: the saved automation (its webhook endpoint or mailbox), null before the first save. */
   automation?: Automation | null;
   /** 07.6-18: What happens and the payload mapping (webhook and mail triggers). */
@@ -140,6 +142,7 @@ export function TriggerStep({
           preview={form.preview}
           errors={form.scheduleErrors}
           disabled={locked}
+          minMinutes={form.minMinutes}
         />
       ) : form.triggerKind === "webhook" ? (
         webhookSaved ? (

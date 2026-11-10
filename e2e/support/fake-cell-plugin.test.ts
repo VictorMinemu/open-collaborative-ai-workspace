@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AgentChannelConversationOpen } from "../../packages/contracts/src/automation-fan-out";
 import { FakeCellPlugin, type MentionPayload, turnAttachmentsSuffix } from "./fake-cell-plugin";
 
 /**
@@ -15,9 +16,19 @@ import { FakeCellPlugin, type MentionPayload, turnAttachmentsSuffix } from "./fa
  */
 
 const seen: Array<{ path: string; body: Record<string, unknown> }> = [];
+/** The `authorization` header of each request in `seen`, by index (07.17: the in-cell MCP call sends the rendered one). */
+const seenAuth: Array<string | undefined> = [];
 let server: Server;
 let plugin: FakeCellPlugin;
 let apiUrl = "";
+
+/**
+ * 07.17-18: answers decided per request (method, path, body), asked before `answers`; `undefined` falls through. The
+ * board PATCH and the open route need them (a 409 then a 200; the items echoed back).
+ */
+const routes: Array<
+  (method: string, url: string, body: Record<string, unknown>) => [number, unknown] | undefined
+> = [];
 
 /** `POST /attachments/read` answers by the requested attachment id (07.15-09). */
 const reads: Record<string, [number, unknown]> = {};
@@ -43,13 +54,17 @@ beforeAll(async () => {
     });
     req.on("end", () => {
       seen.push({ path: req.url ?? "", body: text ? JSON.parse(text) : {} });
+      seenAuth.push(req.headers.authorization);
       const url = req.url ?? "";
       const sent = seen.at(-1)?.body ?? {};
-      const [status, body] = /^\/agent-channel\/v1\/turns\/[^/]+\/done$/u.test(url)
-        ? [204, null]
-        : url === "/agent-channel/v1/attachments/read"
-          ? (reads[String(sent.attachmentId)] ?? [403, { error: { code: "no_trigger", message: "x" } }])
-          : (answers[url] ?? [404, { error: { code: "route_not_found" } }]);
+      const routed = routes.map((r) => r(req.method ?? "GET", url, sent)).find((x) => x !== undefined);
+      const [status, body] = routed
+        ? routed
+        : /^\/agent-channel\/v1\/turns\/[^/]+\/done$/u.test(url)
+          ? [204, null]
+          : url === "/agent-channel/v1/attachments/read"
+            ? (reads[String(sent.attachmentId)] ?? [403, { error: { code: "no_trigger", message: "x" } }])
+            : (answers[url] ?? [404, { error: { code: "route_not_found" } }]);
       res.writeHead(status, { "content-type": "application/json" });
       res.end(body === null ? "" : JSON.stringify(body));
     });
@@ -822,5 +837,557 @@ describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
     );
     expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
     expect(seen.at(-1)?.body.text).toBe(`Done: ${TURN_DONE} @ana`);
+  });
+});
+
+// ---------------------------------------------------------------- 07.17-18: fan-out runs, item turns, card wakes (PD-22)
+
+const FLEET = "00000000-0000-4000-8000-000000000f01";
+const RUNS_ROOT = "00000000-0000-4000-8000-000000000f02";
+const RUN_CARD = "00000000-0000-4000-8000-000000000f03";
+const ROOT42 = "00000000-0000-4000-8000-000000000f04";
+const ROOT43 = "00000000-0000-4000-8000-000000000f05";
+const RUN_EVENT = "00000000-0000-4000-8000-000000000f06";
+const ITEM_EVENT = "00000000-0000-4000-8000-000000000f07";
+const ITEM_WAKE = "00000000-0000-4000-8000-000000000f08";
+const DOING = "00000000-0000-4000-8000-000000000f09";
+const DONE = "00000000-0000-4000-8000-000000000f0a";
+const LOGISTICS = "00000000-0000-4000-8000-000000000f0b";
+const SAM_ID = "00000000-0000-4000-8000-000000000f0c";
+const OPEN = "/agent-channel/v1/conversations/open";
+const CONNECTOR_CALL = "/agent-channel/v1/connectors/call";
+const ESCALATION = [
+  { kind: "unit", id: LOGISTICS, handle: "logistics", displayName: "Logistics" },
+  { kind: "user", id: SAM_ID, handle: "sam", displayName: "Sam Lee" },
+];
+
+/** Atlas's fan-out run turn on the run card of the automation's "· Runs" thread on #fleet, as Víctor. */
+const fanOutRun = (over: Record<string, unknown> = {}) =>
+  asEvent({
+    eventId: RUN_EVENT,
+    seq: 1,
+    type: "agent.automation_run.v1",
+    agent: { id: ATLAS_ID, handle: "atlas", displayName: "Atlas" },
+    conversation: { id: FLEET, kind: "channel", name: "fleet" },
+    thread: { rootMessageId: RUNS_ROOT },
+    message: {
+      id: RUN_CARD,
+      text: "run",
+      author: { kind: "user", id: VICTOR_ID, displayName: "Víctor Ruiz" },
+    },
+    threadHistory: [],
+    roster: [],
+    turn: { tools: ["ocw_conversation_open", "erp__list_records", "erp__get_record"] },
+    automationRun: {
+      automationId: PROJECT,
+      runId: WS,
+      name: "New orders",
+      trigger: "manual",
+      instructions: "Open a card for each new order.",
+      inbound: null,
+    },
+    ...over,
+  });
+
+/** The item turn of order 1042 in its card's thread (tainted from the start: the item is outside content). */
+const itemTurn = (over: Record<string, unknown> = {}) =>
+  asEvent({
+    eventId: ITEM_EVENT,
+    seq: 2,
+    type: "agent.automation_item.v1",
+    agent: { id: ATLAS_ID, handle: "atlas", displayName: "Atlas" },
+    conversation: { id: FLEET, kind: "channel", name: "fleet" },
+    thread: { rootMessageId: ROOT42 },
+    message: {
+      id: ROOT42,
+      text: "opened",
+      author: { kind: "user", id: VICTOR_ID, displayName: "Víctor Ruiz" },
+    },
+    threadHistory: [],
+    roster: [],
+    turn: { tools: ["ocw_board_card", ...WORK_SESSION_TOOLS], tainted: true },
+    automationItem: {
+      automationId: PROJECT,
+      runId: WS,
+      itemId: CARD,
+      name: "New orders",
+      instructions: "Open a card for each new order.",
+      item: { title: "Order 1042", text: "Order 1042 from the ERP.", openedAt: "2026-11-10T10:00:00.000Z" },
+      escalation: ESCALATION,
+    },
+    ...over,
+  });
+
+/** The wake of the session the item turn started, in the card's thread (the live card in it). */
+const itemWake = (workSession: Record<string, unknown>, root = ROOT42) =>
+  wake(workSession, {
+    eventId: ITEM_WAKE,
+    conversation: { id: FLEET, kind: "channel", name: "fleet" },
+    thread: { rootMessageId: root },
+    message: {
+      id: CARD,
+      text: "summary",
+      author: { kind: "user", id: VICTOR_ID, displayName: "Víctor Ruiz" },
+    },
+    turn: { tools: ["ocw_board_card", ...WORK_SESSION_TOOLS], tainted: true },
+  });
+
+const boardCardBody = (messageId: string, version: number, columnId: string) => ({
+  card: {
+    messageId,
+    conversationId: FLEET,
+    columnId,
+    rank: "a",
+    waitingOn: "none",
+    title: "Order 1042",
+    description: "",
+    number: null,
+    version,
+  },
+});
+
+type Route = (method: string, url: string, body: Record<string, unknown>) => [number, unknown] | undefined;
+
+/** The card's PATCH answers 200 at `start` (and bumps it), else the API's 409 with the current card in its details. */
+function boardCardAt(messageId: string, start: number): Route {
+  let current = start;
+  return (method, url, body) => {
+    if (method !== "PATCH" || url !== `/agent-channel/v1/board/cards/${messageId}`) return undefined;
+    const column = String((body.move as { columnId?: string } | undefined)?.columnId ?? DOING);
+    if (body.expectedVersion !== current) {
+      return [
+        409,
+        {
+          error: {
+            code: "board_card_version_conflict",
+            message: "x",
+            details: boardCardBody(messageId, current, column),
+          },
+        },
+      ];
+    }
+    current += 1;
+    return [200, boardCardBody(messageId, current, column)];
+  };
+}
+
+/** The open route: every key opened except 1043, which an earlier run opened (existing: not opened, not refused). */
+const openAnswer: Route = (method, url, body) => {
+  if (method !== "POST" || url !== OPEN) return undefined;
+  const items = (body.items as Array<{ externalKey: string }> | undefined) ?? [];
+  return [
+    200,
+    {
+      ok: true,
+      results: items.map((i) => ({
+        externalKey: i.externalKey,
+        opened: i.externalKey !== "1043",
+        conversationId: FLEET,
+        threadRootMessageId: i.externalKey === "1043" ? ROOT43 : ROOT42,
+        refused: null,
+      })),
+      remainingRun: 8,
+      remainingDay: 98,
+    },
+  ];
+};
+
+describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
+  it("a fan-out run lists a proxied connector once, posts exactly the plugin's open body with an item per id it keeps, then replies `Opened <n>, existing <m>` on the run card", async () => {
+    answers[CONNECTOR_CALL] = [
+      200,
+      { content: JSON.stringify({ ids: ["SO-10442", "1042", "1043"] }), truncated: false, isError: false },
+    ];
+    routes.push(openAnswer);
+    const runs: unknown[] = [];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      fanOutFor: (run) => {
+        runs.push(run.automationRun.runId);
+        return { connector: "erp", select: (ids) => ids.filter((id) => !id.startsWith("SO-")) };
+      },
+    });
+    const from = seen.length;
+    await cell.onEvent("agent.automation_run.v1", fanOutRun());
+    expect(runs).toEqual([WS]);
+    // `GET /cell` renders no such server (this stub answers 404): the connector proxy reads it.
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/cell",
+      CONNECTOR_CALL,
+      OPEN,
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    const turn = { eventId: RUN_EVENT, agentId: ATLAS_ID };
+    expect(seen[from + 1]?.body).toEqual({ ...turn, connector: "erp", tool: "list_records", arguments: {} });
+    const sent = seen[from + 2]?.body;
+    expect(sent).toEqual({
+      ...turn,
+      items: [
+        { externalKey: "1042", title: "Order 1042", body: "Order 1042 from the ERP." },
+        { externalKey: "1043", title: "Order 1043", body: "Order 1043 from the ERP." },
+      ],
+    });
+    // T-07.17-18-01: the body the plugin's own schema accepts as it is (strict: no other key).
+    expect(AgentChannelConversationOpen.parse(sent)).toEqual(sent);
+    expect(seen.at(-1)?.body).toEqual({
+      agentId: ATLAS_ID,
+      conversationId: FLEET,
+      threadRootMessageId: RUNS_ROOT,
+      inReplyToMessageId: RUN_CARD,
+      eventId: RUN_EVENT,
+      text: "Opened 1, existing 1",
+      idempotencyKey: `evt:${RUN_EVENT}`,
+    });
+    expect(cell.conversationOpenRequests.at(-1)).toMatchObject({ eventId: RUN_EVENT, sent, status: 200 });
+    routes.length = 0;
+  });
+
+  it("nothing new is an empty list; a refused open or list says why; without the option, or on a turn not offered the open tool, the run is answered as before", async () => {
+    answers[CONNECTOR_CALL] = [
+      200,
+      { content: JSON.stringify({ ids: [] }), truncated: false, isError: false },
+    ];
+    answers[OPEN] = [200, { ok: true, results: [], remainingRun: 10, remainingDay: 100 }];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      fanOutFor: () => ({ connector: "erp" }),
+    });
+    let from = seen.length;
+    await cell.onEvent("agent.automation_run.v1", fanOutRun());
+    expect(seen[from + 2]?.body).toEqual({ eventId: RUN_EVENT, agentId: ATLAS_ID, items: [] });
+    expect(seen.at(-1)?.body.text).toBe("Opened 0, existing 0");
+
+    answers[OPEN] = [200, { ok: false, code: "fan_out_off", sentence: "s" }];
+    await cell.onEvent("agent.automation_run.v1", fanOutRun());
+    expect(seen.at(-1)?.body.text).toBe("Tool ocw_conversation_open: refused (fan_out_off)");
+
+    // The ERP's tool is not on the turn: the list is never sent, and nothing is opened.
+    from = seen.length;
+    await cell.onEvent("agent.automation_run.v1", fanOutRun({ turn: { tools: ["ocw_conversation_open"] } }));
+    expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+    expect(seen.at(-1)?.body.text).toBe("Tool ocw_connector_call: not offered");
+
+    // A turn without the open tool, or a cell without the option: the 07.6 reply.
+    const plain = new FakeCellPlugin({ apiUrl, token: "cell-token", autoReply: true });
+    for (const [c, ev] of [
+      [cell, fanOutRun({ turn: { tools: ["erp__list_records"] } })],
+      [plain, fanOutRun()],
+    ] as const) {
+      from = seen.length;
+      await c.onEvent("agent.automation_run.v1", ev);
+      expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+      expect(String(seen.at(-1)?.body.text)).toMatch(/^Asked by Víctor Ruiz/u);
+    }
+    delete answers[OPEN];
+  });
+
+  it("an organization server rendered in the cell is listed the real cell's way: the gate, tools/call on the server itself with its headers, the result; never the connector proxy (CI 252/255)", async () => {
+    const CALL_ID = "00000000-0000-4000-8000-000000000f0d";
+    const rpcs: Array<Record<string, unknown>> = [];
+    // GET /cell renders the ERP (org_secret: its headers' values for the cell only), on a host only the API resolves.
+    answers["/agent-channel/v1/cell"] = [
+      200,
+      {
+        agents: [],
+        mcpServers: [
+          {
+            id: "00000000-0000-4000-8000-000000000f0e",
+            safeName: "erp",
+            transport: "streamable-http",
+            url: "http://fake-mcp:4291/erp-mcp",
+            headers: [
+              { name: "Authorization", envName: "OCW_MCP_ERP_AUTHORIZATION", value: "Bearer erp-token" },
+            ],
+            tools: ["list_records"],
+          },
+        ],
+      },
+    ];
+    answers["/agent-channel/v1/tool-calls"] = [200, { callId: CALL_ID, allowed: true, reason: null }];
+    answers[`/agent-channel/v1/tool-calls/${CALL_ID}/result`] = [200, { ok: true }];
+    const erp: Route = (method, url, body) => {
+      if (method !== "POST" || url !== "/erp-mcp") return undefined;
+      rpcs.push(body);
+      if (body.method === "initialize") {
+        return [
+          200,
+          { jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18", capabilities: {} } },
+        ];
+      }
+      if (body.method === "tools/call") {
+        const text = JSON.stringify({ ids: ["SO-10442", "1042", "1043"] });
+        return [200, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text }] } }];
+      }
+      return [202, null];
+    };
+    routes.push(erp, openAnswer);
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      mcpHostMap: { "fake-mcp:4291": new URL(apiUrl).host },
+      fanOutFor: () => ({ connector: "erp", select: (ids) => ids.filter((id) => !id.startsWith("SO-")) }),
+    });
+    try {
+      const from = seen.length;
+      await cell.onEvent("agent.automation_run.v1", fanOutRun());
+      expect(since(from)).toEqual([
+        "/agent-channel/v1/cell",
+        "/agent-channel/v1/tool-calls",
+        "/erp-mcp",
+        "/erp-mcp",
+        "/erp-mcp",
+        `/agent-channel/v1/tool-calls/${CALL_ID}/result`,
+        OPEN,
+        "/agent-channel/v1/typing",
+        "/agent-channel/v1/messages",
+      ]);
+      const turn = { eventId: RUN_EVENT, agentId: ATLAS_ID };
+      // The gate gets the offered name and no arguments (no approval flag on the turn), like any in-cell tool.
+      expect(seen[from + 1]?.body).toEqual({ ...turn, tool: "erp__list_records", params: {} });
+      expect(cell.toolCallRequests.at(-1)).toEqual({ eventId: RUN_EVENT, tool: "erp__list_records" });
+      // The server itself, with the rendered header: initialize, initialized, then the MCP tool name.
+      expect(rpcs.map((r) => r.method)).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+      expect(rpcs.at(-1)?.params).toEqual({ name: "list_records", arguments: {} });
+      expect(seenAuth.slice(from + 2, from + 5)).toEqual([
+        "Bearer erp-token",
+        "Bearer erp-token",
+        "Bearer erp-token",
+      ]);
+      expect(seen[from + 5]?.body).toMatchObject({ status: "ok" });
+      expect(seen[from + 6]?.body).toEqual({
+        ...turn,
+        items: [
+          { externalKey: "1042", title: "Order 1042", body: "Order 1042 from the ERP." },
+          { externalKey: "1043", title: "Order 1043", body: "Order 1043 from the ERP." },
+        ],
+      });
+      expect(seen.at(-1)?.body.text).toBe("Opened 1, existing 1");
+
+      // A gate that refuses: the server is never called, nothing is opened, the run says why.
+      answers["/agent-channel/v1/tool-calls"] = [
+        200,
+        { callId: CALL_ID, allowed: false, reason: "cap_reached" },
+      ];
+      const refusedFrom = seen.length;
+      await cell.onEvent("agent.automation_run.v1", fanOutRun());
+      expect(since(refusedFrom)).toEqual([
+        "/agent-channel/v1/cell",
+        "/agent-channel/v1/tool-calls",
+        "/agent-channel/v1/typing",
+        "/agent-channel/v1/messages",
+      ]);
+      expect(seen.at(-1)?.body.text).toBe("Tool erp__list_records: denied (cap_reached)");
+    } finally {
+      routes.length = 0;
+      delete answers["/agent-channel/v1/cell"];
+      delete answers["/agent-channel/v1/tool-calls"];
+      delete answers[`/agent-channel/v1/tool-calls/${CALL_ID}/result`];
+    }
+  });
+
+  it("an item turn runs itemCallsFor in the card's thread: a tainted turn moves its card without reading the board (version 1), then starts the session", async () => {
+    routes.push(boardCardAt(ROOT42, 1));
+    answers["/agent-channel/v1/work-sessions/start"] = [
+      200,
+      {
+        kind: "started",
+        workSessionId: WS,
+        status: "provisioning",
+        cardMessageId: CARD,
+        model: "opus",
+        mode: "fullAccess",
+        projectName: "fleet-api",
+      },
+    ];
+    const items: string[] = [];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      itemCallsFor: (item) => {
+        items.push(item.automationItem.item.title);
+        return [
+          { tool: "ocw_board_card", args: { action: "move", columnId: DOING } },
+          {
+            tool: "ocw_work_session_start",
+            args: { projectId: PROJECT, prompt: "Prepare order 1042", permissionMode: "fullAccess" },
+          },
+        ];
+      },
+    });
+    const from = seen.length;
+    await cell.onEvent("agent.automation_item.v1", itemTurn());
+    expect(items).toEqual(["Order 1042"]);
+    expect(since(from)).toEqual([
+      `/agent-channel/v1/board/cards/${ROOT42}`,
+      "/agent-channel/v1/work-sessions/start",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen[from]?.body).toEqual({
+      eventId: ITEM_EVENT,
+      agentId: ATLAS_ID,
+      expectedVersion: 1,
+      move: { columnId: DOING, afterCardId: null },
+    });
+    expect(seen.at(-1)?.body).toEqual({
+      agentId: ATLAS_ID,
+      conversationId: FLEET,
+      threadRootMessageId: ROOT42,
+      inReplyToMessageId: ROOT42,
+      eventId: ITEM_EVENT,
+      text: "Tool ocw_board_card: moved\nTool ocw_work_session_start: started fleet-api (fullAccess)",
+      idempotencyKey: `evt:${ITEM_EVENT}`,
+    });
+    expect(cell.itemTurns.at(-1)).toEqual({
+      eventId: ITEM_EVENT,
+      rootMessageId: ROOT42,
+      title: "Order 1042",
+      lines: ["Tool ocw_board_card: moved", "Tool ocw_work_session_start: started fleet-api (fullAccess)"],
+    });
+
+    // Like the plugin: a tainted turn never reads the board nor creates a card (refused locally, nothing sent).
+    const before = seen.length;
+    expect(
+      await cell.simulateToolCalls(itemTurn() as unknown as MentionPayload, [
+        { tool: "ocw_board_card", args: { action: "read" } },
+        { tool: "ocw_board_card", args: { action: "create", description: "x" } },
+      ]),
+    ).toEqual(["Tool ocw_board_card: denied (tainted)", "Tool ocw_board_card: denied (tainted)"]);
+    expect(since(before)).toEqual([]);
+    routes.length = 0;
+  });
+
+  it("an item turn waits for an itemCallsFor that answers later; without the option the item event is ignored", async () => {
+    answers["/agent-channel/v1/work-sessions/start"] = [
+      200,
+      { kind: "refused", code: "too_many_sessions", sentence: "s" },
+    ];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      itemCallsFor: async () => {
+        await gate;
+        return [{ tool: "ocw_work_session_start", args: { projectId: PROJECT, prompt: "x" } }];
+      },
+    });
+    const from = seen.length;
+    const handled = cell.onEvent("agent.automation_item.v1", itemTurn());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(since(from)).toEqual([]);
+    release();
+    await handled;
+    expect(seen.at(-1)?.body.text).toBe("Tool ocw_work_session_start: refused (too_many_sessions)");
+
+    const quiet = new FakeCellPlugin({ apiUrl, token: "cell-token", autoReply: true });
+    const before = seen.length;
+    await quiet.onEvent("agent.automation_item.v1", itemTurn());
+    expect(since(before)).toEqual([]);
+  });
+
+  it("a turn_done wake in an item's thread runs wakeCallsFor (read, then the move retried once at the 409's version) and replies `Done: <last output line> <escalation handles>`", async () => {
+    routes.push(boardCardAt(ROOT42, 1));
+    answers["/agent-channel/v1/work-sessions/read"] = [200, READ_ANSWER];
+    const ctxs: unknown[] = [];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      userHandles: { [VICTOR_ID]: "victor" },
+      itemCallsFor: () => [{ tool: "ocw_board_card", args: { action: "move", columnId: DOING } }],
+      wakeCallsFor: (w, ctx) => {
+        ctxs.push(ctx);
+        return [
+          { tool: "ocw_work_session_read", args: { workSessionId: w.workSession.workSessionId } },
+          { tool: "ocw_board_card", args: { action: "move", columnId: DONE } },
+        ];
+      },
+    });
+    await cell.onEvent("agent.automation_item.v1", itemTurn());
+    // The item turn left the card at version 2; someone moved it since (3): one 409, then one retry at 3.
+    routes.length = 0;
+    routes.push(boardCardAt(ROOT42, 3));
+    const from = seen.length;
+    await cell.onEvent("agent.work_session.v1", itemWake({ transition: "turn_done", summary: TURN_DONE }));
+    expect(ctxs).toEqual([{ escalationHandles: ["logistics", "sam"] }]);
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/work-sessions/read",
+      `/agent-channel/v1/board/cards/${ROOT42}`,
+      `/agent-channel/v1/board/cards/${ROOT42}`,
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen[from + 1]?.body).toMatchObject({ eventId: ITEM_WAKE, expectedVersion: 2 });
+    expect(seen[from + 2]?.body).toEqual({
+      eventId: ITEM_WAKE,
+      agentId: ATLAS_ID,
+      expectedVersion: 3,
+      move: { columnId: DONE, afterCardId: null },
+    });
+    expect(seen.at(-1)?.body).toEqual({
+      agentId: ATLAS_ID,
+      conversationId: FLEET,
+      threadRootMessageId: ROOT42,
+      inReplyToMessageId: CARD,
+      eventId: ITEM_WAKE,
+      text: "Done: Mode: fullAccess @logistics @sam",
+      idempotencyKey: `evt:${ITEM_WAKE}`,
+    });
+    expect(cell.workSessionWakes.at(-1)).toEqual({
+      eventId: ITEM_WAKE,
+      transition: "turn_done",
+      workSessionId: WS,
+      text: "Done: Mode: fullAccess @logistics @sam",
+      lines: ["Tool ocw_work_session_read: read idle: Mode: fullAccess", "Tool ocw_board_card: moved"],
+    });
+
+    // Another thread's wake, and a waiting_approval wake in the item's thread: the 07.16 answers.
+    const before = seen.length;
+    await cell.onEvent(
+      "agent.work_session.v1",
+      itemWake({ transition: "turn_done", summary: TURN_DONE }, ROOT43),
+    );
+    expect(since(before)).toEqual([
+      "/agent-channel/v1/work-sessions/read",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen.at(-1)?.body.text).toBe("Done: Mode: fullAccess @victor");
+    await cell.onEvent(
+      "agent.work_session.v1",
+      itemWake({ transition: "waiting_approval", status: "waiting_approval", summary: WAITING_SUMMARY }),
+    );
+    expect(seen.at(-1)?.body.text).toBe("Needs approval: a tool");
+    expect(ctxs).toHaveLength(1);
+    routes.length = 0;
+  });
+
+  it("an untainted turn still reads the board before a move and never retries a 409", async () => {
+    answers["/agent-channel/v1/board/read"] = [
+      200,
+      { columns: [], card: boardCardBody(ROOT42, 5, DOING).card },
+    ];
+    routes.push(boardCardAt(ROOT42, 6));
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(
+      itemTurn({ turn: { tools: ["ocw_board_card"] } }) as unknown as MentionPayload,
+      [{ tool: "ocw_board_card", args: { action: "move", columnId: DONE } }],
+    );
+    expect(lines).toEqual(["Tool ocw_board_card: denied (board_card_version_conflict)"]);
+    expect(since(from)).toEqual(["/agent-channel/v1/board/read", `/agent-channel/v1/board/cards/${ROOT42}`]);
+    expect(seen.at(-1)?.body).toMatchObject({ expectedVersion: 5 });
+    routes.length = 0;
+    delete answers["/agent-channel/v1/board/read"];
   });
 });

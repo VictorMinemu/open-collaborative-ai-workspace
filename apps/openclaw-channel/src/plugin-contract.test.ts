@@ -44,6 +44,7 @@ import {
 } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
+import { resetBoardToolState } from "./board-tool.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { CONSULT_TOOL_NAME, consultIdempotencyKey } from "./consult-tool.js";
@@ -63,6 +64,7 @@ import { RECORD_UPDATE_TOOL, recordUpdateOf } from "./record-tool.js";
 import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
 import {
+  FAKE_BOARD_COLUMNS,
   FAKE_ERROR_CANARY,
   type FakeAgentChannelApi,
   type MentionInput,
@@ -2233,6 +2235,7 @@ const PLUGIN_TOOLS = [
   "ocw_automation_propose",
   "ocw_record_update",
   "ocw_consult_agent",
+  "ocw_conversation_open",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
@@ -2332,6 +2335,7 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_work_session_prompt",
         "ocw_work_session_read",
         "ocw_work_session_stop",
+        "ocw_conversation_open",
       ],
     });
     const boardTurn = {
@@ -2410,6 +2414,69 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
     expect(Object.keys(stored ?? {})).not.toContain("conversationId");
     // A retry of the same call stores no second card.
     await factory.execute("tc-1", { action: "create", description: "Order spare valve" });
+    expect(api.boardCards).toHaveLength(1);
+  });
+
+  it("07.17 D-06: a tainted item turn moves its thread's card without a read: version 1, the 409's current card, one retry", async () => {
+    api.agents = [structuredClone(ARCHIE)];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    type Factory = (ctx: Record<string, unknown>) => {
+      name: string;
+      execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    };
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    const turn = {
+      tools: ["ocw_agent_card", "ocw_board_card"],
+      toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    const board = () =>
+      registered.map((f) => f({ sessionKey: "s-item" })).find((t) => t.name === "ocw_board_card");
+    // The card exists and was moved once since it was opened (version 2).
+    guard.beginTurn("s-item", { eventId: "evt-c1", agentId: ARCHIE.id, turn, conversationId: "conv-board" });
+    await board()?.execute("tc-1", { action: "create", description: "Order 1042" });
+    const cardId = api.boardCards[0]?.messageId as string;
+    await board()?.execute("tc-2", { action: "move", cardId, columnId: FAKE_BOARD_COLUMNS[1]?.id as string });
+    resetBoardToolState();
+    // The item turn in that card's thread starts tainted (an inbound-rooted thread): the gate lets the move through.
+    guard.beginTurn("s-item", {
+      eventId: "evt-i1",
+      agentId: ARCHIE.id,
+      turn,
+      conversationId: "conv-board",
+      threadRootId: cardId,
+      tainted: true,
+    });
+    expect(
+      await guard.beforeToolCall(
+        { toolName: "ocw_board_card", toolCallId: "tc-3" },
+        { sessionKey: "s-item" },
+      ),
+    ).toBeUndefined();
+    const r = await board()?.execute("tc-3", {
+      action: "move",
+      columnId: FAKE_BOARD_COLUMNS[0]?.id as string,
+    });
+    expect(r?.content[0]?.text).toBe("Card moved.");
+    expect(api.boardPatches.slice(1).map((p) => [p.expectedVersion, p.status])).toEqual([
+      [1, 409],
+      [2, 200],
+    ]);
+    expect(api.boardReads).toEqual([]);
+    // Create stays refused locally on that turn: nothing posted.
+    const created = await board()?.execute("tc-4", { action: "create", description: "Injected card" });
+    expect(created?.content[0]?.text).toBe(
+      "Not done: this turn read web or tool content, so it can no longer change the board.",
+    );
     expect(api.boardCards).toHaveLength(1);
   });
 });
@@ -3726,5 +3793,251 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       },
       { ...event, type: "agent.mention.v1" },
     ]);
+  });
+});
+
+describe("automation fan-out mirror parity (07.17-01: plugin ↔ packages/contracts automation-fan-out.ts, agent-channel.ts, bot-capabilities.ts; PD-09, PD-15)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    fo: (await import(contracts("automation-fan-out.ts"))) as Record<string, unknown>,
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, unknown>,
+    caps: (await import(contracts("bot-capabilities.ts"))) as Record<string, unknown>,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
+  const ANA = U(6);
+  const runEvent = {
+    eventId: U(1),
+    seq: 7,
+    type: "agent.automation_run.v1",
+    organizationId: U(2),
+    cellId: U(2),
+    agent: { id: U(3), handle: "scout", displayName: "Scout" },
+    conversation: { id: U(4), kind: "channel", name: "orders" },
+    thread: { rootMessageId: U(5) },
+    message: {
+      id: U(5),
+      text: "Task “New orders” for Ana Pérez, started by its schedule.",
+      createdAt: "2026-11-10T08:00:00.000Z",
+      author: { kind: "user", id: ANA, displayName: "Ana Pérez" },
+      mentions: [{ kind: "agent", id: U(3) }],
+    },
+    threadHistory: [],
+    roster: [{ kind: "user", id: ANA, displayName: "Ana Pérez", role: "standard" }],
+    automationRun: {
+      automationId: U(7),
+      runId: U(8),
+      name: "New orders",
+      trigger: "schedule",
+      instructions: "Open a conversation for every new order in the ERP.",
+      inbound: null,
+    },
+  };
+  const escalation = [
+    { kind: "unit", id: U(9), handle: "logistics", displayName: "Logistics" },
+    { kind: "user", id: ANA, handle: "ana", displayName: "Ana Pérez" },
+  ];
+  const fanOutRun = {
+    ...runEvent,
+    automationRun: {
+      ...runEvent.automationRun,
+      fanOut: { perRun: 10, remainingRun: 10, remainingDay: 96 },
+      escalation,
+    },
+  };
+  const withRun = (patch: Record<string, unknown>) => ({
+    ...fanOutRun,
+    automationRun: { ...fanOutRun.automationRun, ...patch },
+  });
+
+  it("the tool name, its flags, the limits, the refusal codes and sentences are the contracts'", async () => {
+    const { fo, caps, m } = await load();
+    const c = fo as {
+      FAN_OUT_LIMITS: Record<string, number>;
+      ConversationOpenRefusal: { options: string[] };
+      CONVERSATION_OPEN_SENTENCES: Record<string, string>;
+      fanOutLabel: (n: number) => string;
+    };
+    const b = caps as { BUILTIN_TOOLS: Record<string, string>; CONVERSATION_OPEN_FLAGS: unknown };
+    expect(m.CONVERSATION_OPEN_TOOL).toBe(b.BUILTIN_TOOLS.conversationOpen);
+    expect(m.CONVERSATION_OPEN_TOOL).toBe("ocw_conversation_open");
+    expect({ ...m.CONVERSATION_OPEN_FLAGS }).toEqual(b.CONVERSATION_OPEN_FLAGS);
+    expect({ ...m.FAN_OUT_LIMITS }).toEqual({ ...c.FAN_OUT_LIMITS });
+    expect([...m.ConversationOpenRefusal.options]).toEqual([...c.ConversationOpenRefusal.options]);
+    expect({ ...m.CONVERSATION_OPEN_SENTENCES }).toEqual({ ...c.CONVERSATION_OPEN_SENTENCES });
+    for (const n of [0, 1, 2, 25]) expect(m.fanOutLabel(n)).toBe(c.fanOutLabel(n));
+  });
+
+  it("a 07.16 run event parses unchanged; with fanOut and escalation it parses identically in both copies", async () => {
+    const { channel, m } = await load();
+    const c = channel.AgentAutomationRunEvent as Schema;
+    const legacy = c.safeParse(runEvent);
+    expect(legacy.success).toBe(true);
+    expect(legacy.data).toEqual(runEvent);
+    expect(m.AgentAutomationRunEvent.parse(runEvent)).toEqual(runEvent);
+    expect(c.safeParse(fanOutRun).data).toEqual(fanOutRun);
+    expect(m.AgentAutomationRunEvent.parse(fanOutRun)).toEqual(fanOutRun);
+    const tooMany = withRun({ fanOut: { perRun: 26, remainingRun: 1, remainingDay: 1 } });
+    expect(c.safeParse(tooMany).success).toBe(false);
+    expect(m.AgentAutomationRunEvent.safeParse(tooMany).success).toBe(false);
+    expectSameVerdicts(m.AgentAutomationRunEvent, c, [
+      runEvent,
+      fanOutRun,
+      tooMany,
+      withRun({ fanOut: null }),
+      withRun({ escalation: [] }),
+      withRun({ fanOut: { perRun: 10, remainingRun: -1, remainingDay: 1 } }),
+      withRun({ escalation: Array(6).fill(escalation[0]) }),
+      withRun({ escalation: [{ ...escalation[0], handle: "h".repeat(65) }] }),
+    ]);
+  });
+
+  it("the open request the cell sends and every answer variant parse identically in both copies", async () => {
+    const { fo, m } = await load();
+    const c = fo as Record<string, Schema> & { CONVERSATION_OPEN_SENTENCES: Record<string, string> };
+    const request = {
+      eventId: U(1),
+      agentId: U(3),
+      items: [{ externalKey: "SO-1001", title: "Order SO-1001", body: "Order SO-1001 from the ERP." }],
+    };
+    expect(m.AgentChannelConversationOpen.parse(request)).toEqual(request);
+    expectSameVerdicts(m.AgentChannelConversationOpen, c.AgentChannelConversationOpen as Schema, [
+      request,
+      { ...request, items: [] },
+      { ...request, items: [{ externalKey: " SO-1 ", title: " Order " }] },
+      { ...request, items: Array(26).fill(request.items[0]) },
+      { ...request, conversationId: U(4) },
+      { ...request, runId: U(8) },
+      { ...request, items: [{ ...request.items[0], body: "b".repeat(4001) }] },
+    ]);
+    const opened = {
+      ok: true,
+      results: [
+        {
+          externalKey: "SO-1001",
+          opened: true,
+          conversationId: U(4),
+          threadRootMessageId: U(10),
+          refused: null,
+        },
+        {
+          externalKey: "SO-1000",
+          opened: false,
+          conversationId: U(4),
+          threadRootMessageId: U(11),
+          refused: null,
+        },
+        {
+          externalKey: "SO-1002",
+          opened: false,
+          conversationId: null,
+          threadRootMessageId: null,
+          refused: "day_cap",
+        },
+      ],
+      remainingRun: 9,
+      remainingDay: 0,
+    };
+    const answers = [
+      opened,
+      ...Object.entries(c.CONVERSATION_OPEN_SENTENCES).map(([code, sentence]) => ({
+        ok: false,
+        code,
+        sentence,
+      })),
+    ];
+    for (const answer of answers) {
+      expect(m.AgentChannelConversationOpenResponse.parse(answer)).toEqual(answer);
+      expect((c.AgentChannelConversationOpenResponse as Schema).safeParse(answer).data).toEqual(answer);
+    }
+  });
+});
+
+describe("automation item mirror parity (07.17-01: plugin ↔ packages/contracts agent-channel.ts, automation-fan-out.ts; PD-09)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
+
+  it("the item event parses identically in both copies; the wording helpers are the contracts'", async () => {
+    const channel = (await import(contracts("agent-channel.ts"))) as {
+      AgentChannelEventTypes: Record<string, string>;
+      AgentAutomationItemEvent: Schema;
+    };
+    const fo = (await import(contracts("automation-fan-out.ts"))) as {
+      escalationSentence: (t: readonly { handle: string }[]) => string | null;
+      automationItemSentence: (name: string) => string;
+    };
+    const m = await import("./agent-channel-protocol.js");
+    expect(m.AgentChannelEventTypes.automationItem).toBe(channel.AgentChannelEventTypes.automationItem);
+    expect(m.AgentChannelEventTypes.automationItem).toBe("agent.automation_item.v1");
+    const event = {
+      eventId: U(1),
+      seq: 9,
+      type: "agent.automation_item.v1",
+      organizationId: U(2),
+      cellId: U(2),
+      agent: { id: U(3), handle: "atlas", displayName: "Atlas" },
+      conversation: { id: U(4), kind: "channel", name: "fleet" },
+      thread: { rootMessageId: U(5) },
+      message: {
+        id: U(5),
+        text: fo.automationItemSentence("New orders"),
+        createdAt: "2026-11-10T08:00:00.000Z",
+        author: { kind: "user", id: U(6), displayName: "Ana Pérez" },
+        mentions: [],
+      },
+      threadHistory: [],
+      roster: [{ kind: "user", id: U(6), displayName: "Ana Pérez", role: "standard" }],
+      automationItem: {
+        automationId: U(7),
+        runId: U(8),
+        itemId: U(9),
+        name: "New orders",
+        instructions: "Prepare each order for dispatch.",
+        item: { title: "Order 1042", text: "Order 1042 from the ERP.", openedAt: "2026-11-10T08:00:00.000Z" },
+        escalation: [],
+      },
+    };
+    const withItem = (patch: Record<string, unknown>) => ({
+      ...event,
+      automationItem: { ...event.automationItem, ...patch },
+    });
+    expect(channel.AgentAutomationItemEvent.safeParse(event).data).toEqual(event);
+    expect(m.AgentAutomationItemEvent.parse(event)).toEqual(event);
+    const target = { kind: "unit", id: U(10), handle: "logistics", displayName: "Logistics" };
+    for (const v of [
+      event,
+      withItem({ escalation: [target] }),
+      withItem({ escalation: Array(6).fill(target) }),
+      withItem({ item: { ...event.automationItem.item, text: "x".repeat(4001) } }),
+      withItem({ item: { ...event.automationItem.item, title: "t".repeat(201) } }),
+      withItem({ name: "n".repeat(121) }),
+      { ...event, type: "agent.mention.v1" },
+    ]) {
+      const a = m.AgentAutomationItemEvent.safeParse(v);
+      const b = channel.AgentAutomationItemEvent.safeParse(v);
+      expect(a.success, JSON.stringify(v).slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+    for (const handles of [[], ["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d", "e"]]) {
+      const t = handles.map((handle) => ({ handle }));
+      expect(m.escalationSentence(t)).toBe(fo.escalationSentence(t));
+    }
   });
 });

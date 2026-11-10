@@ -368,17 +368,17 @@ test("the editor explains every rule: board column, not a member, personal bot D
     await sheet.getByTestId("target-picker").scrollIntoViewIfNeeded();
     await review(page, '[data-testid="automation-editor"]', "automation-editor-board", w);
 
-    // ---- limits: 97 runs a day is over the workspace's 96
-    await sheet.getByTestId("automation-runs-per-day").fill("97");
+    // ---- limits: 289 runs a day is over the workspace's 288 (Phase 07.17, D-11)
+    await sheet.getByTestId("automation-runs-per-day").fill("289");
     await sheet.getByTestId("automation-submit").click();
-    await expect(sheet.getByText("Use a whole number from 1 to 96")).toBeVisible();
+    await expect(sheet.getByText("Use a whole number from 1 to 288")).toBeVisible();
     await sheet.getByTestId("automation-runs-per-day").fill("24");
 
-    // ---- a custom schedule more often than every 15 minutes
+    // ---- a custom schedule more often than every 5 minutes (Phase 07.17, D-01)
     await pick(page, sheet.getByTestId("schedule-repeat"), "Custom");
-    await sheet.getByTestId("schedule-cron").fill("*/5 * * * *");
+    await sheet.getByTestId("schedule-cron").fill("*/4 * * * *");
     await expect(sheet.getByTestId("next-runs-error")).toHaveText(
-      "Runs can be at most every 15 minutes in this workspace.",
+      "Runs can be at most every 5 minutes in this workspace.",
     );
     await sheet.getByTestId("schedule-cron").fill("15 8,12 * * 1-5");
     await expect(sheet.getByTestId("next-run")).toHaveCount(3);

@@ -1,4 +1,4 @@
-import { DEFAULT_CAPABILITIES, type Mention, ReplyMode } from "@ocw/contracts";
+import { DEFAULT_CAPABILITIES, type MessageMention, ReplyMode } from "@ocw/contracts";
 import { agents, conversationMembers, type Tx } from "@ocw/db";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Directory } from "./directory";
@@ -24,7 +24,7 @@ export async function replyModeCandidates(
     conversationId: string;
     parentConversationId: string | null;
     authorKind: "user" | "agent";
-    mentions: Mention[];
+    mentions: MessageMention[];
   },
 ): Promise<string[]> {
   if (p.authorKind !== "user") return [];

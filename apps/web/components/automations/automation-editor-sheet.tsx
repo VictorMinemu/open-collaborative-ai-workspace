@@ -3,12 +3,16 @@
 import {
   AUTOMATION_LIMITS,
   type Automation,
+  type AutomationFanOutInput,
   type AutomationOptions,
   type AutomationTarget,
+  type AutomationTargetOptions,
   type AutomationTriggerInput,
   type AutomationTriggerKind,
   type CreateAutomationRequest,
   type CreateAutomationResponse,
+  type EscalationTarget,
+  type EscalationTargetView,
   isKnownTimeZone,
   type UpdateAutomationRequest,
 } from "@ocw/contracts";
@@ -44,9 +48,11 @@ import {
   baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
+  expectedTurnsPerDay,
   formatRunInstant,
   resumedText,
   runReasonSentence,
+  runsPerDayPrefill,
   type ScheduleValue,
   scheduleToCron,
   targetName,
@@ -59,6 +65,7 @@ import {
   useRunNow,
   useSaveAutomation,
   useSchedulePreview,
+  useTargetOptions,
 } from "@/lib/automation-queries";
 import {
   EMPTY_INBOUND,
@@ -75,8 +82,20 @@ import {
   mailboxValueOf,
 } from "@/lib/automation-trigger-queries";
 import { useAgents } from "@/lib/bots-queries";
-import { useMe } from "@/lib/queries";
+import { useUnits } from "@/lib/org-queries";
+import { useMe, useMembers } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { EscalationPicker, escalationForSave } from "./escalation-picker";
+import {
+  FAN_OUT_DEFAULT,
+  type FanOutErrors,
+  FanOutSection,
+  type FanOutValue,
+  fanOutAllowed,
+  fanOutForSave,
+  fanOutPerDayOf,
+  fanOutValueOf,
+} from "./fan-out-section";
 import { RunHistory } from "./run-history";
 import type { ScheduleErrors } from "./schedule-builder";
 import { EMPTY_TARGET, type TargetErrors, TargetPicker, type TargetValue } from "./target-picker";
@@ -93,6 +112,10 @@ interface Values {
   /** Webhook and mail triggers (07.6-18): What happens + mapping, and the mailbox. */
   inbound: InboundValue;
   mailbox: MailboxValue;
+  /** 07.17 (D-02, PD-05): one conversation per new item, with its caps. */
+  fanOut: FanOutValue;
+  /** 07.17 (D-08, PD-15): people and teams the bot mentions when it finishes or needs help, in chip order. */
+  escalation: EscalationTargetView[];
 }
 
 type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay", string>> & {
@@ -100,6 +123,8 @@ type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay"
   target?: TargetErrors;
   inbound?: InboundErrors;
   mailbox?: MailboxErrors;
+  fanOut?: FanOutErrors;
+  escalation?: string;
 };
 
 type Mode = "new" | "edit" | "readonly";
@@ -129,11 +154,20 @@ function valuesOf(a: Automation): Values {
     maxRunsPerDay: String(a.maxRunsPerDay),
     inbound: inboundValueOf(a.inbound),
     mailbox: mailboxValueOf(a.trigger.mailbox),
+    fanOut: fanOutValueOf(a.fanOut),
+    escalation: a.escalation ?? [],
   };
 }
 
 function valuesOfDraft(d: AutomationDraftDefaults): Values {
-  return { ...d, triggerKind: "schedule", inbound: EMPTY_INBOUND, mailbox: EMPTY_MAILBOX };
+  return {
+    ...d,
+    triggerKind: "schedule",
+    inbound: EMPTY_INBOUND,
+    mailbox: EMPTY_MAILBOX,
+    fanOut: FAN_OUT_DEFAULT,
+    escalation: [],
+  };
 }
 
 /**
@@ -162,6 +196,8 @@ function blank(): Values {
     maxRunsPerDay: String(AUTOMATION_LIMITS.maxRunsPerDayDefault),
     inbound: EMPTY_INBOUND,
     mailbox: EMPTY_MAILBOX,
+    fanOut: FAN_OUT_DEFAULT,
+    escalation: [],
   };
 }
 
@@ -182,6 +218,23 @@ function targetOf(t: TargetValue): AutomationTarget | null {
         ? { kind: "board", conversationId: t.conversationId, columnId: t.columnId }
         : null;
   }
+}
+
+/**
+ * The target's names for the editor's copy (`#orders`, the board column `Backlog`): from the bot's target options, else
+ * from the stored label (`#orders`, `Fleet · Backlog`, `Thread in #orders`) while they load or for a read-only viewer.
+ */
+export function targetNamesOf(
+  t: TargetValue,
+  conversations: AutomationTargetOptions["conversations"] | undefined,
+): { conversation: string | null; column: string | null } {
+  if (t.kind === "dm") return { conversation: "your DM", column: null };
+  const c = conversations?.find((x) => x.conversationId === t.conversationId);
+  const [first, second] = t.label ? t.label.replace(/^Thread in /, "").split(" · ") : [];
+  const conversation = c ? (c.layout === "board" ? c.name : `#${c.name}`) : (first ?? null);
+  const column =
+    t.kind === "board" ? (c?.columns.find((x) => x.id === t.columnId)?.name ?? second ?? null) : null;
+  return { conversation, column };
 }
 
 function triggerOf(v: Values): AutomationTriggerInput | null {
@@ -305,6 +358,15 @@ export function AutomationEditorSheet({
   const botName = bot?.displayName ?? "The bot";
   const caps = options.data?.caps;
   const maxRuns = caps?.maxRunsPerDayCap ?? AUTOMATION_LIMITS.maxRunsPerDayCeiling;
+  // "For each new item" shows only where the API allows fan-out (PD-05); the API still decides.
+  const agentTurn = (automation?.actionKind ?? "agent_turn") === "agent_turn";
+  const fanOutOn = fanOutAllowed({
+    actionKind: automation?.actionKind ?? "agent_turn",
+    triggerKind: values.triggerKind,
+    targetKind: values.target.kind,
+  });
+  const targetOptions = useTargetOptions(open && !readonly && values.agentId ? values.agentId : null);
+  const names = targetNamesOf(values.target, targetOptions.data?.conversations);
 
   const cron = values.triggerKind === "schedule" ? scheduleToCron(values.schedule) : null;
   const livePreview = useSchedulePreview(
@@ -342,7 +404,13 @@ export function AutomationEditorSheet({
     onClose();
   }
 
-  function validate(): { trigger: AutomationTriggerInput; target: AutomationTarget; runs: number } | null {
+  function validate(): {
+    trigger: AutomationTriggerInput;
+    target: AutomationTarget;
+    runs: number;
+    fanOut: AutomationFanOutInput | undefined;
+    escalation: EscalationTarget[] | undefined;
+  } | null {
     const e: Errors = {};
     const name = values.name.trim();
     if (!name) e.name = "Give the automation a name";
@@ -356,7 +424,12 @@ export function AutomationEditorSheet({
     if (values.triggerKind === "schedule") {
       const v = values.schedule;
       if (v.preset === "weekly" && v.days.length === 0) s.days = "Pick at least one day";
-      if (v.preset !== "hourly" && v.preset !== "custom" && !/^\d{2}:\d{2}$/.test(v.time))
+      if (
+        v.preset !== "hourly" &&
+        v.preset !== "custom" &&
+        v.preset !== "every_minutes" &&
+        !/^\d{2}:\d{2}$/.test(v.time)
+      )
         s.time = "Enter a time";
       if (!isKnownTimeZone(v.timeZone)) s.timeZone = "Pick a time zone from the list";
       if (v.preset === "custom" && !v.cron.trim()) s.cron = "That schedule isn't valid";
@@ -383,6 +456,12 @@ export function AutomationEditorSheet({
     const runs = Number(raw);
     if (!/^\d+$/.test(raw) || runs < 1 || runs > maxRuns)
       e.maxRunsPerDay = `Use a whole number from 1 to ${maxRuns}`;
+    const fan = fanOutForSave({
+      allowed: fanOutOn,
+      value: values.fanOut,
+      initial: mode === "new" ? null : initial.fanOut,
+    });
+    if (!fan.ok) e.fanOut = fan.errors;
     setErrors(e);
     if (Object.keys(e).length > 0) return null;
     // A schedule the preview refused (too frequent) is refused by the save the same way: say it before asking.
@@ -392,7 +471,7 @@ export function AutomationEditorSheet({
       preview.code === "schedule_too_frequent"
     ) {
       setFormError(
-        `Runs can be at most every ${preview.minMinutes ?? caps?.minScheduleMinutes ?? 15} minutes in this workspace.`,
+        `Runs can be at most every ${preview.minMinutes ?? caps?.minScheduleMinutes ?? AUTOMATION_LIMITS.minScheduleMinutesDefault} minutes in this workspace.`,
       );
       return null;
     }
@@ -401,12 +480,18 @@ export function AutomationEditorSheet({
       setFormError("Couldn't save the automation. Try again.");
       return null;
     }
-    return { trigger, target, runs };
+    const escalation = agentTurn
+      ? escalationForSave({ value: values.escalation, initial: mode === "new" ? null : initial.escalation })
+      : undefined;
+    return { trigger, target, runs, fanOut: fan.ok ? fan.fanOut : undefined, escalation };
   }
 
   const errorCtx = () => ({
     bot: botName,
-    conversation: values.target.label || (values.target.kind === "dm" ? "your DM" : "this conversation"),
+    conversation:
+      names.conversation ||
+      values.target.label ||
+      (values.target.kind === "dm" ? "your DM" : "this conversation"),
     ...(caps ? { maxAutomations: caps.maxAutomationsPerUser, minMinutes: caps.minScheduleMinutes } : {}),
   });
 
@@ -425,6 +510,8 @@ export function AutomationEditorSheet({
           maxRunsPerDay: ok.runs,
           ...(ok.trigger.kind !== "schedule" ? { inbound: inboundOf(values.inbound, ok.target.kind) } : {}),
           ...(draftId && draftView ? { fromApprovalId: draftId } : {}),
+          ...(ok.fanOut ? { fanOut: ok.fanOut } : {}),
+          ...(ok.escalation ? { escalation: ok.escalation } : {}),
         };
         const res = await save.mutateAsync({ body });
         // A webhook's secret leaves the mutation cache at once (07.6-18): it lives only in this sheet's state.
@@ -473,6 +560,8 @@ export function AutomationEditorSheet({
         body.inbound = inboundOf(values.inbound, ok.target.kind);
       }
       if (values.maxRunsPerDay.trim() !== initial.maxRunsPerDay.trim()) body.maxRunsPerDay = ok.runs;
+      if (ok.fanOut) body.fanOut = ok.fanOut;
+      if (ok.escalation) body.escalation = ok.escalation;
       const res = await save.mutateAsync({ id: automation.id, body });
       if (res.webhookSecret) save.reset();
       setLastSave(res);
@@ -492,6 +581,11 @@ export function AutomationEditorSheet({
         (err.details as { max?: number } | null)?.max
       ) {
         setErrors({ maxRunsPerDay: `Use a whole number from 1 to ${(err.details as { max: number }).max}` });
+        return;
+      }
+      // Someone chosen can't read the target or left (PD-15): said under the picker, not as a form notice.
+      if (isApiError(err, 400) && err.code === "escalation_not_allowed") {
+        setErrors({ escalation: automationErrorText(err, errorCtx()) });
         return;
       }
       setFormError(automationErrorText(err, errorCtx()));
@@ -554,6 +648,15 @@ export function AutomationEditorSheet({
   const instructionsLength = values.instructions.length;
   const ownerName = automation?.runAs.displayName ?? me?.name ?? "";
   const dailyLimit = values.agentId ? options.data?.botDailyLimit[values.agentId] : undefined;
+  const runsRaw = values.maxRunsPerDay.trim();
+  const expectedTurns =
+    /^\d+$/.test(runsRaw) && Number(runsRaw) >= 1
+      ? expectedTurnsPerDay({
+          schedule: values.triggerKind === "schedule" ? values.schedule : null,
+          maxRunsPerDay: Number(runsRaw),
+          fanOutPerDay: fanOutPerDayOf(fanOutOn, values.fanOut),
+        })
+      : null;
   const showTabs = !!id && !!automation;
 
   return (
@@ -776,10 +879,15 @@ export function AutomationEditorSheet({
                       triggerKind: values.triggerKind,
                       schedule: values.schedule,
                       setTriggerKind: (triggerKind) => set({ triggerKind }),
-                      setSchedule: (schedule) => set({ schedule }),
+                      setSchedule: (schedule) => {
+                        // Picking an interval pre-fills runs a day (PD-04); loading or other edits never do.
+                        const runs = runsPerDayPrefill(values.schedule, schedule, maxRuns);
+                        set(runs === null ? { schedule } : { schedule, maxRunsPerDay: String(runs) });
+                      },
                       scheduleErrors: errors.schedule ?? {},
                       preview,
                       disabled: readonly,
+                      minMinutes: caps?.minScheduleMinutes,
                       automation: automation ?? lastSave?.automation ?? null,
                       inbound: values.inbound,
                       setInbound: (inbound) => set({ inbound }),
@@ -806,6 +914,33 @@ export function AutomationEditorSheet({
                     disabled={readonly}
                   />
                 </SheetSection>
+
+                {fanOutOn && (values.target.kind === "channel" || values.target.kind === "board") ? (
+                  <SheetSection title="For each new item">
+                    <FanOutSection
+                      value={values.fanOut}
+                      onChange={(fanOut) => set({ fanOut })}
+                      targetKind={values.target.kind}
+                      conversationName={names.conversation}
+                      columnName={names.column}
+                      automationName={values.name}
+                      errors={errors.fanOut ?? {}}
+                      disabled={readonly}
+                    />
+                  </SheetSection>
+                ) : null}
+
+                {agentTurn ? (
+                  <SheetSection title="When it needs people">
+                    <EscalationField
+                      value={values.escalation}
+                      onChange={(escalation) => set({ escalation })}
+                      targetName={names.conversation}
+                      error={errors.escalation}
+                      disabled={readonly}
+                    />
+                  </SheetSection>
+                ) : null}
 
                 <SheetSection title="Runs as">
                   <div className="grid gap-1.5" data-testid="automation-run-as">
@@ -852,6 +987,7 @@ export function AutomationEditorSheet({
                         {errors.maxRunsPerDay}
                       </p>
                     ) : null}
+                    <DailyLimitWarning botName={botName} dailyLimit={dailyLimit} expected={expectedTurns} />
                     <ul className="grid gap-1 text-muted-foreground text-xs" data-testid="automation-limits">
                       {dailyLimit !== undefined ? (
                         <li>
@@ -937,6 +1073,25 @@ export function AutomationEditorSheet({
   );
 }
 
+/** The picker with the organization's people and teams, fetched only while the section is on screen. */
+function EscalationField(props: {
+  value: EscalationTargetView[];
+  onChange: (next: EscalationTargetView[]) => void;
+  targetName: string | null;
+  error: string | undefined;
+  disabled: boolean;
+}) {
+  const members = useMembers().data?.members ?? [];
+  const units = useUnits().data?.units ?? [];
+  // WR-04: the handles team bots hold (personal bots are never @mentioned, so they shadow nothing).
+  const agents = useAgents().data?.agents;
+  const takenHandles = useMemo(
+    () => new Set((agents ?? []).filter((a) => a.scope !== "personal").map((a) => a.username.toLowerCase())),
+    [agents],
+  );
+  return <EscalationPicker {...props} members={members} units={units} takenHandles={takenHandles} />;
+}
+
 function botLabel(b: AutomationOptions["bots"][number]): string {
   const where = b.personal ? " · your personal bot" : b.unitName ? ` · ${b.unitName}` : "";
   return `${b.displayName}${where}${b.ready ? "" : " · not ready"}`;
@@ -952,6 +1107,36 @@ function EditorSkeleton() {
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * Under runs a day (07.17, D-11, PD-19): when the turns this automation can use a day exceed the bot's daily limit, a
+ * non-blocking amber note says so before saving. Saving stays possible; the limit still stops runs server-side.
+ */
+export function DailyLimitWarning({
+  botName,
+  dailyLimit,
+  expected,
+}: {
+  botName: string;
+  dailyLimit: number | null | undefined;
+  expected: number | null;
+}) {
+  if (dailyLimit === null || dailyLimit === undefined || expected === null || expected <= dailyLimit)
+    return null;
+  return (
+    <p
+      role="status"
+      data-testid="automation-daily-limit-warning"
+      className="flex w-full items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-900 leading-5 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
+    >
+      <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        {botName} can take {dailyLimit} turns a day. This automation can use up to {expected}. Raise the bot's
+        daily limit in its sheet, or runs stop when it is reached.
+      </span>
+    </p>
   );
 }
 

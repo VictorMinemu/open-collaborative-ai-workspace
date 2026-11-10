@@ -824,10 +824,16 @@ const CASES: Record<string, Case> = {
     agentId: a.botId,
     changes: { "/status": "From B" },
   })),
+  // ---- 07.17-16 (PD-07, E8): the fan-out open call, B's cell with A's turn
+  "POST /agent-channel/v1/conversations/open": cellRefused("/conversations/open", (a, eventId) => ({
+    eventId,
+    agentId: a.botId,
+    items: [{ externalKey: "from-b", title: "From B", body: "Open this in A." }],
+  })),
 };
 
 const PHASE_ROUTE =
-  /^[A-Z]+ (\/api\/v1\/(automations|hooks|mailboxes|digest|watched-records|me\/preferences)(\/|$)|\/api\/v1\/work-sessions\/:id\/memory|\/agent-channel\/v1\/(automations|records)(\/|$))/u;
+  /^[A-Z]+ (\/api\/v1\/(automations|hooks|mailboxes|digest|watched-records|me\/preferences)(\/|$)|\/api\/v1\/work-sessions\/:id\/memory|\/agent-channel\/v1\/(automations|records|conversations)(\/|$))/u;
 
 /** Everything of organization A that organization B must never change. */
 const snapshotA = async () =>

@@ -405,19 +405,19 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 
 ### Bot Work Zone Orchestration (BWZ) — added 2026-11-09 by the owner
 
-- [ ] **BWZ-01**: A bot has a Work Zone profile set by whoever manages it (personal bot: its owner; team bot: a lead or admin): the device or server its sessions run on (the device owner consents per bot), the projects it may work in, the runtime, the model and options from the runtime-reported catalog, and the permission mode up to bypass, which needs ADR-0012's chain (organization policy ∩ device opt-in for this bot ∩ the profile) and is server-checked and audited
-- [ ] **BWZ-02**: A bot starts Work Zone sessions itself in an allowed project on its profile's device, choosing model and options within the profile's caps, sends follow-up prompts to sessions it started, reads their state and output (normalized, redacted, repo-relative paths only) and stops them, through `ocw_*` tools decided in the Agent Channel API; humans of the session's audience keep prompting and stopping the same session (one executor, many controllers)
-- [ ] **BWZ-03**: The bot is woken in the originating conversation when a session it started finishes a turn, waits for an approval, fails or ends, so it orchestrates without polling; it can mention a person to ask for help; wake-ups are bounded per session (counted against the profile's limits); a wake turn runs as the original asker, the sponsor stays accountable (D-17)
-- [ ] **BWZ-04**: The originating conversation shows a live Work Zone card (status, current step, last update, Open); the session page links back to that conversation; desktop and mobile
-- [ ] **BWZ-05**: From a turn that read outside content (MCP output, attachments, webhooks), starting or prompting a session is allowed only when an admin enabled "act on outside content" on the bot's profile, and bypass mode then only on a device its owner marked as an isolated server; otherwise the bot falls back to today's proposal card; every start, prompt, read and stop is audited without prompt content; tenant isolation proven by tests
-- [ ] **BWZ-06**: Bots without a profile keep today's proposals unchanged; proven by integration tests and an e2e spec (fake runtime, desktop and mobile); ADR-0038 supersedes the affected clauses of ADR-0026 and ADR-0030
+- [x] **BWZ-01**: A bot has a Work Zone profile set by whoever manages it (personal bot: its owner; team bot: a lead or admin): the device or server its sessions run on (the device owner consents per bot), the projects it may work in, the runtime, the model and options from the runtime-reported catalog, and the permission mode up to bypass, which needs ADR-0012's chain (organization policy ∩ device opt-in for this bot ∩ the profile) and is server-checked and audited
+- [x] **BWZ-02**: A bot starts Work Zone sessions itself in an allowed project on its profile's device, choosing model and options within the profile's caps, sends follow-up prompts to sessions it started, reads their state and output (normalized, redacted, repo-relative paths only) and stops them, through `ocw_*` tools decided in the Agent Channel API; humans of the session's audience keep prompting and stopping the same session (one executor, many controllers)
+- [x] **BWZ-03**: The bot is woken in the originating conversation when a session it started finishes a turn, waits for an approval, fails or ends, so it orchestrates without polling; it can mention a person to ask for help; wake-ups are bounded per session (counted against the profile's limits); a wake turn runs as the original asker, the sponsor stays accountable (D-17)
+- [x] **BWZ-04**: The originating conversation shows a live Work Zone card (status, current step, last update, Open); the session page links back to that conversation; desktop and mobile
+- [x] **BWZ-05**: From a turn that read outside content (MCP output, attachments, webhooks), starting or prompting a session is allowed only when an admin enabled "act on outside content" on the bot's profile, and bypass mode then only on a device its owner marked as an isolated server; otherwise the bot falls back to today's proposal card; every start, prompt, read and stop is audited without prompt content; tenant isolation proven by tests
+- [x] **BWZ-06**: Bots without a profile keep today's proposals unchanged; proven by integration tests and an e2e spec (fake runtime, desktop and mobile); ADR-0038 supersedes the affected clauses of ADR-0026 and ADR-0030
 
 ### Automation Fan-out and Team Mentions (AFO) — added 2026-11-09 by the owner
 
 - [ ] **AFO-01**: A scheduled automation can run every 5 minutes or more (was 15)
 - [ ] **AFO-02**: One automation run can open a new conversation per new item it finds (a new thread in its channel target, or a new card in its board target), capped per run, with a per-automation dedupe key (the item's external id) so the same item never opens twice; each new conversation gets its own bot turn that carries the item as untrusted content and keeps the run's tools, including the Work Zone profile of 07.16
 - [ ] **AFO-03**: A bot can move and set waiting on every card its automation opened, from any turn in that card's thread, also after reading outside content when its profile allows it (BWZ-05)
-- [ ] **AFO-04**: People and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
+- [ ] **AFO-04**: In channel posts (threads and board cards included; not DMs, group DMs or AI chats), people and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
 - [ ] **AFO-05**: Proven by integration tests and an e2e spec (fake MCP of orders → card → Work Zone session → team mention on finish), desktop and mobile; ADR-0039 records the decisions
 
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
@@ -653,12 +653,12 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BRA-03 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
 | BRA-04 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
 | BRA-05 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
-| BWZ-01 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
-| BWZ-02 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
-| BWZ-03 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
-| BWZ-04 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
-| BWZ-05 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
-| BWZ-06 | Phase 07.16 | Pending | New (owner, 2026-11-09) |
+| BWZ-01 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
+| BWZ-02 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
+| BWZ-03 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
+| BWZ-04 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
+| BWZ-05 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
+| BWZ-06 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
 | AFO-01 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
 | AFO-02 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
 | AFO-03 | Phase 07.17 | Pending | New (owner, 2026-11-09) |

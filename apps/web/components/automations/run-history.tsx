@@ -1,6 +1,6 @@
 "use client";
 
-import type { Automation, AutomationRun } from "@ocw/contracts";
+import { type Automation, type AutomationRun, fanOutLabel } from "@ocw/contracts";
 import { ArrowRight } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -177,6 +177,22 @@ function RunRow({
         {outside ? (
           <Badge variant="outline" data-testid="run-outside">
             Outside content
+          </Badge>
+        ) : null}
+        {/* A fan-out run says what it opened (07.17, D-10); other runs have no opened count. */}
+        {typeof run.opened === "number" ? (
+          <Badge variant="secondary" data-testid="run-opened">
+            {fanOutLabel(run.opened)}
+          </Badge>
+        ) : null}
+        {/* 07.17 code review WR-02: items waiting for a free Work Zone session or the bot's next day. */}
+        {typeof run.waiting === "number" && run.waiting > 0 ? (
+          <Badge
+            variant="outline"
+            data-testid="run-waiting"
+            title="Started again when one of the bot's sessions ends, or on its next day"
+          >
+            {run.waiting} waiting
           </Badge>
         ) : null}
       </p>

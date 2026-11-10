@@ -5,7 +5,7 @@ import { ChevronRight, Users } from "lucide-react";
 import { type KeyboardEvent, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { UnitActionsMenu } from "./unit-dialogs";
-import { KIND_META, KindIcon, type UnitNode } from "./unit-meta";
+import { KIND_META, KindIcon, UnitHandle, type UnitNode } from "./unit-meta";
 
 const INDENT = 16;
 
@@ -136,7 +136,7 @@ export function UnitTree({
               if (e.target === e.currentTarget) setFocusedId(u.id);
             }}
             className={cn(
-              "group relative flex h-11 cursor-pointer select-none items-center gap-1.5 rounded-lg pr-1 text-[14px] outline-none transition-colors lg:h-9 lg:text-[13.5px]",
+              "group relative flex h-11 min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-lg pr-1 text-[14px] outline-none transition-colors lg:h-9 lg:text-[13.5px]",
               "focus-visible:ring-[3px] focus-visible:ring-ring/40",
               selected
                 ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
@@ -171,8 +171,12 @@ export function UnitTree({
               <span aria-hidden className="size-6 shrink-0" />
             )}
             <KindIcon kind={u.kind} />
-            <span className="min-w-0 flex-1 truncate pl-1" title={u.name}>
-              {u.name}
+            <span className="flex min-w-0 flex-1 items-baseline gap-1.5 pl-1">
+              <span className="min-w-0 truncate" title={u.name}>
+                {u.name}
+              </span>
+              {/* 07.17 (D-14): the mention handle gives way to the name when the row is narrow. */}
+              <UnitHandle unit={u} className="min-w-12 shrink-[3]" />
             </span>
             <span
               aria-hidden

@@ -44,6 +44,12 @@ Everything runs with `docker compose` on your own server. No essential feature d
 - **Bots in the Work Zone:** a bot starts and drives Work Zone sessions itself through its profile (device or server,
   projects, runtime, model, permissions). Full access needs the organization policy, the device's opt-in for that bot
   and the profile. A live card in the conversation opens the session, and the session links back.
+- **Automations:** schedules as often as every 5 minutes. An automation can open one conversation per new item it
+  finds (a thread in a channel or a card on a board), never the same item twice, capped per run and per day. The bot
+  works each item in its own turn, with its Work Zone profile, and moves the card it opened.
+- **Team mentions:** people and bots mention a team or department with `@team`. Its members who can read the
+  conversation get a notification. An automation can name the people or teams its bot mentions when it finishes or
+  needs help.
 - **Self-hosting:** a self-hosted release with HTTPS, backups, upgrades, OpenBao and observability.
 
 [`docs/STATUS.md`](docs/STATUS.md) lists what is built, and the roadmap continues in
@@ -209,11 +215,16 @@ MVP 1 is for testing with your team, not yet for production-critical work:
 - **AI chats:** web search on org models needs the optional `search` profile. Company knowledge, MCP and skills in AI
   chats are not available yet.
 - **Headless Work Zone server:** no Windows service and no container image.
-- **Bots in the Work Zone:** no team mentions or automation fan-out yet (07.17). Bots never approve runtime requests;
-  people do. A `people` audience is a snapshot of the conversation when the session starts.
+- **Bots in the Work Zone:** bots never approve runtime requests; people do. A `people` audience is a snapshot of the
+  conversation when the session starts.
+- **Automation fan-out:** only from schedules (webhooks and mail keep one item per event). An item past the bot's
+  Work Zone limit ("Sessions at once") waits and starts again when one of the bot's sessions ends, and one refused at
+  the bot's daily limit starts again the next day, each at most 5 times; a session that stays open (idle) still holds
+  its place, so the bot should stop sessions it is done with. Fan-out needs the matching cell image. A team's
+  `@handle` cannot be edited yet.
 - **Not yet proven against real services by the maintainers:**
   - an install on a clean machine;
-  - real mailbox and ERP automations;
+  - real mailbox and ERP automations, and fan-out from a real orders MCP;
   - Full-access mode;
   - a bot running a real session on a server.
 

@@ -294,6 +294,23 @@ fake API (`POST /__test/work-sessions` sets each route's answer) and the fake mo
 - no person's prompt or absolute host path (both only in fields outside the contracts) in any model request or cell
   log line, and the session's output only inside a read's tool result.
 
+`automation-fan-out` (07.17-15) runs the working-tree plugin's `ocw_conversation_open` in the real cell against the
+fake API (`POST /__test/conversations` sets the open route's answer) and the fake model (fixture
+`test/automation-run-fan-out.json`, an `agent.automation_run.v1` with `automationRun.fanOut` and an escalation target;
+its directives are in `message.text`, where the fake model reads them):
+- turn-scoped: `ocw_conversation_open` is in the bot's `alsoAllow`, and only the run turn offers it;
+- outside content first: after `web_search` (through the gate) the open still reaches its route, with exactly one
+  `POST /conversations/open` body of `agentId,eventId,items` (items `body,externalKey,title`), never a conversation,
+  automation, run or user key and never `/tool-calls`;
+- the reply on the run's anchor relays one "opened" line per item, and the run's model requests carry the fan-out
+  instruction and the escalation sentence;
+- item turns (fixture `test/automation-item.json`, an `agent.automation_item.v1` published through `POST /__test/event`):
+  one reply in the opened root's thread (`inReplyToMessageId` = the root, `eventId` = the item event's, idempotency
+  `evt:<eventId>`); the item text reaches the model only inside its labelled untrusted block, an `ocw_memory_save`
+  directive written in the item never runs (no `/memories` body) and one in the message body is blocked in the cell;
+- one session per thread: a second item on its own root gets its own reply bound to its own event, and no item turn's
+  model request carries the run's or the other item's turn or offers `ocw_conversation_open`.
+
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.
 

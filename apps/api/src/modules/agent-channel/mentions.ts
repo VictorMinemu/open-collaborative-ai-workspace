@@ -9,6 +9,7 @@ import {
   cellTopic,
   type Mention,
   type ModelRef,
+  principalMentions,
 } from "@ocw/contracts";
 import {
   type AfterCommit,
@@ -39,7 +40,7 @@ import { createPermissionService, memberDirectory, type PermissionService } from
 import { workZoneOfferFor } from "../work-session";
 import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
-import { inboundRooted } from "./inbound-origin";
+import { inboundRooted, runLogTainted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
 /** Bounded thread context per mention (A2.2). */
@@ -133,15 +134,21 @@ export async function buildMentionEvents(
   const aiChat = conv.kind === "ai_chat";
   // 07.15 D-16: the same filter decides which files the turn may read or import (attachment-access.ts).
   const threadFilter = messageScopeFilter(conv, root);
-  const historyRows = (
-    await tx
-      .select()
-      .from(messages)
-      // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
-      .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
-      .orderBy(desc(messages.createdAt), desc(messages.seq))
-      .limit(HISTORY_LIMIT)
-  ).reverse();
+  // 07.17 code review CR-01: a fan-out run anchors in its automation's long-lived run log thread (D-10), whose earlier
+  // replies may echo outside content from earlier runs. The log is for people; the run turn reads no history, so its
+  // clean start (ADR-0039 § 7) never carries another run's text.
+  const fanOutRun = mention.trigger === "automation" && mention.conversationOpen != null;
+  const historyRows = fanOutRun
+    ? []
+    : (
+        await tx
+          .select()
+          .from(messages)
+          // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
+          .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
+          .orderBy(desc(messages.createdAt), desc(messages.seq))
+          .limit(HISTORY_LIMIT)
+      ).reverse();
 
   const users = await memberDirectory(tx);
   const agentIdsNeeded = [
@@ -229,10 +236,12 @@ export async function buildMentionEvents(
     .select({ mentions: messages.mentions })
     .from(messages)
     .where(eq(messages.id, mention.messageId));
-  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned.
+  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned. Phase 07.17 (P4,
+  // ADR-0027): only people and bots cross to the cell; a team mention never enters the event.
+  const principals = stored ? principalMentions(stored.mentions) : [];
   const mentions: Mention[] =
-    stored && (stored.mentions.length > 0 || replyMode)
-      ? stored.mentions
+    stored && (principals.length > 0 || replyMode)
+      ? principals
       : agentIds.map((id) => ({ kind: "agent" as const, id }));
 
   const author: AgentChannelAuthor = {
@@ -254,12 +263,17 @@ export async function buildMentionEvents(
       tx,
       root,
       historyRows.map((m) => m.id),
-    ));
+    )) ||
+    // CR-01: a turn that reads a run log thread starts tainted once a run there read outside content.
+    (!fanOutRun && (await runLogTainted(tx, root)));
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker). Phase 07.16
-  // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser).
+  // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser). Phase 07.17
+  // (D-04, PD-09): nor an item a fan-out run opened (its own turn, delivered by the item worker).
   const workSessionWake = mention.trigger === "work_session";
-  const unattended = mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake;
+  const automationItem = mention.trigger === "automation_item";
+  const unattended =
+    mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake || automationItem;
 
   // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
   // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
@@ -301,9 +315,10 @@ export async function buildMentionEvents(
       : [];
     // Phase 07.16 (D-05, D-21, PD-17): a person's delivery (a mention or reply mode, never an automation run or a
     // consult hop) or a wake about the bot's own session (`work_session`, 07.16-20), of a bot whose Work Zone profile is
-    // active, for an asker who passes the Work Zone module gate.
+    // active, for an asker who passes the Work Zone module gate. Phase 07.17 (D-04, ADR-0039): an opened item's turn
+    // too, for the automation's run-as person, tainted (outside content: the start route decides the flag's path).
     const workZone =
-      unattended && !workSessionWake
+      unattended && !workSessionWake && !automationItem
         ? null
         : await workZoneOfferFor(tx, deps.perms, {
             agentId: a.id,
@@ -337,6 +352,8 @@ export async function buildMentionEvents(
         consultTargets: targets,
         attachments,
         workZone,
+        // Phase 07.17 (D-02, PD-07): only a run delivery carries the fan-out offer; every other trigger ignores it.
+        conversationOpen: mention.trigger === "automation" ? (mention.conversationOpen ?? null) : null,
       },
       {
         audience,
