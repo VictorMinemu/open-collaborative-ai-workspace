@@ -61,6 +61,7 @@ import {
   type TriggerDeps,
 } from "./actions";
 import { AUTOMATION_CREATE_KIND, closeDraft } from "./approval-kind";
+import { escalationFor, escalationNotAllowed, validateEscalation } from "./escalation";
 import { mailTrigger } from "./mailboxes";
 import { firstRunAt, nextRuns, validateSchedule } from "./schedule";
 import { webhookTrigger } from "./webhooks";
@@ -266,6 +267,7 @@ export function createAutomationService(
 ): AutomationService {
   const kinds = createActionRegistry();
   const triggerDeps: TriggerDeps = { core, perms };
+  const escalationDeps = { core, perms };
   /** R3: the endpoint or mailbox behind a webhook or mail trigger lives and dies with its automation, in its tx. */
   const adapterOf = (kind: "webhook" | "mail"): TriggerAdapter<unknown> =>
     kind === "webhook" ? webhookTrigger : mailTrigger;
@@ -522,6 +524,7 @@ export function createAutomationService(
           : null,
         inboundToday: inbound.get(row.id) ?? 0,
         fanOut: { enabled: row.fanOutEnabled, perRun: row.fanOutPerRun, perDay: row.fanOutPerDay },
+        escalation: await escalationFor(tx, escalationDeps, row),
         version: row.version,
         createdAt: new Date(row.createdAt).toISOString(),
         updatedAt: new Date(row.updatedAt).toISOString(),
@@ -626,6 +629,16 @@ export function createAutomationService(
         target: input.target,
       });
       if (!decided.ok) throw targetError(decided.code);
+      // 07.17 (D-08, PD-15): whom the bot may mention, decided against this target and the caller.
+      if (input.escalation && input.escalation.length > 0) {
+        if (actionKind !== "agent_turn") throw escalationNotAllowed();
+        await validateEscalation(tx, escalationDeps, {
+          runAsUserId: actor.userId,
+          targetKind: input.target.kind,
+          conversationId: decided.conversationId,
+          targets: input.escalation,
+        });
+      }
 
       const [row] = await writingTarget(() =>
         tx
@@ -651,6 +664,7 @@ export function createAutomationService(
             nextRunAt,
             // 07.17 (PD-05): absent = off, the column defaults.
             ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
+            ...(input.escalation ? { escalationTargets: input.escalation } : {}),
           })
           .returning(),
       );
@@ -773,6 +787,15 @@ export function createAutomationService(
       // Every save re-decides the target for the owner and the bot (P-08), whatever changed.
       const decided = await decideTarget(tx, perms, { agentId, userId: actor.userId, target });
       if (!decided.ok) throw targetError(decided.code);
+      // 07.17 (PD-15): new targets are decided against the resulting target; absent = kept (and re-checked at delivery).
+      if (input.escalation && input.escalation.length > 0) {
+        await validateEscalation(tx, escalationDeps, {
+          runAsUserId: before.runAsUserId,
+          targetKind: target.kind,
+          conversationId: decided.conversationId,
+          targets: input.escalation,
+        });
+      }
 
       const after = await bump(tx, before, {
         name: input.name ?? before.name,
@@ -788,6 +811,7 @@ export function createAutomationService(
         inboundConfig: inbound?.config ?? {},
         maxRunsPerDay: input.maxRunsPerDay ?? before.maxRunsPerDay,
         ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
+        ...(input.escalation ? { escalationTargets: input.escalation } : {}),
         // The run log root is a message of the target conversation (its key carries both): another conversation
         // starts a new thread on its next fan-out run. Turning fan-out off and on again keeps it (PD-05).
         ...(decided.conversationId !== before.conversationId ? { runLogMessageId: null } : {}),

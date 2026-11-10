@@ -380,3 +380,193 @@ describe("the “<name> · Runs” thread (D-10, PD-06)", () => {
     expect((await runEvent(runId)).thread.rootMessageId).toBe(run.anchor_message_id);
   });
 });
+
+// ---------------------------------------------------------------- Task 2: escalation targets (D-08, PD-15)
+
+describe("escalation targets: validated at save, resolved at delivery (D-08, PD-15, E20)", () => {
+  let logistics: string;
+  let operations: string;
+  let roadmap: string;
+  let hidden: string;
+  let generalId: string;
+
+  const unit = async (kind: string, name: string, parentId: string | null = operations) =>
+    (await ok(s.victor.request("POST", "/api/v1/units", { kind, name, parentId }) as Promise<Res>))
+      .id as string;
+  const handleOf = async (id: string) =>
+    (await s.su.query("select handle from app.org_units where id = $1", [id])).rows[0]?.handle as string;
+  const onSales = (escalation: Json[], extra: Json = {}) =>
+    create({ target: { kind: "channel", conversationId: salesId }, escalation, ...extra });
+  const get = async (id: string) =>
+    (await ok(s.victor.request("GET", `/api/v1/automations/${id}`) as Promise<Res>)) as Json;
+  const removeSam = () =>
+    ok(s.victor.request("DELETE", `/api/v1/channels/${salesId}/members/user/${s.samId}`) as Promise<Res>);
+  const addSam = () =>
+    ok(
+      s.victor.request("POST", `/api/v1/channels/${salesId}/members`, {
+        kind: "user",
+        id: s.samId,
+      }) as Promise<Res>,
+    );
+
+  beforeAll(async () => {
+    operations = await unit("department", "Operations", null);
+    logistics = await unit("team", "Logistics");
+    roadmap = await unit("project", "Roadmap", logistics);
+    hidden = await unit("team", "Board room");
+    // Víctor may not read this one (an explicit deny scoped to it).
+    await s.su.query(
+      `insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, 'user', $3, 'unit.read', 'deny')`,
+      [s.orgA, hidden, s.victorId],
+    );
+    generalId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "general-fo",
+          visibility: "public",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${generalId}/members`, {
+        kind: "agent",
+        id: s.scoutId,
+      }) as Promise<Res>,
+    );
+  });
+
+  it("saves people and teams who can read the target, in order, and returns them as views", async () => {
+    const a = (
+      await ok(
+        onSales([
+          { kind: "unit", id: logistics },
+          { kind: "user", id: s.samId },
+          { kind: "unit", id: operations },
+        ]),
+        201,
+      )
+    ).automation as Json;
+    expect(await handleOf(logistics)).toBe("logistics");
+    expect(a.escalation).toEqual([
+      { kind: "unit", id: logistics, handle: "logistics", displayName: "Logistics" },
+      { kind: "user", id: s.samId, handle: "sam", displayName: "Sam Lee" },
+      { kind: "unit", id: operations, handle: await handleOf(operations), displayName: "Operations" },
+    ]);
+    // Stable ids only in the row (principle 11).
+    expect((await automationRow(a.id)).escalation_targets).toEqual([
+      { kind: "unit", id: logistics },
+      { kind: "user", id: s.samId },
+      { kind: "unit", id: operations },
+    ]);
+    // Without escalation: none.
+    expect((await created({ target: { kind: "channel", conversationId: salesId } })).escalation).toEqual([]);
+  });
+
+  it("refuses with escalation_not_allowed whoever cannot read the target and every unit that is not a readable team or department", async () => {
+    // Alex is not in the private #sales.
+    await expectRefused(onSales([{ kind: "user", id: s.alexId }]), "escalation_not_allowed");
+    // An unknown person, and Eve (organization B).
+    await expectRefused(
+      onSales([{ kind: "user", id: "00000000-0000-4000-8000-000000000002" }]),
+      "escalation_not_allowed",
+    );
+    await expectRefused(onSales([{ kind: "user", id: s.eveId }]), "escalation_not_allowed");
+    // A deactivated member, on a public channel they otherwise read.
+    const onGeneral = (escalation: Json[]) =>
+      create({ target: { kind: "channel", conversationId: generalId }, escalation });
+    expect(
+      ((await ok(onGeneral([{ kind: "user", id: s.alexId }]), 201)).automation as Json).escalation,
+    ).toHaveLength(1);
+    await s.su.query("update app.org_members set deactivated_at = now() where user_id = $1", [s.alexId]);
+    try {
+      await expectRefused(onGeneral([{ kind: "user", id: s.alexId }]), "escalation_not_allowed");
+    } finally {
+      await s.su.query("update app.org_members set deactivated_at = null where user_id = $1", [s.alexId]);
+    }
+    // A project unit, a unit of organization B, a unit Víctor may not read.
+    await expectRefused(onSales([{ kind: "unit", id: roadmap }]), "escalation_not_allowed");
+    const [foreign] = (
+      await s.su.query(
+        "insert into app.org_units (organization_id, kind, name, path) values ($1, 'team', 'Evil logistics', '{}') returning id",
+        [s.orgB],
+      )
+    ).rows as [Json];
+    await s.su.query("update app.org_units set path = array[id] where id = $1", [foreign.id]);
+    await expectRefused(onSales([{ kind: "unit", id: foreign.id }]), "escalation_not_allowed");
+    await expectRefused(onSales([{ kind: "unit", id: hidden }]), "escalation_not_allowed");
+    // One bad target refuses the whole list.
+    await expectRefused(
+      onSales([
+        { kind: "unit", id: logistics },
+        { kind: "user", id: s.alexId },
+      ]),
+      "escalation_not_allowed",
+    );
+    // A DM target: only the run-as person.
+    await expectRefused(
+      create({ target: { kind: "dm" }, escalation: [{ kind: "user", id: s.samId }] }),
+      "escalation_not_allowed",
+    );
+    const dm = (
+      await ok(create({ target: { kind: "dm" }, escalation: [{ kind: "user", id: s.victorId }] }), 201)
+    ).automation as Json;
+    expect(dm.escalation).toEqual([
+      { kind: "user", id: s.victorId, handle: "victor", displayName: "Víctor Ruiz" },
+    ]);
+    // An update is validated the same.
+    const a = await created({ target: { kind: "channel", conversationId: salesId } });
+    await expectRefused(
+      patch(a.id, { escalation: [{ kind: "user", id: s.alexId }] }),
+      "escalation_not_allowed",
+    );
+  });
+
+  it("drops at delivery whoever left or lost access and a deleted unit; an update with [] clears, without escalation keeps", async () => {
+    const tmp = await unit("team", "Night shift");
+    const a = (
+      await ok(
+        onSales([
+          { kind: "unit", id: tmp },
+          { kind: "user", id: s.samId },
+        ]),
+        201,
+      )
+    ).automation as Json;
+    expect((await get(a.id)).escalation).toHaveLength(2);
+    // An update without escalation keeps it.
+    expect(((await ok(patch(a.id, { name: "Renamed" }))).automation as Json).escalation).toHaveLength(2);
+    const nightShift = { kind: "unit", id: tmp, handle: await handleOf(tmp), displayName: "Night shift" };
+
+    // Sam loses access to #sales: dropped; back in: shown again.
+    await removeSam();
+    try {
+      expect((await get(a.id)).escalation).toEqual([nightShift]);
+    } finally {
+      await addSam();
+    }
+    expect((await get(a.id)).escalation).toHaveLength(2);
+
+    // Sam leaves the organization: only the unit; the unit deleted: nothing.
+    const [member] = (
+      await s.su.query("select row_to_json(m) as j from app.org_members m where user_id = $1", [s.samId])
+    ).rows as [Json];
+    await s.su.query("delete from app.org_members where user_id = $1", [s.samId]);
+    try {
+      expect((await get(a.id)).escalation).toEqual([nightShift]);
+      await s.su.query("delete from app.org_units where id = $1", [tmp]);
+      expect((await get(a.id)).escalation).toEqual([]);
+    } finally {
+      await s.su.query(
+        "insert into app.org_members select (json_populate_record(null::app.org_members, $1::json)).*",
+        [JSON.stringify(member.j)],
+      );
+    }
+
+    // An update with [] clears it.
+    const b = (await ok(onSales([{ kind: "user", id: s.samId }]), 201)).automation as Json;
+    const cleared = (await ok(patch(b.id, { escalation: [] }))).automation as Json;
+    expect(cleared.escalation).toEqual([]);
+    expect((await automationRow(b.id)).escalation_targets).toEqual([]);
+  });
+});
