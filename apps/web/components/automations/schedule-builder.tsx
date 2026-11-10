@@ -1,6 +1,6 @@
 "use client";
 
-import { isKnownTimeZone } from "@ocw/contracts";
+import { AUTOMATION_LIMITS, isKnownTimeZone } from "@ocw/contracts";
 import { useMemo, useState } from "react";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import {
   browserTimeZone,
   formatRunInstant,
   HOURLY_MINUTES,
+  intervalOptions,
   nowThere,
   SCHEDULE_PRESETS,
   type SchedulePreset,
@@ -31,6 +32,8 @@ const monthDayLabel = (d: string) => (d === "L" ? "Last day" : d);
  * The schedule of an automation (07.6-15, UI-SPEC Surface 2): presets (every hour at a quarter, every day, weekdays,
  * every week on chosen days, every month on a day or the last day, custom cron), the time, the IANA zone and the next
  * three runs the API previews. The cron the presets make is `scheduleToCron`; a cron no preset makes opens as Custom.
+ * Every few minutes (07.17, D-01, PD-19) offers 5 / 10 / 15 / 30; intervals below the workspace's minimum
+ * (`minMinutes`, from the options) stay listed, disabled, with the reason. The API decides the minimum, not this list.
  */
 export function ScheduleBuilder({
   value,
@@ -38,16 +41,20 @@ export function ScheduleBuilder({
   preview,
   errors,
   disabled,
+  minMinutes,
 }: {
   value: ScheduleValue;
   onChange: (next: ScheduleValue) => void;
   preview: SchedulePreviewState;
   errors: ScheduleErrors;
   disabled?: boolean;
+  /** The workspace's minimum interval (`caps.minScheduleMinutes`); undefined while the options load. */
+  minMinutes?: number | undefined;
 }) {
   const set = (patch: Partial<ScheduleValue>) => onChange({ ...value, ...patch });
   const id = (k: string) => `automation-schedule-${k}`;
-  const timed = value.preset !== "hourly" && value.preset !== "custom";
+  const timed = value.preset !== "hourly" && value.preset !== "custom" && value.preset !== "every_minutes";
+  const intervals = intervalOptions(minMinutes);
 
   return (
     <div className="grid gap-4" data-testid="schedule-builder">
@@ -68,6 +75,35 @@ export function ScheduleBuilder({
           </SelectContent>
         </Select>
       </FormField>
+
+      {value.preset === "every_minutes" ? (
+        <FormField id={id("interval")} label="Every">
+          <Select
+            items={intervals.map((o) => ({ value: String(o.value), label: `Every ${o.value} minutes` }))}
+            value={String(value.everyMinutes)}
+            onValueChange={(v) => v && set({ everyMinutes: Number(v) })}
+            disabled={disabled}
+          >
+            <SelectTrigger
+              id={id("interval")}
+              data-testid="schedule-interval"
+              className={cn("w-full sm:w-56", TOUCH)}
+            />
+            <SelectContent>
+              {intervals.map((o) => (
+                <SelectItem
+                  key={o.value}
+                  value={String(o.value)}
+                  disabled={o.disabled}
+                  className="max-md:min-h-11"
+                >
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FormField>
+      ) : null}
 
       {value.preset === "hourly" ? (
         <FormField id={id("minute")} label="At minute">
@@ -202,7 +238,7 @@ export function ScheduleBuilder({
         />
       </div>
 
-      <NextRuns preview={preview} timeZone={value.timeZone} />
+      <NextRuns preview={preview} timeZone={value.timeZone} minMinutes={minMinutes} />
     </div>
   );
 }
@@ -267,15 +303,19 @@ export function NextRuns({
   preview,
   timeZone,
   browserZone = browserTimeZone(),
+  minMinutes,
 }: {
   preview: SchedulePreviewState;
   timeZone: string;
   browserZone?: string;
+  /** The options' minimum, used when the preview's refusal carries none. */
+  minMinutes?: number | undefined;
 }) {
+  const min = preview.state === "error" ? preview.minMinutes : undefined;
   const error =
     preview.state === "error"
       ? preview.code === "schedule_too_frequent"
-        ? `Runs can be at most every ${preview.minMinutes ?? 15} minutes in this workspace.`
+        ? `Runs can be at most every ${min ?? minMinutes ?? AUTOMATION_LIMITS.minScheduleMinutesDefault} minutes in this workspace.`
         : preview.code === "invalid_time_zone"
           ? "Pick a time zone from the list"
           : "That schedule isn't valid"

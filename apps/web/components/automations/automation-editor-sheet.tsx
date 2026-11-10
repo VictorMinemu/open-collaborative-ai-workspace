@@ -47,6 +47,7 @@ import {
   formatRunInstant,
   resumedText,
   runReasonSentence,
+  runsPerDayPrefill,
   type ScheduleValue,
   scheduleToCron,
   targetName,
@@ -356,7 +357,12 @@ export function AutomationEditorSheet({
     if (values.triggerKind === "schedule") {
       const v = values.schedule;
       if (v.preset === "weekly" && v.days.length === 0) s.days = "Pick at least one day";
-      if (v.preset !== "hourly" && v.preset !== "custom" && !/^\d{2}:\d{2}$/.test(v.time))
+      if (
+        v.preset !== "hourly" &&
+        v.preset !== "custom" &&
+        v.preset !== "every_minutes" &&
+        !/^\d{2}:\d{2}$/.test(v.time)
+      )
         s.time = "Enter a time";
       if (!isKnownTimeZone(v.timeZone)) s.timeZone = "Pick a time zone from the list";
       if (v.preset === "custom" && !v.cron.trim()) s.cron = "That schedule isn't valid";
@@ -392,7 +398,7 @@ export function AutomationEditorSheet({
       preview.code === "schedule_too_frequent"
     ) {
       setFormError(
-        `Runs can be at most every ${preview.minMinutes ?? caps?.minScheduleMinutes ?? 15} minutes in this workspace.`,
+        `Runs can be at most every ${preview.minMinutes ?? caps?.minScheduleMinutes ?? AUTOMATION_LIMITS.minScheduleMinutesDefault} minutes in this workspace.`,
       );
       return null;
     }
@@ -776,10 +782,15 @@ export function AutomationEditorSheet({
                       triggerKind: values.triggerKind,
                       schedule: values.schedule,
                       setTriggerKind: (triggerKind) => set({ triggerKind }),
-                      setSchedule: (schedule) => set({ schedule }),
+                      setSchedule: (schedule) => {
+                        // Picking an interval pre-fills runs a day (PD-04); loading or other edits never do.
+                        const runs = runsPerDayPrefill(values.schedule, schedule, maxRuns);
+                        set(runs === null ? { schedule } : { schedule, maxRunsPerDay: String(runs) });
+                      },
                       scheduleErrors: errors.schedule ?? {},
                       preview,
                       disabled: readonly,
+                      minMinutes: caps?.minScheduleMinutes,
                       automation: automation ?? lastSave?.automation ?? null,
                       inbound: values.inbound,
                       setInbound: (inbound) => set({ inbound }),

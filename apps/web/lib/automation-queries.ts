@@ -2,6 +2,7 @@
 
 import {
   type ApprovalDetail,
+  AUTOMATION_LIMITS,
   type Automation,
   type AutomationDraftView,
   AutomationList,
@@ -293,9 +294,17 @@ export function useAutomationLive() {
 
 // ---------------------------------------------------------------- schedule presets ↔ cron (UI-SPEC Surface 2)
 
-export type SchedulePreset = "hourly" | "daily" | "weekdays" | "weekly" | "monthly" | "custom";
+export type SchedulePreset =
+  | "every_minutes"
+  | "hourly"
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "monthly"
+  | "custom";
 
 export const SCHEDULE_PRESETS: ReadonlyArray<{ value: SchedulePreset; label: string }> = [
+  { value: "every_minutes", label: "Every few minutes" },
   { value: "hourly", label: "Every hour" },
   { value: "daily", label: "Every day" },
   { value: "weekdays", label: "Weekdays" },
@@ -305,6 +314,28 @@ export const SCHEDULE_PRESETS: ReadonlyArray<{ value: SchedulePreset; label: str
 ];
 
 export const HOURLY_MINUTES = ["00", "15", "30", "45"] as const;
+
+/** Every few minutes (07.17, D-01): the intervals offered. Each divides the hour, so the step cron really is every N. */
+export const INTERVAL_MINUTES = [5, 10, 15, 30] as const;
+
+/**
+ * The interval select's options: those below the workspace's minimum stay listed, disabled, with the reason in their
+ * text (PD-19). Guidance only: the API's `validateSchedule` with the organization's minimum decides.
+ */
+export function intervalOptions(
+  minMinutes: number | undefined,
+): Array<{ value: number; label: string; disabled: boolean }> {
+  const min = minMinutes ?? AUTOMATION_LIMITS.minScheduleMinutesDefault;
+  return INTERVAL_MINUTES.map((n) => {
+    const disabled = n < min;
+    const label = `Every ${n} minutes`;
+    return {
+      value: n,
+      label: disabled ? `${label} · Below your workspace's minimum (${min} min)` : label,
+      disabled,
+    };
+  });
+}
 
 /** Monday first; `n` is the cron weekday (Sunday 0). */
 export const WEEK_DAYS = [
@@ -319,6 +350,8 @@ export const WEEK_DAYS = [
 
 export interface ScheduleValue {
   preset: SchedulePreset;
+  /** Every few minutes: one of `INTERVAL_MINUTES`. */
+  everyMinutes: number;
   /** Every hour: the minute (`00`, `15`, `30`, `45`). */
   minute: string;
   /** `HH:MM`, 24-hour (every preset but hourly and custom). */
@@ -341,9 +374,18 @@ export function browserTimeZone(): string {
   }
 }
 
-/** A new automation: every week on Friday at 17:00 in the browser's zone. */
+/** A new automation: every week on Friday at 17:00 in the browser's zone (every 10 minutes once switched to that). */
 export function defaultSchedule(timeZone: string = browserTimeZone()): ScheduleValue {
-  return { preset: "weekly", minute: "00", time: "17:00", days: [5], monthDay: "1", cron: "", timeZone };
+  return {
+    preset: "weekly",
+    everyMinutes: 10,
+    minute: "00",
+    time: "17:00",
+    days: [5],
+    monthDay: "1",
+    cron: "",
+    timeZone,
+  };
 }
 
 const TIME_RE = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
@@ -351,6 +393,7 @@ const TIME_RE = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
 /** The cron of the editor's schedule, or null when a field the preset needs is missing (no time, no day). */
 export function scheduleToCron(v: ScheduleValue): string | null {
   if (v.preset === "custom") return v.cron.trim() || null;
+  if (v.preset === "every_minutes") return `*/${v.everyMinutes} * * * *`;
   if (v.preset === "hourly") return `${Number(v.minute)} * * * *`;
   const t = TIME_RE.exec(v.time);
   if (!t) return null;
@@ -370,6 +413,7 @@ export function scheduleToCron(v: ScheduleValue): string | null {
 }
 
 const MIN_RE = /^(?:[0-9]|[1-5][0-9])$/;
+const STEP_RE = /^\*\/([0-9]{1,2})$/;
 const HOUR_RE = /^(?:[0-9]|1[0-9]|2[0-3])$/;
 const two = (n: number) => String(n).padStart(2, "0");
 
@@ -383,6 +427,13 @@ export function cronToSchedule(cron: string, timeZone: string): ScheduleValue {
   const f = cron.trim().split(/\s+/);
   if (f.length !== 5) return custom;
   const [min, hour, dom, month, dow] = f as [string, string, string, string, string];
+  const step = STEP_RE.exec(min);
+  if (step && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    const n = Number(step[1]);
+    return (INTERVAL_MINUTES as readonly number[]).includes(n)
+      ? { ...base, preset: "every_minutes", everyMinutes: n }
+      : custom;
+  }
   if (!MIN_RE.test(min) || month !== "*") return custom;
   const minute = Number(min);
   if (hour === "*" && dom === "*" && dow === "*") {
@@ -402,6 +453,32 @@ export function cronToSchedule(cron: string, timeZone: string): ScheduleValue {
     return { ...base, preset: "monthly", time, monthDay: dom };
   }
   return custom;
+}
+
+/** How many times a day the schedule fires (every few minutes `floor(1440 / N)`, hourly 24, the others 1); null for Custom. */
+export function runsPerDayOfSchedule(v: ScheduleValue): number | null {
+  switch (v.preset) {
+    case "every_minutes":
+      return Math.floor(1440 / v.everyMinutes);
+    case "hourly":
+      return 24;
+    case "custom":
+      return null;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * The runs a day the editor pre-fills when the person picks an interval (PD-04): `min(cap, floor(1440 / N))` when the
+ * schedule just became Every few minutes or its interval changed; null otherwise, so loading an automation or any other
+ * edit never touches its stored runs a day. The field stays editable.
+ */
+export function runsPerDayPrefill(prev: ScheduleValue, next: ScheduleValue, cap: number): number | null {
+  if (next.preset !== "every_minutes") return null;
+  if (prev.preset === "every_minutes" && prev.everyMinutes === next.everyMinutes) return null;
+  const runs = runsPerDayOfSchedule(next);
+  return runs === null ? null : Math.min(cap, runs);
 }
 
 // ---------------------------------------------------------------- dates in an automation's zone
@@ -643,7 +720,7 @@ export function automationErrorText(
     case "automation_cap":
       return `You've reached ${detail(err, "max") ?? ctx.maxAutomations ?? "the maximum number of"} automations. Delete one to add another.`;
     case "schedule_too_frequent":
-      return `Runs can be at most every ${detail(err, "minMinutes") ?? ctx.minMinutes ?? 15} minutes in this workspace.`;
+      return `Runs can be at most every ${detail(err, "minMinutes") ?? ctx.minMinutes ?? AUTOMATION_LIMITS.minScheduleMinutesDefault} minutes in this workspace.`;
     case "invalid_cron":
       return "That schedule isn't valid";
     case "invalid_time_zone":
