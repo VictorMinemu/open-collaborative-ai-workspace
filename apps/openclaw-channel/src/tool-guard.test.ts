@@ -1793,6 +1793,7 @@ describe("bot Work Zone file tools (07.17.1.1 D-01, D-02, D-10, D-11, PD-13): se
       attachmentId: "0199a6f0-0000-7000-8000-00000000f001",
       path: "docs/spec.pdf",
     },
+    ocw_work_session_download: { workSessionId: WS, path: "README.md" },
   };
   const FILE_TOOLS = Object.keys(FILE_CALLS);
   const fileTurn = (over: Partial<TurnContext> = {}) =>
