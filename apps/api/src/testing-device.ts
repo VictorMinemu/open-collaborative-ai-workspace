@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RuntimeSelfStatus } from "@ocw/contracts";
 import WebSocket from "ws";
 
 /**
@@ -256,6 +257,27 @@ export function maintenanceStatus(over: Record<string, unknown> = {}): Record<st
     stale: false,
     lastRun: null,
     checkedAt: new Date().toISOString(),
+    ...over,
+  };
+}
+
+/**
+ * 07.17.1: the device's own OCW runtime as a supervised service reports it (`RuntimeSelfStatus`), with overrides.
+ * Defaults: 0.3.1 at build `1a2b3c4d5e6f`, supervised and able to update, idle, never checked.
+ */
+export function selfStatus(over: Partial<RuntimeSelfStatus> = {}): RuntimeSelfStatus {
+  return {
+    version: "0.3.1",
+    build: "1a2b3c4d5e6f",
+    supervised: true,
+    canUpdate: true,
+    reason: null,
+    servedVersion: null,
+    servedBuild: null,
+    state: "idle",
+    pendingSince: null,
+    lastRun: null,
+    checkedAt: null,
     ...over,
   };
 }

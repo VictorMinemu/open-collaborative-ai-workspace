@@ -16,6 +16,7 @@ import {
   type RepoTeamProject,
   type RuntimeCompatibilityManifest,
   RuntimeInfo,
+  type RuntimeServedBuild,
   type RuntimeUpdatesLevel,
   UpdateDeviceRequest,
 } from "@ocw/contracts";
@@ -118,6 +119,7 @@ async function listDevices(
   userId: string,
   manifest: RuntimeCompatibilityManifest,
   orgLevelOf: (tx: Tx) => Promise<RuntimeUpdatesLevel>,
+  servedOf: () => Promise<RuntimeServedBuild | null>,
 ): Promise<Device[]> {
   const access = await loadDeviceAccess(tx, userId);
   const [rows, dir, counts] = await Promise.all([
@@ -132,8 +134,9 @@ async function listDevices(
   const byDevice = new Map(counts.map((c) => [c.deviceId, Number(c.n)]));
   const out: Device[] = [];
   const managed: string[] = [];
-  /** Read once per request, only when some device shows its maintenance. */
+  /** Read once per request, only when some device shows its maintenance (07.17.1 PD-15: with the served build). */
   let orgLevel: RuntimeUpdatesLevel | undefined;
+  let served: RuntimeServedBuild | null | undefined;
   for (const r of rows) {
     const viewerCan = await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN);
     // The list of grants is for the owner (device.update) and admins (device.revoke) only (T-03.2-05-05).
@@ -141,13 +144,18 @@ async function listDevices(
     const device = toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0);
     // 07.11 (PD-05): install method, location, update command, state and levels only for the owner and admins.
     const stored = viewerCan.includes("device.maintain") ? storedMaintenance(r.runtimeMaintenance) : null;
-    if (stored) orgLevel ??= await orgLevelOf(tx);
+    if (stored) {
+      orgLevel ??= await orgLevelOf(tx);
+      if (served === undefined) served = await servedOf();
+    }
     out.push({
       ...device,
       viewerMaxMode: access.capOf(r),
       viewerCan,
       runtimeCompatibility: deviceRuntimeCompatibility(manifest, device.runtimes),
-      ...(stored && orgLevel ? { runtimeMaintenance: toDeviceRuntimeMaintenance(stored, orgLevel) } : {}),
+      ...(stored && orgLevel
+        ? { runtimeMaintenance: toDeviceRuntimeMaintenance(stored, orgLevel, served ?? null) }
+        : {}),
     });
   }
   const grants = await loadGrants(tx, managed);
@@ -254,7 +262,15 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
     },
     async (req) => ({
       devices: await core.db.withTenant(tenant(req), (tx) =>
-        listDevices(req, tx, perms, authOf(req).userId, hub.runtimeManifest, (t) => hub.runtimePolicy(t)),
+        listDevices(
+          req,
+          tx,
+          perms,
+          authOf(req).userId,
+          hub.runtimeManifest,
+          (t) => hub.runtimePolicy(t),
+          () => hub.servedRuntime(),
+        ),
       ),
     }),
   );

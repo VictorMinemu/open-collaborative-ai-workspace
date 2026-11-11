@@ -7,9 +7,12 @@ import {
   RequestRuntimeUpdateResponse,
   RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
   RUNTIME_UPDATE_TARGET_LABEL,
+  RuntimeBuild,
   type RuntimeId,
   type RuntimeMaintenanceFrame,
   type RuntimeMaintenanceStatus,
+  type RuntimeSelfUpdateRefusal,
+  type RuntimeServedBuild,
   RuntimeUpdateHistoryQuery,
   RuntimeUpdateParams,
   type RuntimeUpdatePayload,
@@ -17,6 +20,7 @@ import {
   type RuntimeUpdateRunFrame,
   RuntimeUpdateRunList,
   type RuntimeUpdatesLevel,
+  type RuntimeUpdateTarget,
   RuntimeVersion,
   scrubHostPaths,
 } from "@ocw/contracts";
@@ -66,8 +70,11 @@ export const RUNTIME_UPDATE_RUN_ABANDON_MS = 30 * 60_000;
 export const RUN_INTERRUPTED = "interrupted: the device never reported how this update ended";
 const REQUESTED_UQ = "device_runtime_updates_requested_uq";
 
-/** The stored snapshot: the device's report plus whether it had the org level when it sent it (D-10). */
-const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true }).extend({
+/**
+ * The stored snapshot: the device's report (07.17.1: with its own runtime's `self` when it sent one) plus whether it
+ * had the org level when it sent it (D-10). `served` is never stored: the API fills it on every read (PD-15).
+ */
+const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true, served: true }).extend({
   orgLevelReceived: z.boolean(),
 });
 type StoredMaintenance = z.infer<typeof StoredMaintenance>;
@@ -78,10 +85,14 @@ export function storedMaintenance(value: unknown): StoredMaintenance | null {
   return parsed.success ? parsed.data : null;
 }
 
-/** `Device.runtimeMaintenance` for a `device.maintain` holder: the snapshot plus the org level the API applies. */
+/**
+ * `Device.runtimeMaintenance` for a `device.maintain` holder: the snapshot plus the org level the API applies and
+ * (07.17.1, PD-15) the build the workspace serves now (null when it serves none).
+ */
 export function toDeviceRuntimeMaintenance(
   stored: StoredMaintenance,
   orgLevel: RuntimeUpdatesLevel,
+  served: RuntimeServedBuild | null,
 ): DeviceRuntimeMaintenance {
   return {
     runtimes: stored.runtimes,
@@ -90,6 +101,8 @@ export function toDeviceRuntimeMaintenance(
     effectiveLevel: stored.effectiveLevel,
     orgLevel,
     reportedAt: stored.reportedAt,
+    ...(stored.self ? { self: stored.self } : {}),
+    served,
   };
 }
 
@@ -104,6 +117,8 @@ function scrubDeep<T>(value: T): T {
 }
 
 const versionOrNull = (v: string | null) => (v !== null && RuntimeVersion.safeParse(v).success ? v : null);
+const buildOrNull = (v: string | null) => (v !== null && RuntimeBuild.safeParse(v).success ? v : null);
+const isSelfRun = (row: { runtime: RuntimeUpdateTarget }) => row.runtime === OCW_RUNTIME_TARGET;
 const isoOrNull = (v: string | null) => (v ? new Date(v).toISOString() : null);
 
 /** One history row as owners and admins read it (`RuntimeUpdateRun`), the requester named from the directory. */
@@ -129,6 +144,8 @@ export function toRuntimeUpdateRun(
     requestedAt: isoOrNull(row.requestedAt),
     startedAt: isoOrNull(row.startedAt),
     finishedAt: isoOrNull(row.finishedAt),
+    // 07.17.1: the OCW runtime's builds; CLI rows keep their 07.11 shape.
+    ...(isSelfRun(row) ? { fromBuild: buildOrNull(row.fromBuild), toBuild: buildOrNull(row.toBuild) } : {}),
   };
 }
 
@@ -171,7 +188,10 @@ async function auditDevice(
   });
 }
 
-/** Run metadata: versions, outcome, trigger and method; never output, error text or a path. */
+/**
+ * Run metadata: versions, outcome, trigger and method (07.17.1: and both builds on `ocw-runtime` runs, so CLI rows
+ * keep their 07.11 keys); never output, error text or a path.
+ */
 const runMetadata = (row: RunRow) => ({
   runtime: row.runtime,
   from: row.fromVersion,
@@ -180,6 +200,7 @@ const runMetadata = (row: RunRow) => ({
   outcome: row.state === "started" ? null : row.state,
   trigger: row.trigger,
   method: row.method,
+  ...(isSelfRun(row) ? { fromBuild: row.fromBuild, toBuild: row.toBuild } : {}),
 });
 
 async function auditRun(
@@ -242,6 +263,8 @@ export async function onRuntimeMaintenance(
     effectiveLevel: frame.effectiveLevel,
     orgLevelReceived: frame.orgLevelReceived,
     reportedAt: new Date().toISOString(),
+    // 07.17.1 (PD-04): the device's own runtime, kept for the DTO and the update route's preconditions (PD-13).
+    ...(frame.self ? { self: scrubDeep(frame.self) } : {}),
   };
   await tx
     .update(devices)
@@ -316,7 +339,7 @@ async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceR
 }
 
 /** PD-04: this device's "Update now" requests the device never answered within the hour become `expired`. */
-async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Promise<void> {
+async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeUpdateTarget): Promise<void> {
   await tx
     .update(deviceRuntimeUpdates)
     .set({ state: "expired", finishedAt: sql`now()` })
@@ -333,15 +356,23 @@ async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Pr
     );
 }
 
-/** A run frame about one of the two runtime CLIs (07.11); `ocw-runtime` runs are stored from 07.17.1-09. */
-type CliRunFrame = RuntimeUpdateRunFrame & { runtime: RuntimeId };
-const isCliRun = (frame: RuntimeUpdateRunFrame): frame is CliRunFrame => frame.runtime !== OCW_RUNTIME_TARGET;
+/**
+ * 07.17.1 (PD-14): the builds an `ocw-runtime` run frame reports, only those it carries (a frame without them never
+ * erases the builds the request recorded); a CLI frame has none.
+ */
+function frameBuilds(frame: RuntimeUpdateRunFrame): { fromBuild?: string | null; toBuild?: string | null } {
+  if (!isSelfRun(frame)) return {};
+  return {
+    ...(frame.fromBuild !== undefined ? { fromBuild: frame.fromBuild } : {}),
+    ...(frame.toBuild !== undefined ? { toBuild: frame.toBuild } : {}),
+  };
+}
 
 const byRunId = (device: DeviceRef, runId: string) =>
   and(eq(deviceRuntimeUpdates.deviceId, device.deviceId), eq(deviceRuntimeUpdates.runId, runId));
 
 /** The `requested` row of this device's "Update now" command `commandId` for `runtime`, not adopted yet. */
-const requestedBy = (device: DeviceRef, runtime: RuntimeId, commandId: string) =>
+const requestedBy = (device: DeviceRef, runtime: RuntimeUpdateTarget, commandId: string) =>
   and(
     eq(deviceRuntimeUpdates.deviceId, device.deviceId),
     eq(deviceRuntimeUpdates.commandId, commandId),
@@ -354,7 +385,7 @@ async function runStarted(
   tx: Tx,
   deps: MaintenanceDeps,
   device: DeviceRef,
-  frame: CliRunFrame,
+  frame: RuntimeUpdateRunFrame,
 ): Promise<boolean> {
   const [known] = await tx
     .select({ id: deviceRuntimeUpdates.id })
@@ -368,6 +399,7 @@ async function runStarted(
     toVersion: frame.toVersion,
     candidate: frame.candidate,
     method: frame.method,
+    ...frameBuilds(frame),
     startedAt: frame.at,
   };
   let row: RunRow | undefined;
@@ -423,7 +455,7 @@ async function runFinished(
   tx: Tx,
   deps: MaintenanceDeps,
   device: DeviceRef,
-  frame: CliRunFrame,
+  frame: RuntimeUpdateRunFrame,
 ): Promise<boolean> {
   const outcome = frame.outcome!;
   const finished = {
@@ -432,6 +464,7 @@ async function runFinished(
     toVersion: frame.toVersion,
     candidate: frame.candidate,
     method: frame.method,
+    ...frameBuilds(frame),
     output: frame.output === undefined ? null : scrubHostPaths(frame.output).slice(0, 4096),
     error: null,
     finishedAt: frame.at,
@@ -533,8 +566,6 @@ export async function onRuntimeUpdateRun(
   device: DeviceRef,
   frame: RuntimeUpdateRunFrame,
 ): Promise<void> {
-  // Stored from 07.17.1-09; the CHECK refuses the value until 07.17.1-04.
-  if (!isCliRun(frame)) return;
   const locked = await lockDevice(tx, device);
   if (!locked) return;
   const changed =
@@ -588,8 +619,17 @@ function pgError(err: unknown): { code?: string; constraint?: string } {
   return e?.cause?.code ? e.cause : (e ?? {});
 }
 
-const updatePending = () =>
-  conflict("An update of this CLI is already waiting for the device", "update_pending");
+const updatePending = (runtime: RuntimeUpdateTarget) =>
+  conflict(
+    runtime === OCW_RUNTIME_TARGET
+      ? "An update of the OCW runtime is already waiting for the device"
+      : "An update of this CLI is already waiting for the device",
+    "update_pending",
+  );
+
+/** 07.17.1 (PD-13): an OCW runtime update the API refuses, with the contracts' sentence. */
+const selfRefusal = (code: RuntimeSelfUpdateRefusal) =>
+  conflict(RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES[code], code);
 
 function manualUpdateMessage(runtime: RuntimeId, status: RuntimeMaintenanceStatus): string {
   const how = status.updateCommand
@@ -645,8 +685,6 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, false);
         // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
         await expireRequests(tx, row.id);
-        // No `ocw-runtime` row exists until 07.17.1-04 widens the column and 07.17.1-09 stores the runs.
-        if (req.query.runtime === OCW_RUNTIME_TARGET) return { runs: [] };
         const runtime = req.query.runtime;
         const rows = await tx
           .select()
@@ -678,19 +716,47 @@ export function registerDeviceMaintenanceRoutes(
         if (row.status !== "online") {
           throw conflict("This device is offline. Update it once it is connected", "device_offline");
         }
+        const stored = storedMaintenance(row.runtimeMaintenance);
+        /** The `requested` row's own columns and the request's audit metadata, per target. */
+        let request: { values: Partial<RunRow>; metadata: Record<string, unknown> };
         if (runtime === OCW_RUNTIME_TARGET) {
-          // 07.17.1-09 replaces this with the full precondition list, PD-13.
-          throw conflict(
-            RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES.self_update_unsupported,
-            "self_update_unsupported",
-          );
-        }
-        if ((await hub.runtimePolicy(tx)) === "off") {
-          throw conflict("Runtime updates are off for this organization", "runtime_updates_off");
-        }
-        const status = storedMaintenance(row.runtimeMaintenance)?.runtimes.find((s) => s.runtime === runtime);
-        if (status && !status.canUpdate && (status.reason === "manual" || status.reason === "needs_admin")) {
-          throw conflict(manualUpdateMessage(runtime, status), "manual_update");
+          // 07.17.1 PD-13, in order. The org level is not checked: `off` stops automatic checks only (D-09).
+          if (row.hostKind !== "service") throw selfRefusal("not_a_service");
+          const self = stored?.self;
+          if (!self) throw selfRefusal("self_update_unsupported");
+          if (self.reason) throw selfRefusal(self.reason);
+          const served = await hub.servedRuntime();
+          if (!served) throw selfRefusal("runtime_not_served");
+          if (served.build === self.build) throw selfRefusal("already_current");
+          request = {
+            values: {
+              fromVersion: self.version,
+              toVersion: served.version,
+              candidate: served.version,
+              fromBuild: self.build,
+              toBuild: served.build,
+            },
+            metadata: {
+              runtime,
+              from: self.version,
+              to: served.version,
+              fromBuild: self.build,
+              toBuild: served.build,
+            },
+          };
+        } else {
+          if ((await hub.runtimePolicy(tx)) === "off") {
+            throw conflict("Runtime updates are off for this organization", "runtime_updates_off");
+          }
+          const status = stored?.runtimes.find((s) => s.runtime === runtime);
+          if (
+            status &&
+            !status.canUpdate &&
+            (status.reason === "manual" || status.reason === "needs_admin")
+          ) {
+            throw conflict(manualUpdateMessage(runtime, status), "manual_update");
+          }
+          request = { values: {}, metadata: { runtime } };
         }
         const mine = and(
           eq(deviceRuntimeUpdates.deviceId, row.id),
@@ -704,9 +770,10 @@ export function registerDeviceMaintenanceRoutes(
           .from(deviceRuntimeUpdates)
           .where(mine)
           .limit(1);
-        if (waiting) throw updatePending();
+        if (waiting) throw updatePending(runtime);
 
-        // D-05: the command names the runtime and nothing else; the device picks the method and the version.
+        // D-05, P1: the command names the target and nothing else; the device picks the method and the version (the
+        // OCW runtime: from its own paired server).
         const payload: RuntimeUpdatePayload = { runtime };
         const commandId = await hub.enqueue(tx, {
           deviceId: row.id,
@@ -727,11 +794,12 @@ export function registerDeviceMaintenanceRoutes(
               requestedBy: auth.userId,
               state: "requested",
               requestedAt: sql`now()`,
+              ...request.values,
             })
             .returning();
         } catch (err) {
           // The device row lock serializes requests; the partial unique index is the backstop (T-07.11-06-06).
-          if (pgError(err).constraint === REQUESTED_UQ) throw updatePending();
+          if (pgError(err).constraint === REQUESTED_UQ) throw updatePending(runtime);
           throw err;
         }
         await core.audit.record(tx, {
@@ -739,7 +807,7 @@ export function registerDeviceMaintenanceRoutes(
           resourceType: "device",
           resourceId: row.id,
           deviceId: row.id,
-          metadata: { runtime },
+          metadata: request.metadata,
         });
         return { run: toRuntimeUpdateRun(run!, await memberDirectory(tx)) };
       }),
