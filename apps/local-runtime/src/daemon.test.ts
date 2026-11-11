@@ -3162,3 +3162,26 @@ describe("07.17.1.1 session.file.write: a file lands in an idle session's tree, 
     expect(await fileAck(ok.id)).toMatchObject({ ok: true });
   });
 });
+
+describe("07.17.1.1 diff.result never closes the link (D-14, PD-19)", () => {
+  it("a 400 KiB change answers a frame within the API's inbound limit, truncated", async () => {
+    const localId = await addProject();
+    const line = `${"y".repeat(99)}\n`;
+    writeFileSync(join(project, "big.txt"), line.repeat(4096));
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: "dbig",
+      kind: "diff.request",
+      sessionId: "ws-big",
+      payload: { projectLocalId: localId },
+    });
+    const diff = await server.frame("diff.result", (f) => f.requestId === "dbig");
+    expect(Buffer.byteLength(JSON.stringify(diff))).toBeLessThanOrEqual(256 * 1024 - 4096);
+    expect(diff.truncated).toBe(true);
+    expect(diff.files.map((f) => f.path).sort()).toEqual(["README.md", "big.txt"]);
+    expect(diff.patch).toContain("b/big.txt");
+    expect(diff.patch.endsWith("\n")).toBe(true);
+    expect(await server.frame("ack", (f) => f.commandId === "dbig")).toMatchObject({ ok: true });
+  });
+});
