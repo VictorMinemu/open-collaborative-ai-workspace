@@ -1125,7 +1125,7 @@ systemd or launchd; a failure keeps the running version and the doctor names an 
 **Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
 **ADR:** 0040
-**Plans:** 8/11 plans executed
+**Plans:** 9/11 plans executed
 
 Plans:
 **Wave 1**
@@ -1144,7 +1144,7 @@ Plans:
 
 - [x] 07.17.1-07-PLAN.md — Wave 3: Supervision (D-12), running build, boot reconcile and prune, doctor findings
 - [x] 07.17.1-08-PLAN.md — Wave 3: The self-update job: one idle decision across runtimes, exclusion with 07.11, levels and cadence
-- [ ] 07.17.1-09-PLAN.md — Wave 3: The API route and DTO (preconditions, audit with builds, abandoned runs, held prompts survive the restart): the phase's API end to end
+- [x] 07.17.1-09-PLAN.md — Wave 3: The API route and DTO (preconditions, audit with builds, abandoned runs, held prompts survive the restart): the phase's API end to end
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
