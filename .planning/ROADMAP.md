@@ -1116,6 +1116,17 @@ Plans:
 
 - [x] 07.17-19-PLAN.md — Wave 7: Phase gate: every CI workflow green, README/DEMO/STATUS, CODEOWNERS and guard, signed VALIDATION
 
+### Phase 07.17.1: Runtime self-update from the browser: one click in Settings › Devices updates a headless server's OCW runtime to the version the workspace serves (bundle verified, idle gate, service restart) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 07.17
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.17.1 to break down)
+
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
 **Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and
