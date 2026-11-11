@@ -842,3 +842,62 @@ describe("SelfUpdate: when the device checks its workspace and updates by itself
     expect(r.exit).not.toHaveBeenCalled();
   });
 });
+
+describe("SelfUpdate: the run the restart carried over (07.17.1, PD-12)", () => {
+  it("adoptBoot() reports the boot's last run and remembers its command, so a redelivered click does not run twice", async () => {
+    const r = await makeRig();
+    const runId = "5b0f6a52-3c1e-4c55-9f0d-0f8f3f6c2a11";
+    const lastRun = {
+      runId,
+      outcome: "succeeded" as const,
+      at: "2026-11-11T11:59:00.000Z",
+      fromVersion: "0.3.0",
+      toVersion: "0.3.1",
+      fromBuild: "aaaaaaaaaaaa",
+      toBuild: oldSha12(r),
+    };
+    const marker = {
+      runId,
+      commandId: COMMAND_ID,
+      trigger: "manual" as const,
+      from: { version: "0.3.0", sha256: "a".repeat(64) },
+      to: { version: "0.3.1", sha256: r.home.oldSha256 },
+      startedAt: "2026-11-11T11:58:00.000Z",
+    };
+    expect(r.su.isKnownCommand(COMMAND_ID)).toBe(false);
+    const base = {
+      type: "runtime.update.run" as const,
+      runId,
+      runtime: "ocw-runtime" as const,
+      trigger: "manual" as const,
+      commandId: COMMAND_ID,
+      fromVersion: "0.3.0",
+      toVersion: "0.3.1",
+      candidate: "0.3.1",
+      method: "ocw_bundle" as const,
+      fromBuild: lastRun.fromBuild,
+      toBuild: lastRun.toBuild,
+      at: lastRun.at,
+    };
+    r.su.adoptBoot({
+      marker,
+      outcome: "succeeded",
+      frames: [
+        { ...base, phase: "started" },
+        { ...base, phase: "finished", outcome: "succeeded" },
+      ],
+      lastRun,
+    });
+    expect(r.su.isKnownCommand(COMMAND_ID)).toBe(true);
+    expect(r.su.status().lastRun).toEqual(lastRun);
+    r.su.adoptBoot(null);
+    expect(r.su.status().lastRun).toEqual(lastRun);
+  });
+
+  it("a click's command id is known from the moment it is accepted", async () => {
+    const r = await makeRig();
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    expect(r.su.isKnownCommand(COMMAND_ID)).toBe(true);
+  });
+});

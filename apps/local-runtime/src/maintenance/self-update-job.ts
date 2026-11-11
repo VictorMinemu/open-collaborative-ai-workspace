@@ -31,9 +31,13 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import { DEV_RUNTIME_VERSION } from "../version.js";
 import type { RuntimeGate } from "./gate.js";
 import {
+  CANCELLED_OFF,
   CANCELLED_STOPPED,
+  CHECK_EVERY_MS,
+  CHECK_JITTER_MS,
   DRAIN_AFTER_MS,
   DRAIN_POLL_MS,
+  FAILED_BACKOFF_MS,
   type InstallLocks,
   runOutputForFrame,
   type TimerHandle,
@@ -51,6 +55,7 @@ import {
   type SelfUpdateMarker,
   switchToVersion,
 } from "./self-update.js";
+import type { SelfUpdateBoot } from "./self-update-boot.js";
 
 /** The answers a request gets when this device will not run it (the ack's error text). */
 export const SELF_UPDATE_REFUSALS = {
@@ -100,6 +105,10 @@ export interface SelfUpdateOptions {
   drainAfterMs?: number;
   /** How often a waiting update re-checks the gates (default `DRAIN_POLL_MS`). */
   pollMs?: number;
+  /** The automatic and `notify` check cadence (`CHECK_EVERY_MS` ± `CHECK_JITTER_MS`, the 07.11 one). */
+  checkEveryMs?: number;
+  /** A failed automatic run of a build is not retried automatically for this long (`FAILED_BACKOFF_MS`). */
+  failedBackoffMs?: number;
   now?: () => number;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
@@ -149,6 +158,7 @@ const isUuid = (id: string | undefined): id is string => !!id && z.uuid().safePa
 export class SelfUpdate {
   private readonly log: Logger;
   private readonly now: () => number;
+  private readonly random: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly locks: InstallLocks;
@@ -158,11 +168,17 @@ export class SelfUpdate {
   private served: { version: string; sha256: string } | null = null;
   private checkedAt: number | null = null;
   private readonly knownCommands = new Set<string>();
+  /** Served build (sha256) → no automatic run of it before this time (PD-10). */
+  private readonly backoff = new Map<string, number>();
+  private started = false;
   private stopped = false;
+  private checking = false;
+  private checkTimer: TimerHandle | null = null;
 
   constructor(private readonly opts: SelfUpdateOptions) {
     this.log = opts.log ?? silentLogger;
     this.now = opts.now ?? Date.now;
+    this.random = opts.random ?? Math.random;
     this.setTimer =
       opts.setTimer ??
       ((fn, ms) => {
@@ -197,6 +213,9 @@ export class SelfUpdate {
    */
   async stop(): Promise<void> {
     this.stopped = true;
+    this.started = false;
+    if (this.checkTimer !== null) this.clearTimer(this.checkTimer);
+    this.checkTimer = null;
     const job = this.job;
     if (!job || job.switching || job.ended) return;
     const preparing = this.state === "downloading" || this.state === "installing";
@@ -219,6 +238,97 @@ export class SelfUpdate {
     if (supervision.reason !== null) return refuse(SELF_UPDATE_REFUSALS[supervision.reason]);
     if (!supervision.supervised) return refuse(SELF_UPDATE_REFUSALS.not_supervised);
     if (commandId) this.knownCommands.add(commandId);
+    this.begin(trigger, commandId, running, null);
+    return { accepted: true };
+  }
+
+  /** The run the restart carried over (`reconcileSelfUpdate`, 07): its last run, and its command is known. */
+  adoptBoot(boot: SelfUpdateBoot | null): void {
+    if (!boot) return;
+    this.lastRun = boot.lastRun;
+    if (boot.marker.commandId) this.knownCommands.add(boot.marker.commandId);
+    this.safePublish();
+  }
+
+  // ---- levels and cadence (D-06, D-09, D-11, PD-10) ----
+
+  /**
+   * Schedules the check every `checkEveryMs` ± `CHECK_JITTER_MS`. Each tick reads the level: `off` asks nothing (and
+   * keeps the cadence, so a level raised later is followed), `notify` reports, `automatic` may run.
+   */
+  start(): void {
+    if (this.started || this.stopped) return;
+    this.started = true;
+    this.scheduleCheck();
+  }
+
+  /** A `runtime.config` arrived (connect, or the organization's level changed): check now unless the level is `off`. */
+  async onConfig(): Promise<void> {
+    await this.check();
+  }
+
+  private scheduleCheck(): void {
+    if (this.stopped) return;
+    if (this.checkTimer !== null) this.clearTimer(this.checkTimer);
+    const every = this.opts.checkEveryMs ?? CHECK_EVERY_MS;
+    const delay = Math.max(0, every + Math.round((this.random() * 2 - 1) * CHECK_JITTER_MS));
+    this.checkTimer = this.setTimer(() => {
+      this.checkTimer = null;
+      void this.check();
+      this.scheduleCheck();
+    }, delay);
+  }
+
+  /** Whether this device asks its workspace anything: a runtime installed by the install command (PD-10). */
+  private mayRequest(): boolean {
+    return this.opts.running !== null && this.opts.supervision.reason !== "not_installed";
+  }
+
+  /** One check of what the workspace serves (never at `off`, never during a job, which fetches its own). */
+  private async check(): Promise<void> {
+    if (this.stopped || this.checking || this.job) return;
+    if (this.opts.level() === "off" || !this.mayRequest()) return;
+    this.checking = true;
+    try {
+      const manifest = await (this.opts.fetchManifest ?? fetchServedManifest)({
+        serverUrl: this.opts.serverUrl,
+        env: this.opts.env,
+      });
+      if (this.stopped) return;
+      this.served = { version: manifest.version, sha256: manifest.sha256 };
+      this.checkedAt = this.now();
+      this.safePublish();
+      this.decide(manifest);
+    } catch (err) {
+      this.log.warn("runtime self-update check failed", {
+        error: err instanceof SelfUpdateError ? err.message : scrubHostPaths(errorMessage(err)),
+      });
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /**
+   * `automatic` only: a served build other than the running one (newer or older, D-11) runs, unless it failed
+   * automatically within `failedBackoffMs`, the device is not supervised, or a job exists.
+   */
+  private decide(manifest: RuntimeDistManifest): void {
+    if (this.opts.level() !== "automatic" || this.job || this.stopped) return;
+    const { running, supervision } = this.opts;
+    if (!running || !supervision.supervised || supervision.reason !== null) return;
+    if (manifest.sha256 === running.sha256) return;
+    if ((this.backoff.get(manifest.sha256) ?? 0) > this.now()) return;
+    this.begin("automatic", undefined, running, manifest);
+  }
+
+  // ---- the job ----
+
+  private begin(
+    trigger: Trigger,
+    commandId: string | undefined,
+    running: { version: string; sha256: string },
+    manifest: RuntimeDistManifest | null,
+  ): void {
     const job: Job = {
       runId: randomUUID(),
       trigger,
@@ -237,19 +347,23 @@ export class SelfUpdate {
       abort: new AbortController(),
     };
     this.job = job;
-    void this.run(job, running);
-    return { accepted: true };
+    void this.run(job, running, manifest);
   }
 
-  // ---- the job ----
-
-  private async run(job: Job, running: { version: string; sha256: string }): Promise<void> {
+  private async run(
+    job: Job,
+    running: { version: string; sha256: string },
+    checked: RuntimeDistManifest | null,
+  ): Promise<void> {
     try {
-      const manifest = await (this.opts.fetchManifest ?? fetchServedManifest)({
-        serverUrl: this.opts.serverUrl,
-        env: this.opts.env,
-        signal: job.abort.signal,
-      });
+      // An automatic run uses the manifest its check just read; a click asks the workspace now.
+      const manifest =
+        checked ??
+        (await (this.opts.fetchManifest ?? fetchServedManifest)({
+          serverUrl: this.opts.serverUrl,
+          env: this.opts.env,
+          signal: job.abort.signal,
+        }));
       if (job.ended) return;
       job.manifest = manifest;
       this.served = { version: manifest.version, sha256: manifest.sha256 };
@@ -359,6 +473,11 @@ export class SelfUpdate {
       const step = () => {
         job.timer = null;
         if (job.ended) return resolve();
+        // The level is read at each decision: an automatic update ends when the level leaves `automatic` (PD-10).
+        if (job.trigger === "automatic" && this.opts.level() !== "automatic") {
+          this.end(job, "failed", CANCELLED_OFF);
+          return resolve();
+        }
         if (!job.holding && !this.opts.cliBusy()) {
           if (this.closeAllIfIdle()) job.holding = true;
           else if (job.trigger === "manual" || this.now() >= (job.pendingSince ?? 0) + this.drainAfterMs) {
@@ -440,6 +559,11 @@ export class SelfUpdate {
         fromBuild: frame.fromBuild,
         toBuild: frame.toBuild,
       };
+      // A failed automatic run of a build is not retried automatically for a while; a cancel is not its failure.
+      const cancelled = error === CANCELLED_OFF || error === CANCELLED_STOPPED;
+      if (outcome === "failed" && job.trigger === "automatic" && job.manifest && !cancelled) {
+        this.backoff.set(job.manifest.sha256, this.now() + (this.opts.failedBackoffMs ?? FAILED_BACKOFF_MS));
+      }
       this.sendRun({
         ...frame,
         phase: "finished",
@@ -513,7 +637,9 @@ export class SelfUpdate {
     const { running, supervision } = this.opts;
     const reason: RuntimeSelfBlock | null =
       running === null ? (supervision.reason ?? "not_installed") : supervision.reason;
-    const served = this.served;
+    // `served*` and `checkedAt` are this device's last check: none at `off` (the contract's reading).
+    const off = this.opts.level() === "off";
+    const served = off ? null : this.served;
     const status = {
       version: running?.version ?? this.opts.version ?? DEV_RUNTIME_VERSION,
       build: running ? runtimeBuildOf(running.sha256) : null,
@@ -528,7 +654,7 @@ export class SelfUpdate {
           ? new Date(this.job.pendingSince).toISOString()
           : null,
       lastRun: this.lastRun,
-      checkedAt: this.checkedAt === null ? null : new Date(this.checkedAt).toISOString(),
+      checkedAt: off || this.checkedAt === null ? null : new Date(this.checkedAt).toISOString(),
     };
     const parsed = RuntimeSelfStatus.safeParse(status);
     if (parsed.success) return parsed.data;
