@@ -37,7 +37,9 @@ import {
   type PermissionMode,
   PromptPayload,
   RUNTIME_BYPASS_LITERALS,
+  RUNTIME_FILE_ROUTE,
   RuntimeCatalog,
+  RuntimeFilePutAnswer,
   type RuntimeId,
   type RuntimeInfo,
   type RuntimeMaintenanceFrame,
@@ -47,10 +49,12 @@ import {
   type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
+  SessionFileReadPayload,
   SessionStartPayload,
   SessionTitlePayload,
   stripImageData,
   TITLE_TIMEOUT_MS,
+  transferDeadlineMs,
 } from "@ocw/contracts";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
@@ -95,6 +99,7 @@ import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-jo
 import { isSupervised, runningBuild } from "./maintenance/supervision.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
+import { openSessionFileForRead, SessionFileError } from "./session-files.js";
 import { runTitle } from "./title.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -114,6 +119,29 @@ export function toDeviceTokenUrl(serverUrl: string): string {
   u.hash = "";
   return u.toString();
 }
+
+/** A transfer id as the server mints it (a command id: a uuid in production); anything else is never fetched. */
+const TRANSFER_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * 07.17.1.1 (D-08, PD-05, P3): `{serverUrl}/api/v1/runtime/files/<transfer id>`, the only URL a file command ever
+ * fetches. Built from the daemon's own server URL (keeping its path prefix, like `toDeviceTokenUrl`) and the command
+ * id; never from a payload value.
+ */
+export function toRuntimeFileUrl(serverUrl: string, transferId: string): string {
+  if (!TRANSFER_ID.test(transferId)) throw new Error("invalid transfer id");
+  const u = new URL(serverUrl);
+  u.pathname = `${u.pathname.replace(/\/$/, "")}${RUNTIME_FILE_ROUTE}/${encodeURIComponent(transferId)}`;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+/**
+ * 07.17.1.1 (PD-05): the waits before retrying a transfer the server answered 503 (its stream counter was full and the
+ * transfer stays pending); after the last one a 503 is `transfer_failed`.
+ */
+export const FILE_TRANSFER_RETRY_DELAYS_MS: readonly number[] = [1_000, 3_000];
 
 /** The server refused the device token (revoked or unknown device); retried with the link's backoff. */
 export class DeviceTokenRejectedError extends Error {
@@ -176,6 +204,8 @@ export interface DaemonOptions {
    * the daemon and its maintenance scope.
    */
   selfUpdate?: Partial<SelfUpdateOptions>;
+  /** Tests only (07.17.1.1): the waits before retrying a 503 transfer (default `FILE_TRANSFER_RETRY_DELAYS_MS`). */
+  fileRetryDelaysMs?: readonly number[];
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -239,6 +269,27 @@ function realpathOr(p: string): string {
   } catch {
     return p;
   }
+}
+
+/** 07.17.1.1: a file command payload the contract refuses: its path → `invalid_path`, anything else → `transfer_failed`. */
+function payloadRefusal(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>): SessionFileError {
+  return new SessionFileError(issues.some((i) => i.path[0] === "path") ? "invalid_path" : "transfer_failed");
+}
+
+/** Waits `ms`; false when `signal` aborted first (the transfer's deadline passed). */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** What `reloadConfig` answers (control socket): the levels it now enforces, never a value it was sent. */
@@ -1058,6 +1109,11 @@ export class Daemon {
         case "diff.request":
           await this.sendDiff(cmd);
           break;
+        // 07.17.1.1 (D-03, D-08): never in session order and never gated, like diff.request: a running turn does not
+        // delay it (a file being written may be read half-done, PD-08).
+        case "session.file.read":
+          await this.readSessionFile(cmd);
+          break;
         case "session.configure":
           await this.admit(this.sessions.get(cmd.sessionId)?.runtime.id, cmd.sessionId, () =>
             this.configureSession(cmd),
@@ -1077,6 +1133,13 @@ export class Daemon {
       }
       this.ack(cmd.id);
     } catch (err) {
+      if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+        // 07.17.1.1 (P1): a code and at most a size; the log line carries the command id and the code only.
+        const e = err instanceof SessionFileError ? err : new SessionFileError("transfer_failed");
+        this.log.warn("session file command failed", { kind: cmd.kind, commandId: cmd.id, code: e.code });
+        this.ack(cmd.id, e.message, this.rootsBySession.get(cmd.sessionId) ?? roots);
+        return;
+      }
       const message = errorMessage(err);
       this.log.warn("command failed", {
         kind: cmd.kind,
@@ -1300,6 +1363,110 @@ export class Daemon {
         roots,
       ),
     );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Session files (07.17.1.1, D-02 … D-04, D-08, D-13, PD-05, PD-10, PD-18)
+
+  /**
+   * `session.file.read`: one contained regular file of an active session, at most `maxBytes` (else `too_large: <size>`
+   * before any request), `PUT` to the server's transfer route as exactly its bytes with `content-length`.
+   */
+  private async readSessionFile(cmd: CommandFrame): Promise<void> {
+    const payload = SessionFileReadPayload.safeParse(cmd.payload);
+    if (!payload.success) throw payloadRefusal(payload.error.issues);
+    const active = this.sessions.get(cmd.sessionId);
+    if (!active) throw new SessionFileError("not_running");
+    const { handle, size } = await openSessionFileForRead(
+      active.cwd,
+      payload.data.path,
+      payload.data.maxBytes,
+    );
+    const streams: Array<{ destroy(): void }> = [];
+    try {
+      const res = await this.transfer(cmd.id, size, () => {
+        // A fresh stream per attempt, from byte 0 (positional reads), never past the size checked above.
+        let body: Uint8Array | AsyncIterable<Uint8Array> = new Uint8Array(0);
+        if (size > 0) {
+          const stream = handle.createReadStream({ start: 0, end: size - 1, autoClose: false });
+          streams.push(stream);
+          body = stream;
+        }
+        return {
+          method: "PUT",
+          headers: { "content-type": "application/octet-stream", "content-length": String(size) },
+          body,
+        };
+      });
+      const answer = RuntimeFilePutAnswer.safeParse(await res.json().catch(() => null));
+      if (!answer.success || answer.data.sizeBytes !== size) throw new SessionFileError("transfer_failed");
+    } finally {
+      for (const s of streams) s.destroy();
+      await handle.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * One transfer request to `toRuntimeFileUrl(serverUrl, transferId)` under the device JWT, bounded by
+   * `transferDeadlineMs(bytes)`, redirects refused (P3). A 401 is retried once with a fresh JWT; a 503 (the server's
+   * stream counter was full, the transfer stays pending) after each `FILE_TRANSFER_RETRY_DELAYS_MS`; 410 → `expired`,
+   * 413 → `too_large`, anything else → `transfer_failed`. Answers the 200 response (its body unread).
+   */
+  private async transfer(
+    transferId: string,
+    bytes: number,
+    init: () => {
+      method: "GET" | "PUT";
+      headers: Record<string, string>;
+      body?: Uint8Array | AsyncIterable<Uint8Array>;
+    },
+  ): Promise<Response> {
+    let url: string;
+    try {
+      url = toRuntimeFileUrl(this.config.serverUrl, transferId);
+    } catch {
+      throw new SessionFileError("transfer_failed");
+    }
+    const signal = AbortSignal.timeout(transferDeadlineMs(bytes));
+    const delays = this.opts.fileRetryDelaysMs ?? FILE_TRANSFER_RETRY_DELAYS_MS;
+    let refreshed = false;
+    let busy = 0;
+    for (;;) {
+      let token: string;
+      try {
+        token = await this.getAccessToken(refreshed);
+      } catch {
+        throw new SessionFileError("transfer_failed");
+      }
+      const req = init();
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: req.method,
+          headers: { ...req.headers, Authorization: `Bearer ${token}` },
+          ...(req.body !== undefined ? { body: req.body, duplex: "half" } : {}),
+          redirect: "error",
+          signal,
+        } as RequestInit);
+      } catch {
+        throw new SessionFileError("transfer_failed");
+      }
+      if (res.status === 200) return res;
+      await res.body?.cancel().catch(() => undefined);
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        continue;
+      }
+      const delay = delays[busy];
+      if (res.status === 503 && delay !== undefined) {
+        busy++;
+        if (!(await sleepUnlessAborted(delay, signal))) throw new SessionFileError("transfer_failed");
+        continue;
+      }
+      if (res.status === 410) throw new SessionFileError("expired");
+      if (res.status === 413) throw new SessionFileError("too_large");
+      throw new SessionFileError("transfer_failed");
+    }
   }
 
   // -------------------------------------------------------------------------------------------

@@ -55,7 +55,18 @@ describe("resolveSessionPath (PD-10)", () => {
   });
 
   it("refuses traversal, absolute and malformed paths with invalid_path", async () => {
-    for (const rel of ["../a", "/etc/hosts", "a/../../b", "~/x", "C:\\x", "a\\b", "a//b", "./a", "", "a\u0000b"]) {
+    for (const rel of [
+      "../a",
+      "/etc/hosts",
+      "a/../../b",
+      "~/x",
+      "C:\\x",
+      "a\\b",
+      "a//b",
+      "./a",
+      "",
+      "a\u0000b",
+    ]) {
       expect(await codeOf(resolveSessionPath(root, rel, { create: false })), rel).toBe("invalid_path");
     }
   });
@@ -83,7 +94,9 @@ describe("resolveSessionPath (PD-10)", () => {
   it("a directory symlink inside the tree pointing outside, or at .git, is path_not_allowed", async () => {
     symlinkSync(outside, join(root, "out"));
     symlinkSync(join(root, ".git"), join(root, "g"));
-    expect(await codeOf(resolveSessionPath(root, "out/secret.txt", { create: false }))).toBe("path_not_allowed");
+    expect(await codeOf(resolveSessionPath(root, "out/secret.txt", { create: false }))).toBe(
+      "path_not_allowed",
+    );
     expect(await codeOf(resolveSessionPath(root, "g/config", { create: false }))).toBe("path_not_allowed");
   });
 

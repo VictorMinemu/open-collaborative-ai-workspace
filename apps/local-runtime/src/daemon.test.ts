@@ -195,7 +195,11 @@ class FakeRuntime implements AgentRuntime {
     // 07.17.1.1: a held turn (started, not yet handed back); it completes when the test releases it.
     if (this.promptHold) {
       await this.promptHold;
-      sink?.({ type: "prompt.completed", promptId: p.promptId });
+      sink?.({
+        type: "prompt.completed",
+        promptId: p.promptId,
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
       return;
     }
     sink?.({ type: "assistant.message", messageId: "m1", text: `Edited ${cwd}/src/x.ts using ${LEAKY_KEY}` });
@@ -270,7 +274,11 @@ class FakeServer {
   constructor() {
     this.http = createServer((req, res) => {
       const url = req.url ?? "";
-      const path = this.prefix ? (url.startsWith(`${this.prefix}/`) ? url.slice(this.prefix.length) : "") : url;
+      const path = this.prefix
+        ? url.startsWith(`${this.prefix}/`)
+          ? url.slice(this.prefix.length)
+          : ""
+        : url;
       if (path.startsWith("/api/v1/runtime/files/") && (req.method === "GET" || req.method === "PUT")) {
         void this.serveFile(req, res, url);
         return;
@@ -2931,7 +2939,12 @@ describe("07.17.1.1 session.file.read: one contained file streams to the server 
     runtime.promptHold = new Promise<void>((r) => {
       release = r;
     });
-    server.send({ id: "wf-r6-p", kind: "prompt", sessionId: "wf-r6", payload: { promptId: "pp", text: "go" } });
+    server.send({
+      id: "wf-r6-p",
+      kind: "prompt",
+      sessionId: "wf-r6",
+      payload: { promptId: "pp", text: "go" },
+    });
     await server.frame("event", (f) => f.sessionId === "wf-r6" && f.event.type === "prompt.started");
     const cmd = fileCmd("session.file.read", "wf-r6", { path: "README.md", maxBytes: 1024 });
     server.send(cmd);
