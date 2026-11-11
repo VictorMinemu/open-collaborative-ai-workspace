@@ -1118,14 +1118,41 @@ Plans:
 
 ### Phase 07.17.1: Runtime self-update from the browser: one click in Settings › Devices updates a headless server's OCW runtime to the version the workspace serves (bundle verified, idle gate, service restart) (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** In Settings › Devices a headless server's OCW Local Runtime updates to the build its workspace serves with one
+click (owner or admin, `device.maintain`), and by itself at the device's effective 07.11 level (`off` keeps the click),
+never cutting a running turn, verifying every download (bundle and lockfile against the manifest) and restarting through
+systemd or launchd; a failure keeps the running version and the doctor names an update that did not come back.
+**Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
-**Plans:** 0 plans
+**ADR:** 0040
+**Plans:** 11 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.17.1 to break down)
+- [ ] 07.17.1-01-PLAN.md — Wave 1: Contracts (`RuntimeUpdateTarget`, builds, strict `self`, `served`, refusals) and the phase hub (plan map, PD-01…PD-27, edges E1–E30)
+- [ ] 07.17.1-02-PLAN.md — Wave 1: ADR-0040, AGENTS.md row, runtime version 0.3.1 and the release tag check
+- [ ] 07.17.1-03-PLAN.md — Wave 1: API distribution: `GET /api/v1/runtime/npm-shrinkwrap.json`, `runtimeExternalFiles`, one shared dist store, `servedRuntime()`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.17.1-04-PLAN.md — Wave 2: The one migration (`ocw-runtime` in the CHECK, `from_build` / `to_build`, `HEAD_ONLY`)
+- [ ] 07.17.1-05-PLAN.md — Wave 2: Daemon prepare and switch (verified download, fixed `npm ci`, staging, atomic `current`, marker), fake npm, harness
+- [ ] 07.17.1-06-PLAN.md — Wave 2: Web: the Runtime row in Settings › Devices (every view, own test ids) and the held-turn line
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.17.1-07-PLAN.md — Wave 3: Supervision (D-12), running build, boot reconcile and prune, doctor findings
+- [ ] 07.17.1-08-PLAN.md — Wave 3: The self-update job: one idle decision across runtimes, exclusion with 07.11, levels and cadence
+- [ ] 07.17.1-09-PLAN.md — Wave 3: The API route and DTO (preconditions, audit with builds, abandoned runs, held prompts survive the restart): the phase's API end to end
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.17.1-10-PLAN.md — Wave 4: Daemon wiring (command, snapshot `self`, boot frames, exit 75, CLI hook): the phase's device end to end
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.17.1-11-PLAN.md — Wave 5: Phase gate: e2e views with axe, docs and v0.3.1 notes, CI evidence, the owner's Server-1 UAT (blocking)
 
 ### Phase 07.17.1.1: Bot file exchange with its Work Zone sessions: upload chat attachments into the session's working tree and download session files back to the chat as attachments (INSERTED)
 
