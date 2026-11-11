@@ -20,6 +20,7 @@ import {
   runtimeHistoryTitle,
   runtimeSelfView,
   runtimeUpdateStatus,
+  SELF_NOT_BACK_AFTER_MS,
 } from "./runtime-updates";
 import { RuntimeUpdatesField } from "./work-zone-policy-settings";
 
@@ -508,6 +509,49 @@ describe("runtimeSelfView", () => {
       note: RUNTIME_SELF_BLOCK_SENTENCES.not_supervised,
     });
     expect(runtimeSelfView(service({}, {}, { served: null }))).toMatchObject({ kind: "not_served" });
+  });
+});
+
+describe("review WR-03: a runtime that did not come back after updating", () => {
+  const gone = (state: RuntimeSelfStatus["state"], seenAgoMs: number) =>
+    service({ state }, { status: "offline", lastSeenAt: ago(seenAgoMs) });
+
+  it("offline past SELF_NOT_BACK_AFTER_MS while busy: not_back with the time it was last seen, no longer busy", () => {
+    expect(SELF_NOT_BACK_AFTER_MS).toBe(3 * MIN);
+    for (const state of ["restarting", "waiting", "downloading", "installing"] as const) {
+      expect(runtimeSelfView(gone(state, 5 * MIN), NOW)).toEqual({
+        kind: "not_back",
+        installed: `0.3.1 · ${INSTALLED}`,
+        since: ago(5 * MIN),
+      });
+    }
+    const unknown = service({ state: "restarting" }, { status: "offline", lastSeenAt: null });
+    expect(runtimeSelfView(unknown, NOW)).toMatchObject({ kind: "not_back", since: null });
+  });
+
+  it("a restart in its first minutes, or an online device, is still busy", () => {
+    expect(runtimeSelfView(gone("restarting", 30_000), NOW)).toMatchObject({ kind: "busy" });
+    expect(runtimeSelfView(service({ state: "restarting" }, { lastSeenAt: ago(HOUR) }), NOW)).toMatchObject({
+      kind: "busy",
+    });
+    expect(runtimeSelfView(service({}, { status: "offline", lastSeenAt: ago(HOUR) }), NOW)).toMatchObject({
+      kind: "behind",
+    });
+  });
+
+  it("renders a warning without a spinner, the next step and the install command", () => {
+    const row = selfRow(render(<DeviceRuntimeUpdates device={gone("restarting", 5 * MIN)} now={NOW} />));
+    expect(row).toContain('data-view="not_back"');
+    expect(row).not.toContain("animate-spin");
+    expect(row).not.toContain("Restarting…");
+    expect(row).toMatch(/data-testid="runtime-self-status"[^>]*>Did not come back</);
+    expect(row).toContain("did not come back after updating");
+    expect(row).toContain("ocw-runtime doctor");
+    expect(row).toContain("ocw-runtime updates off");
+    expect(row).toContain('data-testid="runtime-self-install-command"');
+    expect(row).toContain("The device was last seen 5 minutes ago");
+    expect(updateButton(row)).toBe("");
+    expect(row).toContain('data-testid="runtime-self-history"');
   });
 });
 

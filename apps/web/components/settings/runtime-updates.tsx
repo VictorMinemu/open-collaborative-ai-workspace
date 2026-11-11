@@ -217,14 +217,33 @@ const TERMINAL: ReadonlySet<RuntimeUpdateRunState> = new Set([
   "expired",
 ]);
 
-export function DeviceRuntimeUpdates({ device }: { device: Device }) {
+/**
+ * Review WR-03: the clock the Runtime row reads, ticking every 15 s only while the device is offline in the middle of
+ * its own update (so "Restarting…" turns into "Did not come back" without a reload).
+ */
+function useSelfClock(active: boolean, fixed: number | undefined): number | undefined {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || fixed !== undefined) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, [active, fixed]);
+  // Otherwise every render reads the wall clock, as before.
+  return fixed ?? (active ? now : undefined);
+}
+
+export function DeviceRuntimeUpdates({ device, now: fixedNow }: { device: Device; now?: number }) {
   const [history, setHistory] = useState<RuntimeUpdateTarget | null>(null);
   const m = device.runtimeMaintenance;
+  const selfBusyOffline = device.status !== "online" && !!m?.self && m.self.state !== "idle";
+  const now = useSelfClock(selfBusyOffline, fixedNow);
   if (!m) return null;
   const canMaintain = device.viewerCan?.includes("device.maintain") ?? false;
-  const selfView = runtimeSelfView(device);
+  const selfView = runtimeSelfView(device, now ?? Date.now());
   const warn =
     selfView.kind === "failed" ||
+    selfView.kind === "not_back" ||
     m.runtimes.some(
       (r) =>
         r.installedCompatibility === "unsupported" ||
@@ -269,6 +288,7 @@ export function DeviceRuntimeUpdates({ device }: { device: Device }) {
               view={selfView}
               canMaintain={canMaintain}
               onHistory={() => setHistory(OCW_RUNTIME_TARGET)}
+              now={now}
             />
           ) : null}
           {m.runtimes.map((s) => (
@@ -451,6 +471,8 @@ export type RuntimeSelfView =
   | { kind: "failed"; installed: string; served: string; servedVersion: string; canPress: true }
   | { kind: "current"; installed: string }
   | { kind: "busy"; installed: string; label: string }
+  /** Review WR-03: busy when the device went offline, and still gone past `SELF_NOT_BACK_AFTER_MS`. */
+  | { kind: "not_back"; installed: string; since: string | null }
   | { kind: "blocked"; installed: string; note: string }
   | { kind: "not_served"; installed: string }
   /** The desktop app ships its runtime (D-01): no button. */
@@ -470,10 +492,22 @@ function servedOf(device: Device, s: RuntimeSelfStatus): { version: string; buil
 }
 
 /**
- * The Runtime row's view (pure): the host kind first (desktop, an older server daemon, a checkout), then busy, then why
- * it can't update, then installed vs served.
+ * Review WR-03: a device that went offline during its own update and has not been seen for this long did not come back
+ * (a normal restart reconnects within seconds).
  */
-export function runtimeSelfView(device: Device): RuntimeSelfView {
+export const SELF_NOT_BACK_AFTER_MS = 3 * 60_000;
+
+/** The device went offline while busy with its own update, and has stayed away past `SELF_NOT_BACK_AFTER_MS`. */
+function notBack(device: Device, now: number): boolean {
+  if (device.status === "online") return false;
+  return device.lastSeenAt === null || Date.parse(device.lastSeenAt) <= now - SELF_NOT_BACK_AFTER_MS;
+}
+
+/**
+ * The Runtime row's view (pure): the host kind first (desktop, an older server daemon, a checkout), then an update
+ * that did not come back, then busy, then why it can't update, then installed vs served.
+ */
+export function runtimeSelfView(device: Device, now: number = Date.now()): RuntimeSelfView {
   const s = device.runtimeMaintenance?.self;
   if (device.hostKind === "desktop") {
     return { kind: "desktop", installed: s ? withBuild(s.version, s.build) : device.daemonVersion };
@@ -485,6 +519,9 @@ export function runtimeSelfView(device: Device): RuntimeSelfView {
   const installed = withBuild(s.version, s.build) ?? s.version;
   if (device.hostKind !== "service" && s.reason === "not_installed") {
     return { kind: "unmanaged", installed, note: RUNTIME_SELF_BLOCK_SENTENCES.not_installed };
+  }
+  if (s.state !== "idle" && notBack(device, now)) {
+    return { kind: "not_back", installed, since: device.lastSeenAt };
   }
   if (s.state !== "idle") return { kind: "busy", installed, label: SELF_BUSY_LABEL[s.state] };
   if (s.reason) return { kind: "blocked", installed, note: RUNTIME_SELF_BLOCK_SENTENCES[s.reason] };
@@ -512,6 +549,13 @@ function selfPill(
       return { label: "Update failed", tone: "warning", busy: false };
     case "current":
       return { label: "Up to date", tone: "success", busy: false };
+    case "not_back":
+      return {
+        label: "Did not come back",
+        tone: "warning",
+        busy: false,
+        ...(view.since ? { title: `last seen ${relativeTime(view.since, now)}` } : {}),
+      };
     case "busy":
       return {
         label: view.label,
@@ -529,6 +573,10 @@ const SELF_NOTE: Partial<Record<RuntimeSelfView["kind"], string>> = {
   not_served: RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES.runtime_not_served,
   desktop: "Updates with the desktop app",
   legacy: "Re-run the install command once to turn on one-click updates.",
+  not_back:
+    "The runtime did not come back after updating. On the server, run `ocw-runtime doctor`; it names the way back " +
+    "(`ocw-runtime updates off`, then the previous version). Re-run the install command once your workspace serves a " +
+    "fixed build.",
 };
 
 /** The views that come from the device's own report and have a history worth opening. */
@@ -537,6 +585,7 @@ const SELF_HISTORY: ReadonlySet<RuntimeSelfView["kind"]> = new Set([
   "failed",
   "current",
   "busy",
+  "not_back",
   "blocked",
   "not_served",
 ]);
@@ -635,7 +684,10 @@ export function RuntimeSelfRow({
             {note}
           </p>
         ) : null}
-        {view.kind === "legacy" ? (
+        {view.kind === "not_back" && view.since ? (
+          <p className="text-muted-foreground text-xs">{`The device was last seen ${relativeTime(view.since, now)}`}</p>
+        ) : null}
+        {view.kind === "legacy" || view.kind === "not_back" ? (
           <CopyLine
             text={runtimeInstallCommand(apiUrl)}
             testId="runtime-self-install-command"
