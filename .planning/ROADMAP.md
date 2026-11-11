@@ -1125,7 +1125,7 @@ systemd or launchd; a failure keeps the running version and the doctor names an 
 **Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
 **ADR:** 0040
-**Plans:** 5/11 plans executed
+**Plans:** 6/11 plans executed
 
 Plans:
 **Wave 1**
@@ -1138,7 +1138,7 @@ Plans:
 
 - [x] 07.17.1-04-PLAN.md — Wave 2: The one migration (`ocw-runtime` in the CHECK, `from_build` / `to_build`, `HEAD_ONLY`)
 - [x] 07.17.1-05-PLAN.md — Wave 2: Daemon prepare and switch (verified download, fixed `npm ci`, staging, atomic `current`, marker), fake npm, harness
-- [ ] 07.17.1-06-PLAN.md — Wave 2: Web: the Runtime row in Settings › Devices (every view, own test ids) and the held-turn line
+- [x] 07.17.1-06-PLAN.md — Wave 2: Web: the Runtime row in Settings › Devices (every view, own test ids) and the held-turn line
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
