@@ -26,6 +26,7 @@ import {
   type RuntimeUpdatesLevel,
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { RUNTIME_VERSION } from "../version.js";
 import { RuntimeGate } from "./gate.js";
 import { CANCELLED_OFF, CANCELLED_STOPPED, CHECK_EVERY_MS, CHECK_JITTER_MS } from "./maintenance.js";
 import { InstallLock } from "./runner.js";
@@ -588,6 +589,8 @@ describe("SelfUpdate: requests the device refuses (07.17.1, D-05, PD-11)", () =>
     });
     await flush();
     expect(r.stub.requests).toEqual([]);
+    // The daemon's own version (`0.0.0-dev` under tsx), no build.
+    expect(r.su.status()).toMatchObject({ version: RUNTIME_VERSION, build: null, canUpdate: false });
   });
 
   it("the sentences are the contract's (RUNTIME_SELF_BLOCK_SENTENCES)", () => {

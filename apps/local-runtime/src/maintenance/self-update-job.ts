@@ -28,7 +28,7 @@ import {
 import { z } from "zod";
 import { runtimeDir } from "../install-info.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
-import { DEV_RUNTIME_VERSION } from "../version.js";
+import { DEV_RUNTIME_VERSION, RUNTIME_VERSION } from "../version.js";
 import type { RuntimeGate } from "./gate.js";
 import {
   CANCELLED_OFF,
@@ -97,7 +97,7 @@ export interface SelfUpdateOptions {
    * home: the scratch home in tests and fake-CLI mode). Never derived here (PD-09, PD-19).
    */
   lockDir: string;
-  /** The daemon's version when `running` is null (a checkout). */
+  /** The daemon's version when `running` is null (a checkout, the desktop app; default `RUNTIME_VERSION`). */
   version?: string;
   execPath?: string;
   nodeVersion?: string;
@@ -641,7 +641,7 @@ export class SelfUpdate {
     const off = this.opts.level() === "off";
     const served = off ? null : this.served;
     const status = {
-      version: running?.version ?? this.opts.version ?? DEV_RUNTIME_VERSION,
+      version: running?.version ?? this.opts.version ?? RUNTIME_VERSION,
       build: running ? runtimeBuildOf(running.sha256) : null,
       supervised: supervision.supervised,
       canUpdate: supervision.supervised && reason === null && running !== null,
