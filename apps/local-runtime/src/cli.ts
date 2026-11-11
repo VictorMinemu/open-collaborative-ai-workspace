@@ -62,7 +62,7 @@ import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
 import { assertProjectDirAllowed, noGitNotice } from "./project-dir.js";
-import { createShutdownGuard, selfUpdateExit } from "./service/hand-over.js";
+import { createShutdownGuard, selfUpdateExit, stopSignal } from "./service/hand-over.js";
 import { defaultServiceDeps, serviceCommand } from "./service/index.js";
 import { applyServiceEnv } from "./service-env.js";
 import {
@@ -458,8 +458,7 @@ async function run(): Promise<void> {
   // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.
   let started: Promise<void> = Promise.resolve();
   const shutdown = (signal: string) => {
-    if (guard.stopping) return;
-    guard.stopping = true;
+    if (!stopSignal(guard)) return;
     process.stderr.write(`received ${signal}, stopping\n`);
     started
       .catch(() => undefined)

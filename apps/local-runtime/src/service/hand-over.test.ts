@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createShutdownGuard, HAND_OVER_TIMEOUT_MS, selfUpdateExit } from "./hand-over.js";
+import { createShutdownGuard, HAND_OVER_TIMEOUT_MS, selfUpdateExit, stopSignal } from "./hand-over.js";
 
 describe("the self-update exit hook (07.17.1, D-05, PD-08)", () => {
   it("marks the shared stopping guard first, stops the daemon once, then exits with the code", async () => {
@@ -63,6 +63,29 @@ describe("the self-update exit hook (07.17.1, D-05, PD-08)", () => {
     const exit = vi.fn((_code: number) => undefined);
     await selfUpdateExit({ guard, stop, exit })(75);
     expect(stop).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("review IN-09: a stop signal during the hand-over turns its exit 75 into 0 (a systemctl stop is not a failure)", async () => {
+    const guard = createShutdownGuard();
+    let release: () => void = () => undefined;
+    const stop = vi.fn(() => new Promise<void>((r) => (release = r)));
+    const exit = vi.fn((_code: number) => undefined);
+    const done = selfUpdateExit({ guard, stop, exit })(75);
+    // The signal handler: the hand-over owns the exit, so it does not stop again.
+    expect(stopSignal(guard)).toBe(false);
+    release();
+    await done;
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("review IN-09: a stop signal with no hand-over running claims the guard once; the hook then does nothing", async () => {
+    const guard = createShutdownGuard();
+    expect(stopSignal(guard)).toBe(true);
+    expect(stopSignal(guard)).toBe(false);
+    const exit = vi.fn((_code: number) => undefined);
+    await selfUpdateExit({ guard, stop: async () => undefined, exit })(75);
     expect(exit).not.toHaveBeenCalled();
   });
 
