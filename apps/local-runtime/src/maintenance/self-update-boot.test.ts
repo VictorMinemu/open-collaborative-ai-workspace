@@ -254,11 +254,11 @@ describe("pruneRuntimeVersions and clearStaging (07.17.1, PD-12, E16)", () => {
       keep: [prepared.sha12, home.oldSha12],
     });
     expect(removed.sort()).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
-    expect(readdirSync(versions).sort()).toEqual(
-      [".staging-x", "notes", prepared.sha12, home.oldSha12].sort(),
-    );
+    // The fake npm's report file is another non-build name: it stays too.
+    const left = () => readdirSync(versions).filter((n) => n !== "fake-npm-report.json");
+    expect(left().sort()).toEqual([".staging-x", "notes", prepared.sha12, home.oldSha12].sort());
     expect(await clearStaging(home.ocwHome)).toBe(1);
-    expect(readdirSync(versions).sort()).toEqual(["notes", prepared.sha12, home.oldSha12].sort());
+    expect(left().sort()).toEqual(["notes", prepared.sha12, home.oldSha12].sort());
   });
 
   it("never removes the directory current points to, even when keep forgets it", async () => {
