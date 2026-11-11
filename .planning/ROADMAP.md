@@ -1125,7 +1125,7 @@ systemd or launchd; a failure keeps the running version and the doctor names an 
 **Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
 **ADR:** 0040
-**Plans:** 9/11 plans executed
+**Plans:** 10/11 plans executed
 
 Plans:
 **Wave 1**
@@ -1148,7 +1148,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 07.17.1-10-PLAN.md — Wave 4: Daemon wiring (command, snapshot `self`, boot frames, exit 75, CLI hook): the phase's device end to end
+- [x] 07.17.1-10-PLAN.md — Wave 4: Daemon wiring (command, snapshot `self`, boot frames, exit 75, CLI hook): the phase's device end to end
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
