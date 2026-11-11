@@ -1125,7 +1125,7 @@ systemd or launchd; a failure keeps the running version and the doctor names an 
 **Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
 **ADR:** 0040
-**Plans:** 10/11 plans executed
+**Plans:** 11/11 plans executed
 
 Plans:
 **Wave 1**
@@ -1152,7 +1152,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 07.17.1-11-PLAN.md — Wave 5: Phase gate: e2e views with axe, docs and v0.3.1 notes, CI evidence, the owner's Server-1 UAT (blocking)
+- [x] 07.17.1-11-PLAN.md — Wave 5: Phase gate: e2e views with axe, docs and v0.3.1 notes, CI evidence, the owner's Server-1 UAT (blocking)
 
 ### Phase 07.17.1.1: Bot file exchange with its Work Zone sessions: upload chat attachments into the session's working tree and download session files back to the chat as attachments (INSERTED)
 
