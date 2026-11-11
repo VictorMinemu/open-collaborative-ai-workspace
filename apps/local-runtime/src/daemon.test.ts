@@ -34,13 +34,17 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { type WebSocket, WebSocketServer } from "ws";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
-import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE } from "./daemon.js";
+import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
 import { defaultLockDir } from "./maintenance/runner.js";
-import { type PrepareVersionOptions, prepareVersion, selfUpdateMarkerPath } from "./maintenance/self-update.js";
+import {
+  type PrepareVersionOptions,
+  prepareVersion,
+  selfUpdateMarkerPath,
+} from "./maintenance/self-update.js";
 import {
   type DistStub,
   fakeNpm,
@@ -2207,8 +2211,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     sessionId: randomUUID(),
     payload: { runtime: "ocw-runtime" },
   });
-  const ackOf = (id: string, timeoutMs = 10_000) =>
-    server.frame("ack", (f) => f.commandId === id, timeoutMs);
+  const ackOf = (id: string, timeoutMs = 10_000) => server.frame("ack", (f) => f.commandId === id, timeoutMs);
   const gatesOf = (d: Daemon) => (d as unknown as { gates: Map<RuntimeId, RuntimeGate> }).gates;
   type Snapshot = Extract<DeviceToServerFrame, { type: "runtime.maintenance" }>;
   const selfStates = (frames: DeviceToServerFrame[]) =>

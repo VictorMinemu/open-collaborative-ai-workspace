@@ -16,6 +16,12 @@
 // device's level comes from runtime.json or `OCW_RUNTIME_UPDATES`. Snapshots go out only while connected, run frames
 // through the offline log. Maintenance runs only when the daemon drives its real adapters, or in fake-CLI mode with a
 // scratch `HOME`, or when a test passes `DaemonOptions.maintenance`: a test or demo daemon never touches a real CLI.
+//
+// Runtime self-update (07.17.1, ADR-0040, D-03, D-04, D-05, D-07, PD-09, PD-12, PD-18, PD-19): a `SelfUpdate` exists only
+// where `RuntimeMaintenance` does and `cli.ts run` passed `exitForUpdate`. The `ocw-runtime` command reads only
+// `runtime`; the new build comes from `config.serverUrl`. Every `runtime.maintenance` frame then carries `self`; the
+// boot reconcile's frames go first after `hello`; a held turn is told the OCW runtime is restarting; and once the
+// switch is done the daemon's stop is a hand-over: the link closes first, nothing reopens a gate, no run frame goes out.
 
 import { realpathSync } from "node:fs";
 import { arch, homedir, platform, userInfo } from "node:os";
@@ -34,6 +40,7 @@ import {
   RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
+  type RuntimeMaintenanceFrame,
   RuntimeUpdatePayload,
   type RuntimeUpdatesLevel,
   type RuntimeUpdatesLevelSource,
@@ -75,6 +82,16 @@ import {
   type RuntimeMaintenanceOptions,
   type UpdateRequestAnswer,
 } from "./maintenance/maintenance.js";
+import { defaultLockDir } from "./maintenance/runner.js";
+import { removeSelfUpdateMarker } from "./maintenance/self-update.js";
+import {
+  clearStaging,
+  pruneRuntimeVersions,
+  reconcileSelfUpdate,
+  type SelfUpdateBoot,
+} from "./maintenance/self-update-boot.js";
+import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-job.js";
+import { isSupervised, runningBuild } from "./maintenance/supervision.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { runTitle } from "./title.js";
@@ -146,6 +163,18 @@ export interface DaemonOptions {
    * with `userHome` (a scratch home) and usually `which`, a registry URL in `env` and short timers.
    */
   maintenance?: Partial<RuntimeMaintenanceOptions>;
+  /**
+   * 07.17.1 (D-05, PD-08): the only way the daemon restarts itself after a self-update switched `current`: stop
+   * cleanly, then exit with `code` (75) so the service manager starts the new build. `cli.ts run` passes it; without it
+   * no `SelfUpdate` exists and an `ocw-runtime` update is refused with `SELF_UPDATE_UNAVAILABLE_MESSAGE`.
+   */
+  exitForUpdate?: (code: number) => Promise<void>;
+  /**
+   * Tests only (07.17.1, PD-19): overrides for the `SelfUpdate` (the stub's URL, the running build, supervision, the
+   * fake npm through `prepare`, short polls). The exit, the lock directory and the scratch-home rule always come from
+   * the daemon and its maintenance scope.
+   */
+  selfUpdate?: Partial<SelfUpdateOptions>;
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -237,6 +266,14 @@ export class Daemon {
   private maintenance: RuntimeMaintenance | null = null;
   /** 07.11 (PD-07): per runtime, the sessions told `runtime.update` `waiting` during the current update. */
   private readonly heldSessions = new Map<RuntimeId, Set<string>>();
+  /** 07.17.1: the OCW runtime's own update; null unless maintenance runs here and `exitForUpdate` was given. */
+  private selfUpdate: SelfUpdate | null = null;
+  /** 07.17.1 (PD-12): the run a self-update restart carried over, reported once in the handshake. */
+  private boot: { report: SelfUpdateBoot; running: { version: string; sha256: string } | null } | null = null;
+  /** 07.17.1 (PD-18): sessions told the OCW runtime is restarting during the current hold (once each). */
+  private readonly selfHeldSessions = new Set<string>();
+  /** Snapshots with `self` go out in the order their status was read. */
+  private snapshotChain: Promise<void> = Promise.resolve();
   private readonly sessions = new Map<string, ActiveSession>();
   /** Roots per session survive session end so late events are still contained. */
   private readonly rootsBySession = new Map<string, string[]>();
@@ -316,10 +353,87 @@ export class Daemon {
       log.warn("This device is marked as an isolated server", { source: daemon.isolated.source });
     await daemon.registry.load();
     const scope = maintenanceScope(opts, env, fake && opts.runtimes === undefined);
-    if (scope) daemon.maintenance = daemon.buildMaintenance(scope);
-    else if (fake)
+    if (scope) {
+      daemon.maintenance = daemon.buildMaintenance(scope);
+      if (opts.exitForUpdate) await daemon.buildSelfUpdate(daemon.maintenance, scope, opts.exitForUpdate);
+    } else if (fake)
       log.info("runtime updates are off: fake runtime without OCW_RUNTIME_FAKE_CLI=1 and a scratch HOME");
     return daemon;
+  }
+
+  /**
+   * 07.17.1 (D-05, D-07, PD-09, PD-12, PD-19): the running build (hashed once), supervision, the boot reconcile of a
+   * run the last restart carried over and the staging left by an interrupted prepare, then the `SelfUpdate` on the
+   * same gates. The lock directory is the maintenance scope's (`defaultLockDir(scope.userHome)`), never the OS user's
+   * home from a test.
+   */
+  private async buildSelfUpdate(
+    maintenance: RuntimeMaintenance,
+    scope: MaintenanceScope,
+    exit: (code: number) => Promise<void>,
+  ): Promise<void> {
+    const over = this.opts.selfUpdate ?? {};
+    const argv1 = process.argv[1];
+    const running =
+      over.running !== undefined
+        ? over.running
+        : await runningBuild({ argv1, ocwHome: this.home, version: RUNTIME_VERSION });
+    const supervision =
+      over.supervision ??
+      (await isSupervised({ env: this.env, platform: process.platform, argv1, ocwHome: this.home }));
+    const report = await reconcileSelfUpdate({ ocwHome: this.home, running });
+    await clearStaging(this.home).catch(() => 0);
+    const selfUpdate = new SelfUpdate({
+      ocwHome: this.home,
+      serverUrl: this.config.serverUrl,
+      env: this.env,
+      running,
+      supervision,
+      gates: this.gates,
+      activeTurns: (r) => this.runtimes.get(r)?.activeTurns() ?? 0,
+      cliBusy: () => maintenance.jobActive,
+      level: () => maintenance.effectiveLevel,
+      sendRun: (frame) => this.send(frame),
+      publish: () => this.onSelfUpdateChange(),
+      log: this.log,
+      ...over,
+      exit,
+      requireScratchHome: scope.requireScratchHome,
+      lockDir: this.opts.maintenance?.lockDir ?? defaultLockDir(scope.userHome),
+    });
+    this.selfUpdate = selfUpdate;
+    if (report) {
+      this.boot = { report, running };
+      selfUpdate.adoptBoot(report);
+      this.log.info("runtime self-update: reporting the run the restart carried over", {
+        outcome: report.outcome,
+      });
+    }
+  }
+
+  /** The self-update's status changed: a fresh snapshot (while connected); a hold that ended forgets its sessions. */
+  private onSelfUpdateChange(): void {
+    const su = this.selfUpdate;
+    if (!su) return;
+    if (!su.holding) this.selfHeldSessions.clear();
+    const m = this.maintenance;
+    if (!m || !this.isConnected) return;
+    const self = su.status();
+    this.snapshotChain = this.snapshotChain
+      .then(async () => {
+        const frame = await m.snapshot();
+        if (this.isConnected) this.send({ ...frame, self });
+      })
+      .catch((err: unknown) =>
+        this.log.warn("runtime self status snapshot failed", {
+          error: sanitizeString(errorMessage(err), []),
+        }),
+      );
+  }
+
+  /** Every `runtime.maintenance` frame carries `self` exactly when a SelfUpdate exists. */
+  private withSelf(frame: RuntimeMaintenanceFrame): RuntimeMaintenanceFrame {
+    return this.selfUpdate ? { ...frame, self: this.selfUpdate.status() } : frame;
   }
 
   private buildMaintenance(scope: MaintenanceScope): RuntimeMaintenance {
@@ -341,8 +455,15 @@ export class Daemon {
         return this.detectRuntimes();
       },
       // PD-03: a snapshot only while connected (the handshake carries one on every connect); runs never get lost.
+      // 07.17.1: with a SelfUpdate it carries `self` and keeps its place behind the self-update's own snapshots.
       sendSnapshot: (frame) => {
-        if (this.isConnected) this.send(frame);
+        if (!this.selfUpdate) {
+          if (this.isConnected) this.send(frame);
+          return;
+        }
+        this.snapshotChain = this.snapshotChain.then(() => {
+          if (this.isConnected) this.send(this.withSelf(frame));
+        });
       },
       sendRun: (frame) => this.send(frame),
       notifySession: (runtime, phase, version) => this.notifyHeldSessions(runtime, phase, version),
@@ -350,6 +471,8 @@ export class Daemon {
         this.detectCache = null;
         if (this.isConnected) this.send(await this.capabilitiesFrame());
       },
+      // 07.17.1 (PD-09): no CLI job starts while the OCW runtime's self-update holds the gates.
+      exclusive: () => this.selfUpdate?.holding ?? false,
       ...this.opts.maintenance,
       userHome: scope.userHome,
       requireScratchHome: scope.requireScratchHome,
@@ -403,14 +526,31 @@ export class Daemon {
     this.link.start();
     this.log.info("connecting to server", { serverUrl: this.config.serverUrl });
     this.maintenance?.start({ paired: true });
+    this.selfUpdate?.start();
   }
 
-  /** Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest. */
+  /**
+   * Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest; 07.17.1 (PD-10): the
+   * self-update then checks what the workspace serves (nothing at `off`).
+   */
   private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
-    if (frame.type === "runtime.config") this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
+    if (frame.type !== "runtime.config") return;
+    this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
+    void this.selfUpdate?.onConfig();
   }
 
+  /**
+   * Stops the daemon. 07.17.1 (E29): the SelfUpdate stops first; a run not yet switched is cancelled there (gates
+   * reopen, `finished failed`). Once it switched (the exit hand-over, gates still held) the link closes right after the
+   * last snapshot went out: no ack, run frame or session event from the teardown reaches the server, and nothing
+   * reopens a gate on an open socket. The next daemon reports the run from the marker.
+   */
   async stop(): Promise<void> {
+    await this.selfUpdate?.stop();
+    if (this.selfUpdate?.holding) {
+      await this.snapshotChain;
+      await this.link?.stop();
+    }
     this.maintenance?.stop();
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
@@ -547,28 +687,58 @@ export class Daemon {
   }
 
   private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
-    return [
-      {
-        type: "hello",
-        protocolVersion: DEVICE_LINK_PROTOCOL_VERSION,
-        device: {
-          name: deviceName(this.config),
-          platform: platform(),
-          arch: arch(),
-          daemonVersion: DAEMON_VERSION,
-          ...(this.hostKind ? { host: this.hostKind } : {}),
-        },
-        runtimes: await this.detectRuntimes(),
-        sessions: [...this.sessions.keys()],
-        // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
-        fullAccessOptIn: this.gate.optIn,
-        // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
-        isolatedServer: this.reportedIsolated,
+    const hello: DeviceToServerFrame = {
+      type: "hello",
+      protocolVersion: DEVICE_LINK_PROTOCOL_VERSION,
+      device: {
+        name: deviceName(this.config),
+        platform: platform(),
+        arch: arch(),
+        daemonVersion: DAEMON_VERSION,
+        ...(this.hostKind ? { host: this.hostKind } : {}),
       },
+      runtimes: await this.detectRuntimes(),
+      sessions: [...this.sessions.keys()],
+      // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
+      fullAccessOptIn: this.gate.optIn,
+      // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
+      isolatedServer: this.reportedIsolated,
+    };
+    const frames: DeviceToServerFrame[] = [
+      hello,
+      // 07.17.1 (PD-12): the run the last restart carried over, right after hello, until it went out once.
+      ...(this.boot ? this.boot.report.frames : []),
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
-      ...(this.maintenance ? [await this.maintenance.snapshot()] : []),
+      ...(this.maintenance ? [this.withSelf(await this.maintenance.snapshot())] : []),
     ];
+    // The link writes these frames right after this resolves; once they went out on an open socket, the marker goes.
+    if (this.boot) setImmediate(() => void this.afterBootReported());
+    return frames;
+  }
+
+  /**
+   * 07.17.1 (PD-12): the boot frames were written on an open socket: the marker is removed and `versions/` pruned
+   * (keeping the running build and the one the run came from), once. Still disconnected: the next handshake sends
+   * them again.
+   */
+  private async afterBootReported(): Promise<void> {
+    const boot = this.boot;
+    if (!boot || !this.isConnected) return;
+    this.boot = null;
+    try {
+      await removeSelfUpdateMarker(this.home);
+      if (boot.running) {
+        await pruneRuntimeVersions({
+          ocwHome: this.home,
+          keep: [boot.running.sha256.slice(0, 12), boot.report.marker.from.sha256.slice(0, 12)],
+        });
+      }
+    } catch (err) {
+      this.log.warn("runtime self-update: cleanup after the restart failed", {
+        error: sanitizeString(errorMessage(err), [this.home]),
+      });
+    }
   }
 
   private async capabilitiesFrame(): Promise<DeviceToServerFrame> {
@@ -881,8 +1051,15 @@ export class Daemon {
     const payload = RuntimeUpdatePayload.safeParse(cmd.payload);
     if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
     const runtime = payload.data.runtime;
-    // 07.17.1-10 routes it to the SelfUpdate.
-    if (runtime === OCW_RUNTIME_TARGET) throw new Error(SELF_UPDATE_UNAVAILABLE_MESSAGE);
+    // 07.17.1 (D-05, PD-11, E17): the device re-decides; a command it already ran (before the restart too) runs nothing.
+    if (runtime === OCW_RUNTIME_TARGET) {
+      const su = this.selfUpdate;
+      if (!su) throw new Error(SELF_UPDATE_UNAVAILABLE_MESSAGE);
+      if (su.isKnownCommand(cmd.id)) return;
+      const answer = await su.request("manual", cmd.id);
+      if (!answer.accepted) throw new Error(answer.reason);
+      return;
+    }
     if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
     const answer = await this.maintenance.requestUpdate(runtime, "manual", cmd.id);
     if (!answer.accepted) throw new Error(answer.reason);
