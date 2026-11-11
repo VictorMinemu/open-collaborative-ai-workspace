@@ -1,6 +1,6 @@
 "use client";
 
-import type { BotCapabilityView, CatalogTool, ToolGrant } from "@ocw/contracts";
+import { type BotCapabilityView, type CatalogTool, type ToolGrant, TURN_TOOLS_MAX } from "@ocw/contracts";
 import { ArrowUpRight, Lock, Plug, Puzzle, Wrench } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -24,6 +24,46 @@ export function shortToolName(t: Pick<CatalogTool, "sourceKind" | "tool">): stri
   if (t.sourceKind !== "mcp") return t.tool;
   const i = t.tool.indexOf("__");
   return i === -1 ? t.tool : t.tool.slice(i + 2);
+}
+
+export type BulkMode = "read" | "all" | "none";
+
+/**
+ * The bot's full grant set after one per-source bulk action: `read` turns on the source's read-only tools and off the
+ * ones that change data, `all` turns every available tool on, `none` turns them all off. A blocked tool (a reason and
+ * not granted) is never turned on; other sources keep their grants.
+ */
+export function bulkGrants(all: CatalogTool[], sourceTools: CatalogTool[], mode: BulkMode): ToolGrant[] {
+  const inSource = new Set(sourceTools.map(keyOf));
+  const others = all.filter((t) => t.granted && !inSource.has(keyOf(t))).map(grantOf);
+  const on = sourceTools.filter((t) => {
+    if (mode === "none") return false;
+    if (t.reason !== null && !t.granted) return false;
+    return mode === "all" || !t.sideEffecting;
+  });
+  return [...others, ...on.map(grantOf)];
+}
+
+/** A quiet text button for the per-source bulk actions. */
+function BulkButton({
+  onClick,
+  testId,
+  children,
+}: {
+  onClick: () => void;
+  testId: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid={testId}
+      className="rounded px-1.5 py-0.5 font-medium text-primary hover:bg-primary/8 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+    >
+      {children}
+    </button>
+  );
 }
 
 /**
@@ -62,14 +102,22 @@ export function ToolsSection({
     g.tools.push(t);
   }
 
-  function toggle(tool: CatalogTool, on: boolean) {
-    const others = view.tools.filter((t) => t.granted && keyOf(t) !== keyOf(tool)).map(grantOf);
+  function save(tools: ToolGrant[]) {
     update.mutate(
-      { tools: on ? [...others, grantOf(tool)] : others },
+      { tools },
       {
         onError: (err) => toast.error("Could not change the bot's tools", { description: errorMessage(err) }),
       },
     );
+  }
+
+  function toggle(tool: CatalogTool, on: boolean) {
+    const others = view.tools.filter((t) => t.granted && keyOf(t) !== keyOf(tool)).map(grantOf);
+    save(on ? [...others, grantOf(tool)] : others);
+  }
+
+  function setSource(sourceTools: CatalogTool[], mode: BulkMode) {
+    save(bulkGrants(view.tools, sourceTools, mode));
   }
 
   return (
@@ -84,6 +132,23 @@ export function ToolsSection({
           </span>
         ) : null}
       </div>
+
+      {(view.toolsOverLimit ?? 0) > 0 ? (
+        <p
+          className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/8 px-3 py-2 text-foreground/85 text-xs leading-snug"
+          data-testid="tools-over-limit"
+          role="status"
+        >
+          <Lock className="mt-px size-3.5 shrink-0 text-warning" aria-hidden />
+          <span>
+            {view.toolsOverLimit === 1
+              ? "1 tool that is on does not fit in a bot turn, so the bot cannot use it."
+              : `${view.toolsOverLimit} tools that are on do not fit in a bot turn, so the bot cannot use them.`}{" "}
+            A turn carries at most {TURN_TOOLS_MAX} tools, including the platform's. Turn off the ones this
+            bot does not need.
+          </span>
+        </p>
+      ) : null}
 
       {groups.length === 0 ? (
         <p
@@ -132,6 +197,28 @@ export function ToolsSection({
                   </Link>
                 ) : null}
               </div>
+              {!readOnly && !sourceReason && g.tools.length > 1 ? (
+                <fieldset
+                  className="flex flex-wrap items-center gap-x-1 gap-y-1 border-b px-3 py-1.5 text-xs"
+                  data-testid="tool-source-bulk"
+                  disabled={update.isPending}
+                >
+                  <legend className="sr-only">Turn on several {g.name} tools at once</legend>
+                  <span className="mr-1 text-muted-foreground">Turn on:</span>
+                  <BulkButton onClick={() => setSource(g.tools, "read")} testId="tools-bulk-read">
+                    Read-only tools
+                  </BulkButton>
+                  <BulkButton onClick={() => setSource(g.tools, "all")} testId="tools-bulk-all">
+                    All, including changes
+                  </BulkButton>
+                  <span className="mx-1 text-muted-foreground" aria-hidden>
+                    ·
+                  </span>
+                  <BulkButton onClick={() => setSource(g.tools, "none")} testId="tools-bulk-none">
+                    Turn all off
+                  </BulkButton>
+                </fieldset>
+              ) : null}
               {sourceReason ? (
                 <p
                   className="flex items-start gap-1.5 border-b bg-warning/8 px-3 py-2 text-foreground/85 text-xs leading-snug"

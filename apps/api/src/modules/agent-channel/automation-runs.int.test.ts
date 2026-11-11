@@ -7,6 +7,7 @@ import {
   type EscalationTargetView,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_TOOL_NAMES,
+  TURN_TOOLS_MAX,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
@@ -1233,7 +1234,10 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
        values ($1, $2, 'Bulk', 'bulk', 'streamable-http', 'https://bulk.example.test/mcp', 'ready', 'org_secret')`,
       [serverMcp, s.orgA],
     );
-    const names = Array.from({ length: 64 - base }, (_, i) => `bulk__t${String(i).padStart(2, "0")}`);
+    const names = Array.from(
+      { length: TURN_TOOLS_MAX - base },
+      (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
+    );
     for (const name of names) {
       await s.su.query(
         "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
@@ -1248,7 +1252,7 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
       );
     await grant(names);
     const full = await runTurn();
-    expect(full.turn.tools).toHaveLength(64);
+    expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
     // The run turn's primary tool is reserved: the lowest-priority tool (the last MCP tool offered) makes room.
     expect(full.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
     expect(full.turn.tools).not.toContain(names.at(-1));
@@ -1258,7 +1262,7 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
 
     await grant(names.slice(1));
     const room = await runTurn();
-    expect(room.turn.tools).toHaveLength(64);
+    expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
     expect(room.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
     expect(room.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
   });

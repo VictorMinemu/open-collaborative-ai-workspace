@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-10-02)
 Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-10 — Phase 07.17 complete, transitioned to Phase 1
+Last activity: 2026-11-11 — Quick task 261111-hs9: bot MCP tools past the per-turn cap
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -96,6 +96,8 @@ Recent decisions affecting current work:
 | 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
 | 261022-cip | Woodpecker workflows in parallel slots on one dind; heavy workflows not on push to main | 2026-10-22 | 52b58541 | [261022-cip-ci-parallel](./quick/261022-cip-ci-parallel/) |
 | 261023-nsb | Node.js 24.22.1 security bump (Oct 2026 releases); every node base image pinned by digest | 2026-10-23 | 4f1f55a4 | [261023-nsb-node-24-22-1](./quick/261023-nsb-node-24-22-1/) |
+| 261111-gyk | Bots with an active Work Zone profile start sessions directly; no proposal tools on their turns | 2026-11-11 | 18d5bcb9 | [261111-gyk-bots-with-an-active-work-zone-profile-st](./quick/261111-gyk-bots-with-an-active-work-zone-profile-st/) |
+| 261111-hs9 | Bot MCP tools past the per-turn cap were silently dropped: cap 128, over-limit warning, bulk enable by read/write | 2026-11-11 | (PR #71) | [261111-hs9-bot-mcp-tools-past-the-64-per-turn-cap-w](./quick/261111-hs9-bot-mcp-tools-past-the-64-per-turn-cap-w/) |
 
 ### Roadmap Evolution
 

@@ -18,6 +18,7 @@ import {
   MAX_WEB_CALLS_PER_TURN,
   modelAcceptsImages,
   SANDBOX_TOOL_NAMES,
+  TURN_TOOLS_MAX,
   type TurnAttachment,
   type TurnContext,
   type TurnMemoryFile,
@@ -108,7 +109,7 @@ export interface TurnAudience {
 type Withheld = NonNullable<TurnContext["withheld"]>;
 
 /** Maximum tools per turn (`TurnContext.tools`). */
-const MAX_TURN_TOOLS = 64;
+const MAX_TURN_TOOLS = TURN_TOOLS_MAX;
 
 const PLATFORM_TOOLS: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS));
 
@@ -356,6 +357,27 @@ function assemble(
     }
   }
   return { tools, toolFlags };
+}
+
+/**
+ * How many of a bot's usable catalog tools a channel turn cannot carry (`MAX_TURN_TOOLS`, after the platform tools
+ * `assemble` adds first). The bot sheet shows it (`BotCapabilityView.toolsOverLimit`): a tool past the cap is never
+ * offered, so the bot cannot call it. Turn-scoped extras (board, Work Zone, consult) can take a few more slots.
+ */
+export function toolsOverLimit(
+  effective: BotCapabilityView["effective"],
+  catalog: readonly CatalogSource[],
+  usable: ReadonlySet<string>,
+  keys: boolean,
+): number {
+  const offered = new Set(assemble(effective, "channel", catalog, usable, false, keys).tools);
+  let over = 0;
+  for (const source of catalog) {
+    for (const t of source.tools) {
+      if (usable.has(`${source.sourceKind}:${source.sourceId}:${t.name}`) && !offered.has(t.name)) over++;
+    }
+  }
+  return over;
 }
 
 const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>
@@ -1088,11 +1110,18 @@ export async function turnPolicy(
 
   // Phase 07.16 (D-05, PD-17): the four Work Zone session tools are turn-scoped, all or none: offered only with the
   // caller's offer and room for the four. The routes re-decide every call (the live turn, the profile, the sponsor).
-  const workZone =
-    p.workZone && computed.tools.length + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS
-      ? p.workZone
-      : null;
+  // They replace the 07.5 proposal tools: offered both, the model kept proposing (a card the person had to start) and
+  // told them it could not start sessions. The start route still falls back to a proposal after outside content.
+  const proposalTools: readonly string[] = [BUILTIN_TOOLS.workZoneProjects, BUILTIN_TOOLS.startWorkZone];
+  const kept = computed.tools.filter((name) => !proposalTools.includes(name)).length;
+  const workZone = p.workZone && kept + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS ? p.workZone : null;
   if (workZone) {
+    for (const name of proposalTools) {
+      const at = computed.tools.indexOf(name);
+      if (at === -1) continue;
+      computed.tools.splice(at, 1);
+      delete computed.toolFlags[name];
+    }
     for (const name of WORK_SESSION_TOOL_NAMES) {
       if (computed.toolFlags[name]) continue;
       computed.tools.push(name);
