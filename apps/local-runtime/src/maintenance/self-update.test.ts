@@ -11,29 +11,40 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rename, symlink } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { CLAUDE_AGENT_SDK_PACKAGE, RUNTIME_ROUTES, runtimeExternalFiles } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { RuntimeInstallInfo } from "../install-info.js";
 import {
   fetchServedManifest,
   isLoopbackHost,
   NPM_CI_ARGS,
   type PrepareVersionOptions,
   prepareVersion,
+  readSelfUpdateMarker,
+  removeSelfUpdateMarker,
   SELF_UPDATE_FAILURE_SENTENCES,
   SelfUpdateError,
   type SelfUpdateFailure,
+  type SelfUpdateMarker,
+  selfUpdateMarkerPath,
   serverRuntimeUrl,
+  switchToVersion,
+  writeSelfUpdateMarker,
 } from "./self-update.js";
 import {
   type DistStub,
   fakeNpm,
   HOST_PATH_TOKEN_RE,
   layOutVersion,
+  SCRATCH_NODE_PATH,
   type ScratchHome,
   scratchOcwHome,
   startDistStub,
@@ -399,5 +410,171 @@ describe("prepareVersion failures (07.17.1, D-07, E1–E10, E23)", () => {
         join(runtime(), "versions", new12, "node_modules", CLAUDE_AGENT_SDK_PACKAGE, "package.json"),
       ),
     ).toBe(true);
+  });
+});
+
+function marker(over: Partial<SelfUpdateMarker> = {}): SelfUpdateMarker {
+  return {
+    runId: RUN_ID,
+    commandId: "0d6c1c38-2f7e-4a8b-9a51-6c0f1e2d3b4a",
+    trigger: "manual",
+    from: { version: "0.3.1", sha256: home.oldSha256 },
+    to: { version: "0.3.2", sha256: stub.manifest.sha256 },
+    startedAt: "2026-11-11T12:00:00.000Z",
+    ...over,
+  };
+}
+
+const markerFile = () => join(runtime(), "self-update.json");
+
+describe("the self-update marker (07.17.1, PD-08, PD-12)", () => {
+  it("round-trips through a 0600 file", async () => {
+    const m = marker();
+    await writeSelfUpdateMarker(home.ocwHome, m);
+    expect(selfUpdateMarkerPath(home.ocwHome)).toBe(markerFile());
+    expect(statSync(markerFile()).mode & 0o777).toBe(0o600);
+    expect(await readSelfUpdateMarker(home.ocwHome)).toEqual(m);
+    expect(readFileSync(markerFile(), "utf8")).not.toMatch(HOST_PATH_TOKEN_RE);
+  });
+
+  it("reads an extra key, a bad sha256 or no file as null; removing a missing marker resolves", async () => {
+    writeFileSync(markerFile(), JSON.stringify({ ...marker(), path: "/home/x" }));
+    expect(await readSelfUpdateMarker(home.ocwHome)).toBeNull();
+    writeFileSync(markerFile(), JSON.stringify(marker({ to: { version: "0.3.2", sha256: "x" } })));
+    expect(await readSelfUpdateMarker(home.ocwHome)).toBeNull();
+    writeFileSync(markerFile(), "{");
+    expect(await readSelfUpdateMarker(home.ocwHome)).toBeNull();
+    await removeSelfUpdateMarker(home.ocwHome);
+    expect(existsSync(markerFile())).toBe(false);
+    expect(await readSelfUpdateMarker(home.ocwHome)).toBeNull();
+    await expect(removeSelfUpdateMarker(home.ocwHome)).resolves.toBeUndefined();
+  });
+
+  it("refuses to write a marker that does not parse", async () => {
+    await expect(writeSelfUpdateMarker(home.ocwHome, marker({ runId: "not-a-uuid" }))).rejects.toThrow();
+    expect(existsSync(markerFile())).toBe(false);
+  });
+});
+
+describe("switchToVersion (07.17.1, D-03, PD-08, E11)", () => {
+  async function prepared() {
+    return prepareVersion(await options());
+  }
+
+  /** The real fs calls, recorded by destination name. */
+  function spyFs(order: string[], failOn?: string) {
+    return {
+      rename: async (from: string, to: string) => {
+        order.push(`rename:${basename(to)}`);
+        if (failOn && basename(to) === failOn)
+          throw Object.assign(new Error(`EIO: rename ${to}`), { code: "EIO" });
+        return rename(from, to);
+      },
+      symlink: async (target: string, path: string) => {
+        order.push(`symlink:${target}`);
+        return symlink(target, path);
+      },
+    };
+  }
+
+  it("writes the marker, swaps current atomically to the relative new version, then rewrites install.json", async () => {
+    const p = await prepared();
+    const order: string[] = [];
+    await switchToVersion({
+      ocwHome: home.ocwHome,
+      prepared: p,
+      marker: marker(),
+      serverUrl: stub.url,
+      now: () => new Date("2026-11-11T12:01:00.000Z"),
+      fs: spyFs(order),
+    });
+    expect(order).toEqual([
+      "rename:self-update.json",
+      `symlink:versions/${p.sha12}`,
+      "rename:current",
+      "rename:install.json",
+    ]);
+    expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${p.sha12}`);
+    expect(realpathSync(join(runtime(), "current", "ocw-runtime.mjs"))).toBe(
+      join(realpathSync(runtime()), "versions", p.sha12, "ocw-runtime.mjs"),
+    );
+    // The previous version stays for a rollback (PD-08).
+    expect(existsSync(join(runtime(), "versions", home.oldSha12, "ocw-runtime.mjs"))).toBe(true);
+    expect(await readSelfUpdateMarker(home.ocwHome)).toEqual(marker());
+    expect(readdirSync(runtime()).filter((n) => n.startsWith("current.tmp-"))).toEqual([]);
+
+    const file = join(runtime(), "install.json");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    const info = RuntimeInstallInfo.parse(JSON.parse(readFileSync(file, "utf8")));
+    expect(info).toEqual({
+      serverUrl: stub.url,
+      version: "0.3.2",
+      sha256: stub.manifest.sha256,
+      installedAt: "2026-11-11T12:01:00.000Z",
+      nodePath: SCRATCH_NODE_PATH,
+    });
+  });
+
+  it("replaces a leftover current.tmp-<pid> that points elsewhere (E11)", async () => {
+    const p = await prepared();
+    symlinkSync("versions/elsewhere", join(runtime(), `current.tmp-${process.pid}`));
+    await switchToVersion({ ocwHome: home.ocwHome, prepared: p, marker: marker(), serverUrl: stub.url });
+    expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${p.sha12}`);
+    expect(readdirSync(runtime()).filter((n) => n.startsWith("current.tmp-"))).toEqual([]);
+  });
+
+  it("with no previous install record, the new record names the node that runs the daemon", async () => {
+    const p = await prepared();
+    rmSync(join(runtime(), "install.json"));
+    await switchToVersion({ ocwHome: home.ocwHome, prepared: p, marker: marker(), serverUrl: stub.url });
+    const info = RuntimeInstallInfo.parse(JSON.parse(readFileSync(join(runtime(), "install.json"), "utf8")));
+    expect(info.nodePath).toBe(process.execPath);
+    expect(info.version).toBe("0.3.2");
+  });
+
+  it("a failed link rename → switch_failed; current still resolves to the old version, no marker left", async () => {
+    const p = await prepared();
+    const before = installJsonBytes();
+    const err = await failureOf(
+      switchToVersion({
+        ocwHome: home.ocwHome,
+        prepared: p,
+        marker: marker(),
+        serverUrl: stub.url,
+        fs: spyFs([], "current"),
+      }),
+      "switch_failed",
+    );
+    expect(err.detail).not.toMatch(HOST_PATH_TOKEN_RE);
+    expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${home.oldSha12}`);
+    expect(realpathSync(join(runtime(), "current", "ocw-runtime.mjs"))).toBe(
+      join(realpathSync(runtime()), "versions", home.oldSha12, "ocw-runtime.mjs"),
+    );
+    expect(installJsonBytes().equals(before)).toBe(true);
+    expect(existsSync(markerFile())).toBe(false);
+    expect(readdirSync(runtime()).filter((n) => n.startsWith("current.tmp-"))).toEqual([]);
+  });
+
+  it("a server URL that is not a URL → switch_failed before anything changes", async () => {
+    const p = await prepared();
+    const before = installJsonBytes();
+    await failureOf(
+      switchToVersion({ ocwHome: home.ocwHome, prepared: p, marker: marker(), serverUrl: "not a url" }),
+      "switch_failed",
+    );
+    expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${home.oldSha12}`);
+    expect(installJsonBytes().equals(before)).toBe(true);
+    expect(existsSync(markerFile())).toBe(false);
+  });
+
+  it("a prepared version that is not on disk → switch_failed, current untouched", async () => {
+    const p = await prepared();
+    rmSync(join(runtime(), "versions", p.sha12), { recursive: true });
+    await failureOf(
+      switchToVersion({ ocwHome: home.ocwHome, prepared: p, marker: marker(), serverUrl: stub.url }),
+      "switch_failed",
+    );
+    expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${home.oldSha12}`);
+    expect(existsSync(markerFile())).toBe(false);
   });
 });
