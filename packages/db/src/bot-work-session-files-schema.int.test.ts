@@ -375,3 +375,109 @@ describe("bot file exchange isolation as ocw_app (07.17.1.1, D-05)", () => {
     await expect(as(A.id, null, (q) => transfer(A, {}, q))).resolves.toEqual(expect.any(String));
   });
 });
+
+const ACTIVE = "{provisioning,idle,running,waiting_approval,host_offline}";
+
+describe("file moves share the bot's hourly prompt budget (07.17.1.1, D-06, PD-12)", () => {
+  /** `app.bot_work_session_load` as ocw_app in `org` (a user-less system transaction, as the API's caps run). */
+  const load = (org: Org, agent: string) =>
+    as(org.id, null, async (q) => {
+      const r = await q(
+        "select bot_active, org_active, bot_prompts_hour, tree_busy from app.bot_work_session_load($1, $2, $3::text[])",
+        [agent, org.project, ACTIVE],
+      );
+      return r.rows[0] as {
+        bot_active: number;
+        org_active: number;
+        bot_prompts_hour: number;
+        tree_busy: boolean;
+      };
+    });
+
+  /** The 07.16 definition of the three other columns, read directly as the migrator (the oracle for "unchanged"). */
+  const others = async (org: Org, agent: string) =>
+    (
+      await db.query(
+        `select (select count(*)::int from app.work_sessions where organization_id = $1 and started_by_agent_id = $2 and status = any ($4::text[])) as bot_active,
+                (select count(*)::int from app.work_sessions where organization_id = $1 and started_by_agent_id is not null and status = any ($4::text[])) as org_active,
+                exists (select 1 from app.work_sessions where organization_id = $1 and project_id = $3 and not worktree and status = any ($4::text[])) as tree_busy`,
+        [org.id, agent, org.project, ACTIVE],
+      )
+    ).rows[0] as { bot_active: number; org_active: number; tree_busy: boolean };
+
+  it("counts the agent's prompts and ledger rows of the last hour, whatever their status; older rows and other agents are not counted", async () => {
+    const C = await seedOrg();
+    const y = await bot(C.id, "other");
+    const before = await load(C, C.agent);
+    expect(before.bot_prompts_hour).toBe(0);
+    for (const position of [1, 2]) {
+      await db.query(
+        "insert into app.work_prompts (organization_id, work_session_id, author_user_id, body, position, author_agent_id) values ($1, $2, $3, 'x', $4, $5)",
+        [C.id, C.session, C.user, position, C.agent],
+      );
+    }
+    expect((await load(C, C.agent)).bot_prompts_hour).toBe(2);
+    await transfer(C, { status: "done" });
+    await transfer(C, { status: "pending", direction: "from_device", completed_at: null });
+    await transfer(C, { status: "failed", failure: "not_found" });
+    await transfer(C, { created_at: new Date(Date.now() - 2 * 3600_000).toISOString() });
+    await transfer(C, { agent_id: y });
+    const after = await load(C, C.agent);
+    expect(after.bot_prompts_hour).toBe(5);
+    expect({
+      bot_active: after.bot_active,
+      org_active: after.org_active,
+      tree_busy: after.tree_busy,
+    }).toEqual(await others(C, C.agent));
+    expect({
+      bot_active: after.bot_active,
+      org_active: after.org_active,
+      tree_busy: after.tree_busy,
+    }).toEqual({
+      bot_active: before.bot_active,
+      org_active: before.org_active,
+      tree_busy: before.tree_busy,
+    });
+    // The other agent's own row counts for it alone; another organization's rows never count.
+    expect((await load(C, y)).bot_prompts_hour).toBe(1);
+    await transfer(B, { agent_id: C.agent });
+    expect((await load(C, C.agent)).bot_prompts_hour).toBe(5);
+  });
+
+  it("still raises without a tenant (it bypasses RLS and backs every cap)", async () => {
+    const call = (q: Q) =>
+      q("select * from app.bot_work_session_load($1, $2, $3::text[])", [A.agent, A.project, ACTIVE]);
+    await app.query("begin");
+    try {
+      await app.query("select set_config('app.organization_id', '', true)");
+      await expect(call(app.query.bind(app) as Q)).rejects.toMatchObject({
+        code: "42501",
+        message: "tenant context required",
+      });
+    } finally {
+      await app.query("rollback");
+    }
+    await expect(call(app.query.bind(app) as Q)).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("keeps its signature, SECURITY DEFINER, search_path and grants", async () => {
+    const fn = await db.query(
+      `select pg_get_function_identity_arguments(p.oid) as args, pg_get_function_result(p.oid) as result,
+              p.prosecdef as definer, p.proconfig as config,
+              has_function_privilege('ocw_app', p.oid, 'execute') as app_exec,
+              has_function_privilege('ocw_auth', p.oid, 'execute') as auth_exec
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'app' and p.proname = 'bot_work_session_load'`,
+    );
+    expect(fn.rows).toEqual([
+      {
+        args: "p_agent uuid, p_project uuid, p_states text[]",
+        result: "TABLE(bot_active integer, org_active integer, bot_prompts_hour integer, tree_busy boolean)",
+        definer: true,
+        config: ["search_path=pg_catalog, pg_temp"],
+        app_exec: true,
+        auth_exec: false,
+      },
+    ]);
+  });
+});

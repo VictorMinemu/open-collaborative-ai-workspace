@@ -896,6 +896,32 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       expect(await pgbossQueues()).toContain("automation.item");
     });
 
+    it("starts every policy at a 25 MiB bot file limit, every profile at the organization's and an empty file ledger (Phase 07.17.1.1, D-05, D-07)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const policies = await c.query(
+          "select organization_id, bot_file_max_bytes::text as bot_file_max_bytes from app.work_zone_policies order by organization_id",
+        );
+        expect(policies.rows).toEqual([{ organization_id: ORG_A, bot_file_max_bytes: "26214400" }]);
+        // `bot_work_zone_profiles` is newer than N-1 (none can exist there): its new column is nullable with no default,
+        // so a profile stored by N-1 code against this schema reads the organization's limit.
+        const cols = await c.query(
+          "select table_name, is_nullable, column_default from information_schema.columns where table_schema = 'app' and ((table_name = 'bot_work_zone_profiles' and column_name = 'file_max_bytes') or (table_name = 'work_zone_policies' and column_name = 'bot_file_max_bytes')) order by table_name",
+        );
+        expect(cols.rows).toEqual([
+          { table_name: "bot_work_zone_profiles", is_nullable: "YES", column_default: null },
+          { table_name: "work_zone_policies", is_nullable: "NO", column_default: "26214400" },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.bot_work_zone_profiles where file_max_bytes is not null) as profile_limits, (select count(*)::int from app.bot_work_session_files) as transfers",
+        );
+        expect(empty.rows).toEqual([{ profile_limits: 0, transfers: 0 }]);
+      } finally {
+        await c.end();
+      }
+    });
+
     it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {
       const c = new pg.Client({ connectionString: urls.migrator });
       await c.connect();
