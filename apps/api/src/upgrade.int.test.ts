@@ -142,6 +142,7 @@ const HEAD_ONLY = [
   "20261110081210_automation_fan_out",
   "20261110124940_automation_item_waiting",
   "20261111194914_runtime_self_update",
+  "20261111225544_bot_work_session_files",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
