@@ -6,7 +6,7 @@
 // every case no lock file exists under the OS user's real home (PD-19, E30).
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join, relative } from "node:path";
 import {
@@ -18,8 +18,17 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { RuntimeGate } from "./gate.js";
+import { CANCELLED_STOPPED } from "./maintenance.js";
 import { InstallLock } from "./runner.js";
-import { type PrepareVersionOptions, prepareVersion, readSelfUpdateMarker } from "./self-update.js";
+import {
+  type PrepareVersionOptions,
+  prepareVersion,
+  readSelfUpdateMarker,
+  SELF_UPDATE_FAILURE_SENTENCES,
+  SelfUpdateError,
+  selfUpdateMarkerPath,
+  switchToVersion,
+} from "./self-update.js";
 import {
   type DistStub,
   fakeNpm,
@@ -193,7 +202,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   for (const r of rigs.splice(0)) {
-    r.su.stop();
+    await r.su.stop();
     // PD-19, E30: the job's lock is in the scratch home, never in the OS user's lock directory.
     expect(existsSync(realHomeLockFile(r))).toBe(false);
     const home = userInfo().homedir;
@@ -368,5 +377,287 @@ describe("SelfUpdate: one click on an idle service device (07.17.1, D-03, D-05, 
       lastRun: null,
       checkedAt: null,
     });
+  });
+});
+
+async function untilState(r: Rig, state: RuntimeSelfStatus["state"]): Promise<void> {
+  await vi.waitFor(() => expect(r.su.status().state).toBe(state), { timeout: 10_000, interval: 20 });
+}
+
+describe("SelfUpdate: never cut a turn (07.17.1, D-04, PD-09, E12)", () => {
+  it("a click while Codex runs a turn closes every gate at once, holds new turns, and switches once Codex is idle", async () => {
+    const r = await makeRig();
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+
+    expect(gatesClosed(r)).toBe(true);
+    expect(r.su.holding).toBe(true);
+    expect(r.su.status().pendingSince).toBe("2026-11-11T12:00:00.000Z");
+    expect(r.exit).not.toHaveBeenCalled();
+    // A new Claude Code turn is held, not run.
+    const ran: string[] = [];
+    void r.gates.get("claude-code")?.admit(async () => {
+      ran.push("claude-code");
+    });
+    expect(r.gates.get("claude-code")?.heldCount).toBe(1);
+    await r.clock.advance(5_000);
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(ran).toEqual([]);
+
+    r.turns.codex = 0;
+    await r.clock.advance(1_000);
+    await untilExit(r);
+    expect(r.exit).toHaveBeenCalledWith(75);
+    expect(ran).toEqual([]);
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${newSha12(r)}`);
+    expect(r.published.map((s) => s.state)).toEqual(["downloading", "installing", "waiting", "restarting"]);
+  });
+
+  it("automatic with a turn running keeps every gate open until drainAfterMs, then drains and switches when idle", async () => {
+    const r = await makeRig({ drainAfterMs: 60_000 }, { level: "automatic" });
+    r.turns["claude-code"] = 1;
+    expect(await r.su.request("automatic")).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    expect(gatesOpen(r)).toBe(true);
+    expect(r.su.holding).toBe(false);
+
+    await r.clock.advance(59_000);
+    expect(gatesOpen(r)).toBe(true);
+    expect(r.exit).not.toHaveBeenCalled();
+    await r.clock.advance(1_000);
+    expect(gatesClosed(r)).toBe(true);
+    expect(r.su.status().state).toBe("waiting");
+    expect(r.exit).not.toHaveBeenCalled();
+
+    r.turns["claude-code"] = 0;
+    await r.clock.advance(1_000);
+    await untilExit(r);
+    expect(r.frames[0]).toMatchObject({ phase: "started", trigger: "automatic" });
+    expect(r.frames[0]?.commandId).toBeUndefined();
+  });
+
+  it("automatic: a turn that ends before drainAfterMs lets the next idle moment close every gate and switch", async () => {
+    const r = await makeRig({ drainAfterMs: 60_000 }, { level: "automatic" });
+    r.turns.codex = 1;
+    expect(await r.su.request("automatic")).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    await r.clock.advance(10_000);
+    expect(gatesOpen(r)).toBe(true);
+    r.turns.codex = 0;
+    await r.clock.advance(1_000);
+    await untilExit(r);
+    expect(gatesClosed(r)).toBe(true);
+  });
+
+  it("automatic with nothing running closes every gate and switches at once", async () => {
+    const r = await makeRig({ drainAfterMs: 60_000 }, { level: "automatic" });
+    expect(await r.su.request("automatic")).toEqual({ accepted: true });
+    await untilExit(r);
+    expect(r.published.map((s) => s.state)).toEqual(["downloading", "installing", "restarting"]);
+  });
+
+  it("a command admitted but not yet at its adapter counts as running: no switch until it is through", async () => {
+    const r = await makeRig();
+    let done: () => void = () => undefined;
+    const inFlight = r.gates.get("claude-code")?.admit(
+      () =>
+        new Promise<void>((resolve) => {
+          done = resolve;
+        }),
+    );
+    expect(r.gates.get("claude-code")?.admitted).toBe(1);
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    expect(gatesClosed(r)).toBe(true);
+    await r.clock.advance(3_000);
+    expect(r.exit).not.toHaveBeenCalled();
+    done();
+    await inFlight;
+    await r.clock.advance(1_000);
+    await untilExit(r);
+  });
+});
+
+describe("SelfUpdate: exclusion with 07.11 and every gate reopened (07.17.1, PD-09, E13)", () => {
+  it("a 07.11 CLI job active: no gate closes and the state is waiting; when it ends the decision runs", async () => {
+    const r = await makeRig();
+    r.cli.busy = true;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    await r.clock.advance(5_000);
+    expect(r.closes).toEqual({ "claude-code": 0, codex: 0 });
+    expect(gatesOpen(r)).toBe(true);
+    expect(r.su.holding).toBe(false);
+    expect(r.exit).not.toHaveBeenCalled();
+
+    r.cli.busy = false;
+    await r.clock.advance(1_000);
+    await untilExit(r);
+    expect(gatesClosed(r)).toBe(true);
+  });
+
+  it("a switch that fails after the gates closed reopens every gate, releases the lock and reports the switch sentence", async () => {
+    let closedAtSwitch = false;
+    const r = await makeRig({
+      switchTo: async () => {
+        closedAtSwitch = gatesClosed(rigs[0] as Rig);
+        throw new SelfUpdateError("switch_failed");
+      },
+    });
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilIdleWith(r, 2);
+
+    expect(closedAtSwitch).toBe(true);
+    expect(gatesOpen(r)).toBe(true);
+    expect(r.su.holding).toBe(false);
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(r.frames.map((f) => [f.phase, f.outcome])).toEqual([
+      ["started", undefined],
+      ["finished", "failed"],
+    ]);
+    expect(r.frames[1]?.output).toBe(SELF_UPDATE_FAILURE_SENTENCES.switch_failed);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 5_000, interval: 20 });
+    expect(r.su.status()).toMatchObject({
+      state: "idle",
+      pendingSince: null,
+      lastRun: { outcome: "failed" },
+    });
+    expectNoHostPath(r);
+  });
+
+  it("an unexpected error while switching is reported with the fixed switch sentence, never its message", async () => {
+    const r = await makeRig({
+      switchTo: async () => {
+        throw new Error("EACCES: permission denied, rename '/Users/someone/.ocw/runtime/current.tmp-1'");
+      },
+    });
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilIdleWith(r, 2);
+    expect(r.frames[1]?.output).toBe(SELF_UPDATE_FAILURE_SENTENCES.switch_failed);
+    expect(gatesOpen(r)).toBe(true);
+    expectNoHostPath(r);
+  });
+});
+
+describe("SelfUpdate: requests the device refuses (07.17.1, D-05, PD-11)", () => {
+  it("a second request while a job runs answers the busy sentence", async () => {
+    const r = await makeRig();
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    expect(await r.su.request("manual", "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60")).toEqual({
+      accepted: false,
+      reason: SELF_UPDATE_REFUSALS.busy,
+    });
+    expect(await r.su.request("automatic")).toEqual({ accepted: false, reason: SELF_UPDATE_REFUSALS.busy });
+    expect(SELF_UPDATE_REFUSALS.busy).toBe("an update of the OCW runtime is already running");
+  });
+
+  it.each([
+    ["not_supervised", { supervised: false, reason: "not_supervised" as const }],
+    ["not_installed", { supervised: false, reason: "not_installed" as const }],
+  ])(
+    "a daemon whose supervision says %s refuses with its sentence; nothing is fetched",
+    async (reason, supervision) => {
+      const r = await makeRig({ supervision });
+      expect(await r.su.request("manual", COMMAND_ID)).toEqual({
+        accepted: false,
+        reason: SELF_UPDATE_REFUSALS[reason as "not_supervised" | "not_installed"],
+      });
+      await flush();
+      expect(r.stub.requests).toEqual([]);
+      expect(r.frames).toEqual([]);
+      expect(r.su.busy).toBe(false);
+    },
+  );
+
+  it("no running build (a checkout, the desktop app): refused not_installed, nothing fetched", async () => {
+    const r = await makeRig({ running: null, supervision: { supervised: false, reason: null } });
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({
+      accepted: false,
+      reason: SELF_UPDATE_REFUSALS.not_installed,
+    });
+    await flush();
+    expect(r.stub.requests).toEqual([]);
+  });
+
+  it("the sentences are the contract's (RUNTIME_SELF_BLOCK_SENTENCES)", () => {
+    expect(SELF_UPDATE_REFUSALS.not_supervised).toBe(
+      "Run as a service to update from the browser; or re-run the install command",
+    );
+  });
+});
+
+describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => {
+  it("stop() while waiting: gates open, lock released, no staging, finished failed cancelled, no exit", async () => {
+    const r = await makeRig();
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    expect(gatesClosed(r)).toBe(true);
+    expect(existsSync(lockFileOf(r))).toBe(true);
+
+    await r.su.stop();
+    expect(gatesOpen(r)).toBe(true);
+    expect(existsSync(lockFileOf(r))).toBe(false);
+    expect(stagingLeft(r)).toEqual([]);
+    expect(r.frames.map((f) => [f.phase, f.outcome, f.commandId])).toEqual([
+      ["started", undefined, COMMAND_ID],
+      ["finished", "failed", COMMAND_ID],
+    ]);
+    expect(r.frames[1]?.output).toBe(CANCELLED_STOPPED);
+    expect(r.su.status().state).toBe("idle");
+
+    r.turns.codex = 0;
+    await r.clock.advance(5_000);
+    await flush();
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(r.frames).toHaveLength(2);
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
+  });
+
+  it("stop() after the switch (restarting, exit pending): no frame, every gate stays closed, the lock and the marker stay", async () => {
+    // The daemon's stop runs while the exit hand-over is still pending (10).
+    const exit = vi.fn((_code: number) => new Promise<void>(() => undefined));
+    const r = await makeRig({ exit });
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(75), { timeout: 10_000, interval: 20 });
+    expect(r.su.status().state).toBe("restarting");
+    const markerBefore = readFileSync(selfUpdateMarkerPath(r.home.ocwHome), "utf8");
+    const framesBefore = r.frames.length;
+
+    await r.su.stop();
+    await flush();
+    expect(r.frames).toHaveLength(framesBefore);
+    expect(r.frames.some((f) => f.phase === "finished")).toBe(false);
+    expect(gatesClosed(r)).toBe(true);
+    expect(r.su.holding).toBe(true);
+    expect(existsSync(lockFileOf(r))).toBe(true);
+    expect(readFileSync(selfUpdateMarkerPath(r.home.ocwHome), "utf8")).toBe(markerBefore);
+    expect(r.su.status().state).toBe("restarting");
+  });
+
+  it("stop() while the switch itself runs: nothing is sent and no exit follows; the next start reports the run", async () => {
+    let release: () => void = () => undefined;
+    const r = await makeRig({
+      switchTo: async (p) => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await switchToVersion(p);
+      },
+    });
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "restarting");
+    const stopped = r.su.stop();
+    release();
+    await stopped;
+    await vi.waitFor(() =>
+      expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${newSha12(r)}`),
+    );
+    await flush();
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(r.frames.some((f) => f.phase === "finished")).toBe(false);
+    expect(await readSelfUpdateMarker(r.home.ocwHome)).toMatchObject({ commandId: COMMAND_ID });
   });
 });
