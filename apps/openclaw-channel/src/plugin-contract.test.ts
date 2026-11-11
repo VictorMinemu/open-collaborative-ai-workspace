@@ -4197,14 +4197,29 @@ describe("bot Work Zone file mirror parity (07.17.1.1-01: plugin ↔ packages/co
       sizeBytes?: number | null;
       limit: { bytes: number; source: string };
     }) => string;
-    const sizes = [0, 1, 1023, 1024, 1536, 10 * MiB, 25 * MiB, 40 * MiB + 512 * 1024, 1024 * MiB, 3 * 1024 * MiB];
+    const sizes = [
+      0,
+      1,
+      1023,
+      1024,
+      1536,
+      10 * MiB,
+      25 * MiB,
+      40 * MiB + 512 * 1024,
+      1024 * MiB,
+      3 * 1024 * MiB,
+    ];
     expect(sizes).toHaveLength(10);
     for (const b of sizes) expect(m.fileSizeLabel(b), String(b)).toBe(label(b));
     for (const source of ["bot", "organization", "server"] as const) {
       const limit = { bytes: 25 * MiB, source };
-      expect(m.botFileTooLargeSentence({ sizeBytes: 40 * MiB, limit })).toBe(sentence({ sizeBytes: 40 * MiB, limit }));
+      expect(m.botFileTooLargeSentence({ sizeBytes: 40 * MiB, limit })).toBe(
+        sentence({ sizeBytes: 40 * MiB, limit }),
+      );
       expect(m.botFileTooLargeSentence({ limit })).toBe(sentence({ limit }));
-      expect(m.botFileTooLargeSentence({ sizeBytes: null, limit })).toBe(sentence({ sizeBytes: null, limit }));
+      expect(m.botFileTooLargeSentence({ sizeBytes: null, limit })).toBe(
+        sentence({ sizeBytes: null, limit }),
+      );
     }
   });
 

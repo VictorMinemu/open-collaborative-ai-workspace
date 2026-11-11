@@ -2071,6 +2071,9 @@ export const deviceCommands = appSchema.table(
         "session.configure",
         "session.title",
         "runtime.update",
+        // 07.17.1.1 (D-04): type-level only, like the kinds above (the column has no check constraint).
+        "session.file.write",
+        "session.file.read",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),

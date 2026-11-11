@@ -284,7 +284,9 @@ describe("device commands, payloads and acks (07.17.1.1 D-04, D-08, D-14, PD-05,
     expect(SessionFileWritePayload.parse(write)).toEqual(write);
     expect(SessionFileWritePayload.parse({ ...write, sha256: null })).toEqual({ ...write, sha256: null });
     // A plain object: a newer API's extra key is stripped, so an older daemon never breaks on it.
-    expect(SessionFileWritePayload.parse({ ...write, url: "https://x.test/f", bytes: "aGk=" })).toEqual(write);
+    expect(SessionFileWritePayload.parse({ ...write, url: "https://x.test/f", bytes: "aGk=" })).toEqual(
+      write,
+    );
     expect(SessionFileWritePayload.safeParse({ ...write, sha256: "A".repeat(64) }).success).toBe(false);
     expect(SessionFileWritePayload.safeParse({ ...write, sha256: "a".repeat(63) }).success).toBe(false);
     expect(SessionFileWritePayload.safeParse({ ...write, sizeBytes: GiB + 1 }).success).toBe(false);
@@ -329,8 +331,12 @@ describe("device commands, payloads and acks (07.17.1.1 D-04, D-08, D-14, PD-05,
     expect(parseSessionFileAck(undefined)).toEqual({ code: "unknown" });
     expect(sessionFileAckError("mismatch", "size")).toBe("mismatch: size");
     expect(sessionFileAckError("exists")).toBe("exists");
-    expect(sessionFileAckError("transfer_failed", "first line\nsecond line")).toBe("transfer_failed: first line");
-    expect(sessionFileAckError("transfer_failed", "x".repeat(500))).toBe(`transfer_failed: ${"x".repeat(120)}`);
+    expect(sessionFileAckError("transfer_failed", "first line\nsecond line")).toBe(
+      "transfer_failed: first line",
+    );
+    expect(sessionFileAckError("transfer_failed", "x".repeat(500))).toBe(
+      `transfer_failed: ${"x".repeat(120)}`,
+    );
     expect(sessionFileAckError("too_large", String(41943040))).toBe("too_large: 41943040");
   });
 

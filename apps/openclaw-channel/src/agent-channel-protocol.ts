@@ -664,6 +664,30 @@ export const BOT_FILE_LIMIT_SOURCE_LABELS: Readonly<Record<BotFileLimitSource, s
   server: "the server's limit",
 };
 
+const FILE_SIZE_UNITS = ["B", "KB", "MB", "GB"] as const;
+
+/** Contracts `fileSizeLabel`: 1 536 → "1.5 KB", 25 MiB → "25 MB" (binary units, one decimal, ".0" dropped). */
+export function fileSizeLabel(bytes: number): string {
+  let value = Math.max(0, bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < FILE_SIZE_UNITS.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const text = unit === 0 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
+  return `${text} ${FILE_SIZE_UNITS[unit]}`;
+}
+
+/** Contracts `botFileTooLargeSentence`: the size, the limit and the level that set it (≤ 300 characters). */
+export function botFileTooLargeSentence(p: { sizeBytes?: number | null; limit: BotFileLimit }): string {
+  const limit = `${fileSizeLabel(p.limit.bytes)} (${BOT_FILE_LIMIT_SOURCE_LABELS[p.limit.source]})`;
+  const text =
+    p.sizeBytes === null || p.sizeBytes === undefined
+      ? `That file is larger than this bot may move: up to ${limit}.`
+      : `That file is ${fileSizeLabel(p.sizeBytes)}. This bot moves files up to ${limit}.`;
+  return text.slice(0, 300);
+}
+
 /** `POST /work-sessions/upload` (`ocw_work_session_upload`): ids and a repo-relative path; strict. */
 export const AgentChannelWorkSessionUpload = z.strictObject({
   eventId: Id,

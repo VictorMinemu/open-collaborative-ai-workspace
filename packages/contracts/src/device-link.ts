@@ -60,6 +60,17 @@ export const CommandKind = z.enum([
    * acked when accepted, the result arrives as `runtime.update.run` frames.
    */
   "runtime.update",
+  /**
+   * 07.17.1.1 (D-04, D-08, D-13): write one file of an active, idle session from `GET <serverUrl>/api/v1/runtime/files/
+   * <command id>` under the device's own token; payload `SessionFileWritePayload` (a path and bounds, never bytes or a
+   * URL). An older daemon acks `invalid command frame`, read as `runtime_too_old`.
+   */
+  "session.file.write",
+  /**
+   * 07.17.1.1 (D-03, D-04, D-08): stream one regular file of an active session to `PUT …/<command id>`; payload
+   * `SessionFileReadPayload`.
+   */
+  "session.file.read",
 ]);
 export type CommandKind = z.infer<typeof CommandKind>;
 
@@ -319,6 +330,11 @@ export const WORK_PROMPT_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
  * frame. A frame above the daemon's limit closes the link (1009) and redelivery would loop, so neither side exceeds it.
  */
 export const DEVICE_LINK_MAX_COMMAND_FRAME_BYTES = 32 * 1024 * 1024;
+/**
+ * 07.17.1.1 (D-14): the largest device → server frame, the API's inbound WebSocket `maxPayload`. A bigger frame closes
+ * the link with 1009, so the daemon bounds what it sends (a `diff.result` patch is cut and marked `truncated`).
+ */
+export const DEVICE_LINK_MAX_DEVICE_FRAME_BYTES = 256 * 1024;
 const IMAGE_BASE64_MAX_CHARS = Math.ceil(WORK_PROMPT_IMAGE_MAX_BYTES / 3) * 4;
 
 export const PromptImage = z.object({
