@@ -60,10 +60,13 @@ import {
   AgentChannelWorkSessionStartResponse,
   type AgentChannelWorkSessionStop,
   AgentChannelWorkSessionStopResponse,
+  type AgentChannelWorkSessionUpload,
+  AgentChannelWorkSessionUploadResponse,
   type AgentChannelWorkZoneProjects,
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
   AgentChannelWorkZoneProposeResponse,
+  BOT_FILE_LIMITS,
   BROWSER_TIMEOUTS_MS,
   BROWSER_TOOL_NAMES,
   BROWSER_TOOL_RESPONSES,
@@ -224,6 +227,14 @@ export const ATTACHMENT_READ_TIMEOUT_MS = 35_000;
  * device's first answer; 30 s waits past it, so the bot reads what the API decided.
  */
 export const WORK_SESSION_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 07.17.1.1 (PD-18): one attempt of `ocw_work_session_upload` / `ocw_work_session_download`. The route waits for the
+ * device to finish the transfer, bounded by the ledger's deadline (at most `BOT_FILE_LIMITS.transferMaxMs`, 10 min);
+ * 15 s more lets the bot read what the API decided (moved, refused or `transfer_timeout`), never the transport sentence
+ * for a move that happened anyway. A retry could move the file twice, so there is none.
+ */
+export const WORK_SESSION_FILE_REQUEST_TIMEOUT_MS = BOT_FILE_LIMITS.transferMaxMs + 15_000;
 
 /**
  * 07.17 (PD-07): one `/conversations/open` call posts up to 25 cards or messages in one transaction; the budget is
@@ -732,6 +743,26 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         WORK_SESSION_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelWorkSessionStopResponse.parse(raw);
+    },
+    /**
+     * `ocw_work_session_upload` (07.17.1.1 D-01, D-02): the turn's ids, the session, one of the turn's attachments and a
+     * repo-relative path; the API decides everything else and waits for the device. One attempt of
+     * `WORK_SESSION_FILE_REQUEST_TIMEOUT_MS`. Refusals are a 200 `{kind: "refused"}`; an ended turn throws (404
+     * `unknown_turn`). Never logs the path.
+     */
+    async workSessionUpload(
+      body: AgentChannelWorkSessionUpload,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionUploadResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/upload",
+        body,
+        signal,
+        1,
+        WORK_SESSION_FILE_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionUploadResponse.parse(raw);
     },
     /**
      * `ocw_conversation_open` (07.17 D-02, PD-07): the run turn's ids and the items it found; the API takes the

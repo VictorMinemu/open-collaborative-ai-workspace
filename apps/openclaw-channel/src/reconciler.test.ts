@@ -359,6 +359,7 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
         "ocw_work_session_prompt",
         "ocw_work_session_read",
         "ocw_work_session_stop",
+        "ocw_work_session_upload",
         "ocw_conversation_open",
       ],
     });

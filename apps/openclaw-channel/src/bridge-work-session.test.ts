@@ -64,12 +64,14 @@ const WORK_ZONE = {
   sessions: [{ id: SESSION_ID, status: "idle", projectName: "billing-api" }],
 };
 
-/** Contracts `WORK_SESSION_TOOL_FLAGS` (the API sends them with the four tools). */
+/** Contracts `WORK_SESSION_TOOL_FLAGS` (the API sends them with the session tools; 07.17.1.1 adds the two file tools). */
 const WORK_SESSION_TOOL_FLAGS: Record<string, { untrustedOutput: boolean; sideEffecting: boolean }> = {
   ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
   ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
 };
 
 /** The turn the API computed for the wake (as for a mention): the four tools, their flags, taint and the Work Zone. */

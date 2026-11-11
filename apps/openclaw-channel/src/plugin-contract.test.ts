@@ -2216,6 +2216,7 @@ const PLUGIN_TOOLS = [
   "ocw_work_session_prompt",
   "ocw_work_session_read",
   "ocw_work_session_stop",
+  "ocw_work_session_upload",
   "ocw_sandbox_exec",
   "ocw_sandbox_process",
   "ocw_sandbox_read",
@@ -2335,6 +2336,7 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_work_session_prompt",
         "ocw_work_session_read",
         "ocw_work_session_stop",
+        "ocw_work_session_upload",
         "ocw_conversation_open",
       ],
     });

@@ -33,6 +33,7 @@ import {
   WORK_SESSION_START_TOOL,
   WORK_SESSION_STOP_TOOL,
   WORK_SESSION_TOOL_NAMES,
+  WORK_SESSION_UPLOAD_TOOL,
   type WorkSessionToolName,
 } from "./turn-scoped-tools.js";
 // work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
@@ -67,6 +68,10 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * start, prompt and stop still reach their routes (`ROUTE_DECIDES_TAINT`: the route allows them with the profile's
  * outside-content flag or answers with a proposal). After a successful `ocw_work_session_read` (`sessionOutputRead`)
  * every other side-effecting call of the turn is refused here, except prompt and stop; start answers `session_output`.
+ * Bot Work Zone files (07.17.1.1 D-01, D-02, D-10, D-11, PD-13): `ocw_work_session_upload|download` are self-validated
+ * the same way, side-effecting, never approvable and counted against the cap of 8; on a tainted turn and after a
+ * session read they still reach their routes, which decide with the profile's `actOnOutsideContent` and the
+ * one-read-session rule.
  * Automation fan-out (07.17 D-02, D-05, PD-07): `ocw_conversation_open` is self-validated by `/conversations/open`,
  * takes its static flags (side-effecting, never approvable), counts against the cap of 8, and on a tainted run turn
  * still reaches its route, which decides outside content (the run read the MCP it fans out from).
@@ -182,6 +187,8 @@ const WORK_SESSION_FLAGS: Record<WorkSessionToolName, TurnToolFlags> = {
   ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
   ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+  // 07.17.1.1 (D-01): writes into a member's working tree; the answer is the platform's own ids and size.
+  ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
 };
 /**
  * 07.16 (D-08, PD-15, Pitfall 7): side-effecting, yet a tainted turn's call still reaches the route, because the route
@@ -194,6 +201,10 @@ const ROUTE_DECIDES_TAINT: ReadonlySet<string> = new Set([
   WORK_SESSION_START_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_STOP_TOOL,
+  // 07.17.1.1 (D-02, D-10, PD-13): the route moves a file on a tainted turn only with the profile's
+  // `actOnOutsideContent` (claimed with `outsideContent`, audited) and answers `outside_content` otherwise; a local
+  // block would make that allowed path unreachable.
+  WORK_SESSION_UPLOAD_TOOL,
   // 07.17 (D-05, PD-10): the route allows the open on a tainted run turn (the run read the MCP it fans out from) and
   // only in the run's own target, which the stored turn names (never the model); it claims with `outsideContent`.
   CONVERSATION_OPEN_TOOL,
@@ -206,6 +217,9 @@ const ROUTE_DECIDES_TAINT: ReadonlySet<string> = new Set([
 const SESSION_OUTPUT_EXEMPT: ReadonlySet<string> = new Set([
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_STOP_TOOL,
+  // 07.17.1.1 (D-11, PD-13): after a session read the route allows a move only for the one session the turn read
+  // (`readOnly`) and answers `session_output` otherwise; the plugin does not know which session that was, so it asks.
+  WORK_SESSION_UPLOAD_TOOL,
 ]);
 /**
  * 07.17 (D-12, PD-11): side-effecting calls that, after a session read, still reach their route, which decides the
