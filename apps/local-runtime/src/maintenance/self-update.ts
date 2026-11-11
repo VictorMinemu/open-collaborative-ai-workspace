@@ -350,11 +350,15 @@ async function fileSha256(file: string): Promise<string> {
     .digest("hex");
 }
 
-/** `install.sh`'s reuse test: bundle, SDK and lockfile present and the bundle hashes to the manifest. */
+/**
+ * `install.sh`'s reuse test: bundle, SDK and lockfile present and the bundle hashes to the manifest. Review IN-03: the
+ * lockfile must also hash to `externalLockSha256`, so a directory installed from another lockfile is rebuilt.
+ */
 async function isComplete(dir: string, manifest: RuntimeDistManifest): Promise<boolean> {
   try {
     await stat(join(dir, "node_modules", CLAUDE_AGENT_SDK_PACKAGE, "package.json"));
-    await stat(join(dir, RUNTIME_EXTERNAL_LOCK_FILE));
+    if ((await fileSha256(join(dir, RUNTIME_EXTERNAL_LOCK_FILE))) !== manifest.externalLockSha256)
+      return false;
     return (await fileSha256(join(dir, RUNTIME_BUNDLE_FILE))) === manifest.sha256;
   } catch {
     return false;
@@ -533,6 +537,10 @@ async function prepare(p: PrepareVersionOptions): Promise<PreparedVersion> {
     });
     if (ci.aborted) throw new SelfUpdateError("cancelled");
     if (ci.exitCode !== 0 || ci.timedOut) throw new SelfUpdateError("npm_failed", undefined, ci.output);
+    // Review IN-03: what the preflight runs and the switch adopts is still the verified bundle.
+    if ((await fileSha256(join(staging, RUNTIME_BUNDLE_FILE))) !== manifest.sha256) {
+      throw new SelfUpdateError("checksum", undefined, "the bundle changed during npm ci");
+    }
     await preflight(staging);
     // Review WR-05: a stop that came after the preflight leaves nothing half-adopted behind.
     if (p.signal?.aborted) throw new SelfUpdateError("cancelled");

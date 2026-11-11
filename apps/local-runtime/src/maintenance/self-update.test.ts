@@ -22,6 +22,7 @@ import { basename, join } from "node:path";
 import { CLAUDE_AGENT_SDK_PACKAGE, RUNTIME_ROUTES, runtimeExternalFiles } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RuntimeInstallInfo } from "../install-info.js";
+import { runFixedCommand } from "./runner.js";
 import {
   fetchServedManifest,
   isLoopbackHost,
@@ -413,6 +414,32 @@ describe("prepareVersion failures (07.17.1, D-07, E1–E10, E23)", () => {
     expect(existsSync(npmReport())).toBe(false);
     expect(readlinkSync(join(runtime(), "current"))).toBe(`versions/${home.oldSha12}`);
     expect(installJsonBytes().equals(before)).toBe(true);
+  });
+
+  it("review IN-03: a versions/<sha12> whose lockfile is not the manifest's is rebuilt, not reused", async () => {
+    const new12 = stub.manifest.sha256.slice(0, 12);
+    layOutVersion(join(runtime(), "versions", new12), stub.bundle);
+    writeFileSync(join(runtime(), "versions", new12, "npm-shrinkwrap.json"), "{}\n");
+    const prepared = await prepareVersion(await options());
+    expect(prepared.reused).toBe(false);
+    expect(existsSync(npmReport())).toBe(true);
+  });
+
+  it("review IN-03: a bundle that changed during npm ci is refused (checksum) before the preflight runs it", async () => {
+    const commands: string[] = [];
+    const opts = await options({
+      run: async (c) => {
+        commands.push(c.args.includes("ci") ? "ci" : "preflight");
+        if (c.args.includes("ci")) {
+          writeFileSync(join(c.cwd, "ocw-runtime.mjs"), "console.log('swapped')\n");
+          return { exitCode: 0, output: "", timedOut: false };
+        }
+        return runFixedCommand(c);
+      },
+    });
+    await failureOf(prepareVersion(opts), "checksum");
+    expect(commands).toEqual(["ci"]);
+    expect(existsSync(join(runtime(), "versions", stub.manifest.sha256.slice(0, 12)))).toBe(false);
   });
 
   it("an incomplete versions/<sha12> (no SDK) is rebuilt", async () => {
