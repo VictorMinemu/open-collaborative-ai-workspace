@@ -189,6 +189,13 @@ describe("renderInstallScript (07.12-06, PD-04)", () => {
     expect(code).not.toMatch(/\beval\b/);
     expect(code).not.toMatch(/\|\s*(ba|da|z)?sh\b/);
   });
+
+  // 07.17.1-03 (D-03, E27): the output is pinned byte for byte. The sha256 was captured from the renderer before the
+  // lockfile checks moved to `runtimeExternalFiles` in contracts; a change to the template or its values breaks it.
+  it("renders byte-identical install.sh (golden sha256, 07.17.1-03 E27)", () => {
+    const golden = renderInstallScript({ serverUrl: "https://ocw.example.com/", manifest: MANIFEST });
+    expect(sha256Hex(golden)).toBe("368c823ce0d63d1eb43f899e9fd6c88e6cf55d6ea927b289eab087f21e3272fd");
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------------

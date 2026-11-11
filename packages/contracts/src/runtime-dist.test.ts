@@ -5,6 +5,7 @@ import {
   RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
   RuntimeDistManifest,
+  runtimeExternalFiles,
   runtimeInstallCommand,
 } from "./runtime-dist";
 
@@ -89,5 +90,59 @@ describe("RuntimeDistManifest (07.12, D-01, D-10, D-13)", () => {
       "0BSD",
       "BlueOak-1.0.0",
     ]);
+  });
+});
+
+describe("runtimeExternalFiles (07.17.1-03, D-03, PD-16)", () => {
+  const m = RuntimeDistManifest.parse(manifest);
+  const pins = Object.fromEntries(manifest.external.map((p) => [p.name, p.version]));
+  const lockOf = (
+    patch: { lockfileVersion?: number; root?: string; dependencies?: Record<string, string> } = {},
+  ) =>
+    `${JSON.stringify(
+      {
+        name: patch.root ?? "ocw-runtime-deps",
+        lockfileVersion: patch.lockfileVersion ?? 3,
+        requires: true,
+        packages: {
+          "": { name: patch.root ?? "ocw-runtime-deps", dependencies: patch.dependencies ?? pins },
+          "node_modules/zod": { version: "4.6.5" },
+        },
+      },
+      null,
+      2,
+    )}\n`;
+
+  it("returns the lockfile unchanged and the package.json install.sh writes, with its trailing newline", () => {
+    const lock = lockOf();
+    const files = runtimeExternalFiles(m, lock);
+    expect(files.lock).toBe(lock);
+    expect(files.packageJson).toBe(
+      `${JSON.stringify({ name: "ocw-runtime-deps", private: true, dependencies: pins }, null, 2)}\n`,
+    );
+  });
+
+  it("never hashes: a lockfile that is not the manifest's externalLockSha256 still returns (the caller checks)", () => {
+    expect(m.externalLockSha256).toBe("b".repeat(64));
+    expect(() => runtimeExternalFiles(m, lockOf())).not.toThrow();
+  });
+
+  const { zod: _zod, ...missing } = pins;
+  it.each([
+    ["lockfile v2", lockOf({ lockfileVersion: 2 })],
+    ["a root named x", lockOf({ root: "x" })],
+    ["an extra pin", lockOf({ dependencies: { ...pins, "left-pad": "1.0.0" } })],
+    ["a missing pin", lockOf({ dependencies: missing })],
+    ["a different pinned version", lockOf({ dependencies: { ...pins, zod: "4.6.6" } })],
+    [
+      "the same pins in another order",
+      lockOf({ dependencies: Object.fromEntries(Object.entries(pins).reverse()) }),
+    ],
+    ["text that is not JSON", "{"],
+    ["no root package", `${JSON.stringify({ lockfileVersion: 3, packages: {} })}\n`],
+  ])("refuses %s", (_label, lock) => {
+    expect(() => runtimeExternalFiles(m, lock)).toThrow(
+      "the external lockfile is not rooted at the manifest's pins",
+    );
   });
 });
