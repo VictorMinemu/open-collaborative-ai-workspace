@@ -18,6 +18,7 @@ import {
   MAX_WEB_CALLS_PER_TURN,
   modelAcceptsImages,
   SANDBOX_TOOL_NAMES,
+  TURN_TOOLS_MAX,
   type TurnAttachment,
   type TurnContext,
   type TurnMemoryFile,
@@ -108,7 +109,7 @@ export interface TurnAudience {
 type Withheld = NonNullable<TurnContext["withheld"]>;
 
 /** Maximum tools per turn (`TurnContext.tools`). */
-const MAX_TURN_TOOLS = 64;
+const MAX_TURN_TOOLS = TURN_TOOLS_MAX;
 
 const PLATFORM_TOOLS: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS));
 
@@ -356,6 +357,27 @@ function assemble(
     }
   }
   return { tools, toolFlags };
+}
+
+/**
+ * How many of a bot's usable catalog tools a channel turn cannot carry (`MAX_TURN_TOOLS`, after the platform tools
+ * `assemble` adds first). The bot sheet shows it (`BotCapabilityView.toolsOverLimit`): a tool past the cap is never
+ * offered, so the bot cannot call it. Turn-scoped extras (board, Work Zone, consult) can take a few more slots.
+ */
+export function toolsOverLimit(
+  effective: BotCapabilityView["effective"],
+  catalog: readonly CatalogSource[],
+  usable: ReadonlySet<string>,
+  keys: boolean,
+): number {
+  const offered = new Set(assemble(effective, "channel", catalog, usable, false, keys).tools);
+  let over = 0;
+  for (const source of catalog) {
+    for (const t of source.tools) {
+      if (usable.has(`${source.sourceKind}:${source.sourceId}:${t.name}`) && !offered.has(t.name)) over++;
+    }
+  }
+  return over;
 }
 
 const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>

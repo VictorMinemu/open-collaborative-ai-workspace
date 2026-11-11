@@ -25,6 +25,7 @@ import {
   SANDBOX_TOOL_NAMES,
   ToolPattern,
   TURN_ATTACHMENT_NOTES,
+  TURN_TOOLS_MAX,
   TurnAttachment,
   TurnContext,
   UpdateBotCapabilitiesRequest,
@@ -184,7 +185,9 @@ describe("agent channel additions are backward compatible", () => {
     const parsed = AgentMentionEvent.parse({ ...mentionEvent, turn });
     expect(parsed.turn).toEqual(turn);
     expect(AgentMentionEvent.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
-    expect(TurnContext.safeParse({ ...turn, tools: Array(65).fill("x") }).success).toBe(false);
+    expect(TurnContext.safeParse({ ...turn, tools: Array(TURN_TOOLS_MAX + 1).fill("x") }).success).toBe(
+      false,
+    );
   });
 
   it("cell agents default to no tools and the snapshot to DuckDuckGo", () => {

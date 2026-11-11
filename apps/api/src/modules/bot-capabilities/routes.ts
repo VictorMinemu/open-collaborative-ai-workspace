@@ -43,6 +43,7 @@ import {
 import { loadCatalog, loadGrants, replaceGrants } from "./catalog";
 import { clearMemories, listMemories } from "./memory";
 import { availableSearchProviders, internetConfigured, loadPolicy, savePolicy } from "./policy";
+import { toolsOverLimit } from "./turn-policy";
 import { effectiveDailyLimit, nextResetAt, turnsToday } from "./usage";
 
 type AgentRow = typeof agents.$inferSelect;
@@ -200,29 +201,35 @@ async function capabilityView(
       browser: await perms.can(req, tx, "browser.use", resource),
     },
   });
+  const effective = effectiveCapabilities({
+    scope: row.scope,
+    caps,
+    policy,
+    configured: { internet: configured },
+    human: { internet },
+  });
+  const tools = effectiveTools({
+    scope: row.scope,
+    caps,
+    policy,
+    catalog,
+    grants,
+    humanToolAllowed: (tool) => toolAllowed.get(tool) ?? null,
+  });
+  const usable = new Set(
+    tools.filter((t) => t.effective).map((t) => `${t.sourceKind}:${t.sourceId}:${t.tool}`),
+  );
   return {
     agentId: row.id,
     scope: row.scope,
     capabilities: caps,
-    effective: effectiveCapabilities({
-      scope: row.scope,
-      caps,
-      policy,
-      configured: { internet: configured },
-      human: { internet },
-    }),
-    tools: effectiveTools({
-      scope: row.scope,
-      caps,
-      policy,
-      catalog,
-      grants,
-      humanToolAllowed: (tool) => toolAllowed.get(tool) ?? null,
-    }),
+    effective,
+    tools,
     usage: usageView(usage.get(row.id) ?? 0, row, caps, policy),
     dailyLimitMax: row.scope === "personal" ? policy.personalDailyLimitMax : MAX_DAILY_LIMIT,
     viewerCan: await perms.viewerCan(req, tx, resource, VIEWER_CANDIDATES),
     confined,
+    toolsOverLimit: toolsOverLimit(effective, catalog, usable, false),
   };
 }
 

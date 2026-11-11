@@ -234,6 +234,11 @@ export const BotCapabilityView = z.object({
   viewerCan: z.array(Permission),
   /** Phase 07.8 (R11): the Sandbox and Browser rows; absent on older payloads. */
   confined: z.object({ sandbox: ConfinedCapabilityState, browser: ConfinedCapabilityState }).optional(),
+  /**
+   * How many of the bot's usable tools do not fit in one turn (`TURN_TOOLS_MAX`, counted on a channel turn after the
+   * platform tools), so the sheet can say so instead of the bot failing silently. Absent on older payloads.
+   */
+  toolsOverLimit: z.number().int().nonnegative().optional(),
 });
 export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
 
@@ -423,8 +428,15 @@ export const ATTACHMENT_READ_LIMITS = {
   charsPerFile: 64_000,
 } as const;
 
+/**
+ * The most tools one bot turn carries: platform tools first, then the bot's MCP and plugin tools. Raised from 64 on
+ * 2026-11-11, because an ERP MCP server's tools past the cap were silently dropped and the bot said it could not use
+ * them. 128 is the most function tools OpenAI's API accepts in one request.
+ */
+export const TURN_TOOLS_MAX = 128;
+
 export const TurnContext = z.object({
-  tools: z.array(z.string()).max(64),
+  tools: z.array(z.string()).max(TURN_TOOLS_MAX),
   toolFlags: z.record(z.string(), TurnToolFlags),
   memory: z.array(MemoryItem).max(50),
   now: TurnNow.nullable(),
