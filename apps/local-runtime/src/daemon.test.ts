@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -22,20 +24,32 @@ import {
   type PromptPayload,
   RUNTIME_COMPATIBILITY_MANIFEST,
   type RuntimeCatalog,
+  type RuntimeId,
   type RuntimeInfo,
   type ServerToDeviceFrame,
   type SessionEvent,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
-import { Daemon } from "./daemon.js";
+import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
+import { defaultLockDir } from "./maintenance/runner.js";
+import { type PrepareVersionOptions, prepareVersion, selfUpdateMarkerPath } from "./maintenance/self-update.js";
+import {
+  type DistStub,
+  fakeNpm,
+  HOST_PATH_TOKEN_RE,
+  type ScratchHome,
+  scratchOcwHome,
+  startDistStub,
+} from "./maintenance/self-update-harness.js";
+import type { SelfUpdateOptions } from "./maintenance/self-update-job.js";
 import type {
   AgentRuntime,
   EventSink,
@@ -2085,4 +2099,219 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       } as never),
     ).toMatchObject({ ok: false });
   }, 20_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.17.1 runtime self-update: the device end to end over a test Device Link (D-03, D-04, D-05, D-07, PD-12, PD-18,
+// PD-19). A scratch OCW_HOME at 0.3.1 is the daemon's home, a loopback stub serves 0.3.2, the fake npm installs it,
+// and the exit is a spy that runs the daemon's real hand-over (stop, then record the code; never process.exit).
+
+const sha256Of = (data: string) => createHash("sha256").update(data).digest("hex");
+const BUILD_DIR = /^[0-9a-f]{12}$/;
+
+describe("07.17.1 runtime self-update: the daemon updates itself over the Device Link", () => {
+  let scratch: ScratchHome;
+  let stub: DistStub;
+  let npmPath: string;
+  let userHome: string;
+  let codex: ScriptedRuntime;
+  const extra: Daemon[] = [];
+
+  beforeEach(async () => {
+    await daemon.stop();
+    scratch = await scratchOcwHome();
+    stub = await startDistStub({ version: "0.3.2" });
+    const root = join(scratch.ocwHome, "..");
+    npmPath = await fakeNpm(join(root, "fake-bin"));
+    userHome = join(root, "user");
+    mkdirSync(userHome, { recursive: true });
+  });
+
+  afterEach(async () => {
+    for (const d of extra.splice(0)) await d.stop();
+    // PD-19, E30: the install lock was taken in the scratch home's lock directory, never in the OS user's.
+    const lockName = `${sha256Of(join(scratch.ocwHome, "runtime"))}.lock`;
+    expect(existsSync(join(userInfo().homedir, ".cache", "ocw", "runtime-updates", lockName))).toBe(false);
+    await stub.close();
+    scratch.cleanup();
+  });
+
+  const oldSelf = () => ({ version: "0.3.1", sha256: scratch.oldSha256 });
+  const newSelf = () => ({ version: "0.3.2", sha256: stub.manifest.sha256 });
+  const new12 = () => stub.manifest.sha256.slice(0, 12);
+  const scratchLockFile = () =>
+    join(defaultLockDir(userHome), `${sha256Of(join(scratch.ocwHome, "runtime"))}.lock`);
+
+  /** A daemon on the scratch home with a Claude Code stub and a scripted Codex; the self-update aimed at the stub. */
+  async function selfDaemon(
+    o: {
+      running?: { version: string; sha256: string } | null;
+      supervision?: SelfUpdateOptions["supervision"];
+      exitForUpdate?: ((code: number) => Promise<void>) | null;
+    } = {},
+  ): Promise<Daemon> {
+    runtime = new FakeRuntime();
+    codex = new ScriptedRuntime("codex", 5);
+    const d = await Daemon.create({
+      home: scratch.ocwHome,
+      env: { PATH: ["/usr/bin", "/bin"].join(":"), HOME: userHome },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime, codex],
+      logger: silentLogger,
+      controlSocket: false,
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      maintenance: {
+        userHome,
+        which: () => null,
+        registry: { latest: async () => null },
+        freshRegistry: { latest: async () => null },
+      },
+      ...(o.exitForUpdate === null ? {} : { exitForUpdate: o.exitForUpdate ?? (async () => undefined) }),
+      selfUpdate: {
+        serverUrl: stub.url,
+        running: o.running === undefined ? oldSelf() : o.running,
+        supervision: o.supervision ?? { supervised: true, reason: null },
+        pollMs: 20,
+        prepare: (p: PrepareVersionOptions) => prepareVersion({ ...p, npmPath }),
+      },
+    });
+    extra.push(d);
+    return d;
+  }
+
+  /** The exit spy: runs the daemon's real hand-over (`stop()`), then records the code; never exits the process. */
+  function handOverSpy(of: () => Daemon) {
+    const window = { from: -1, to: -1 };
+    const spy: Mock<(code: number) => Promise<void>> = vi.fn(async (_code: number) => {
+      window.from = server.allFrames.length;
+      await of().stop();
+      window.to = server.allFrames.length;
+    });
+    return { spy, window };
+  }
+
+  const welcome = (): ServerToDeviceFrame => ({
+    type: "welcome",
+    deviceId: randomUUID(),
+    organizationId: randomUUID(),
+  });
+  const notify = (): ServerToDeviceFrame => ({
+    type: "runtime.config",
+    policy: "notify",
+    manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+  });
+  const selfCmd = () => ({
+    id: randomUUID(),
+    kind: "runtime.update" as const,
+    sessionId: randomUUID(),
+    payload: { runtime: "ocw-runtime" },
+  });
+  const ackOf = (id: string, timeoutMs = 10_000) =>
+    server.frame("ack", (f) => f.commandId === id, timeoutMs);
+  const gatesOf = (d: Daemon) => (d as unknown as { gates: Map<RuntimeId, RuntimeGate> }).gates;
+  type Snapshot = Extract<DeviceToServerFrame, { type: "runtime.maintenance" }>;
+  const selfStates = (frames: DeviceToServerFrame[]) =>
+    frames.flatMap((f) => (f.type === "runtime.maintenance" && f.self ? [f.self.state] : []));
+
+  it("the click updates the daemon: started, downloading → installing → restarting, current switched, exit 75 once; the next daemon reports success", async () => {
+    const { spy, window } = handOverSpy(() => first);
+    const first = await selfDaemon({ exitForUpdate: spy });
+    daemon = first;
+    await first.start();
+    await server.frame("hello");
+    const hello = server.last;
+    const handshake = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    expect(handshake.self).toMatchObject({
+      version: "0.3.1",
+      build: scratch.oldSha12,
+      supervised: true,
+      canUpdate: true,
+      reason: null,
+      state: "idle",
+    });
+    server.push(welcome());
+    // runtime.config → onConfig(): the device checks what its workspace serves (the stub) and reports it.
+    server.push(notify());
+    await server.frame("runtime.maintenance", (f) => f.self?.servedBuild === new12(), 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    const started = await server.frame(
+      "runtime.update.run",
+      (f) => f.phase === "started" && f.commandId === cmd.id,
+      10_000,
+    );
+    expect(started).toMatchObject({
+      runtime: "ocw-runtime",
+      trigger: "manual",
+      fromVersion: "0.3.1",
+      toVersion: "0.3.2",
+      fromBuild: scratch.oldSha12,
+      toBuild: new12(),
+      method: "ocw_bundle",
+    });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled(), { timeout: 30_000, interval: 20 });
+    await vi.waitFor(() => expect(window.to).toBeGreaterThanOrEqual(0), { timeout: 10_000, interval: 20 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(75);
+    const states = selfStates(hello.frames);
+    const at = (s: string) => states.indexOf(s as never);
+    expect(at("downloading")).toBeGreaterThan(-1);
+    expect(at("downloading")).toBeLessThan(at("installing"));
+    expect(at("installing")).toBeLessThan(at("restarting"));
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${new12()}`);
+    // E29: the hand-over sends no run frame (no `finished`); every gate stays closed into the exit.
+    const during = server.allFrames.slice(window.from, window.to);
+    expect(during.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+    expect(
+      hello.frames.filter((f) => f.type === "runtime.update.run" && f.runId === started.runId),
+    ).toHaveLength(1);
+    expect([...gatesOf(first).values()].every((g) => !g.isOpen)).toBe(true);
+    // The lock directory is the maintenance scope's (the scratch home): the lock is held into the exit there.
+    expect(existsSync(scratchLockFile())).toBe(true);
+
+    // The service manager starts the new build: a second daemon on the same home, running 0.3.2.
+    const second = await selfDaemon({ running: newSelf() });
+    daemon = second;
+    await second.start();
+    const conn = await server.waitFor(() =>
+      server.connections.length > 1 && server.last.frames.length >= 3 ? server.last : undefined,
+    );
+    expect(conn.frames[0]?.type).toBe("hello");
+    expect(conn.frames[1]).toMatchObject({
+      type: "runtime.update.run",
+      phase: "started",
+      runId: started.runId,
+      commandId: cmd.id,
+    });
+    expect(conn.frames[2]).toMatchObject({
+      type: "runtime.update.run",
+      phase: "finished",
+      outcome: "succeeded",
+      runId: started.runId,
+      commandId: cmd.id,
+      fromBuild: scratch.oldSha12,
+      toBuild: new12(),
+    });
+    const after = (await server.waitFor(
+      () => conn.frames.find((f) => f.type === "runtime.maintenance" && f.self !== undefined),
+      10_000,
+    )) as Snapshot;
+    expect(after.self).toMatchObject({ version: "0.3.2", build: new12(), lastRun: { outcome: "succeeded" } });
+    await vi.waitFor(() => expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    const versions = readdirSync(join(scratch.ocwHome, "runtime", "versions"));
+    expect(versions.filter((n) => BUILD_DIR.test(n)).sort()).toEqual([scratch.oldSha12, new12()].sort());
+    expect(versions.filter((n) => n.startsWith(".staging-"))).toEqual([]);
+
+    // PD-25: no frame the server received carries a host path.
+    for (const f of server.allFrames) expect(JSON.stringify(f)).not.toMatch(HOST_PATH_TOKEN_RE);
+    // Only the stub was asked for the runtime (P1); nothing followed a redirect.
+    expect(stub.requests.length).toBeGreaterThan(0);
+    expect(stub.redirectRequests).toEqual([]);
+  }, 60_000);
 });
