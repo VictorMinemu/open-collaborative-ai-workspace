@@ -441,6 +441,45 @@ function runChild(
   });
 }
 
+export interface FixedCommandResult {
+  /** The child's exit code; null when it could not be started or was killed by a signal. */
+  exitCode: number | null;
+  /** Sanitised, path-free, ≤ 10 KB (`sanitizeUpdateOutput`). */
+  output: string;
+  timedOut: boolean;
+}
+
+/**
+ * 07.17.1 (D-03, PD-07): one fixed command (the self-update's `npm ci` and its preflight) with the 07.11 child rules —
+ * no shell, its own process group, SIGTERM at `timeoutMs` then SIGKILL, a hard deadline, pipes closed after a short
+ * grace — and its output through `sanitizeUpdateOutput(output, roots, home)`. The caller builds `env` (normally
+ * `updateChildEnv`); a spawn failure settles with `exitCode: null`, never a throw.
+ */
+export async function runFixedCommand(p: {
+  file: string;
+  args: readonly string[];
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  timeoutMs: number;
+  roots: readonly string[];
+  home: string;
+}): Promise<FixedCommandResult> {
+  const child = await runChild(
+    spawn,
+    p.file,
+    [...p.args],
+    p.env,
+    p.cwd,
+    { timeoutMs: p.timeoutMs, killGraceMs: KILL_GRACE_MS, stdioGraceMs: STDIO_GRACE_MS },
+    () => undefined,
+  );
+  return {
+    exitCode: child.spawnError ? null : child.code,
+    output: sanitizeUpdateOutput(child.raw, p.roots, p.home),
+    timedOut: child.timedOut,
+  };
+}
+
 function failed(fromVersion: string | null, output: string, error: string): RunResult {
   return { outcome: "failed", fromVersion, toVersion: null, output, error };
 }
