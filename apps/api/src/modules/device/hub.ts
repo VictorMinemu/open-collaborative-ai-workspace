@@ -149,6 +149,11 @@ export interface DeviceHubOptions {
    * copy). Tests only; it is never read from the environment (07.11 PD-12).
    */
   runtimeManifest?: RuntimeCompatibilityManifest;
+  /**
+   * 07.17.1 (PD-15): the one dist store of the device module (`RuntimeDistStore`), the only reader of the build this
+   * workspace serves. Absent → `servedRuntime()` is null.
+   */
+  runtimeDist?: { served(): Promise<{ version: string; build: string } | null> };
 }
 
 /**
@@ -190,6 +195,14 @@ export class DeviceHub {
       realtime: opts.realtime,
       runtimePolicy: (tx) => this.runtimePolicy(tx),
     };
+  }
+
+  /**
+   * 07.17.1 (PD-05, PD-15): the build this workspace serves now (`{ version, build }`, build = 12 hex), read from the
+   * device module's one dist store; null when no verified bundle is served or no store was given.
+   */
+  async servedRuntime(): Promise<{ version: string; build: string } | null> {
+    return (await this.opts.runtimeDist?.served()) ?? null;
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {

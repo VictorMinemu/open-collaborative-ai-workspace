@@ -55,6 +55,8 @@ export function createDeviceModule(
     realtime: core.realtime,
     audit: core.audit,
     log: core.log,
+    // 07.17.1 PD-15: the same store the distribution routes read.
+    runtimeDist,
     ...(Number.isFinite(graceEnv) && graceEnv > 0 ? { offlineGraceMs: graceEnv } : {}),
     ...(opts.maxFrameBytes ? { maxFrameBytes: opts.maxFrameBytes } : {}),
     ...(opts.runtimeManifest ? { runtimeManifest: opts.runtimeManifest } : {}),

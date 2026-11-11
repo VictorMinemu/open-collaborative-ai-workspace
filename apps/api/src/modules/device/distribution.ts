@@ -6,6 +6,7 @@ import {
   RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
   RuntimeDistManifest,
+  runtimeBuildOf,
 } from "@ocw/contracts";
 import type { FastifyBaseLogger } from "fastify";
 import type { App, Core } from "../../core";
@@ -66,6 +67,17 @@ export class RuntimeDistStore {
     readonly dir: string,
     private readonly log?: FastifyBaseLogger,
   ) {}
+
+  /**
+   * 07.17.1 (PD-05, PD-15): the build this workspace serves now, `{ version, build }` where `build` is the first 12 hex
+   * of the bundle's sha256 (the `versions/<sha12>` directory name on a device); null when no verified bundle is served
+   * (missing or corrupt). Built on `load()`, so a verified dist is read once.
+   */
+  async served(): Promise<{ version: string; build: string } | null> {
+    const dist = await this.load();
+    if (typeof dist === "string") return null;
+    return { version: dist.manifest.version, build: runtimeBuildOf(dist.manifest.sha256) };
+  }
 
   /** The verified dist, `"missing"` or `"corrupt"`. Concurrent first requests share one read. */
   load(): Promise<RuntimeDistLoad> {
