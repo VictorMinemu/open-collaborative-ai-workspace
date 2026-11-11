@@ -1179,14 +1179,14 @@ bot's profile configure (the lower wins), decided server-side, audited, and neve
   4. Integration tests (containment, transport, caps, taint, tenant isolation) and an e2e spec pass on desktop and
      mobile; ADR-0041 records the decisions
 
-**Plans:** 3/15 plans executed
+**Plans:** 4/15 plans executed
 
 Plans:
 
 - [x] 07.17.1.1-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, path rule, deny list, limits, device commands) + the phase hub
 - [x] 07.17.1.1-02-PLAN.md — Wave 1: ADR-0041 and the AGENTS.md row
 - [x] 07.17.1.1-03-PLAN.md — Wave 2: The migration (limit columns, transfer ledger, hourly load)
-- [ ] 07.17.1.1-04-PLAN.md — Wave 2: The daemon (containment, `session.file.read|write`, transfer requests, bounded diff frame)
+- [x] 07.17.1.1-04-PLAN.md — Wave 2: The daemon (containment, `session.file.read|write`, transfer requests, bounded diff frame)
 - [ ] 07.17.1.1-05-PLAN.md — Wave 2: The plugin (two tools, guard sets, Work Zone block line, real-cell smoke)
 - [ ] 07.17.1.1-06-PLAN.md — Wave 3: The limits in the API (policy and profile, `loadBotFileLimit`)
 - [ ] 07.17.1.1-07-PLAN.md — Wave 3: Transfer read side (device JWT auth, ledger primitives, `GET /api/v1/runtime/files/:transferId`)
