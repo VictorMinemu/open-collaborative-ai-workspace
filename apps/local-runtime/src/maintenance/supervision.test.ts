@@ -36,10 +36,12 @@ describe("isSupervised (07.17.1, D-05, D-12, PD-11, E15)", () => {
       { INVOCATION_ID: "abc" },
       { OCW_RUNTIME_HOST: "desktop", INVOCATION_ID: "abc" },
     ]) {
-      expect(await isSupervised({ env, platform: "linux", argv1: installed, ocwHome: home.ocwHome })).toEqual({
-        supervised: false,
-        reason: "not_supervised",
-      });
+      expect(await isSupervised({ env, platform: "linux", argv1: installed, ocwHome: home.ocwHome })).toEqual(
+        {
+          supervised: false,
+          reason: "not_supervised",
+        },
+      );
     }
   });
 
@@ -101,7 +103,9 @@ describe("isSupervised (07.17.1, D-05, D-12, PD-11, E15)", () => {
     ).toBe("not_installed");
 
     rmSync(join(home.ocwHome, "runtime", "install.json"));
-    expect(await isSupervised({ env: {}, platform: "linux", argv1: installed, ocwHome: home.ocwHome })).toEqual({
+    expect(
+      await isSupervised({ env: {}, platform: "linux", argv1: installed, ocwHome: home.ocwHome }),
+    ).toEqual({
       supervised: false,
       reason: "not_installed",
     });
@@ -131,9 +135,9 @@ describe("runningBuild (07.17.1, PD-05)", () => {
     const checkout = join(home.ocwHome, "..", "checkout-cli.ts");
     writeFileSync(checkout, "// a checkout\n");
     const read = vi.fn((path: string) => readFile(path));
-    expect(await runningBuild({ argv1: checkout, ocwHome: home.ocwHome, version: "0.3.1", readFile: read })).toBe(
-      null,
-    );
+    expect(
+      await runningBuild({ argv1: checkout, ocwHome: home.ocwHome, version: "0.3.1", readFile: read }),
+    ).toBe(null);
     expect(await runningBuild({ argv1: undefined, ocwHome: home.ocwHome, version: "0.3.1" })).toBeNull();
     expect(read).not.toHaveBeenCalled();
   });
