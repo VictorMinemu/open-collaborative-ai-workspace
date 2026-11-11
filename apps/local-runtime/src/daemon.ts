@@ -28,11 +28,13 @@ import { arch, homedir, platform, userInfo } from "node:os";
 import {
   ApprovalResolvePayload,
   type CommandFrame,
+  DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
   type DeviceHostKind,
   type DeviceToServerFrame,
   DiffRequestPayload,
+  type DiffResultFrame,
   OCW_RUNTIME_TARGET,
   type PermissionMode,
   PromptPayload,
@@ -78,6 +80,7 @@ import {
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
+import { boundDiffFrame } from "./diff-frame.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
@@ -1380,20 +1383,17 @@ export class Daemon {
       unifiedPatch(cwd),
       repoInfo(cwd),
     ]);
-    this.send(
-      sanitizeValue(
-        {
-          type: "diff.result",
-          requestId: cmd.id,
-          files,
-          patch,
-          truncated,
-          branch: info.branch,
-          headSha: info.headSha,
-        },
-        roots,
-      ),
-    );
+    const frame: DiffResultFrame = {
+      type: "diff.result",
+      requestId: cmd.id,
+      files,
+      patch,
+      truncated,
+      branch: info.branch,
+      headSha: info.headSha,
+    };
+    // 07.17.1.1 (D-14, PD-19): bounded after sanitising, so the frame never exceeds the API's inbound limit.
+    this.send(boundDiffFrame(sanitizeValue(frame, roots), DEVICE_LINK_MAX_DEVICE_FRAME_BYTES));
   }
 
   // -------------------------------------------------------------------------------------------

@@ -3,7 +3,12 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import websocket from "@fastify/websocket";
-import { HealthResponse, type RuntimeCompatibilityManifest, WS_PROTOCOL } from "@ocw/contracts";
+import {
+  DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
+  HealthResponse,
+  type RuntimeCompatibilityManifest,
+  WS_PROTOCOL,
+} from "@ocw/contracts";
 import { createTenantDb } from "@ocw/db";
 import scalar from "@scalar/fastify-api-reference";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -228,7 +233,9 @@ export async function buildApp(
   await app.register(rateLimit, { global: false, store: redisRateLimitStore(bus.pub) });
   await app.register(websocket, {
     options: {
-      maxPayload: 256 * 1024,
+      // 256 KiB. The daemon bounds every diff.result under this (local-runtime/src/diff-frame.ts, 07.17.1.1 D-14):
+      // a bigger device frame would close the link with 1009.
+      maxPayload: DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
       // Select the application protocol, never the `ocw.auth.<jwt>` entry: browsers fail a handshake that
       // offered subprotocols and got none back (Pitfall 2), and the token must not be echoed (T-02-08-04).
       handleProtocols: (protocols: Set<string>) => (protocols.has(WS_PROTOCOL) ? WS_PROTOCOL : false),

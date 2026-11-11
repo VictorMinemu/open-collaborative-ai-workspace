@@ -31,9 +31,9 @@ function addedLines(n: number, width: number, ch = "x"): string {
 
 describe("boundDiffFrame (PD-19)", () => {
   it("a 500 KiB patch is cut at a newline under the bound, truncated: true, a prefix of the original", () => {
-    const patch = addedLines(5000, 100);
+    const patch = addedLines(5200, 100);
     expect(Buffer.byteLength(patch)).toBeGreaterThan(500 * 1024);
-    const files: DiffFile[] = [{ path: "big.txt", status: "added", additions: 5000, deletions: 0 }];
+    const files: DiffFile[] = [{ path: "big.txt", status: "added", additions: 5200, deletions: 0 }];
     const out = boundDiffFrame(frame(patch, files, false), DEVICE_LINK_MAX_DEVICE_FRAME_BYTES);
     expect(bytesOf(out)).toBeLessThanOrEqual(BOUND);
     expect(out.truncated).toBe(true);
