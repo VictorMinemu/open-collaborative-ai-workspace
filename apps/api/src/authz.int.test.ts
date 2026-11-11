@@ -33,6 +33,8 @@ const PUBLIC_ROUTES = [
   "GET /api/v1/runtime/bundle",
   "GET /api/v1/runtime/bundle.sha256",
   "GET /api/v1/runtime/install.sh",
+  // 07.17.1-03 (D-03, PD-16): a server's daemon fetches the served bundle's npm lockfile to update itself.
+  "GET /api/v1/runtime/npm-shrinkwrap.json",
   // 07.4-10: the OAuth callback checks the member's session against the flow by hand; the CIMD document is public.
   "GET /api/v1/connectors/oauth/callback",
   "GET /api/v1/connectors/oauth/client-metadata.json",

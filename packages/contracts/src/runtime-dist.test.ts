@@ -69,6 +69,7 @@ describe("RuntimeDistManifest (07.12, D-01, D-10, D-13)", () => {
       bundle: "/api/v1/runtime/bundle",
       bundleSha256: "/api/v1/runtime/bundle.sha256",
       version: "/api/v1/runtime/version",
+      externalLock: "/api/v1/runtime/npm-shrinkwrap.json",
     });
     expect(runtimeInstallCommand("https://ocw.example.com/")).toBe(
       "curl -fsSL https://ocw.example.com/api/v1/runtime/install.sh | sh",
