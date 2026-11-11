@@ -34,7 +34,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { type WebSocket, WebSocketServer } from "ws";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
-import { Daemon } from "./daemon.js";
+import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
@@ -1451,6 +1451,7 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       env?: Record<string, string>;
       fakeUpdate?: Record<string, unknown>;
       maintenance?: Partial<RuntimeMaintenanceOptions>;
+      selfUpdate?: boolean;
     } = {},
   ): Promise<void> {
     await daemon.stop();
@@ -1480,6 +1481,17 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
         which: (name) => (name === "claude" ? join(claudeBin(), "claude") : null),
         ...o.maintenance,
       },
+      // 07.17.1 regression: the same daemon with a SelfUpdate (a checkout: no installed build, it never updates).
+      ...(o.selfUpdate
+        ? {
+            exitForUpdate: async () => undefined,
+            selfUpdate: {
+              serverUrl: "http://127.0.0.1:9",
+              running: null,
+              supervision: { supervised: false, reason: "not_installed" as const },
+            },
+          }
+        : {}),
     });
   }
 
@@ -1488,6 +1500,56 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
     deviceId: randomUUID(),
     organizationId: randomUUID(),
   });
+
+  it("07.17.1: with a SelfUpdate present, a Claude Code update command and its held turns behave exactly as in 07.11 (no subject)", async () => {
+    await updatesDaemon({
+      fakeUpdate: { delayMs: 1000 },
+      maintenance: { drainPollMs: 20 },
+      selfUpdate: true,
+    });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "notify", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    const behind = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.advisory === "behind"),
+      10_000,
+    );
+    expect(behind.self).toMatchObject({ build: null, reason: "not_installed", canUpdate: false });
+    server.send({
+      id: "start-B",
+      kind: "session.start",
+      sessionId: "B",
+      payload: { projectLocalId: localId, runtime: "claude-code", permissionMode: "default" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "start-B")).toMatchObject({ ok: true });
+    const cmd = { id: randomUUID(), kind: "runtime.update" as const, sessionId: randomUUID() };
+    server.send({ ...cmd, payload: { runtime: "claude-code" } });
+    expect(await server.frame("ack", (f) => f.commandId === cmd.id, 10_000)).toMatchObject({ ok: true });
+    await server.frame("runtime.update.run", (f) => f.phase === "started" && f.commandId === cmd.id, 10_000);
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ runtime: "claude-code", commandId: cmd.id, outcome: "succeeded" });
+    expect(await server.frame("ack", (f) => f.commandId === "pb1", 5000)).toMatchObject({ ok: true });
+    const events = () =>
+      server.allFrames.flatMap((f) =>
+        f.type === "event" && f.sessionId === "B" && f.event.type === "runtime.update" ? [f.event] : [],
+      );
+    await server.waitFor(() => (events().length === 2 ? true : undefined));
+    expect(events()).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting" },
+      { type: "runtime.update", runtime: "claude-code", phase: "done", version: "2.1.300" },
+    ]);
+    // Every snapshot carries `self` while a SelfUpdate exists; it never asked anything.
+    expect(
+      server.allFrames.filter((f) => f.type === "runtime.maintenance").every((f) => f.self !== undefined),
+    ).toBe(true);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.runtime === "ocw-runtime")).toBe(
+      false,
+    );
+  }, 40_000);
 
   it("automatic: a behind Claude Code is updated at start while no turn runs, and the server hears every step", async () => {
     await updatesDaemon();
@@ -2311,10 +2373,152 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     expect(versions.filter((n) => BUILD_DIR.test(n)).sort()).toEqual([scratch.oldSha12, new12()].sort());
     expect(versions.filter((n) => n.startsWith(".staging-"))).toEqual([]);
 
+    // E17: the server redelivers the first command to the new daemon: acked ok, nothing runs again.
+    const asked = stub.requests.length;
+    server.send(cmd);
+    expect(
+      await server.waitFor(() => conn.frames.find((f) => f.type === "ack" && f.commandId === cmd.id)),
+    ).toMatchObject({ ok: true });
+    await sleep(300);
+    expect(conn.frames.filter((f) => f.type === "runtime.update.run" && f.phase === "started")).toHaveLength(
+      1,
+    );
+    expect(stub.requests.length).toBe(asked);
+
     // PD-25: no frame the server received carries a host path.
     for (const f of server.allFrames) expect(JSON.stringify(f)).not.toMatch(HOST_PATH_TOKEN_RE);
     // Only the stub was asked for the runtime (P1); nothing followed a redirect.
     expect(stub.requests.length).toBeGreaterThan(0);
     expect(stub.redirectRequests).toEqual([]);
   }, 60_000);
+
+  // ---- Task 2: busy devices wait and say why; redelivered and refused commands are safe (D-04, D-05, PD-18) ----
+
+  const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
+  const updateEvents = (sessionId: string) =>
+    server.allFrames.flatMap((f) =>
+      f.type === "event" && f.sessionId === sessionId && f.event.type === "runtime.update" ? [f.event] : [],
+    );
+  async function startOn(sessionId: string, rt: RuntimeId, localId: string): Promise<void> {
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, runtime: rt, permissionMode: "default" },
+    });
+    expect(await ackOf(`start-${sessionId}`)).toMatchObject({ ok: true });
+  }
+
+  it("a Codex turn running: the update waits, a new Claude Code turn is held and told the OCW runtime restarts; the exit comes after the turn", async () => {
+    const { spy, window } = handOverSpy(() => d);
+    const d = await selfDaemon({ exitForUpdate: spy });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    // C's Codex turn runs and waits on an approval: a turn in flight.
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    const asked = await server.frame(
+      "event",
+      (f) => f.sessionId === "C" && f.event.type === "approval.requested",
+      10_000,
+    );
+    expect(codex.activeTurns()).toBe(1);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    // A new Claude Code turn (and a title for it) is held; its session hears once that the OCW runtime restarts.
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    server.send({
+      id: "ta1",
+      kind: "session.title",
+      sessionId: "A",
+      payload: { runtime: "claude-code", model: "opus", prompt: "Please fix the login redirect bug" },
+    });
+    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 5_000);
+    await sleep(300);
+    expect(updateEvents("A")).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting", subject: "ocw-runtime" },
+    ]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(hasAck("pa1")).toBe(false);
+    expect(hasAck("ta1")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(spy).not.toHaveBeenCalled();
+
+    // The Codex turn ends (its approval is resolved; approvals never wait at the gate): then the restart.
+    const approvalId = asked.event.type === "approval.requested" ? asked.event.approvalId : "";
+    server.send({
+      id: "rc1",
+      kind: "approval.resolve",
+      sessionId: "C",
+      payload: { approvalId, decision: "once" },
+    });
+    expect(await ackOf("rc1")).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(75), { timeout: 15_000, interval: 20 });
+    await vi.waitFor(() => expect(window.to).toBeGreaterThanOrEqual(0), { timeout: 10_000, interval: 20 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(
+      server.allFrames.some(
+        (f) => f.type === "event" && f.sessionId === "C" && f.event.type === "prompt.completed",
+      ),
+    ).toBe(true);
+    // The held prompt was never acked by this daemon: the server runs it after the restart (PD-27).
+    expect(hasAck("pa1")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(updateEvents("A")).toHaveLength(1);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${new12()}`);
+  }, 60_000);
+
+  it("not a service run: the click is refused with the device's sentence; nothing is fetched, current is unchanged", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({
+      supervision: { supervised: false, reason: "not_supervised" },
+      exitForUpdate: spy,
+    });
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const snap = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    expect(snap.self).toMatchObject({ supervised: false, canUpdate: false, reason: "not_supervised" });
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({
+      ok: false,
+      error: "Run as a service to update from the browser; or re-run the install command",
+    });
+    await sleep(200);
+    expect(stub.requests).toEqual([]);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("a daemon built without exitForUpdate refuses the click and its snapshots carry no self", async () => {
+    const d = await selfDaemon({ exitForUpdate: null });
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const snap = await server.frame("runtime.maintenance", () => true, 10_000);
+    expect(snap.self).toBeUndefined();
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: false, error: SELF_UPDATE_UNAVAILABLE_MESSAGE });
+    await sleep(200);
+    expect(stub.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.maintenance" && f.self !== undefined)).toEqual(
+      [],
+    );
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    expect(
+      readdirSync(join(scratch.ocwHome, "runtime", "versions")).filter((n) => BUILD_DIR.test(n)),
+    ).toEqual([scratch.oldSha12]);
+  }, 30_000);
 });
