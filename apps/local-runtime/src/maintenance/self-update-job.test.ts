@@ -6,7 +6,16 @@
 // every case no lock file exists under the OS user's real home (PD-19, E30).
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { userInfo } from "node:os";
 import { join, relative } from "node:path";
 import {
@@ -18,7 +27,7 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { RuntimeGate } from "./gate.js";
-import { CANCELLED_STOPPED } from "./maintenance.js";
+import { CANCELLED_OFF, CANCELLED_STOPPED, CHECK_EVERY_MS, CHECK_JITTER_MS } from "./maintenance.js";
 import { InstallLock } from "./runner.js";
 import {
   type PrepareVersionOptions,
@@ -659,5 +668,177 @@ describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => 
     expect(r.exit).not.toHaveBeenCalled();
     expect(r.frames.some((f) => f.phase === "finished")).toBe(false);
     expect(await readSelfUpdateMarker(r.home.ocwHome)).toMatchObject({ commandId: COMMAND_ID });
+  });
+});
+
+describe("SelfUpdate: when the device checks its workspace and updates by itself (07.17.1, D-06, D-09, D-11, PD-10, E14)", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const versionRequests = (r: Rig) => r.stub.requests.filter((p) => p === RUNTIME_ROUTES.version).length;
+  /** The fake npm's control file for `npm ci` (in the staging directory's parent). */
+  const npmControl = (r: Rig) => join(runtimeDirOf(r), "versions", "fake-update.json");
+
+  it("off: start(), onConfig() and a day of timers make zero requests; a click still updates (D-09)", async () => {
+    const r = await makeRig({}, { level: "off" });
+    r.su.start();
+    await r.su.onConfig();
+    await r.clock.advance(DAY_MS);
+    expect(r.stub.requests).toEqual([]);
+    expect(r.frames).toEqual([]);
+    expect(r.su.status()).toMatchObject({ servedVersion: null, servedBuild: null, checkedAt: null });
+
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilExit(r);
+    expect(r.exit).toHaveBeenCalledWith(75);
+  });
+
+  it("notify: onConfig() checks once and reports what the workspace serves; it never runs by itself", async () => {
+    const r = await makeRig({}, { level: "notify" });
+    r.su.start();
+    await r.su.onConfig();
+    expect(r.stub.requests).toEqual([RUNTIME_ROUTES.version]);
+    expect(r.su.status()).toMatchObject({
+      servedVersion: "0.3.2",
+      servedBuild: newSha12(r),
+      checkedAt: "2026-11-11T12:00:00.000Z",
+      canUpdate: true,
+      state: "idle",
+    });
+    expect(r.published.at(-1)).toMatchObject({ servedBuild: newSha12(r) });
+    await flush();
+    expect(r.frames).toEqual([]);
+    expect(r.su.busy).toBe(false);
+    expect(r.exit).not.toHaveBeenCalled();
+  });
+
+  it("notify: the timer checks again every checkEveryMs ± jitter", async () => {
+    const r = await makeRig({ random: () => 1 }, { level: "notify" });
+    r.su.start();
+    expect(versionRequests(r)).toBe(0);
+    await r.clock.advance(CHECK_EVERY_MS + CHECK_JITTER_MS - 1);
+    expect(versionRequests(r)).toBe(0);
+    await r.clock.advance(1);
+    await vi.waitFor(() => expect(versionRequests(r)).toBe(1));
+    await r.clock.advance(CHECK_EVERY_MS + CHECK_JITTER_MS);
+    await vi.waitFor(() => expect(versionRequests(r)).toBe(2));
+    expect(r.frames).toEqual([]);
+  });
+
+  it("automatic: a newer served build runs by itself (trigger automatic, no command id)", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    r.su.start();
+    await r.su.onConfig();
+    await untilExit(r);
+    expect(r.frames[0]).toMatchObject({
+      phase: "started",
+      trigger: "automatic",
+      fromVersion: "0.3.1",
+      toVersion: "0.3.2",
+    });
+    expect(r.frames[0]?.commandId).toBeUndefined();
+    // The check's manifest is the run's: one /version request.
+    expect(versionRequests(r)).toBe(1);
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${newSha12(r)}`);
+  });
+
+  it("automatic: an OLDER served build (a server rollback) is followed too (D-11)", async () => {
+    const r = await makeRig({}, { level: "automatic", served: "0.3.0" });
+    await r.su.onConfig();
+    await untilExit(r);
+    expect(r.frames[0]).toMatchObject({ trigger: "automatic", fromVersion: "0.3.1", toVersion: "0.3.0" });
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${newSha12(r)}`);
+  });
+
+  it("automatic: the running build served → nothing runs, no lock is taken", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    r.stub.serve("0.3.1", testBundle("0.3.1"));
+    await r.su.onConfig();
+    await flush();
+    expect(r.stub.requests).toEqual([RUNTIME_ROUTES.version]);
+    expect(r.frames).toEqual([]);
+    expect(r.su.status()).toMatchObject({ servedBuild: oldSha12(r), state: "idle" });
+    expect(existsSync(lockFileOf(r))).toBe(false);
+  });
+
+  it("a failed automatic run of a build is not retried before failedBackoffMs; a check after it retries", async () => {
+    const r = await makeRig({ failedBackoffMs: 2 * CHECK_EVERY_MS }, { level: "automatic" });
+    writeFileSync(npmControl(r), JSON.stringify({ exitCode: 1 }));
+    r.su.start();
+    await r.su.onConfig();
+    await untilIdleWith(r, 2);
+    expect(r.frames.map((f) => [f.phase, f.outcome, f.trigger])).toEqual([
+      ["started", undefined, "automatic"],
+      ["finished", "failed", "automatic"],
+    ]);
+    expect(r.frames[1]?.output).toBe(SELF_UPDATE_FAILURE_SENTENCES.npm_failed);
+    rmSync(npmControl(r));
+
+    // The next scheduled check (6 h) is inside the backoff: it reports, it does not run.
+    await r.clock.advance(CHECK_EVERY_MS);
+    await vi.waitFor(() => expect(versionRequests(r)).toBe(2));
+    await flush();
+    expect(r.frames).toHaveLength(2);
+    expect(r.su.busy).toBe(false);
+
+    // The one after it (12 h) is past it: the run starts again.
+    await r.clock.advance(CHECK_EVERY_MS);
+    await untilExit(r);
+    expect(r.frames.filter((f) => f.phase === "started")).toHaveLength(2);
+  });
+
+  it("a click within the backoff of a failed automatic run still runs", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    writeFileSync(npmControl(r), JSON.stringify({ exitCode: 1 }));
+    await r.su.onConfig();
+    await untilIdleWith(r, 2);
+    rmSync(npmControl(r));
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilExit(r);
+    expect(r.frames.at(-1)).toMatchObject({ phase: "started", trigger: "manual", commandId: COMMAND_ID });
+  });
+
+  it.each<RuntimeUpdatesLevel>(["automatic", "notify", "off"])(
+    "level %s: no running build or not_installed → zero requests; status says why it cannot update",
+    async (level) => {
+      for (const over of [
+        { running: null, supervision: { supervised: false, reason: null } },
+        { supervision: { supervised: false, reason: "not_installed" as const } },
+      ] satisfies Partial<SelfUpdateOptions>[]) {
+        const r = await makeRig(over, { level });
+        r.su.start();
+        await r.su.onConfig();
+        await r.clock.advance(DAY_MS);
+        expect(r.stub.requests).toEqual([]);
+        expect(r.su.status()).toMatchObject({ canUpdate: false, reason: "not_installed" });
+      }
+    },
+  );
+
+  it("the level is read at each decision: automatic → off stops the checks at the next tick", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    r.stub.serve("0.3.1", testBundle("0.3.1"));
+    r.su.start();
+    await r.su.onConfig();
+    expect(versionRequests(r)).toBe(1);
+    r.level.value = "off";
+    await r.clock.advance(DAY_MS);
+    expect(versionRequests(r)).toBe(1);
+    r.level.value = "notify";
+    await r.clock.advance(CHECK_EVERY_MS + CHECK_JITTER_MS);
+    await vi.waitFor(() => expect(versionRequests(r)).toBe(2));
+  });
+
+  it("an automatic update still waiting for an idle moment ends when the level leaves automatic: gates open, no exit", async () => {
+    const r = await makeRig({ drainAfterMs: 60_000 }, { level: "automatic" });
+    r.turns.codex = 1;
+    await r.su.onConfig();
+    await untilState(r, "waiting");
+    r.level.value = "notify";
+    await r.clock.advance(1_000);
+    await untilIdleWith(r, 2);
+    expect(r.frames[1]).toMatchObject({ phase: "finished", outcome: "failed", trigger: "automatic" });
+    expect(r.frames[1]?.output).toBe(CANCELLED_OFF);
+    expect(gatesOpen(r)).toBe(true);
+    await r.clock.advance(120_000);
+    expect(r.exit).not.toHaveBeenCalled();
   });
 });
