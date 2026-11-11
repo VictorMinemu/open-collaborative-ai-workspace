@@ -126,6 +126,10 @@ describe("round trip", () => {
     expect(RuntimeUpdatePayload.safeParse({ runtime: "codex", version: "0.170.0" }).success).toBe(false);
     expect(RuntimeUpdatePayload.safeParse({ runtime: "codex", command: "npm i -g x" }).success).toBe(false);
     expect(RuntimeUpdatePayload.safeParse({ runtime: "opencode" }).success).toBe(false);
+    // 07.17.1 widened the target to the OCW runtime; the payload is still strict.
+    expect(RuntimeUpdatePayload.safeParse({ runtime: "ocw-runtime", command: "npm i -g x" }).success).toBe(
+      false,
+    );
   });
 
   it("a history run parses with its nullable fields", () => {

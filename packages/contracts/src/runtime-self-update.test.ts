@@ -85,7 +85,7 @@ const finishedFrame = {
 const dto07_11 = {
   runtimes: [],
   localLevel: "notify",
-  localLevelSource: "default",
+  localLevelSource: "config",
   effectiveLevel: "notify",
   orgLevel: "automatic",
   reportedAt: AT,

@@ -3,12 +3,15 @@ import { IsoDateTime, RelativePath } from "./common";
 import { DeviceHostKind, RuntimeInfo } from "./device";
 import {
   InstallMethod,
+  RuntimeBuild,
   RuntimeCompatibilityManifest,
   RuntimeMaintenanceStatus,
+  RuntimeSelfStatus,
   RuntimeUpdateOutcome,
   RuntimeUpdateOutputText,
   RuntimeUpdatesLevel,
   RuntimeUpdatesLevelSource,
+  RuntimeUpdateTarget,
   RuntimeUpdateTrigger,
   RuntimeVersion,
 } from "./runtime-maintenance";
@@ -196,6 +199,11 @@ export const RuntimeMaintenanceFrame = z.object({
   effectiveLevel: RuntimeUpdatesLevel,
   /** False until a `runtime.config` arrived (the org level then counts as `notify`, D-10). */
   orgLevelReceived: z.boolean(),
+  /**
+   * 07.17.1 (PD-04): the device's own OCW runtime, strict. Old APIs strip it (this frame is a plain `z.object`); the
+   * API never sends an `ocw-runtime` update command to a daemon whose snapshot lacks it.
+   */
+  self: RuntimeSelfStatus.optional(),
 });
 export type RuntimeMaintenanceFrame = z.infer<typeof RuntimeMaintenanceFrame>;
 
@@ -209,7 +217,8 @@ export const RuntimeUpdateRunFrame = z
   .object({
     type: z.literal("runtime.update.run"),
     runId: z.uuid(),
-    runtime: RuntimeId,
+    /** 07.17.1 (PD-04): a runtime CLI or the OCW runtime itself (then `method: "ocw_bundle"`). */
+    runtime: RuntimeUpdateTarget,
     trigger: RuntimeUpdateTrigger,
     commandId: z.uuid().optional(),
     phase: z.enum(["started", "finished"]),
@@ -219,6 +228,9 @@ export const RuntimeUpdateRunFrame = z
     candidate: RuntimeVersion.nullable(),
     method: InstallMethod,
     output: RuntimeUpdateOutputText.optional(),
+    /** 07.17.1: the OCW runtime's builds before and after (12 hex); absent on CLI runs and from older daemons. */
+    fromBuild: RuntimeBuild.nullable().optional(),
+    toBuild: RuntimeBuild.nullable().optional(),
     at: IsoDateTime,
   })
   .refine((f) => (f.phase === "finished") === (f.outcome !== undefined), {
