@@ -591,6 +591,14 @@ const SELF_HISTORY: ReadonlySet<RuntimeSelfView["kind"]> = new Set([
 ]);
 
 /**
+ * Review IN-10: how often a clicked run is re-read, `elapsedMs` after the click: every 2 s for the first minute (a quick
+ * update ends there), then every 15 s (a run waiting for sessions can last up to the 30 min hold).
+ */
+export function selfTrackInterval(elapsedMs: number): number {
+  return elapsedMs < 60_000 ? 2_000 : 15_000;
+}
+
+/**
  * The OCW runtime's row, first in the device's list (PD-17): installed vs served, one Update (D-01) that the API decides
  * and audits, the run followed until it ends (D-07), and what to do where one click can't work (D-05).
  */
@@ -612,8 +620,9 @@ export function RuntimeSelfRow({
   const request = useRequestRuntimeUpdate(device.id);
   // The run Update created, followed until it ends: the device restarts in between, so the answer comes from the API.
   const [tracked, setTracked] = useState<string | null>(null);
+  const [trackedAt, setTrackedAt] = useState(0);
   const runs = useRuntimeUpdateHistory(device.id, OCW_RUNTIME_TARGET, tracked !== null, {
-    refetchInterval: tracked ? 2000 : false,
+    refetchInterval: tracked ? () => selfTrackInterval(Date.now() - trackedAt) : false,
   });
   const trackedRun = tracked ? runs.data?.find((r) => r.id === tracked) : undefined;
   useEffect(() => {
@@ -711,7 +720,10 @@ export function RuntimeSelfRow({
               title={block ?? undefined}
               onClick={() =>
                 request.mutate(OCW_RUNTIME_TARGET, {
-                  onSuccess: ({ run }) => setTracked(run.id),
+                  onSuccess: ({ run }) => {
+                    setTrackedAt(Date.now());
+                    setTracked(run.id);
+                  },
                   onError: (err) => toast.error(errorMessage(err)),
                 })
               }

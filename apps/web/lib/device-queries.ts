@@ -78,7 +78,7 @@ export function useRuntimeUpdateHistory(
   deviceId: string,
   runtime: RuntimeUpdateTarget | undefined,
   enabled: boolean,
-  opts: { refetchInterval?: number | false } = {},
+  opts: { refetchInterval?: number | false | (() => number | false) } = {},
 ) {
   return useQuery({
     enabled,

@@ -21,6 +21,7 @@ import {
   runtimeSelfView,
   runtimeUpdateStatus,
   SELF_NOT_BACK_AFTER_MS,
+  selfTrackInterval,
 } from "./runtime-updates";
 import { RuntimeUpdatesField } from "./work-zone-policy-settings";
 
@@ -552,6 +553,15 @@ describe("review WR-03: a runtime that did not come back after updating", () => 
     expect(row).toContain("The device was last seen 5 minutes ago");
     expect(updateButton(row)).toBe("");
     expect(row).toContain('data-testid="runtime-self-history"');
+  });
+});
+
+describe("review IN-10: following a clicked run backs off", () => {
+  it("polls every 2 s for the first minute, then every 15 s", () => {
+    expect(selfTrackInterval(0)).toBe(2_000);
+    expect(selfTrackInterval(59_000)).toBe(2_000);
+    expect(selfTrackInterval(60_000)).toBe(15_000);
+    expect(selfTrackInterval(3 * HOUR)).toBe(15_000);
   });
 });
 
