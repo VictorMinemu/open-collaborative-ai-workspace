@@ -51,7 +51,12 @@ jobs:
           sparse-checkout: |
             docs/releases
             scripts/install.sh
+            apps/local-runtime/package.json
+            scripts/check-runtime-version.mjs
           sparse-checkout-cone-mode: false
+      # The runtime's version follows the release (ADR-0040 § 13, D-10): a tag that disagrees publishes nothing.
+      - name: Check the runtime version
+        run: node scripts/check-runtime-version.mjs "$TAG"
       - name: Draft the release and upload install.sh
         env:
           GH_TOKEN: ${{ github.token }}
