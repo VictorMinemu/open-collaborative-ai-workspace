@@ -771,6 +771,43 @@ describe("prompt, read and stop through the real entry and the fake Agent Channe
     expect(text(stopped)).toBe(`Stopped session ${WS}.`);
     expect(api.toolCalls).toEqual([]);
   });
+
+  it("07.17.1.1: upload and download post their own bodies to their own routes, never /tool-calls", async () => {
+    toolGuard.beginTurn(SESSION, { eventId: "evt-f1", agentId: BOT, turn: turn(), conversationId: DM });
+    const attachmentId = "0199a6f0-0000-7000-8000-00000000f001";
+    const put = await ownedTool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", {
+      workSessionId: WS,
+      attachmentId,
+      path: "docs/spec.pdf",
+    });
+    const got = await ownedTool(WORK_SESSION_DOWNLOAD_TOOL).execute("tc-2", {
+      workSessionId: WS,
+      path: "README.md",
+    });
+    expect(api.workSessions.uploads).toEqual([
+      { eventId: "evt-f1", agentId: BOT, workSessionId: WS, attachmentId, path: "docs/spec.pdf" },
+    ]);
+    expect(api.workSessions.downloads).toEqual([
+      { eventId: "evt-f1", agentId: BOT, workSessionId: WS, path: "README.md" },
+    ]);
+    expect(text(put)).toBe(`Put docs/spec.pdf (1.5 KB) into session ${WS}.`);
+    expect(text(got)).toMatch(new RegExp(`^Downloaded README\\.md \\(64 B\\) from session ${WS}\\. `, "u"));
+    expect(api.toolCalls).toEqual([]);
+  });
+
+  it("the fake file routes are strict like the real ones: a device id or a URL is a 400", async () => {
+    for (const [route, body] of [
+      ["upload", { workSessionId: WS, attachmentId: WS, path: "a.txt", deviceId: WS }],
+      ["download", { workSessionId: WS, path: "a.txt", url: "https://x.test/a" }],
+    ] as const) {
+      const res = await fetch(`${api.url}/agent-channel/v1/work-sessions/${route}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${api.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ eventId: "evt-x", agentId: BOT, ...body }),
+      });
+      expect(res.status, route).toBe(400);
+    }
+  });
 });
 
 describe("the session-output mark (07.16 D-20, PD-15): a read makes the turn's other actions read-only", () => {
