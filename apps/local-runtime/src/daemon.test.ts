@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   rmSync,
@@ -2975,5 +2976,189 @@ describe("07.17.1.1 session.file.read: one contained file streams to the server 
     expect(logger.lines.join("\n")).not.toContain(home);
     for (const id of ids) expect(logger.lines.some((l) => l.includes(id))).toBe(true);
     expect(logger.lines.some((l) => l.includes('"code":"not_a_file"'))).toBe(true);
+  });
+});
+
+describe("07.17.1.1 session.file.write: a file lands in an idle session's tree, verified, with no second writer", () => {
+  function writePayload(path: string, bytes: Buffer, overwrite = false) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite };
+  }
+
+  it("GETs the transfer with the device JWT, writes exactly the bytes and acks ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-w1");
+    const bytes = randomBytes(40_000);
+    server.fileBody = bytes;
+    const cmd = fileCmd("session.file.write", "wf-w1", writePayload("notes/up.bin", bytes));
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toEqual({ type: "ack", commandId: cmd.id, ok: true });
+    expect(server.fileRequests).toEqual([
+      {
+        method: "GET",
+        url: `/api/v1/runtime/files/${cmd.id}`,
+        authorization: `Bearer ${server.issued.at(-1)}`,
+        contentLength: undefined,
+        sha256: sha256Hex(""),
+        bytes: 0,
+      },
+    ]);
+    expect(sha256Hex(readFileSync(join(project, "notes", "up.bin")))).toBe(sha256Hex(bytes));
+    expect(readdirSync(join(project, "notes"))).toEqual(["up.bin"]);
+  });
+
+  it("refused while a turn of the session runs (busy, no request); accepted once it completed", async () => {
+    await fileDaemon();
+    await activeSession("wf-w2");
+    server.fileBody = Buffer.from("hello");
+    // The test runtime's prompt starts a turn and returns without completing it.
+    server.send({
+      id: "wf-w2-p",
+      kind: "prompt",
+      sessionId: "wf-w2",
+      payload: { promptId: "pw", text: "go" },
+    });
+    expect(await fileAck("wf-w2-p")).toMatchObject({ ok: true });
+    const busy = fileCmd("session.file.write", "wf-w2", writePayload("a.txt", server.fileBody));
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "busy" });
+    expect(server.fileRequests).toEqual([]);
+    runtime.emit("wf-w2", {
+      type: "prompt.completed",
+      promptId: "pw",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const ok = fileCmd("session.file.write", "wf-w2", writePayload("a.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    expect(readFileSync(join(project, "a.txt"), "utf8")).toBe("hello");
+  });
+
+  it("a session.state that is not running or waiting_approval also ends the turn", async () => {
+    await fileDaemon();
+    await activeSession("wf-w3");
+    server.fileBody = Buffer.from("hello");
+    runtime.emit("wf-w3", { type: "session.state", status: "waiting_approval" });
+    const busy = fileCmd("session.file.write", "wf-w3", writePayload("b.txt", server.fileBody));
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "busy" });
+    runtime.emit("wf-w3", { type: "session.state", status: "idle" });
+    const ok = fileCmd("session.file.write", "wf-w3", writePayload("b.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+  });
+
+  it("not active → not_running; 410 → expired; wrong bytes → mismatch; a repeated id runs once", async () => {
+    await fileDaemon();
+    await activeSession("wf-w4");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    const gone = fileCmd("session.file.write", "no-such-session", writePayload("c.txt", bytes));
+    server.send(gone);
+    expect(await fileAck(gone.id)).toMatchObject({ ok: false, error: "not_running" });
+    expect(server.fileRequests).toEqual([]);
+
+    server.fileStatuses = [410];
+    const expired = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(expired);
+    expect(await fileAck(expired.id)).toMatchObject({ ok: false, error: "expired" });
+    expect(existsSync(join(project, "c.txt"))).toBe(false);
+
+    server.fileBody = Buffer.from("jello");
+    const wrong = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(wrong);
+    expect(await fileAck(wrong.id)).toMatchObject({ ok: false, error: "mismatch" });
+    expect(existsSync(join(project, "c.txt"))).toBe(false);
+    expect(readdirSync(project).filter((n) => n.startsWith(".ocw-upload-"))).toEqual([]);
+
+    server.fileBody = bytes;
+    server.fileRequests.length = 0;
+    const once = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(once);
+    expect(await fileAck(once.id)).toMatchObject({ ok: true });
+    server.send(once);
+    await server.waitFor(() =>
+      server.allFrames.filter((f) => f.type === "ack" && f.commandId === once.id).length === 2
+        ? true
+        : undefined,
+    );
+    expect(server.fileRequests).toHaveLength(1);
+  });
+
+  it("refusals before any request: exists, not_a_file, path_not_allowed (.ocw-worktrees, .claude), invalid_path", async () => {
+    await fileDaemon();
+    await activeSession("wf-w5");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    mkdirSync(join(project, "docs"));
+    for (const [path, error, overwrite] of [
+      ["README.md", "exists", false],
+      ["docs", "not_a_file", true],
+      [".ocw-worktrees/other/x.md", "path_not_allowed", false],
+      [".claude/settings.json", "path_not_allowed", false],
+      ["../x.md", "invalid_path", false],
+    ] as const) {
+      const cmd = fileCmd("session.file.write", "wf-w5", writePayload(path, bytes, overwrite));
+      server.send(cmd);
+      expect(await fileAck(cmd.id), path).toMatchObject({ ok: false, error });
+    }
+    expect(server.fileRequests).toEqual([]);
+    expect(readFileSync(join(project, "README.md"), "utf8")).toBe("hello\n");
+  });
+
+  it("a write and a prompt of the same session run one after the other (session order), never at once", async () => {
+    await fileDaemon();
+    await activeSession("wf-w6");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    let release!: () => void;
+    runtime.promptHold = new Promise<void>((r) => {
+      release = r;
+    });
+    server.send({
+      id: "wf-w6-p",
+      kind: "prompt",
+      sessionId: "wf-w6",
+      payload: { promptId: "po", text: "go" },
+    });
+    await server.frame("event", (f) => f.sessionId === "wf-w6" && f.event.type === "prompt.started");
+    const cmd = fileCmd("session.file.write", "wf-w6", writePayload("d.txt", bytes));
+    server.send(cmd);
+    await sleep(200);
+    expect(server.allFrames.some((f) => f.type === "ack" && f.commandId === cmd.id)).toBe(false);
+    expect(server.fileRequests).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    const acks = server.allFrames.flatMap((f) => (f.type === "ack" ? [f.commandId] : []));
+    expect(acks.indexOf("wf-w6-p")).toBeLessThan(acks.indexOf(cmd.id));
+    expect(readFileSync(join(project, "d.txt"), "utf8")).toBe("hello");
+  });
+
+  it("a stopped session's turn is forgotten: a write after a restart of the session is not busy", async () => {
+    await fileDaemon();
+    await activeSession("wf-w7");
+    server.fileBody = Buffer.from("hello");
+    server.send({
+      id: "wf-w7-p",
+      kind: "prompt",
+      sessionId: "wf-w7",
+      payload: { promptId: "px", text: "go" },
+    });
+    expect(await fileAck("wf-w7-p")).toMatchObject({ ok: true });
+    server.send({ id: "wf-w7-s", kind: "session.stop", sessionId: "wf-w7" });
+    expect(await fileAck("wf-w7-s")).toMatchObject({ ok: true });
+    const stopped = fileCmd("session.file.write", "wf-w7", writePayload("e.txt", server.fileBody));
+    server.send(stopped);
+    expect(await fileAck(stopped.id)).toMatchObject({ ok: false, error: "not_running" });
+    const localId = daemon.registry.list()[0]!.localId;
+    server.send({
+      id: "wf-w7-r",
+      kind: "session.start",
+      sessionId: "wf-w7",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+    });
+    expect(await fileAck("wf-w7-r")).toMatchObject({ ok: true });
+    const ok = fileCmd("session.file.write", "wf-w7", writePayload("e.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
   });
 });

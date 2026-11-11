@@ -1,10 +1,29 @@
 // 07.17.1.1 (D-02, D-03, D-04, D-09, PD-09, PD-10): containment of a session's files on the device. Scratch trees only.
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { openSessionFileForRead, resolveSessionPath, SessionFileError } from "./session-files.js";
+import {
+  openSessionFileForRead,
+  resolveSessionPath,
+  SessionFileError,
+  writeSessionFile,
+} from "./session-files.js";
 
 let base: string;
 let root: string;
@@ -143,4 +162,238 @@ describe("openSessionFileForRead (PD-10)", () => {
       expect(String((err as Error).message)).not.toContain(base);
     }
   });
+});
+
+// ---------------------------------------------------------------- the write side (D-02, D-13, PD-10, E2, E4, E21, E22, E25)
+
+function sha(b: Uint8Array | string): string {
+  return createHash("sha256").update(b).digest("hex");
+}
+
+/** A body of the given parts; `seen.started` tells whether anything read it. */
+function bodyOf(parts: Array<string | Uint8Array>, seen: { started: boolean } = { started: false }) {
+  return (async function* () {
+    seen.started = true;
+    for (const p of parts) yield typeof p === "string" ? Buffer.from(p) : p;
+  })();
+}
+
+/** Files a write left behind in `dir` (the temp files must never stay). */
+function leftovers(dir: string): string[] {
+  return existsSync(dir) ? readdirSync(dir).filter((n) => n.startsWith(".ocw-upload-")) : [];
+}
+
+const HELLO = { sizeBytes: 5, sha256: sha("hello") };
+
+describe("writeSessionFile (PD-10)", () => {
+  it("creates missing folders and the file with exactly the bytes, mode 0o644; no temp file remains", async () => {
+    await writeSessionFile(root, "notes/new.md", {
+      transferId: "t1",
+      ...HELLO,
+      overwrite: false,
+      body: bodyOf(["he", "llo"]),
+    });
+    const target = join(root, "notes", "new.md");
+    expect(readFileSync(target, "utf8")).toBe("hello");
+    expect(statSync(target).mode & 0o777).toBe(0o644);
+    expect(leftovers(join(root, "notes"))).toEqual([]);
+  });
+
+  it("an existing file without overwrite is exists (unchanged); with overwrite it is replaced", async () => {
+    writeFileSync(join(root, "docs", "b.md"), "old");
+    const again = writeSessionFile(root, "docs/b.md", {
+      transferId: "t2",
+      ...HELLO,
+      overwrite: false,
+      body: bodyOf(["hello"]),
+    });
+    expect(await codeOf(again)).toBe("exists");
+    expect(readFileSync(join(root, "docs", "b.md"), "utf8")).toBe("old");
+    await writeSessionFile(root, "docs/b.md", {
+      transferId: "t3",
+      ...HELLO,
+      overwrite: true,
+      body: bodyOf(["hello"]),
+    });
+    expect(readFileSync(join(root, "docs", "b.md"), "utf8")).toBe("hello");
+    expect(leftovers(join(root, "docs"))).toEqual([]);
+  });
+
+  it("a folder or a link at the target is not_a_file, overwrite or not; the link's target is untouched", async () => {
+    symlinkSync(join(outside, "secret.txt"), join(root, "leak.txt"));
+    for (const overwrite of [false, true]) {
+      for (const rel of ["docs", "leak.txt"]) {
+        const w = writeSessionFile(root, rel, {
+          transferId: `t-${rel}-${overwrite}`,
+          ...HELLO,
+          overwrite,
+          body: bodyOf(["hello"]),
+        });
+        expect(await codeOf(w), `${rel} ${overwrite}`).toBe("not_a_file");
+      }
+    }
+    expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("outside");
+    expect(lstatSync(join(root, "leak.txt")).isSymbolicLink()).toBe(true);
+    expect(leftovers(root)).toEqual([]);
+  });
+
+  it("a folder link pointing outside or at .git is path_not_allowed; nothing is written outside", async () => {
+    symlinkSync(outside, join(root, "out"));
+    symlinkSync(join(root, ".git"), join(root, "g"));
+    symlinkSync(join(root, "docs"), join(root, "d"));
+    for (const rel of ["out/x.md", "out/new/x.md", "g/hooks/pre-commit", "d/sub/x.md"]) {
+      const w = writeSessionFile(root, rel, {
+        transferId: "t4",
+        ...HELLO,
+        overwrite: false,
+        body: bodyOf(["hello"]),
+      });
+      expect(await codeOf(w), rel).toBe("path_not_allowed");
+    }
+    expect(readdirSync(outside)).toEqual(["secret.txt"]);
+    expect(existsSync(join(root, ".git", "hooks"))).toBe(false);
+    expect(existsSync(join(root, "docs", "sub"))).toBe(false);
+  });
+
+  it("the deny list and malformed paths are refused before anything is created", async () => {
+    for (const [rel, code] of [
+      [".ocw-worktrees/other/a.md", "path_not_allowed"],
+      [".claude/settings.json", "path_not_allowed"],
+      [".mcp.json", "path_not_allowed"],
+      [DOT_ENV, "path_not_allowed"],
+      ["../escape.md", "invalid_path"],
+    ] as const) {
+      const w = writeSessionFile(root, rel, {
+        transferId: "t5",
+        ...HELLO,
+        overwrite: false,
+        body: bodyOf(["hello"]),
+      });
+      expect(await codeOf(w), rel).toBe(code);
+    }
+    expect(existsSync(join(root, ".ocw-worktrees"))).toBe(false);
+    expect(existsSync(join(root, ".claude"))).toBe(false);
+    expect(existsSync(join(base, "escape.md"))).toBe(false);
+  });
+
+  it("bytes of the wrong size or sha256 are mismatch: nothing at the target, no temp file", async () => {
+    for (const [parts, expected] of [
+      [["hell"], HELLO],
+      [["hello!"], HELLO],
+      [["jello"], HELLO],
+    ] as const) {
+      const w = writeSessionFile(root, "docs/m.md", {
+        transferId: "t6",
+        ...expected,
+        overwrite: false,
+        body: bodyOf([...parts]),
+      });
+      expect(await codeOf(w), parts.join("")).toBe("mismatch");
+      expect(existsSync(join(root, "docs", "m.md"))).toBe(false);
+      expect(leftovers(join(root, "docs"))).toEqual([]);
+    }
+    // A null sha256 checks the size only.
+    await writeSessionFile(root, "docs/m.md", {
+      transferId: "t6b",
+      sizeBytes: 5,
+      sha256: null,
+      overwrite: false,
+      body: bodyOf(["jello"]),
+    });
+    expect(readFileSync(join(root, "docs", "m.md"), "utf8")).toBe("jello");
+  });
+
+  it("a body that fails mid-way is transfer_failed; a SessionFileError from the body is kept; no temp file", async () => {
+    const failing = (err: Error) =>
+      (async function* () {
+        yield Buffer.from("he");
+        throw err;
+      })();
+    const w = writeSessionFile(root, "docs/f.md", {
+      transferId: "t7",
+      ...HELLO,
+      overwrite: false,
+      body: failing(new Error(`socket closed near ${root}`)),
+    });
+    try {
+      await w;
+      expect.unreachable();
+    } catch (err) {
+      expect((err as SessionFileError).code).toBe("transfer_failed");
+      expect((err as Error).message).not.toContain(base);
+    }
+    const expired = writeSessionFile(root, "docs/f.md", {
+      transferId: "t8",
+      ...HELLO,
+      overwrite: false,
+      body: failing(new SessionFileError("expired")),
+    });
+    expect(await codeOf(expired)).toBe("expired");
+    expect(existsSync(join(root, "docs", "f.md"))).toBe(false);
+    expect(leftovers(join(root, "docs"))).toEqual([]);
+  });
+
+  it("too little free space is no_space before the body is read (E25)", async () => {
+    const seen = { started: false };
+    const w = writeSessionFile(root, "docs/big.bin", {
+      transferId: "t9",
+      ...HELLO,
+      overwrite: false,
+      body: bodyOf(["hello"], seen),
+      statfs: async () => ({ bavail: 1, bsize: 4 }),
+    });
+    expect(await codeOf(w)).toBe("no_space");
+    expect(seen.started).toBe(false);
+    expect(leftovers(join(root, "docs"))).toEqual([]);
+  });
+
+  it("a transfer id that is not an id is refused before any temp file", async () => {
+    const w = writeSessionFile(root, "docs/t.md", {
+      transferId: "../../x",
+      ...HELLO,
+      overwrite: false,
+      body: bodyOf(["hello"]),
+    });
+    expect(await codeOf(w)).toBe("transfer_failed");
+    expect(existsSync(join(root, "x"))).toBe(false);
+  });
+
+  it("17 MiB of random bytes written then read back give the same sha256 (E21)", async () => {
+    const bytes = randomBytes(17 * 1024 * 1024);
+    const parts: Uint8Array[] = [];
+    for (let i = 0; i < bytes.byteLength; i += 1024 * 1024) parts.push(bytes.subarray(i, i + 1024 * 1024));
+    await writeSessionFile(root, "blob/r.bin", {
+      transferId: "t10",
+      sizeBytes: bytes.byteLength,
+      sha256: sha(bytes),
+      overwrite: false,
+      body: bodyOf(parts),
+    });
+    const { handle, size } = await openSessionFileForRead(root, "blob/r.bin", 32 * 1024 * 1024);
+    try {
+      expect(size).toBe(bytes.byteLength);
+      const h = createHash("sha256");
+      for await (const chunk of handle.createReadStream({ start: 0, end: size - 1, autoClose: false })) {
+        h.update(chunk as Buffer);
+      }
+      expect(h.digest("hex")).toBe(sha(bytes));
+    } finally {
+      await handle.close();
+    }
+  }, 30_000);
+
+  it.skipIf(process.platform === "win32")(
+    "a FIFO is not_a_file both ways, and reading never blocks on it",
+    async () => {
+      execFileSync("mkfifo", [join(root, "docs", "pipe")]);
+      expect(await codeOf(openSessionFileForRead(root, "docs/pipe", 10))).toBe("not_a_file");
+      const w = writeSessionFile(root, "docs/pipe", {
+        transferId: "t11",
+        ...HELLO,
+        overwrite: true,
+        body: bodyOf(["hello"]),
+      });
+      expect(await codeOf(w)).toBe("not_a_file");
+    },
+  );
 });
