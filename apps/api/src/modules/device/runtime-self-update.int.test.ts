@@ -13,7 +13,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, selfStatus, sleep } from "../../testing-device";
 import { writeRuntimeDist } from "../../testing-runtime-dist";
-import { errorCode, invite, pairDevice, shareDevice } from "../../testing-workzone";
+import { errorCode, invite, pairDevice, shareDevice, startSession } from "../../testing-workzone";
+import { RUN_INTERRUPTED } from "./maintenance";
 
 /**
  * The OCW runtime's own update on the Control Plane (07.17.1-09, D-01, D-02, D-05, D-07, D-09, PD-13, PD-14, PD-15,
@@ -180,6 +181,8 @@ async function seen(as: TestClient, deviceId: string): Promise<DeviceDto | undef
 }
 
 beforeAll(async () => {
+  // A closed socket reads as offline quickly (the abandoned-run case, PD-14).
+  process.env.OCW_DEVICE_OFFLINE_GRACE_MS = "300";
   dist = await mkdtemp(join(tmpdir(), "ocw-self-update-dist-"));
   stack = await startTestStack({ env: { OCW_RUNTIME_DIST_DIR: dist } });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
@@ -217,6 +220,7 @@ afterAll(async () => {
   await su?.end();
   await stack?.stop();
   if (dist) await rm(dist, { recursive: true, force: true });
+  delete process.env.OCW_DEVICE_OFFLINE_GRACE_MS;
 });
 
 describe("07.17.1-09 Task 2 (runs first, before the bundle exists): no served bundle", () => {
@@ -432,5 +436,228 @@ describe("07.17.1-09 Task 2: who may update, which devices qualify, and the orga
     } finally {
       await setLevel("automatic");
     }
+  });
+});
+
+/** A clicked OCW runtime update the device accepted and started (its `runId`), as the device reports it. */
+async function startedSelfUpdate(dev: FakeDevice, deviceId: string): Promise<{ id: string; runId: string }> {
+  const B = (await serveBundle()).build;
+  await report(dev, deviceId, selfStatus({ build: A }));
+  const res = await owen.request("POST", updateUrl(deviceId));
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  const cmd = await dev.command("runtime.update");
+  dev.ack(cmd.id);
+  const runId = randomUUID();
+  dev.updateRun({
+    runId,
+    runtime: "ocw-runtime",
+    trigger: "manual",
+    commandId: cmd.id,
+    phase: "started",
+    fromVersion: "0.3.1",
+    toVersion: null,
+    candidate: "0.3.2",
+    method: "ocw_bundle",
+    fromBuild: A,
+    toBuild: B,
+  });
+  await report(dev, deviceId, selfStatus({ build: A, state: "waiting" }));
+  const row = (await runs(deviceId)).find((r) => r.run_id === runId);
+  expect(row).toMatchObject({ state: "started" });
+  return { id: row!.id as string, runId };
+}
+
+/** Make a run look started 31 minutes ago (past `RUNTIME_UPDATE_RUN_ABANDON_MS`). */
+async function age(runId: string): Promise<void> {
+  await su.query(
+    "update app.device_runtime_updates set started_at = now() - interval '31 minutes' where run_id = $1",
+    [runId],
+  );
+}
+
+/** The system's `finished failed` audits of this device's OCW runtime runs (closed as interrupted). */
+const interrupted = async (deviceId: string) =>
+  (await audits("device.runtime_update_finished", deviceId)).filter(
+    (a) =>
+      a.actor_kind === "system" && a.metadata.runtime === "ocw-runtime" && a.metadata.outcome === "failed",
+  ).length;
+
+describe("07.17.1-09 Task 3: an update that never reports back reads as failed (PD-14)", () => {
+  it("offline past the abandon time: the read closes the row as failed RUN_INTERRUPTED, audited once; a CLI row is untouched; a late finished frame still wins", async () => {
+    const srv = await pairDevice(stack, owen, "Owen's build server");
+    let dev = await FakeDevice.connect(stack.baseUrl, srv.token, undefined, { host: "service" });
+    open.push(dev);
+    const { runId } = await startedSelfUpdate(dev, srv.deviceId);
+    const cliRun = randomUUID();
+    dev.updateRun({ runId: cliRun, phase: "started", fromVersion: "2.1.290", candidate: "2.1.300" });
+    await report(dev, srv.deviceId, selfStatus({ build: A, state: "waiting" }));
+    await age(runId);
+    await age(cliRun);
+    await dev.close();
+    await eventually(async () => (await deviceRow(srv.deviceId)).status === "offline");
+
+    const read = await owen.request("GET", historyUrl(srv.deviceId, "ocw-runtime"));
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body!.runs as Row[]).toHaveLength(1);
+    expect((read.body!.runs as Row[])[0]).toMatchObject({
+      runtime: "ocw-runtime",
+      state: "failed",
+      error: RUN_INTERRUPTED,
+    });
+    expect(await interrupted(srv.deviceId)).toBe(1);
+    // 07.11 closes CLI rows only at a snapshot: the read leaves them alone.
+    expect((await runs(srv.deviceId)).find((r) => r.run_id === cliRun)).toMatchObject({ state: "started" });
+    // A second read writes nothing new.
+    expect((await owen.request("GET", historyUrl(srv.deviceId))).status).toBe(200);
+    expect(await interrupted(srv.deviceId)).toBe(1);
+
+    // The new daemon's real outcome, replayed from its offline log, still closes the row (07.11 ME-04).
+    dev = await FakeDevice.connect(stack.baseUrl, srv.token, undefined, { host: "service" });
+    open.push(dev);
+    dev.updateRun({
+      runId,
+      runtime: "ocw-runtime",
+      trigger: "manual",
+      phase: "finished",
+      outcome: "succeeded",
+      fromVersion: "0.3.1",
+      toVersion: "0.3.2",
+      candidate: "0.3.2",
+      method: "ocw_bundle",
+      fromBuild: A,
+      toBuild: served!.build,
+    });
+    await report(dev, srv.deviceId, selfStatus({ version: "0.3.2", build: served!.build }));
+    expect((await runs(srv.deviceId)).find((r) => r.run_id === runId)).toMatchObject({
+      state: "succeeded",
+      error: null,
+      to_version: "0.3.2",
+      to_build: served!.build,
+    });
+  });
+
+  it("online and waiting for sessions to finish keeps the row open (snapshot and read); the stored self at idle closes it on read", async () => {
+    const { runId } = await startedSelfUpdate(d, dId);
+    await age(runId);
+    // A snapshot while the device still waits does not close it either.
+    await report(d, dId, selfStatus({ build: A, state: "waiting" }));
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+    const waiting = await owen.request("GET", historyUrl(dId, "ocw-runtime"));
+    expect(waiting.status).toBe(200);
+    expect((waiting.body!.runs as Row[]).find((r) => r.state === "started")).toBeDefined();
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+
+    // The stored report says idle (no new snapshot): the read closes the run.
+    await su.query(
+      "update app.devices set runtime_maintenance = jsonb_set(runtime_maintenance, '{self,state}', '\"idle\"') where id = $1",
+      [dId],
+    );
+    const before = await interrupted(dId);
+    // Organization B's read of the same id is 404 and closes nothing of organization A.
+    const other = await eve.request("GET", historyUrl(dId, "ocw-runtime"));
+    expect(other.status, JSON.stringify(other.body)).toBe(404);
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+    expect(await interrupted(dId)).toBe(before);
+    const idle = await owen.request("GET", historyUrl(dId, "ocw-runtime"));
+    expect(idle.status).toBe(200);
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({
+      state: "failed",
+      error: RUN_INTERRUPTED,
+    });
+    expect(await interrupted(dId)).toBe(before + 1);
+  });
+});
+
+describe("07.17.1-09 Task 3: a prompt held while the device restarts runs after it (PD-27)", () => {
+  let wzToken: string;
+  let wz: FakeDevice;
+  let projectId: string;
+
+  async function promptOf(sessionId: string, promptId: string) {
+    const res = await owen.request("GET", `/api/v1/work-sessions/${sessionId}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return (res.body!.prompts as Array<{ id: string; status: string }>).find((p) => p.id === promptId);
+  }
+
+  async function promptStatuses(sessionId: string, promptId: string): Promise<string[]> {
+    const res = await su.query(
+      "select payload->>'status' as status from app.stream_events where stream_id = $1 and type = 'prompt.updated' and payload->>'id' = $2 order by seq",
+      [`ws:${sessionId}`, promptId],
+    );
+    return res.rows.map((r) => (r as { status: string }).status);
+  }
+
+  beforeAll(async () => {
+    const paired = await pairDevice(stack, owen, "Owen's work server");
+    wzToken = paired.token;
+    wz = await FakeDevice.connect(stack.baseUrl, wzToken, undefined, { host: "service" });
+    open.push(wz);
+    wz.send({
+      type: "projects.sync",
+      projects: [{ localId: "lp_held", name: "held", gitRemote: null, defaultBranch: "main" }],
+    });
+    await wz.next((f) => f.type === "projects.ack");
+    const projects = (await owen.request("GET", "/api/v1/projects")).body!.projects as Array<{
+      id: string;
+      name: string;
+    }>;
+    projectId = projects.find((p) => p.name === "held")!.id;
+  });
+
+  it("a dispatched prompt the device never acked is re-queued, its stale command never redelivered, and it runs once after the resume", async () => {
+    const sessionId = await startSession(owen, wz, projectId);
+    const posted = await owen.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
+      body: "held by the restart",
+    });
+    expect(posted.status, JSON.stringify(posted.body)).toBe(200);
+    // The device gets the prompt and holds it at its gate: no ack, no turn event.
+    const held = await wz.command("prompt", sessionId);
+    const promptId = held.payload.promptId as string;
+    await eventually(async () => (await promptOf(sessionId, promptId))?.status === "dispatched");
+
+    // The update's exit, then the new daemon, which runs no session yet.
+    await wz.close();
+    wz = await FakeDevice.connect(stack.baseUrl, wzToken, [], { host: "service" });
+    open.push(wz);
+    const start = await wz.command("session.start", sessionId);
+    expect(start.payload).toMatchObject({ resumeRuntimeSessionId: `rt-${sessionId}` });
+    // Commands are redelivered in creation order, so a stale prompt would already be here.
+    await sleep(200);
+    expect(wz.frames.filter((f) => f.type === "command" && f.id === held.id)).toEqual([]);
+    expect(wz.pending("prompt")).toEqual([]);
+    expect((await promptOf(sessionId, promptId))?.status).toBe("queued");
+    const stale = await su.query("select status, error from app.device_commands where id = $1", [held.id]);
+    expect(stale.rows[0]).toMatchObject({ status: "failed", error: "superseded: the device restarted" });
+
+    wz.ack(start.id);
+    const again = await wz.command("prompt", sessionId);
+    expect(again.id).not.toBe(held.id);
+    expect(again.payload).toMatchObject({ promptId, text: "held by the restart" });
+    wz.ack(again.id);
+    wz.emitTurn(sessionId, { promptId, text: "ran after the restart" });
+    await eventually(async () => (await promptOf(sessionId, promptId))?.status === "completed");
+    await sleep(200);
+    expect(wz.pending("prompt")).toEqual([]);
+    expect(await promptStatuses(sessionId, promptId)).not.toContain("failed");
+  });
+
+  it("a prompt that was running when the device restarted still fails (07.11/07.12 behaviour)", async () => {
+    const sessionId = await startSession(owen, wz, projectId);
+    await owen.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, { body: "was running" });
+    const cmd = await wz.command("prompt", sessionId);
+    const promptId = cmd.payload.promptId as string;
+    wz.ack(cmd.id);
+    wz.event(sessionId, { type: "prompt.started", promptId });
+    await eventually(async () => (await promptOf(sessionId, promptId))?.status === "running");
+
+    await wz.close();
+    wz = await FakeDevice.connect(stack.baseUrl, wzToken, [], { host: "service" });
+    open.push(wz);
+    const start = await wz.command("session.start", sessionId);
+    expect(start.payload).toMatchObject({ resumeRuntimeSessionId: `rt-${sessionId}` });
+    expect((await promptOf(sessionId, promptId))?.status).toBe("failed");
+    wz.ack(start.id);
+    await sleep(200);
+    expect(wz.pending("prompt")).toEqual([]);
   });
 });

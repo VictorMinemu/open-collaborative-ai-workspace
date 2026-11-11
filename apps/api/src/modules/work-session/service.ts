@@ -1268,10 +1268,48 @@ export class WorkSessionService implements DeviceSessionHandler {
           if (s.status === "host_offline") await this.setStatus(tx, s, "provisioning");
           continue;
         }
+        // 07.17.1 PD-27: a prompt the old daemon never started runs on the new one; only a running turn is lost.
+        await this.requeueUnstarted(tx, s);
         await this.failInFlight(tx, s, "The device restarted");
         await this.restart(tx, s);
       }
     });
+  }
+
+  /**
+   * 07.17.1 PD-27: after a daemon restart, a prompt still `dispatched` (sent, never reported running: e.g. held at the
+   * OCW runtime self-update's gate) never started on the old daemon. It goes back to `queued` at its own place (the
+   * head of the queue) and its stale `prompt` command is closed through the device hub, so the new daemon never gets
+   * it; the arbiter dispatches the prompt once more after the `session.start` that re-attaches the session is acked.
+   * Call with the session row LOCKED, before `failInFlight` (which then fails only `running` prompts).
+   */
+  private async requeueUnstarted(tx: Tx, s: SessionRow): Promise<void> {
+    const requeued = await tx
+      .update(workPrompts)
+      .set({ status: "queued", dispatchedAt: null })
+      .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "dispatched")))
+      .returning();
+    if (requeued.length === 0) return;
+    const stale = await tx
+      .select({ id: deviceCommands.id })
+      .from(deviceCommands)
+      .where(
+        and(
+          eq(deviceCommands.workSessionId, s.id),
+          eq(deviceCommands.kind, "prompt"),
+          inArray(deviceCommands.status, ["pending", "sent"]),
+          inArray(
+            sql`${deviceCommands.payload}->>'promptId'`,
+            requeued.map((p) => p.id),
+          ),
+        ),
+      );
+    await this.deps.hub.supersedeCommands(
+      tx,
+      s.deviceId,
+      stale.map((c) => c.id),
+    );
+    for (const p of requeued) await this.emitPrompt(tx, p);
   }
 
   async onOffline(device: DeviceRef): Promise<void> {

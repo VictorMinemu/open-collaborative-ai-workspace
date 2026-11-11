@@ -169,6 +169,9 @@ export function frameFits(serialized: string, limit: number): boolean {
 
 type SendResult = "sent" | "closed" | "too_large";
 
+/** 07.17.1 PD-27: why `supersedeCommands` closed a command (a restarted daemon never got to run it). */
+export const COMMAND_SUPERSEDED_RESTART = "superseded: the device restarted";
+
 /**
  * Device Link hub: owns the live device sockets of this API instance, the persistent command queue
  * (at-least-once, redelivered in order on reconnect) and presence (online/offline with a grace period).
@@ -242,6 +245,28 @@ export class DeviceHub {
       .returning({ id: deviceCommands.id });
     ctx.afterCommit(() => this.requestFlush(cmd.deviceId));
     return row!.id;
+  }
+
+  /**
+   * 07.17.1 PD-27: close commands of this device the daemon never acked, in the caller's transaction, so they are never
+   * redelivered: `failed` with `COMMAND_SUPERSEDED_RESTART`, and no `onCommandResult` (the caller already decided what
+   * replaces them, e.g. a prompt re-queued after a daemon restart). Acked or already closed commands are left alone.
+   * Returns the ids it closed.
+   */
+  async supersedeCommands(tx: Tx, deviceId: string, commandIds: readonly string[]): Promise<string[]> {
+    if (commandIds.length === 0) return [];
+    const rows = await tx
+      .update(deviceCommands)
+      .set({ status: "failed", error: COMMAND_SUPERSEDED_RESTART, ackedAt: sql`now()` })
+      .where(
+        and(
+          eq(deviceCommands.deviceId, deviceId),
+          inArray(deviceCommands.id, [...commandIds]),
+          inArray(deviceCommands.status, ["pending", "sent"]),
+        ),
+      )
+      .returning({ id: deviceCommands.id });
+    return rows.map((r) => r.id);
   }
 
   /** Ask the instance holding the device socket (maybe this one) to send pending commands. */

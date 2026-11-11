@@ -25,7 +25,7 @@ import {
   scrubHostPaths,
 } from "@ocw/contracts";
 import { type deviceCommands, deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
-import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, notFound } from "../../lib/errors";
@@ -119,6 +119,8 @@ function scrubDeep<T>(value: T): T {
 const versionOrNull = (v: string | null) => (v !== null && RuntimeVersion.safeParse(v).success ? v : null);
 const buildOrNull = (v: string | null) => (v !== null && RuntimeBuild.safeParse(v).success ? v : null);
 const isSelfRun = (row: { runtime: RuntimeUpdateTarget }) => row.runtime === OCW_RUNTIME_TARGET;
+/** 07.17.1 PD-14: the device's own runtime is not busy with an update (idle, or a daemon that reports no `self`). */
+const selfIdle = (self: StoredMaintenance["self"]) => !self || self.state === "idle";
 const isoOrNull = (v: string | null) => (v ? new Date(v).toISOString() : null);
 
 /** One history row as owners and admins read it (`RuntimeUpdateRun`), the requester named from the directory. */
@@ -301,22 +303,41 @@ export async function onRuntimeMaintenance(
       source: frame.localLevelSource,
     });
   }
-  await closeAbandonedRuns(tx, deps, device);
+  // 07.17.1 PD-14: an OCW runtime run stays open while the device reports it is still busy with it (`waiting` for
+  // sessions to finish can outlast the abandon time); idle, or a daemon without `self`, can no longer be running it.
+  await closeAbandonedRuns(tx, deps, device, { cli: true, self: selfIdle(next.self) });
   await pingOrg(tx, deps, device, locked.status);
 }
 
 /**
  * 07.11 review ME-04: this device's runs `started` more than `RUNTIME_UPDATE_RUN_ABANDON_MS` ago and never finished
- * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. Checked at every
- * snapshot (the handshake carries one on every connect).
+ * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. CLI runs are checked
+ * at every snapshot (the handshake carries one on every connect); `ocw-runtime` runs (07.17.1 PD-14) at a snapshot
+ * whose `self` is idle and on reading the history while the device is offline or its stored `self` is idle. Returns
+ * how many it closed.
  */
-async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceRef): Promise<void> {
+async function closeAbandonedRuns(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  targets: { cli: boolean; self: boolean },
+): Promise<number> {
+  if (!targets.cli && !targets.self) return 0;
+  const target =
+    targets.cli && targets.self
+      ? []
+      : [
+          targets.self
+            ? eq(deviceRuntimeUpdates.runtime, OCW_RUNTIME_TARGET)
+            : ne(deviceRuntimeUpdates.runtime, OCW_RUNTIME_TARGET),
+        ];
   const closed = await tx
     .update(deviceRuntimeUpdates)
     .set({ state: "failed", error: RUN_INTERRUPTED, finishedAt: sql`now()` })
     .where(
       and(
         eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+        ...target,
         eq(deviceRuntimeUpdates.state, "started"),
         lt(
           deviceRuntimeUpdates.startedAt,
@@ -336,6 +357,7 @@ async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceR
       "error",
     );
   }
+  return closed.length;
 }
 
 /** PD-04: this device's "Update now" requests the device never answered within the hour become `expired`. */
@@ -685,6 +707,20 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, false);
         // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
         await expireRequests(tx, row.id);
+        // 07.17.1 PD-14: an OCW runtime update that never reported back (the device is gone, or back and idle) reads
+        // as failed, not as "Updating…" for ever; one still waiting for its sessions keeps its row open.
+        const self = storedMaintenance(row.runtimeMaintenance)?.self;
+        if (row.status !== "online" || selfIdle(self)) {
+          const device = {
+            deviceId: row.id,
+            organizationId: row.organizationId,
+            ownerUserId: row.ownerUserId,
+          };
+          const deps = { audit: core.audit, realtime: core.realtime };
+          if (await closeAbandonedRuns(tx, deps, device, { cli: false, self: true })) {
+            await pingOrg(tx, deps, device, row.status);
+          }
+        }
         const runtime = req.query.runtime;
         const rows = await tx
           .select()
