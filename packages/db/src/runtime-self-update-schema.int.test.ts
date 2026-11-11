@@ -26,7 +26,10 @@ async function seedOrg(): Promise<Org> {
   const owner = randomUUID();
   const device = randomUUID();
   await db.query("insert into auth.organization (id, name, slug) values ($1, 'O', $2)", [id, `o-${id}`]);
-  await db.query("insert into auth.user (id, name, email) values ($1, 'P', $2)", [owner, `${owner}@rsu.test`]);
+  await db.query("insert into auth.user (id, name, email) values ($1, 'P', $2)", [
+    owner,
+    `${owner}@rsu.test`,
+  ]);
   await db.query(
     "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'P', 'standard')",
     [id, owner],
@@ -194,9 +197,10 @@ describe("runtime self-update history schema (07.17.1, D-02, D-07, PD-22)", () =
 
     await app.query("begin");
     try {
-      await app.query("select set_config('app.organization_id', $1, true), set_config('app.user_id', '', true)", [
-        B.id,
-      ]);
+      await app.query(
+        "select set_config('app.organization_id', $1, true), set_config('app.user_id', '', true)",
+        [B.id],
+      );
       await expect(insert(A, {}, app)).rejects.toThrow(/row-level security/);
     } finally {
       await app.query("rollback");

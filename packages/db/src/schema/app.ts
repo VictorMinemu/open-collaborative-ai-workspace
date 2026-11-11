@@ -2097,7 +2097,8 @@ export const deviceRuntimeUpdates = appSchema.table(
     id: id(),
     organizationId: orgId(),
     deviceId: uuid("device_id").notNull(),
-    runtime: text("runtime", { enum: ["claude-code", "codex"] }).notNull(),
+    /** The maintenance target: a CLI the daemon drives, or the OCW runtime itself (07.17.1, ADR-0040). */
+    runtime: text("runtime", { enum: ["claude-code", "codex", "ocw-runtime"] }).notNull(),
     /** Device-generated run id; null while only requested. */
     runId: uuid("run_id"),
     /** The `runtime.update` command of an "Update now" request. */
@@ -2120,6 +2121,10 @@ export const deviceRuntimeUpdates = appSchema.table(
     toVersion: text("to_version"),
     candidate: text("candidate"),
     method: text("method"),
+    /** 07.17.1: the 12-hex build an `ocw-runtime` run started from (never a full sha256); null for CLI runs. */
+    fromBuild: text("from_build"),
+    /** 07.17.1: the 12-hex build an `ocw-runtime` run targets (the build the workspace serves); null for CLI runs. */
+    toBuild: text("to_build"),
     output: text("output"),
     error: text("error"),
     requestedAt: ts("requested_at"),
@@ -2139,7 +2144,11 @@ export const deviceRuntimeUpdates = appSchema.table(
       .on(t.organizationId, t.deviceId, t.runtime)
       .where(sql`state = 'requested'`),
     index("device_runtime_updates_device_idx").on(t.organizationId, t.deviceId, t.createdAt),
-    check("device_runtime_updates_runtime_ck", sql`${t.runtime} in ('claude-code','codex')`),
+    check("device_runtime_updates_runtime_ck", sql`${t.runtime} in ('claude-code','codex','ocw-runtime')`),
+    check(
+      "device_runtime_updates_build_ck",
+      sql`(${t.fromBuild} is null or ${t.fromBuild} ~ '^[0-9a-f]{12}$') and (${t.toBuild} is null or ${t.toBuild} ~ '^[0-9a-f]{12}$')`,
+    ),
     check("device_runtime_updates_trigger_ck", sql`${t.trigger} in ('automatic','manual','local')`),
     check(
       "device_runtime_updates_state_ck",
