@@ -279,7 +279,11 @@ describe("SelfUpdate: one click on an idle service device (07.17.1, D-03, D-05, 
     });
 
     // Only the paired server's three fixed routes (PD-06); the gates stay closed into the exit.
-    expect(r.stub.requests).toEqual([RUNTIME_ROUTES.version, RUNTIME_ROUTES.bundle, RUNTIME_ROUTES.externalLock]);
+    expect(r.stub.requests).toEqual([
+      RUNTIME_ROUTES.version,
+      RUNTIME_ROUTES.bundle,
+      RUNTIME_ROUTES.externalLock,
+    ]);
     expect(gatesClosed(r)).toBe(true);
     expect(r.su.holding).toBe(true);
     expectNoHostPath(r);
@@ -317,7 +321,11 @@ describe("SelfUpdate: one click on an idle service device (07.17.1, D-03, D-05, 
       ["finished", "failed"],
     ]);
     expect(r.frames[1]?.output).toBe("checksum mismatch");
-    expect(r.frames[1]).toMatchObject({ commandId: COMMAND_ID, fromBuild: oldSha12(r), toBuild: newSha12(r) });
+    expect(r.frames[1]).toMatchObject({
+      commandId: COMMAND_ID,
+      fromBuild: oldSha12(r),
+      toBuild: newSha12(r),
+    });
     expect(r.exit).not.toHaveBeenCalled();
     expect(gatesOpen(r)).toBe(true);
     expect(existsSync(lockFileOf(r))).toBe(false);
