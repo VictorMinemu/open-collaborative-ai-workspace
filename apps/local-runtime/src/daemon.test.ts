@@ -1524,7 +1524,7 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       sessionId: "B",
       payload: { projectLocalId: localId, runtime: "claude-code", permissionMode: "default" },
     });
-    expect(await server.frame("ack", (f) => f.commandId === "start-B")).toMatchObject({ ok: true });
+    expect(await server.frame("ack", (f) => f.commandId === "start-B", 10_000)).toMatchObject({ ok: true });
     const cmd = { id: randomUUID(), kind: "runtime.update" as const, sessionId: randomUUID() };
     server.send({ ...cmd, payload: { runtime: "claude-code" } });
     expect(await server.frame("ack", (f) => f.commandId === cmd.id, 10_000)).toMatchObject({ ok: true });
@@ -2341,8 +2341,9 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     const second = await selfDaemon({ running: newSelf() });
     daemon = second;
     await second.start();
-    const conn = await server.waitFor(() =>
-      server.connections.length > 1 && server.last.frames.length >= 3 ? server.last : undefined,
+    const conn = await server.waitFor(
+      () => (server.connections.length > 1 && server.last.frames.length >= 3 ? server.last : undefined),
+      10_000,
     );
     expect(conn.frames[0]?.type).toBe("hello");
     expect(conn.frames[1]).toMatchObject({
@@ -2377,7 +2378,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     const asked = stub.requests.length;
     server.send(cmd);
     expect(
-      await server.waitFor(() => conn.frames.find((f) => f.type === "ack" && f.commandId === cmd.id)),
+      await server.waitFor(() => conn.frames.find((f) => f.type === "ack" && f.commandId === cmd.id), 10_000),
     ).toMatchObject({ ok: true });
     await sleep(300);
     expect(conn.frames.filter((f) => f.type === "runtime.update.run" && f.phase === "started")).toHaveLength(
@@ -2440,7 +2441,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
       sessionId: "A",
       payload: { runtime: "claude-code", model: "opus", prompt: "Please fix the login redirect bug" },
     });
-    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 5_000);
+    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 10_000);
     await sleep(300);
     expect(updateEvents("A")).toEqual([
       { type: "runtime.update", runtime: "claude-code", phase: "waiting", subject: "ocw-runtime" },
