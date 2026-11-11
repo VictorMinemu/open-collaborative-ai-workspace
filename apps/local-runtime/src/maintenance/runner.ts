@@ -271,6 +271,8 @@ interface ChildOutcome {
   timedOut: boolean;
   spawnError: boolean;
   raw: string;
+  /** Review WR-05: the caller's signal aborted it (its process group was killed). */
+  aborted?: boolean;
 }
 
 /**
@@ -377,14 +379,20 @@ function runChild(
   limits: ChildLimits,
   onChunk: (text: string) => void,
   onSpawn: (pid: number) => void = () => undefined,
+  signal?: AbortSignal,
 ): Promise<ChildOutcome> {
   const { timeoutMs, killGraceMs, stdioGraceMs } = limits;
   return new Promise((resolve) => {
     let raw = "";
     let rawBytes = 0;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     let child: ChildProcess;
+    if (signal?.aborted) {
+      resolve({ code: null, timedOut: false, spawnError: true, raw: "", aborted: true });
+      return;
+    }
     try {
       child = spawnFn(file, args, {
         shell: false,
@@ -422,15 +430,24 @@ function runChild(
       },
       timeoutMs + killGraceMs + stdioGraceMs + HARD_DEADLINE_SLACK_MS,
     );
+    // Review WR-05: the daemon stops (or the job ends): the whole group goes, SIGTERM then SIGKILL, as at the timeout.
+    const onAbort = () => {
+      if (settled) return;
+      aborted = true;
+      killGroup(child, "SIGTERM");
+      if (!killTimer) killTimer = setTimeout(() => killGroup(child, "SIGKILL"), killGraceMs);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const done = (outcome: ChildOutcome) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", onAbort);
       for (const t of [timer, killTimer, drainTimer, deadline]) if (t) clearTimeout(t);
       // The leader is gone; make sure nothing it started outlives it.
-      if (outcome.timedOut) killGroup(child, "SIGKILL");
+      if (outcome.timedOut || aborted) killGroup(child, "SIGKILL");
       child.stdout?.destroy();
       child.stderr?.destroy();
-      resolve(outcome);
+      resolve(aborted ? { ...outcome, aborted: true } : outcome);
     };
     child.once("error", () => done({ code: null, timedOut, spawnError: true, raw }));
     child.once("close", (code: number | null) => done({ code, timedOut, spawnError: false, raw }));
@@ -447,13 +464,16 @@ export interface FixedCommandResult {
   /** Sanitised, path-free, ≤ 10 KB (`sanitizeUpdateOutput`). */
   output: string;
   timedOut: boolean;
+  /** Review WR-05: `signal` aborted the command (never started, or its process group was killed). */
+  aborted?: true;
 }
 
 /**
  * 07.17.1 (D-03, PD-07): one fixed command (the self-update's `npm ci` and its preflight) with the 07.11 child rules —
  * no shell, its own process group, SIGTERM at `timeoutMs` then SIGKILL, a hard deadline, pipes closed after a short
  * grace — and its output through `sanitizeUpdateOutput(output, roots, home)`. The caller builds `env` (normally
- * `updateChildEnv`); a spawn failure settles with `exitCode: null`, never a throw.
+ * `updateChildEnv`); a spawn failure settles with `exitCode: null`, never a throw. Review WR-05: `signal` kills the
+ * whole process group the same way (SIGTERM, then SIGKILL after the grace), so nothing it started outlives the daemon.
  */
 export async function runFixedCommand(p: {
   file: string;
@@ -463,6 +483,7 @@ export async function runFixedCommand(p: {
   timeoutMs: number;
   roots: readonly string[];
   home: string;
+  signal?: AbortSignal;
 }): Promise<FixedCommandResult> {
   const child = await runChild(
     spawn,
@@ -472,11 +493,14 @@ export async function runFixedCommand(p: {
     p.cwd,
     { timeoutMs: p.timeoutMs, killGraceMs: KILL_GRACE_MS, stdioGraceMs: STDIO_GRACE_MS },
     () => undefined,
+    undefined,
+    p.signal,
   );
   return {
     exitCode: child.spawnError ? null : child.code,
     output: sanitizeUpdateOutput(child.raw, p.roots, p.home),
     timedOut: child.timedOut,
+    ...(child.aborted ? { aborted: true as const } : {}),
   };
 }
 

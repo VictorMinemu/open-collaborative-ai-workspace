@@ -700,6 +700,55 @@ describe("runFixedCommand (Phase 07.17.1, D-03, PD-07)", () => {
     expect(r.output).not.toMatch(/\/(home|tmp|opt|usr|var|Users|private)\//);
   });
 
+  it("review WR-05: an abort kills the command's whole process group, children included, and settles at once", async () => {
+    const pidFile = join(tmp, "grandchild.pid");
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const g = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));`,
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const abort = new AbortController();
+    const started = Date.now();
+    const running = runFixedCommand({
+      ...base(),
+      file: process.execPath,
+      args: ["-e", script],
+      timeoutMs: 60_000,
+      signal: abort.signal,
+    });
+    await waitFor(() => existsSync(pidFile));
+    const grandchild = Number(readFileSync(pidFile, "utf8"));
+    abort.abort();
+    const r = await running;
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(r.aborted).toBe(true);
+    expect(r.exitCode).not.toBe(0);
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await waitFor(() => !alive(grandchild));
+    expect(alive(grandchild)).toBe(false);
+  });
+
+  it("review WR-05: an already aborted signal starts nothing", async () => {
+    const marker = join(tmp, "ran");
+    const r = await runFixedCommand({
+      ...base(),
+      file: process.execPath,
+      args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1')`],
+      timeoutMs: 10_000,
+      signal: AbortSignal.abort(),
+    });
+    expect(r).toMatchObject({ exitCode: null, aborted: true, timedOut: false });
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("answers a spawn failure as a non-zero settle, never a throw", async () => {
     const r = await runFixedCommand({
       ...base(),

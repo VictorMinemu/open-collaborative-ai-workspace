@@ -75,7 +75,8 @@ export type SelfUpdateFailure =
   | "preflight_failed"
   | "wrong_version"
   | "outside_scratch_home"
-  | "switch_failed";
+  | "switch_failed"
+  | "cancelled";
 
 /** The one sentence each failure is reported with (run error, toast, log). None carries a host path. */
 export const SELF_UPDATE_FAILURE_SENTENCES: Readonly<Record<SelfUpdateFailure, string>> = {
@@ -93,6 +94,7 @@ export const SELF_UPDATE_FAILURE_SENTENCES: Readonly<Record<SelfUpdateFailure, s
   wrong_version: "the new runtime reports another version",
   outside_scratch_home: "refused outside a scratch home",
   switch_failed: "could not switch to the new version",
+  cancelled: "cancelled: the runtime stopped",
 };
 
 /**
@@ -483,7 +485,9 @@ async function prepare(p: PrepareVersionOptions): Promise<PreparedVersion> {
       timeoutMs: PREFLIGHT_TIMEOUT_MS,
       roots: [p.ocwHome],
       home,
+      ...(p.signal ? { signal: p.signal } : {}),
     });
+    if (res.aborted) throw new SelfUpdateError("cancelled");
     if (res.exitCode !== 0 || res.timedOut) {
       throw new SelfUpdateError("preflight_failed", undefined, res.output);
     }
@@ -525,9 +529,13 @@ async function prepare(p: PrepareVersionOptions): Promise<PreparedVersion> {
       timeoutMs: UPDATE_TIMEOUT_MS,
       roots: [p.ocwHome],
       home,
+      ...(p.signal ? { signal: p.signal } : {}),
     });
+    if (ci.aborted) throw new SelfUpdateError("cancelled");
     if (ci.exitCode !== 0 || ci.timedOut) throw new SelfUpdateError("npm_failed", undefined, ci.output);
     await preflight(staging);
+    // Review WR-05: a stop that came after the preflight leaves nothing half-adopted behind.
+    if (p.signal?.aborted) throw new SelfUpdateError("cancelled");
 
     // An incomplete directory of the same build (an interrupted install) is replaced.
     await rm(versionDir, { recursive: true, force: true });

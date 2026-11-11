@@ -2,7 +2,15 @@
 // that restarted it, rewrites a stale install record and prunes old versions. Every case runs on a scratch OCW_HOME
 // (`scratchOcwHome`) with a loopback stub and the fake npm; nothing touches the OS user's home or a non-loopback host.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { CLAUDE_AGENT_SDK_PACKAGE, DeviceToServerFrame, runtimeBuildOf } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -297,6 +305,17 @@ describe("pruneRuntimeVersions and clearStaging (07.17.1, PD-12, E16)", () => {
     expect(left().sort()).toEqual([".staging-x", "notes", prepared.sha12, home.oldSha12].sort());
     expect(await clearStaging(home.ocwHome)).toBe(1);
     expect(left().sort()).toEqual(["notes", prepared.sha12, home.oldSha12].sort());
+  });
+
+  it("review WR-05: clearStaging removes a staging directory an interrupted npm left read-only", async () => {
+    const staging = join(runtime(), "versions", ".staging-left");
+    const locked = join(staging, "node_modules", "pkg");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "index.js"), "x");
+    chmodSync(locked, 0o500);
+    chmodSync(join(staging, "node_modules"), 0o500);
+    expect(await clearStaging(home.ocwHome)).toBe(1);
+    expect(existsSync(staging)).toBe(false);
   });
 
   it("never removes the directory current points to, even when keep forgets it", async () => {

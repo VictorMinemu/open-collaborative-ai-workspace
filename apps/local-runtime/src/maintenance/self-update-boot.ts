@@ -11,7 +11,7 @@
 // sentences only). It leaves the marker in place: the caller removes it once the frames were sent.
 
 import { realpathSync } from "node:fs";
-import { readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import {
   IsoDateTime,
@@ -247,17 +247,40 @@ export async function pruneRuntimeVersions(p: {
   return removed;
 }
 
-/** Removes every `versions/.staging-*` left by an interrupted prepare. Returns how many it removed. */
+/** Gives the owner write access back on every directory under `dir` (never follows a symlink). */
+async function makeWritable(dir: string): Promise<void> {
+  let st: Awaited<ReturnType<typeof lstat>>;
+  try {
+    st = await lstat(dir);
+  } catch {
+    return;
+  }
+  if (!st.isDirectory()) return;
+  await chmod(dir, 0o700).catch(() => undefined);
+  for (const name of await entriesOf(dir)) await makeWritable(join(dir, name));
+}
+
+/**
+ * Removes every `versions/.staging-*` left by an interrupted prepare. Returns how many it removed. Review WR-05: a
+ * leftover npm made read-only, or one still settling, is retried once its directories are writable again.
+ */
 export async function clearStaging(ocwHome: string): Promise<number> {
   const versions = join(runtimeDir(ocwHome), "versions");
   let removed = 0;
   for (const name of await entriesOf(versions)) {
     if (!name.startsWith(STAGING_PREFIX)) continue;
+    const dir = join(versions, name);
     try {
-      await rm(join(versions, name), { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       removed += 1;
     } catch {
-      // Left for the next boot.
+      try {
+        await makeWritable(dir);
+        await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        removed += 1;
+      } catch {
+        // Left for the next boot.
+      }
     }
   }
   return removed;

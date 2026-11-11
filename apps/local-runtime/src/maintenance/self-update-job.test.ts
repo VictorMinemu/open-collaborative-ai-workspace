@@ -691,6 +691,28 @@ describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => 
     expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
   });
 
+  it("review WR-05: stop() during npm ci kills npm and returns once the prepare settled: lock released, nothing left in versions/", async () => {
+    const r = await makeRig();
+    // The fake npm sleeps this long before it installs (its control file sits beside the staging directory).
+    writeFileSync(join(runtimeDirOf(r), "versions", "fake-update.json"), JSON.stringify({ delayMs: 1_500 }));
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "installing");
+    await r.su.stop();
+    // stop() waited for the prepare: its lock is gone and no staging directory is left behind.
+    expect(existsSync(lockFileOf(r))).toBe(false);
+    expect(stagingLeft(r)).toEqual([]);
+    // npm was killed: nothing writes into versions/ after the stop.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(stagingLeft(r)).toEqual([]);
+    expect(existsSync(join(runtimeDirOf(r), "versions", newSha12(r)))).toBe(false);
+    expect(r.frames.at(-1)).toMatchObject({
+      phase: "finished",
+      outcome: "failed",
+      output: CANCELLED_STOPPED,
+    });
+    expect(r.exit).not.toHaveBeenCalled();
+  });
+
   it("stop() after the switch (restarting, exit pending): no frame, every gate stays closed, the lock and the marker stay", async () => {
     // The daemon's stop runs while the exit hand-over is still pending (10).
     const exit = vi.fn((_code: number) => new Promise<void>(() => undefined));

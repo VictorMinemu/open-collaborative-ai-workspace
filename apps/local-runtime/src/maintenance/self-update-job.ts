@@ -68,6 +68,9 @@ export const SELF_UPDATE_MAX_HOLD_MS = 30 * 60_000;
 export const HOLD_TIMED_OUT =
   "cancelled: sessions were still running after the longest wait; nothing changed, press Update again when they finish";
 
+/** Review WR-05: the longest `stop()` waits for an aborted prepare (npm and the preflight are killed) to settle. */
+export const STOP_SETTLE_MS = 5_000;
+
 /** The answers a request gets when this device will not run it (the ack's error text). */
 export const SELF_UPDATE_REFUSALS = {
   busy: "an update of the OCW runtime is already running",
@@ -118,6 +121,8 @@ export interface SelfUpdateOptions {
   pollMs?: number;
   /** Review WR-02: the longest hold with every gate closed (default `SELF_UPDATE_MAX_HOLD_MS`). */
   maxHoldMs?: number;
+  /** Review WR-05: how long `stop()` waits for an aborted prepare to settle (default `STOP_SETTLE_MS`). */
+  stopSettleMs?: number;
   /** The automatic and `notify` check cadence (`CHECK_EVERY_MS` ± `CHECK_JITTER_MS`, the 07.11 one). */
   checkEveryMs?: number;
   /** A failed automatic run of a build is not retried automatically for this long (`FAILED_BACKOFF_MS`). */
@@ -171,6 +176,8 @@ interface Job {
   timer: TimerHandle | null;
   /** Resolves a pending `hold()` (the job ended while it waited). */
   wake: (() => void) | null;
+  /** Settles when `run` is over (its `finally` removed the staging and released the lock). */
+  done: Promise<void>;
   abort: AbortController;
 }
 
@@ -248,8 +255,21 @@ export class SelfUpdate {
     this.end(job, job.started || job.trigger === "manual" ? "failed" : null, CANCELLED_STOPPED, {
       reopen: false,
     });
-    // A prepare still running under the lock releases it when it settles (the job's own `finally`).
-    if (!preparing) await this.releaseLock(job);
+    if (!preparing) {
+      await this.releaseLock(job);
+      return;
+    }
+    // Review WR-05: the end aborted the prepare (the download, `npm ci` and the preflight, process group included);
+    // wait, bounded, for it to settle so its own `finally` removes the staging and releases the lock before the exit.
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      job.done,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.opts.stopSettleMs ?? STOP_SETTLE_MS);
+        timer.unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
   }
 
   /**
@@ -390,10 +410,11 @@ export class SelfUpdate {
       holdingSince: null,
       timer: null,
       wake: null,
+      done: Promise.resolve(),
       abort: new AbortController(),
     };
     this.job = job;
-    void this.run(job, running, manifest);
+    job.done = this.run(job, running, manifest).catch(() => undefined);
   }
 
   private async run(
