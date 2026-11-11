@@ -50,6 +50,7 @@ import {
   SessionConfigurePayload,
   type SessionEvent,
   SessionFileReadPayload,
+  SessionFileWritePayload,
   SessionStartPayload,
   SessionTitlePayload,
   stripImageData,
@@ -99,7 +100,7 @@ import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-jo
 import { isSupervised, runningBuild } from "./maintenance/supervision.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
-import { openSessionFileForRead, SessionFileError } from "./session-files.js";
+import { openSessionFileForRead, SessionFileError, writeSessionFile } from "./session-files.js";
 import { runTitle } from "./title.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -338,6 +339,8 @@ export class Daemon {
    * reaches the runtime only once the change was handed over. Other commands stay immediate.
    */
   private readonly sessionChains = new Map<string, Promise<void>>();
+  /** 07.17.1.1 (D-13): sessions whose turn runs now (`trackTurn`); a file write into them is refused `busy`. */
+  private readonly turnsRunning = new Set<string>();
   private detectCache: { at: number; value: RuntimeInfo[] } | null = null;
   private started = false;
   /** The current device JWT (never logged). */
@@ -865,11 +868,32 @@ export class Daemon {
     const out: SessionEvent =
       event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
     this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
+    this.trackTurn(sessionId, event);
     // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
     if (event.type === "prompt.completed" || event.type === "session.state") {
       const runtime = this.sessions.get(sessionId)?.runtime.id;
       if (runtime) this.maintenance?.onRuntimeActivity(runtime);
     }
+  }
+
+  /**
+   * 07.17.1.1 (D-13, PD-08): whether a turn of the session runs, from the events it forwards: `prompt.started` (or a
+   * `running` / `waiting_approval` state) begins one; `prompt.completed`, or any other state, ends it. A file write is
+   * refused `busy` meanwhile, the second line behind the API's own check.
+   */
+  private trackTurn(sessionId: string, event: SessionEvent): void {
+    if (event.type === "prompt.started") this.turnsRunning.add(sessionId);
+    else if (event.type === "prompt.completed") this.turnsRunning.delete(sessionId);
+    else if (event.type === "session.state") {
+      if (event.status === "running" || event.status === "waiting_approval") this.turnsRunning.add(sessionId);
+      else this.turnsRunning.delete(sessionId);
+    }
+  }
+
+  /** A session left this device (stopped, completed, failed or never started): its turn is forgotten too. */
+  private endSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    this.turnsRunning.delete(sessionId);
   }
 
   /**
@@ -942,11 +966,14 @@ export class Daemon {
       return;
     }
     this.remember(cmd.id);
-    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") return this.execute(cmd);
+    // 07.17.1.1 (D-13, principle 4): a file write is handed over between turns, never beside a prompt or configure.
+    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure" && cmd.kind !== "session.file.write") {
+      return this.execute(cmd);
+    }
     return this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
   }
 
-  /** Runs `fn` after every earlier configure / prompt of this session (D-14 order). */
+  /** Runs `fn` after every earlier configure / prompt / file write of this session (D-14 order). */
   private inSessionOrder<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.sessionChains.get(sessionId) ?? Promise.resolve();
     const run = prev.then(fn);
@@ -1102,7 +1129,7 @@ export class Daemon {
           const s = this.sessions.get(cmd.sessionId);
           if (s) {
             await s.runtime.stop(cmd.sessionId);
-            this.sessions.delete(cmd.sessionId);
+            this.endSession(cmd.sessionId);
           }
           break;
         }
@@ -1113,6 +1140,10 @@ export class Daemon {
         // delay it (a file being written may be read half-done, PD-08).
         case "session.file.read":
           await this.readSessionFile(cmd);
+          break;
+        // 07.17.1.1 (D-02, D-13): in session order (handleCommand), only while no turn runs; not gated (no CLI call).
+        case "session.file.write":
+          await this.writeSessionFileFromServer(cmd);
           break;
         case "session.configure":
           await this.admit(this.sessions.get(cmd.sessionId)?.runtime.id, cmd.sessionId, () =>
@@ -1277,12 +1308,12 @@ export class Daemon {
         (event) => {
           this.forwardEvent(cmd.sessionId, event);
           if (event.type === "session.state" && (event.status === "failed" || event.status === "completed")) {
-            this.sessions.delete(cmd.sessionId);
+            this.endSession(cmd.sessionId);
           }
         },
       );
     } catch (err) {
-      this.sessions.delete(cmd.sessionId);
+      this.endSession(cmd.sessionId);
       throw err;
     }
   }
@@ -1404,6 +1435,35 @@ export class Daemon {
       for (const s of streams) s.destroy();
       await handle.close().catch(() => undefined);
     }
+  }
+
+  /**
+   * `session.file.write`: one file into an active session whose turn is not running (`busy` otherwise, before any
+   * request). Every path, target and free-space check runs first; only then the bytes are fetched (`GET`, the body
+   * read lazily by `writeSessionFile`) and land after their size and sha256 matched the payload's.
+   */
+  private async writeSessionFileFromServer(cmd: CommandFrame): Promise<void> {
+    const payload = SessionFileWritePayload.safeParse(cmd.payload);
+    if (!payload.success) throw payloadRefusal(payload.error.issues);
+    const active = this.sessions.get(cmd.sessionId);
+    if (!active) throw new SessionFileError("not_running");
+    if (this.turnsRunning.has(cmd.sessionId)) throw new SessionFileError("busy");
+    const p = payload.data;
+    const fetchBody = async function* (this: Daemon): AsyncGenerator<Uint8Array> {
+      const res = await this.transfer(cmd.id, p.sizeBytes, () => ({
+        method: "GET",
+        headers: { accept: "application/octet-stream" },
+      }));
+      if (!res.body) return;
+      for await (const chunk of res.body) yield chunk;
+    };
+    await writeSessionFile(active.cwd, p.path, {
+      transferId: cmd.id,
+      sizeBytes: p.sizeBytes,
+      sha256: p.sha256,
+      overwrite: p.overwrite,
+      body: fetchBody.call(this),
+    });
   }
 
   /**

@@ -7,8 +7,20 @@
 // Bytes only: nothing here decodes, sanitises or executes a file's content (P7). Errors carry a `SessionFileFailure`
 // code and at most a number as detail, never a path.
 
+import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { type FileHandle, lstat, mkdir, open, realpath } from "node:fs/promises";
+import {
+  copyFile,
+  type FileHandle,
+  link,
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  statfs,
+  unlink,
+} from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import {
   type SessionFileFailure,
@@ -168,5 +180,108 @@ export async function openSessionFileForRead(
   } catch (err) {
     await handle.close().catch(() => undefined);
     throw err instanceof SessionFileError ? err : new SessionFileError("transfer_failed");
+  }
+}
+
+/** The command id as it appears in the temp file's name; anything else is never written. */
+const TRANSFER_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Hard links are not on every file system (exFAT, some network shares): an exclusive copy then. */
+const NO_HARD_LINK = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"]);
+
+export interface WriteSessionFileParams {
+  /** The command id (= the transfer id); names the temp file `.ocw-upload-<id>.part`. */
+  transferId: string;
+  sizeBytes: number;
+  /** When set, the bytes' sha256 must equal it. */
+  sha256: string | null;
+  overwrite: boolean;
+  /** The bytes, read only after every check passed (the daemon's GET starts on the first read). */
+  body: AsyncIterable<Uint8Array>;
+  /** Tests only: the free-space probe (default `fs.promises.statfs`). */
+  statfs?: (path: string) => Promise<{ bavail: number | bigint; bsize: number | bigint }>;
+}
+
+async function writeAll(handle: FileHandle, chunk: Uint8Array): Promise<void> {
+  let off = 0;
+  while (off < chunk.byteLength) {
+    const { bytesWritten } = await handle.write(chunk, off, chunk.byteLength - off);
+    off += bytesWritten;
+  }
+}
+
+/**
+ * Writes one file into the session's tree (D-02, D-13, PD-10). Checks, in order and before any byte is read: the path
+ * (`resolveSessionPath` with `create: true`), the target (`not_a_file` for a folder, a link or anything but a regular
+ * file; `exists` without `overwrite`) and the free space (`no_space`). Then the bytes go to a temp file in the
+ * target's folder (`wx`, 0o644), counted and hashed (`mismatch` past or short of `sizeBytes`, or another sha256), and
+ * land with `link` (no overwrite: an existing file is `exists`, atomically) or `rename` (overwrite). The temp file is
+ * gone after every outcome. A body failure is `transfer_failed`, or the `SessionFileError` it threw.
+ */
+export async function writeSessionFile(root: string, rel: string, p: WriteSessionFileParams): Promise<void> {
+  if (!TRANSFER_ID.test(p.transferId)) throw new SessionFileError("transfer_failed");
+  const { parent, target } = await resolveSessionPath(root, rel, { create: true });
+  const existing = await lstatOrNull(target);
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isFile()) throw new SessionFileError("not_a_file");
+    if (!p.overwrite) throw new SessionFileError("exists");
+  }
+  const free = await (p.statfs ?? statfs)(parent).catch(() => null);
+  if (free && Number(free.bavail) * Number(free.bsize) < p.sizeBytes) throw new SessionFileError("no_space");
+
+  const tmp = join(parent, `.ocw-upload-${p.transferId}.part`);
+  let handle: FileHandle;
+  try {
+    handle = await open(tmp, "wx", 0o644);
+  } catch {
+    throw new SessionFileError("transfer_failed");
+  }
+  let handleOpen = true;
+  let tmpLeft = true;
+  try {
+    const hash = createHash("sha256");
+    let n = 0;
+    try {
+      for await (const chunk of p.body) {
+        n += chunk.byteLength;
+        if (n > p.sizeBytes) throw new SessionFileError("mismatch");
+        hash.update(chunk);
+        await writeAll(handle, chunk);
+      }
+    } catch (err) {
+      if (err instanceof SessionFileError) throw err;
+      if (errno(err) === "ENOSPC") throw new SessionFileError("no_space");
+      throw new SessionFileError("transfer_failed");
+    }
+    if (n !== p.sizeBytes) throw new SessionFileError("mismatch");
+    if (p.sha256 !== null && hash.digest("hex") !== p.sha256) throw new SessionFileError("mismatch");
+    await handle.chmod(0o644);
+    await handle.close();
+    handleOpen = false;
+    if (!p.overwrite) {
+      try {
+        await link(tmp, target);
+      } catch (err) {
+        if (errno(err) === "EEXIST") throw new SessionFileError("exists");
+        if (!NO_HARD_LINK.has(errno(err) ?? "")) throw err;
+        try {
+          await copyFile(tmp, target, constants.COPYFILE_EXCL);
+        } catch (copyErr) {
+          if (errno(copyErr) === "EEXIST") throw new SessionFileError("exists");
+          throw copyErr;
+        }
+      }
+    } else {
+      const now = await lstatOrNull(target);
+      if (now && (now.isSymbolicLink() || !now.isFile())) throw new SessionFileError("not_a_file");
+      await rename(tmp, target);
+      tmpLeft = false;
+    }
+  } catch (err) {
+    if (err instanceof SessionFileError) throw err;
+    throw new SessionFileError(errno(err) === "ENOSPC" ? "no_space" : "transfer_failed");
+  } finally {
+    if (handleOpen) await handle.close().catch(() => undefined);
+    if (tmpLeft) await unlink(tmp).catch(() => undefined);
   }
 }

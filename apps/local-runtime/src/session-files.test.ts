@@ -224,7 +224,7 @@ describe("writeSessionFile (PD-10)", () => {
     for (const overwrite of [false, true]) {
       for (const rel of ["docs", "leak.txt"]) {
         const w = writeSessionFile(root, rel, {
-          transferId: `t-${rel}-${overwrite}`,
+          transferId: `t-${rel.length}-${overwrite}`,
           ...HELLO,
           overwrite,
           body: bodyOf(["hello"]),
