@@ -63,7 +63,7 @@ import {
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
 import { sessionNotFound } from "./hidden";
-import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
+import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy, serverFileMaxBytes } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
@@ -298,9 +298,12 @@ export function registerWorkSessionRoutes(
     config: { authz: "user" as const },
     preHandler: [requireUser, perms.requirePermission("work_zone.manage")],
   };
+  // 07.17.1.1 (D-07, PD-11): the ceiling of the organization's bot file limit, said in the view and enforced on save.
+  const fileCeiling = serverFileMaxBytes(core.env);
   const policyView = async (tx: Tx, policy: WorkZonePolicy): Promise<WorkZonePolicyView> => ({
     ...policy,
     knownModels: await knownModels(tx),
+    serverFileMaxBytes: fileCeiling,
   });
 
   app.get(
@@ -316,7 +319,9 @@ export function registerWorkSessionRoutes(
     async (req) => {
       const auth = authOf(req);
       const { view, changed } = await core.db.withTenant(tenant(req), async (tx) => {
-        const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId);
+        const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId, {
+          serverFileMaxBytes: fileCeiling,
+        });
         if (changed.length > 0) {
           await core.audit.record(tx, {
             action: "work_zone_policy.updated",
