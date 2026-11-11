@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
 import {
   compatibilityOf,
   RUNTIME_COMPATIBILITY_MANIFEST,
@@ -169,6 +170,8 @@ export interface DoctorDeps {
    * daemon's exit; a marker while no daemon runs is an update that did not come back.
    */
   selfUpdateMarker: () => Promise<SelfUpdateMarker | null>;
+  /** Review IN-02: this runtime's `OCW_HOME` (default `~/.ocw`), so the way back names the right directory. */
+  ocwHome?: () => string;
 }
 
 // ---------------------------------------------------------------- the checks
@@ -329,15 +332,19 @@ function checkNode(ctx: Context): Finding {
 
 /**
  * 07.17.1 (PD-20): an update left its marker and no daemon answers: the new version did not come back. Names the
- * version and build it switched to and the way back (paths `~`-relative, the previous build's directory name).
+ * version and build it switched to and the way back (paths `~`-relative to this runtime's `OCW_HOME`, the previous
+ * build's directory name). Review CR-01 / IN-02: `updates off` first, so nothing installs the broken build again while
+ * the owner looks; the install command installs what the workspace serves, so it helps only once that is fixed.
  */
 async function stuckUpdate(ctx: Context): Promise<Finding | null> {
   const marker = await ctx.selfUpdateMarker().catch(() => null);
   if (!marker) return null;
+  const home = ctx.deps.homeDir();
+  const ocw = displayPath(ctx.deps.ocwHome?.() ?? join(home, ".ocw"), home);
   return fail(
     `The runtime did not come back after updating to ${marker.to.version} (${short(marker.to.sha256)})`,
-    "Re-run the install command from Settings › Devices, or point ~/.ocw/runtime/current back to " +
-      `versions/${short(marker.from.sha256)} and run \`ocw-runtime service restart\``,
+    `Run \`ocw-runtime updates off\`, then point ${ocw}/runtime/current back to versions/${short(marker.from.sha256)} ` +
+      "and run `ocw-runtime service restart`; re-running the install command helps only once the workspace serves a fixed build",
   );
 }
 
@@ -900,6 +907,7 @@ export function createDoctorDeps(
     homeDir: () => homedir(),
     now: () => new Date(),
     selfUpdateMarker: () => readSelfUpdateMarker(home),
+    ocwHome: () => home,
   };
   return { ...base, ...probes };
 }

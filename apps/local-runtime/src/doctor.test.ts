@@ -703,8 +703,8 @@ const updateMarker: SelfUpdateMarker = {
 };
 const STUCK = "The runtime did not come back after updating to 0.3.2 (abcdef012345)";
 const STUCK_FIX =
-  "Re-run the install command from Settings › Devices, or point ~/.ocw/runtime/current back to " +
-  "versions/0123456789ab and run `ocw-runtime service restart`";
+  "Run `ocw-runtime updates off`, then point ~/.ocw/runtime/current back to versions/0123456789ab and run " +
+  "`ocw-runtime service restart`; re-running the install command helps only once the workspace serves a fixed build";
 
 describe("ocw-runtime doctor names an update that did not come back (07.17.1, D-07, PD-20)", () => {
   const withMarker = { selfUpdateMarker: async () => updateMarker };
@@ -724,6 +724,20 @@ describe("ocw-runtime doctor names an update that did not come back (07.17.1, D-
       );
       expect(service).toEqual({ id: "service", status: "fail", summary: STUCK, fix: STUCK_FIX });
     }
+  });
+
+  it("review IN-02: the way back names the runtime's own OCW_HOME, not a hard-coded ~/.ocw", async () => {
+    const daemon = check(
+      await runDoctor(deps({ ...notRunning, ...withMarker, ocwHome: () => `${HOME}/srv/ocw` })),
+      "daemon",
+    );
+    expect(daemon.fix).toContain("point ~/srv/ocw/runtime/current back to versions/0123456789ab");
+    expect(daemon.fix?.startsWith("Run `ocw-runtime updates off`")).toBe(true);
+    const outside = check(
+      await runDoctor(deps({ ...notRunning, ...withMarker, ocwHome: () => "/srv/ocw" })),
+      "daemon",
+    );
+    expect(outside.fix).toContain("point <outside home>/runtime/current back to");
   });
 
   it("a marker while the daemon runs is the normal boot window: the 07.12 findings stay", async () => {

@@ -214,13 +214,21 @@ every update is one click (or none, at *Automatic*).
 the install command. Keep https wherever you can.
 
 **A new build that does not come back** (it crash-loops under the service manager): the doctor's `daemon` and
-`service` lines name it ("The runtime did not come back after updating to …"). Re-run the install command, or point
-`current` back to the previous build and restart:
+`service` lines name it ("The runtime did not come back after updating to …"). Turn automatic updates off (this
+pauses the Claude Code and Codex updates too), point `current` back to the previous build and restart:
 
 ```bash
+ocw-runtime updates off                                      # nothing installs it again while you look
 ls ~/.ocw/runtime/versions/                                  # the previous build's directory
 ln -sfn versions/<previous> ~/.ocw/runtime/current && ocw-runtime service restart
 ```
+
+The previous build reports the run as failed ("came back on the previous version") and remembers the build that
+failed in `~/.ocw/runtime/self-update-failed.json`. *Automatic* never installs that build again; it updates by itself
+again as soon as your workspace serves another one. **Update** in Settings may still retry it. Re-running the install
+command installs what your workspace serves, so it helps only once the workspace serves a fixed build. When it does,
+`ocw-runtime updates automatic` turns the level back on. Under a custom `OCW_HOME`, use that directory in place of
+`~/.ocw`.
 
 The doctor still warns when the installed runtime differs from the one your workspace serves.
 

@@ -19,8 +19,12 @@ import {
 import {
   CAME_BACK_ON_PREVIOUS,
   clearStaging,
+  failedBuildPath,
+  forgetFailedBuild,
   pruneRuntimeVersions,
+  readFailedBuild,
   reconcileSelfUpdate,
+  rememberFailedBuild,
 } from "./self-update-boot.js";
 import {
   type DistStub,
@@ -150,6 +154,40 @@ describe("reconcileSelfUpdate (07.17.1, D-07, PD-12, E16)", () => {
     });
     expect(boot?.lastRun.outcome).toBe("failed");
     for (const f of boot?.frames ?? []) DeviceToServerFrame.parse(f);
+  });
+
+  it("review CR-01: a run that came back on the previous version is remembered on disk (0600) until a boot of that build succeeds", async () => {
+    expect(await readFailedBuild(home.ocwHome)).toBeNull();
+    await switched();
+    await reconcileSelfUpdate({
+      ocwHome: home.ocwHome,
+      running: { version: "0.3.1", sha256: home.oldSha256 },
+      now: () => NOW,
+    });
+    expect(await readFailedBuild(home.ocwHome)).toBe(stub.manifest.sha256);
+    expect(statSync(failedBuildPath(home.ocwHome)).mode & 0o777).toBe(0o600);
+    // Versions, hashes and a time only: never a path.
+    expect(readFileSync(failedBuildPath(home.ocwHome), "utf8")).not.toMatch(HOST_PATH_TOKEN_RE);
+    expect(readdirSync(runtime()).filter((n) => n.includes(".tmp-"))).toEqual([]);
+
+    // The owner's click of the same build later comes back on it: the record goes.
+    await reconcileSelfUpdate({
+      ocwHome: home.ocwHome,
+      running: { version: "0.3.2", sha256: stub.manifest.sha256 },
+      now: () => NOW,
+    });
+    expect(await readFailedBuild(home.ocwHome)).toBeNull();
+    expect(existsSync(failedBuildPath(home.ocwHome))).toBe(false);
+  });
+
+  it("review CR-01: forgetFailedBuild removes the record, and an unreadable one reads as none", async () => {
+    await rememberFailedBuild(home.ocwHome, stub.manifest.sha256, NOW);
+    expect(await readFailedBuild(home.ocwHome)).toBe(stub.manifest.sha256);
+    await forgetFailedBuild(home.ocwHome);
+    expect(await readFailedBuild(home.ocwHome)).toBeNull();
+    await forgetFailedBuild(home.ocwHome);
+    writeFileSync(failedBuildPath(home.ocwHome), "{ not json", { mode: 0o600 });
+    expect(await readFailedBuild(home.ocwHome)).toBeNull();
   });
 
   it("omits commandId when the run was automatic and had no command", async () => {

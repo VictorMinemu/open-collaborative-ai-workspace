@@ -3,7 +3,8 @@
 // carried the run across the exit; `reconcileSelfUpdate` compares the running build with the marker's target and
 // builds the run's `started` and `finished` frames (sent first in the handshake, 10), and rewrites an `install.json`
 // left stale by a crash between the link and the record. `pruneRuntimeVersions` and `clearStaging` keep `versions/`
-// from piling up.
+// from piling up. A run that came back on the previous version leaves its target in `self-update-failed.json`, so
+// automatic updates do not install it again (review CR-01).
 //
 // What this module never does: read the network; delete the running directory, the one `current` points to, a `keep`
 // entry or any name that is not 12 lowercase hex; put a path in a frame (versions, 12-hex builds, enums and fixed
@@ -12,7 +13,13 @@
 import { realpathSync } from "node:fs";
 import { readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { type RuntimeSelfLastRun, type RuntimeUpdateRunFrame, runtimeBuildOf } from "@ocw/contracts";
+import {
+  IsoDateTime,
+  type RuntimeSelfLastRun,
+  type RuntimeUpdateRunFrame,
+  runtimeBuildOf,
+} from "@ocw/contracts";
+import { z } from "zod";
 import { installInfoPath, RuntimeInstallInfo, runtimeDir } from "../install-info.js";
 import { readSelfUpdateMarker, type SelfUpdateMarker } from "./self-update.js";
 
@@ -75,6 +82,13 @@ export async function reconcileSelfUpdate(p: {
   ];
 
   if (p.running) await rewriteStaleInstallInfo(p.ocwHome, p.running, at);
+  // Review CR-01: the build that did not come back is remembered before the caller removes the marker, so automatic
+  // updates never install it again on this device (`SelfUpdate.decide`); a boot of it that succeeds forgets it.
+  if (outcome === "failed") {
+    await rememberFailedBuild(p.ocwHome, marker.to.sha256, new Date(at)).catch(() => undefined);
+  } else if ((await readFailedBuild(p.ocwHome)) === marker.to.sha256) {
+    await forgetFailedBuild(p.ocwHome).catch(() => undefined);
+  }
 
   return {
     marker,
@@ -90,6 +104,54 @@ export async function reconcileSelfUpdate(p: {
       toBuild,
     },
   };
+}
+
+// ---- the build that did not come back (review CR-01) ----
+
+const FailedBuildRecord = z
+  .object({
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    at: IsoDateTime,
+  })
+  .strict();
+
+/**
+ * `<ocwHome>/runtime/self-update-failed.json` (0600): the target of the last run that came back on the previous
+ * version. A hash and a time only, never a path. Automatic updates skip that build until the workspace serves another
+ * one; the owner's click may still retry it (D-09).
+ */
+export function failedBuildPath(ocwHome: string): string {
+  return join(runtimeDir(ocwHome), "self-update-failed.json");
+}
+
+/** The remembered failed build's sha256, or null when there is none or it does not parse strictly. */
+export async function readFailedBuild(ocwHome: string): Promise<string | null> {
+  try {
+    const parsed = FailedBuildRecord.safeParse(JSON.parse(await readFile(failedBuildPath(ocwHome), "utf8")));
+    return parsed.success ? parsed.data.sha256 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers `sha256` as the build that did not come back (temp file + rename, 0600). */
+export async function rememberFailedBuild(ocwHome: string, sha256: string, at: Date): Promise<void> {
+  const record = FailedBuildRecord.parse({ sha256, at: at.toISOString() });
+  const file = failedBuildPath(ocwHome);
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    await rm(tmp, { force: true });
+    await writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(tmp, file);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+/** Forgets the failed build (the workspace serves another one, or a boot of it succeeded); a missing record is fine. */
+export async function forgetFailedBuild(ocwHome: string): Promise<void> {
+  await rm(failedBuildPath(ocwHome), { force: true });
 }
 
 /** Rewrites `install.json` from the running build when it names another one; a missing or invalid record stays. */

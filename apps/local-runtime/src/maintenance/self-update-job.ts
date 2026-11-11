@@ -55,7 +55,7 @@ import {
   type SelfUpdateMarker,
   switchToVersion,
 } from "./self-update.js";
-import type { SelfUpdateBoot } from "./self-update-boot.js";
+import { forgetFailedBuild, type SelfUpdateBoot } from "./self-update-boot.js";
 
 /** The answers a request gets when this device will not run it (the ack's error text). */
 export const SELF_UPDATE_REFUSALS = {
@@ -109,6 +109,12 @@ export interface SelfUpdateOptions {
   checkEveryMs?: number;
   /** A failed automatic run of a build is not retried automatically for this long (`FAILED_BACKOFF_MS`). */
   failedBackoffMs?: number;
+  /**
+   * Review CR-01: the sha256 of a build that came back on the previous version (`readFailedBuild`, read at boot). It
+   * never runs automatically while the workspace serves it; a click still may (D-09). Forgotten (memory and disk) at
+   * the first check that sees another build served.
+   */
+  failedBuild?: string | null;
   now?: () => number;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
@@ -170,6 +176,8 @@ export class SelfUpdate {
   private readonly knownCommands = new Set<string>();
   /** Served build (sha256) → no automatic run of it before this time (PD-10). */
   private readonly backoff = new Map<string, number>();
+  /** Review CR-01: a build that did not come back; never run automatically while it is served. */
+  private failedBuild: string | null;
   private started = false;
   private stopped = false;
   private checking = false;
@@ -188,6 +196,7 @@ export class SelfUpdate {
       });
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.locks = opts.locks ?? new InstallLock(opts.lockDir);
+    this.failedBuild = opts.failedBuild ?? null;
   }
 
   /** Every gate is closed by the self-update (also after the switch, into the exit). */
@@ -242,11 +251,16 @@ export class SelfUpdate {
     return { accepted: true };
   }
 
-  /** The run the restart carried over (`reconcileSelfUpdate`, 07): its last run, and its command is known. */
+  /**
+   * The run the restart carried over (`reconcileSelfUpdate`, 07): its last run, and its command is known. A run that
+   * came back on the previous version makes its target the failed build (review CR-01; also on disk, from the boot).
+   */
   adoptBoot(boot: SelfUpdateBoot | null): void {
     if (!boot) return;
     this.lastRun = boot.lastRun;
     if (boot.marker.commandId) this.knownCommands.add(boot.marker.commandId);
+    if (boot.outcome === "failed") this.failedBuild = boot.marker.to.sha256;
+    else if (this.failedBuild === boot.marker.to.sha256) this.failedBuild = null;
     this.safePublish();
   }
 
@@ -297,6 +311,16 @@ export class SelfUpdate {
       if (this.stopped) return;
       this.served = { version: manifest.version, sha256: manifest.sha256 };
       this.checkedAt = this.now();
+      // Review CR-01: the workspace serves another build than the one that did not come back: forget it.
+      if (this.failedBuild !== null && manifest.sha256 !== this.failedBuild) {
+        this.failedBuild = null;
+        await forgetFailedBuild(this.opts.ocwHome).catch((err: unknown) =>
+          this.log.warn("could not forget the failed runtime build", {
+            error: scrubHostPaths(errorMessage(err)),
+          }),
+        );
+        if (this.stopped) return;
+      }
       this.safePublish();
       this.decide(manifest);
     } catch (err) {
@@ -309,14 +333,16 @@ export class SelfUpdate {
   }
 
   /**
-   * `automatic` only: a served build other than the running one (newer or older, D-11) runs, unless it failed
-   * automatically within `failedBackoffMs`, the device is not supervised, or a job exists.
+   * `automatic` only: a served build other than the running one (newer or older, D-11) runs, unless it came back on
+   * the previous version (`failedBuild`, review CR-01), it failed automatically within `failedBackoffMs`, the device
+   * is not supervised, or a job exists.
    */
   private decide(manifest: RuntimeDistManifest): void {
     if (this.opts.level() !== "automatic" || this.job || this.stopped) return;
     const { running, supervision } = this.opts;
     if (!running || !supervision.supervised || supervision.reason !== null) return;
     if (manifest.sha256 === running.sha256) return;
+    if (manifest.sha256 === this.failedBuild) return;
     if ((this.backoff.get(manifest.sha256) ?? 0) > this.now()) return;
     this.begin("automatic", undefined, running, manifest);
   }

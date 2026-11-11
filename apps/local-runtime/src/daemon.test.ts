@@ -44,6 +44,7 @@ import {
   type PrepareVersionOptions,
   prepareVersion,
   selfUpdateMarkerPath,
+  writeSelfUpdateMarker,
 } from "./maintenance/self-update.js";
 import {
   type DistStub,
@@ -2500,6 +2501,58 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false);
     expect(spy).not.toHaveBeenCalled();
   }, 30_000);
+
+  it("review CR-01: back on the previous build after a rollback, automatic does not re-install the build that did not come back, across restarts", async () => {
+    // The owner pointed `current` back at 0.3.1 after 0.3.2 crash-looped: the marker still names 0.3.2.
+    await writeSelfUpdateMarker(scratch.ocwHome, {
+      runId: randomUUID(),
+      commandId: null,
+      trigger: "automatic",
+      from: oldSelf(),
+      to: newSelf(),
+      startedAt: new Date().toISOString(),
+    });
+    const automatic = (): ServerToDeviceFrame => ({
+      type: "runtime.config",
+      policy: "automatic",
+      manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+    });
+    const startedRuns = () =>
+      server.allFrames.filter((f) => f.type === "runtime.update.run" && f.phase === "started").length;
+    const versionAsks = () => stub.requests.filter((p) => p.endsWith("/version")).length;
+    const spy = vi.fn(async (_code: number) => undefined);
+
+    const first = await selfDaemon({ exitForUpdate: spy });
+    daemon = first;
+    await first.start();
+    await server.frame("runtime.update.run", (f) => f.phase === "finished" && f.outcome === "failed", 10_000);
+    const reported = startedRuns();
+    server.push(welcome());
+    server.push(automatic());
+    await vi.waitFor(() => expect(versionAsks()).toBe(1), { timeout: 10_000, interval: 20 });
+    await sleep(500);
+    expect(startedRuns()).toBe(reported);
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    await vi.waitFor(() => expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    await first.stop();
+
+    // The next start has no marker any more: the build is still remembered.
+    const second = await selfDaemon({ exitForUpdate: spy });
+    daemon = second;
+    await second.start();
+    await server.waitFor(() => (server.connections.length > 1 ? true : undefined), 10_000);
+    server.push(welcome());
+    server.push(automatic());
+    await vi.waitFor(() => expect(versionAsks()).toBe(2), { timeout: 10_000, interval: 20 });
+    await sleep(500);
+    expect(startedRuns()).toBe(reported);
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+  }, 60_000);
 
   it("a daemon built without exitForUpdate refuses the click and its snapshots carry no self", async () => {
     const d = await selfDaemon({ exitForUpdate: null });

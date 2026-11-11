@@ -87,6 +87,7 @@ import { removeSelfUpdateMarker } from "./maintenance/self-update.js";
 import {
   clearStaging,
   pruneRuntimeVersions,
+  readFailedBuild,
   reconcileSelfUpdate,
   type SelfUpdateBoot,
 } from "./maintenance/self-update-boot.js";
@@ -383,12 +384,16 @@ export class Daemon {
       (await isSupervised({ env: this.env, platform: process.platform, argv1, ocwHome: this.home }));
     const report = await reconcileSelfUpdate({ ocwHome: this.home, running });
     await clearStaging(this.home).catch(() => 0);
+    // Review CR-01: a build that came back on the previous version (this boot, or an earlier one) never runs again
+    // automatically while the workspace serves it.
+    const failedBuild = await readFailedBuild(this.home);
     const selfUpdate = new SelfUpdate({
       ocwHome: this.home,
       serverUrl: this.config.serverUrl,
       env: this.env,
       running,
       supervision,
+      failedBuild,
       gates: this.gates,
       activeTurns: (r) => this.runtimes.get(r)?.activeTurns() ?? 0,
       cliBusy: () => maintenance.jobActive,

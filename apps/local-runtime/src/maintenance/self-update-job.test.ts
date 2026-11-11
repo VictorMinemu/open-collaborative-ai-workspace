@@ -39,6 +39,7 @@ import {
   selfUpdateMarkerPath,
   switchToVersion,
 } from "./self-update.js";
+import { readFailedBuild, rememberFailedBuild } from "./self-update-boot.js";
 import {
   type DistStub,
   fakeNpm,
@@ -786,6 +787,90 @@ describe("SelfUpdate: when the device checks its workspace and updates by itself
     await r.clock.advance(CHECK_EVERY_MS);
     await untilExit(r);
     expect(r.frames.filter((f) => f.phase === "started")).toHaveLength(2);
+  });
+
+  it("review CR-01: a build remembered as failed (came back on the previous version) is never re-installed automatically; a click still runs it", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    await rememberFailedBuild(r.home.ocwHome, r.stub.manifest.sha256, new Date(r.clock.now()));
+    const su = new SelfUpdate(selfUpdateOptions(r, { failedBuild: r.stub.manifest.sha256 }));
+    r.su = su;
+    su.start();
+    await su.onConfig();
+    await r.clock.advance(3 * CHECK_EVERY_MS);
+    await flush();
+    expect(versionRequests(r)).toBeGreaterThanOrEqual(2);
+    expect(r.frames).toEqual([]);
+    expect(su.busy).toBe(false);
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
+    // Still served: the record stays.
+    expect(await readFailedBuild(r.home.ocwHome)).toBe(r.stub.manifest.sha256);
+
+    // The owner's explicit click may retry it (D-09).
+    expect(await su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilExit(r);
+    expect(r.frames[0]).toMatchObject({ phase: "started", trigger: "manual", commandId: COMMAND_ID });
+    await su.stop();
+  });
+
+  it("review CR-01: once the workspace serves another build, the failed record is forgotten and the new build runs by itself", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    const failed = "f".repeat(64);
+    await rememberFailedBuild(r.home.ocwHome, failed, new Date(r.clock.now()));
+    const su = new SelfUpdate(selfUpdateOptions(r, { failedBuild: failed }));
+    r.su = su;
+    await su.onConfig();
+    await untilExit(r);
+    expect(r.frames[0]).toMatchObject({ phase: "started", trigger: "automatic" });
+    await vi.waitFor(async () => expect(await readFailedBuild(r.home.ocwHome)).toBeNull());
+    await su.stop();
+  });
+
+  it("review CR-01: adoptBoot() of a run that came back on the previous version blocks the automatic re-install in this process too", async () => {
+    const r = await makeRig({}, { level: "automatic" });
+    const runId = "5b0f6a52-3c1e-4c55-9f0d-0f8f3f6c2a11";
+    const base = {
+      type: "runtime.update.run" as const,
+      runId,
+      runtime: "ocw-runtime" as const,
+      trigger: "automatic" as const,
+      fromVersion: "0.3.1",
+      toVersion: "0.3.2",
+      candidate: "0.3.2",
+      method: "ocw_bundle" as const,
+      fromBuild: oldSha12(r),
+      toBuild: newSha12(r),
+      at: "2026-11-11T11:59:00.000Z",
+    };
+    r.su.adoptBoot({
+      marker: {
+        runId,
+        commandId: null,
+        trigger: "automatic",
+        from: { version: "0.3.1", sha256: r.home.oldSha256 },
+        to: { version: "0.3.2", sha256: r.stub.manifest.sha256 },
+        startedAt: "2026-11-11T11:58:00.000Z",
+      },
+      outcome: "failed",
+      frames: [
+        { ...base, phase: "started" },
+        { ...base, phase: "finished", outcome: "failed" },
+      ],
+      lastRun: {
+        runId,
+        outcome: "failed",
+        at: base.at,
+        fromVersion: "0.3.1",
+        toVersion: "0.3.2",
+        fromBuild: base.fromBuild,
+        toBuild: base.toBuild,
+      },
+    });
+    await r.su.onConfig();
+    await flush();
+    expect(versionRequests(r)).toBe(1);
+    expect(r.frames).toEqual([]);
+    expect(r.su.busy).toBe(false);
   });
 
   it("a click within the backoff of a failed automatic run still runs", async () => {
