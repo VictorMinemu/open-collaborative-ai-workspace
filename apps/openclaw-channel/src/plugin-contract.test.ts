@@ -4236,6 +4236,41 @@ describe("bot Work Zone file mirror parity (07.17.1.1-01: plugin ↔ packages/co
     expect(parsed).toEqual({ kind: "refused", code: "file_too_large", sentence: newer.sentence });
   });
 
+  it("a turn offer with workZone.files parses identically in both copies; a 07.16 offer is unchanged (07.17.1.1-01 T3)", async () => {
+    const { wz, m } = await load();
+    const workZone = {
+      runtime: "claude-code",
+      device: { id: DEVICE, name: "build-server", online: true },
+      projects: [{ id: AGENT, name: "billing-api" }],
+      projectsMore: 0,
+      models: ["claude-sonnet-4-5"],
+      defaultModel: "claude-sonnet-4-5",
+      efforts: ["high"],
+      fastMode: "off",
+      defaultMode: "default",
+      maxMode: "acceptEdits",
+      outsideContent: false,
+      sessions: [{ id: SESSION, status: "idle", projectName: "billing-api" }],
+    };
+    const withFiles = { ...workZone, files: { bytes: 25 * MiB, source: "organization" } };
+    const contract = wz.TurnWorkZone as Schema;
+    expect(contract.safeParse(withFiles).data).toEqual(withFiles);
+    expect(m.TurnWorkZone.parse(withFiles)).toEqual(contract.safeParse(withFiles).data);
+    const legacy = m.TurnWorkZone.parse(workZone);
+    expect(legacy).toEqual(contract.safeParse(workZone).data);
+    expect("files" in legacy).toBe(false);
+    expectSameVerdicts(m.TurnWorkZone, contract, [
+      workZone,
+      withFiles,
+      { ...withFiles, files: { bytes: 10 * MiB, source: "bot" } },
+      { ...withFiles, files: { bytes: 1024 * MiB, source: "server" } },
+    ]);
+    // A newer source the mirror does not know drops the field, never the whole offer.
+    const newer = { ...withFiles, files: { bytes: 25 * MiB, source: "team" } };
+    expect(contract.safeParse(newer).success).toBe(false);
+    expect(m.TurnWorkZone.parse(newer)).toEqual(workZone);
+  });
+
   it("the 07.16 answers still parse unchanged in both copies", async () => {
     const { wz, m } = await load();
     const queued = { kind: "queued", workSessionId: SESSION, promptId: EVENT, position: 1, status: "queued" };
