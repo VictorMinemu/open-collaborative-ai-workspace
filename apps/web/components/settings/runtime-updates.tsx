@@ -16,6 +16,7 @@ import {
   type RuntimeUpdateRunState,
   type RuntimeUpdatesLevel,
   type RuntimeUpdateTarget,
+  runtimeInstallCommand,
 } from "@ocw/contracts";
 import { ChevronRight, History, Lock, RefreshCw, Server, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -29,6 +30,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { RUNTIMES, RuntimeLogo } from "@/components/work-zone/meta";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { errorMessage } from "@/lib/api";
+import { useRuntimeConfig } from "@/lib/config";
 import { useRequestRuntimeUpdate, useRuntimeUpdateHistory } from "@/lib/device-queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { CopyLine } from "./copy-line";
@@ -451,6 +453,13 @@ export type RuntimeSelfView =
   | { kind: "busy"; installed: string; label: string }
   | { kind: "blocked"; installed: string; note: string }
   | { kind: "not_served"; installed: string }
+  /** The desktop app ships its runtime (D-01): no button. */
+  | { kind: "desktop"; installed: string | null }
+  /** A server daemon older than 07.17.1 reports no `self`: one more install command run turns the button on. */
+  | { kind: "legacy"; installed: string | null }
+  /** A runtime of unknown host kind not installed with the install command (a checkout). */
+  | { kind: "unmanaged"; installed: string; note: string }
+  /** Nothing reported (a device of unknown kind and an older daemon): the section shows the CLI rows only. */
   | { kind: "hidden" };
 
 /** The build the workspace serves: the API's (PD-15), else the device's last check (an API that does not send it). */
@@ -460,11 +469,23 @@ function servedOf(device: Device, s: RuntimeSelfStatus): { version: string; buil
   return s.servedVersion && s.servedBuild ? { version: s.servedVersion, build: s.servedBuild } : null;
 }
 
-/** The Runtime row's view (pure): busy first, then why it can't update, then installed vs served. */
+/**
+ * The Runtime row's view (pure): the host kind first (desktop, an older server daemon, a checkout), then busy, then why
+ * it can't update, then installed vs served.
+ */
 export function runtimeSelfView(device: Device): RuntimeSelfView {
   const s = device.runtimeMaintenance?.self;
-  if (!s) return { kind: "hidden" };
+  if (device.hostKind === "desktop") {
+    return { kind: "desktop", installed: s ? withBuild(s.version, s.build) : device.daemonVersion };
+  }
+  if (!s)
+    return device.hostKind === "service"
+      ? { kind: "legacy", installed: device.daemonVersion }
+      : { kind: "hidden" };
   const installed = withBuild(s.version, s.build) ?? s.version;
+  if (device.hostKind !== "service" && s.reason === "not_installed") {
+    return { kind: "unmanaged", installed, note: RUNTIME_SELF_BLOCK_SENTENCES.not_installed };
+  }
   if (s.state !== "idle") return { kind: "busy", installed, label: SELF_BUSY_LABEL[s.state] };
   if (s.reason) return { kind: "blocked", installed, note: RUNTIME_SELF_BLOCK_SENTENCES[s.reason] };
   const served = servedOf(device, s);
@@ -502,6 +523,13 @@ function selfPill(
       return null;
   }
 }
+
+/** The row's note for the views whose sentence is fixed (the blocked ones carry their own). */
+const SELF_NOTE: Partial<Record<RuntimeSelfView["kind"], string>> = {
+  not_served: RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES.runtime_not_served,
+  desktop: "Updates with the desktop app",
+  legacy: "Re-run the install command once to turn on one-click updates.",
+};
 
 /** The views that come from the device's own report and have a history worth opening. */
 const SELF_HISTORY: ReadonlySet<RuntimeSelfView["kind"]> = new Set([
@@ -556,7 +584,8 @@ export function RuntimeSelfRow({
 
   const pill = selfPill(view, s, now);
   const installed = "installed" in view ? view.installed : null;
-  const note = "note" in view ? view.note : null;
+  const note = "note" in view ? view.note : SELF_NOTE[view.kind];
+  const { apiUrl } = useRuntimeConfig();
   const pressable = view.kind === "behind" || view.kind === "failed" || view.kind === "busy";
   const levelLine =
     m && (view.kind === "behind" || view.kind === "failed" || view.kind === "current")
@@ -606,10 +635,13 @@ export function RuntimeSelfRow({
             {note}
           </p>
         ) : null}
-        {view.kind === "not_served" ? (
-          <p className="text-muted-foreground text-xs" data-testid="runtime-self-note">
-            {RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES.runtime_not_served}
-          </p>
+        {view.kind === "legacy" ? (
+          <CopyLine
+            text={runtimeInstallCommand(apiUrl)}
+            testId="runtime-self-install-command"
+            buttonClassName="max-md:size-11"
+            wrap
+          />
         ) : null}
         {levelLine ? <p className="text-muted-foreground text-xs">{levelLine}</p> : null}
         {last ? <p className="text-muted-foreground text-xs">{last}</p> : null}
