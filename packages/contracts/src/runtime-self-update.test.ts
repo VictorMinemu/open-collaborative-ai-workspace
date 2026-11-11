@@ -11,10 +11,15 @@ import {
   RuntimeUpdateParams,
   RuntimeUpdatePayload,
   RuntimeUpdateRun,
+  RUNTIME_SELF_BLOCK_SENTENCES,
+  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
+  RuntimeSelfBlock,
+  RuntimeSelfUpdateRefusal,
   RuntimeUpdateTarget,
   runtimeBuildOf,
+  scrubHostPaths,
 } from "./runtime-maintenance";
-import { RuntimeId } from "./session-events";
+import { RuntimeId, SessionEvent } from "./session-events";
 
 /**
  * Phase 07.17.1 (runtime self-update, RSU-01…RSU-08; PD-04, PD-05, PD-25): the OCW runtime is a maintenance target
@@ -238,5 +243,47 @@ describe("DTOs stay compatible (D-07)", () => {
     expect(RuntimeUpdateHistoryQuery.parse({ runtime: "ocw-runtime" })).toEqual({ runtime: "ocw-runtime" });
     expect(RuntimeUpdateHistoryQuery.parse({})).toEqual({});
     expect(RuntimeUpdateParams.safeParse({ id: ID, runtime: "ocw" }).success).toBe(false);
+  });
+});
+
+describe("refusals and their sentences (D-05, PD-13)", () => {
+  it("names the three blocks; not_supervised is D-05 verbatim", () => {
+    expect(Object.keys(RUNTIME_SELF_BLOCK_SENTENCES).sort()).toEqual([...RuntimeSelfBlock.options].sort());
+    expect(RUNTIME_SELF_BLOCK_SENTENCES.not_supervised).toBe(
+      "Run as a service to update from the browser; or re-run the install command",
+    );
+  });
+
+  it("names the seven refusals; the three block codes reuse the block sentences", () => {
+    expect(Object.keys(RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES).sort()).toEqual(
+      [...RuntimeSelfUpdateRefusal.options].sort(),
+    );
+    expect(RuntimeSelfUpdateRefusal.options).toHaveLength(7);
+    for (const block of RuntimeSelfBlock.options) {
+      expect(RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES[block]).toBe(RUNTIME_SELF_BLOCK_SENTENCES[block]);
+    }
+  });
+
+  it("every sentence is short, has no placeholder, no URL and no host path", () => {
+    const all = [
+      ...Object.values(RUNTIME_SELF_BLOCK_SENTENCES),
+      ...Object.values(RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES),
+    ];
+    for (const s of all) {
+      expect(s.length).toBeLessThanOrEqual(200);
+      expect(s).not.toContain("{");
+      expect(s).not.toContain("http");
+      expect(scrubHostPaths(s)).toBe(s);
+    }
+  });
+});
+
+describe("held-session subject (PD-18)", () => {
+  it("a runtime.update event may name the OCW runtime as what it waits for", () => {
+    const held = { type: "runtime.update", runtime: "codex", phase: "waiting", subject: "ocw-runtime" } as const;
+    expect(SessionEvent.parse(held)).toEqual(held);
+    const plain = { type: "runtime.update", runtime: "codex", phase: "waiting" } as const;
+    expect(SessionEvent.parse(plain)).toEqual(plain);
+    expect(SessionEvent.safeParse({ ...held, subject: "codex" }).success).toBe(false);
   });
 });
