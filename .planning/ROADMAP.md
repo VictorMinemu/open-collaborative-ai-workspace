@@ -1125,12 +1125,12 @@ systemd or launchd; a failure keeps the running version and the doctor names an 
 **Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
 **Depends on:** Phase 07.17
 **ADR:** 0040
-**Plans:** 11 plans
+**Plans:** 1/11 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 07.17.1-01-PLAN.md — Wave 1: Contracts (`RuntimeUpdateTarget`, builds, strict `self`, `served`, refusals) and the phase hub (plan map, PD-01…PD-27, edges E1–E30)
+- [x] 07.17.1-01-PLAN.md — Wave 1: Contracts (`RuntimeUpdateTarget`, builds, strict `self`, `served`, refusals) and the phase hub (plan map, PD-01…PD-27, edges E1–E30)
 - [ ] 07.17.1-02-PLAN.md — Wave 1: ADR-0040, AGENTS.md row, runtime version 0.3.1 and the release tag check
 - [ ] 07.17.1-03-PLAN.md — Wave 1: API distribution: `GET /api/v1/runtime/npm-shrinkwrap.json`, `runtimeExternalFiles`, one shared dist store, `servedRuntime()`
 
