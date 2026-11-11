@@ -193,6 +193,11 @@ export interface RuntimeMaintenanceOptions {
   notifySession?: (runtime: RuntimeId, phase: "done" | "failed", version?: string) => void;
   /** After a run: the daemon drops its caches and sends fresh `capabilities`. */
   afterRun?: (runtime: RuntimeId) => Promise<void> | void;
+  /**
+   * 07.17.1 (PD-09): true while the OCW runtime's own self-update holds the gates. No CLI job starts then (no lock
+   * kept, no gate closed); a pending CLI update stays pending and starts after it.
+   */
+  exclusive?: () => boolean;
 }
 
 interface Job {
@@ -245,6 +250,13 @@ const WAITING_STATES: ReadonlySet<RuntimeMaintenanceState> = new Set<RuntimeMain
   "pending",
   "queued",
   "draining",
+]);
+
+/** A job in these states is past `pending`: it holds or will hold its gate (07.17.1 PD-09, `jobActive`). */
+const ACTIVE_STATES: ReadonlySet<RuntimeMaintenanceState> = new Set<RuntimeMaintenanceState>([
+  "draining",
+  "queued",
+  "running",
 ]);
 
 function realpathOr(p: string): string {
@@ -356,6 +368,17 @@ export class RuntimeMaintenance {
 
   get effectiveLevel(): RuntimeUpdatesLevel {
     return effectiveRuntimeUpdatesLevel(this.orgLevel, this.local.level);
+  }
+
+  /**
+   * 07.17.1 (PD-09): a CLI update is past `pending` (draining, queued for its install lock, or running): the OCW
+   * runtime's self-update closes no gate while this is true.
+   */
+  get jobActive(): boolean {
+    for (const st of this.states.values()) {
+      if (ACTIVE_STATES.has(st.state)) return true;
+    }
+    return false;
   }
 
   /** The server's `runtime.config` (PD-03): its level, and the newer of our manifest and its. */
@@ -742,6 +765,11 @@ export class RuntimeMaintenance {
     const st = this.stateOf(runtime);
     const job = st.job;
     if (this.stopped || !job || st.state !== "pending" || job.locking) return;
+    // 07.17.1 (PD-09): the OCW runtime's self-update holds the gates; this update waits pending until it ends.
+    if (this.opts.exclusive?.()) {
+      this.scheduleExclusivePoll(runtime, st);
+      return;
+    }
     const adapter = this.adapterOf(runtime);
     const gate = this.gateOf(runtime);
     const drainAt = this.drainAt(st, job);
@@ -767,6 +795,15 @@ export class RuntimeMaintenance {
       st.pollTimer = null;
       this.attempt(runtime);
     }, wait);
+  }
+
+  /** While `exclusive()` holds, a pending update looks again every poll (never sooner: a drain due now would spin). */
+  private scheduleExclusivePoll(runtime: RuntimeId, st: RuntimeState): void {
+    if (st.pollTimer !== null) return;
+    st.pollTimer = this.setTimer(() => {
+      st.pollTimer = null;
+      this.attempt(runtime);
+    }, this.opts.pollMs ?? PENDING_POLL_MS);
   }
 
   /** The install's lock for the run (null: nothing to lock, the runner refuses such an install by itself). */
@@ -797,6 +834,18 @@ export class RuntimeMaintenance {
     }
     job.locking = false;
     if (this.stopped || st.job !== job) {
+      if (taken && taken !== "busy") await taken.held.release().catch(() => undefined);
+      return;
+    }
+    // 07.17.1 (PD-09): the self-update closed every gate while the lock was being taken. Checked in the same
+    // synchronous step as the gate close below (`closeIfIdle` / `drain`), so no CLI job starts under its hold: the lock
+    // goes back and the update waits pending.
+    if (this.opts.exclusive?.()) {
+      if (st.state === "queued") {
+        st.state = "pending";
+        void this.publish(true);
+      }
+      this.scheduleExclusivePoll(runtime, st);
       if (taken && taken !== "busy") await taken.held.release().catch(() => undefined);
       return;
     }

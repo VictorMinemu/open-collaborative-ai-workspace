@@ -31,6 +31,8 @@ import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import { DEV_RUNTIME_VERSION } from "../version.js";
 import type { RuntimeGate } from "./gate.js";
 import {
+  CANCELLED_STOPPED,
+  DRAIN_AFTER_MS,
   DRAIN_POLL_MS,
   type InstallLocks,
   runOutputForFrame,
@@ -56,6 +58,7 @@ export const SELF_UPDATE_REFUSALS = {
   not_installed: RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
   not_supervised: RUNTIME_SELF_BLOCK_SENTENCES.not_supervised,
   node_too_old: RUNTIME_SELF_BLOCK_SENTENCES.node_too_old,
+  stopping: "the runtime is stopping",
 } as const;
 
 export interface SelfUpdateOptions {
@@ -93,6 +96,8 @@ export interface SelfUpdateOptions {
   version?: string;
   execPath?: string;
   nodeVersion?: string;
+  /** An automatic update waits this long for an idle moment with every gate open, then drains (`DRAIN_AFTER_MS`). */
+  drainAfterMs?: number;
   /** How often a waiting update re-checks the gates (default `DRAIN_POLL_MS`). */
   pollMs?: number;
   now?: () => number;
@@ -134,6 +139,8 @@ interface Job {
   ended: boolean;
   pendingSince: number | null;
   timer: TimerHandle | null;
+  /** Resolves a pending `hold()` (the job ended while it waited). */
+  wake: (() => void) | null;
   abort: AbortController;
 }
 
@@ -151,6 +158,7 @@ export class SelfUpdate {
   private served: { version: string; sha256: string } | null = null;
   private checkedAt: number | null = null;
   private readonly knownCommands = new Set<string>();
+  private stopped = false;
 
   constructor(private readonly opts: SelfUpdateOptions) {
     this.log = opts.log ?? silentLogger;
@@ -181,8 +189,20 @@ export class SelfUpdate {
     return this.knownCommands.has(id);
   }
 
-  stop(): void {
-    // Task 2 (cancel before the switch, nothing after it).
+  /**
+   * The daemon stops. Before the switch the job is cancelled: every gate reopens, the lock goes back (once nothing is
+   * being prepared under it), and the run is closed `finished failed` "cancelled: the runtime stopped" (an automatic
+   * run nothing announced yet ends silently). From the switch on (`restarting`) nothing is sent, reopened or released:
+   * the exit hand-over owns the gates and the lock, and the next daemon reports the run from the marker (E29).
+   */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    const job = this.job;
+    if (!job || job.switching || job.ended) return;
+    const preparing = this.state === "downloading" || this.state === "installing";
+    this.end(job, job.started || job.trigger === "manual" ? "failed" : null, CANCELLED_STOPPED);
+    // A prepare still running under the lock releases it when it settles (the job's own `finally`).
+    if (!preparing) await this.releaseLock(job);
   }
 
   /**
@@ -190,9 +210,14 @@ export class SelfUpdate {
    * answer comes before anything is fetched; the run reports itself through `runtime.update.run` frames.
    */
   async request(trigger: Trigger, commandId?: string): Promise<UpdateRequestAnswer> {
-    if (this.job) return { accepted: false, reason: SELF_UPDATE_REFUSALS.busy };
-    const running = this.opts.running;
-    if (!running) return { accepted: false, reason: SELF_UPDATE_REFUSALS.not_installed };
+    const refuse = (reason: string): UpdateRequestAnswer => ({ accepted: false, reason });
+    if (this.stopped) return refuse(SELF_UPDATE_REFUSALS.stopping);
+    if (this.job) return refuse(SELF_UPDATE_REFUSALS.busy);
+    // The device re-decides what the API decided from its snapshot (PD-11): nothing is fetched when it cannot update.
+    const { running, supervision } = this.opts;
+    if (!running || supervision.reason === "not_installed") return refuse(SELF_UPDATE_REFUSALS.not_installed);
+    if (supervision.reason !== null) return refuse(SELF_UPDATE_REFUSALS[supervision.reason]);
+    if (!supervision.supervised) return refuse(SELF_UPDATE_REFUSALS.not_supervised);
     if (commandId) this.knownCommands.add(commandId);
     const job: Job = {
       runId: randomUUID(),
@@ -208,6 +233,7 @@ export class SelfUpdate {
       ended: false,
       pendingSince: null,
       timer: null,
+      wake: null,
       abort: new AbortController(),
     };
     this.job = job;
@@ -287,6 +313,14 @@ export class SelfUpdate {
         now: () => new Date(this.now()),
       });
       job.switched = true;
+      // The daemon began stopping during the switch: its own stop ends the process (a `systemctl stop` must not turn
+      // into a restart); `current` already names the new version and the next start reports the run from the marker.
+      if (this.stopped) {
+        this.log.info(
+          "runtime self-update switched while the daemon stopped; the next start runs the new version",
+        );
+        return;
+      }
       await this.opts.exit(SELF_UPDATE_EXIT_CODE);
     } catch (err) {
       if (job.switched) {
@@ -311,22 +345,40 @@ export class SelfUpdate {
     }
   }
 
-  /** Resolves once every gate is closed on an idle device (D-04, PD-09). */
+  /**
+   * The gate decision (D-04, PD-09). Resolves once every gate is closed by this job and every runtime is idle, so the
+   * restart cuts nothing. Never closes a gate while a 07.11 CLI job is past `pending` (`cliBusy`). A click drains at
+   * once (every gate closes, running turns finish, new turns wait); an automatic update first waits up to
+   * `drainAfterMs` for a moment when everything is idle, closing every gate in that same synchronous step, then drains
+   * like a click. State `waiting` until then.
+   */
   private hold(job: Job): Promise<void> {
+    job.pendingSince = this.now();
     return new Promise<void>((resolve) => {
+      job.wake = resolve;
       const step = () => {
         job.timer = null;
         if (job.ended) return resolve();
-        if (this.closeAllIfIdle()) {
-          job.holding = true;
+        if (!job.holding && !this.opts.cliBusy()) {
+          if (this.closeAllIfIdle()) job.holding = true;
+          else if (job.trigger === "manual" || this.now() >= (job.pendingSince ?? 0) + this.drainAfterMs) {
+            for (const gate of this.opts.gates.values()) gate.close();
+            job.holding = true;
+          }
+        }
+        if (job.holding && this.allIdle()) {
+          job.wake = null;
           return resolve();
         }
-        job.pendingSince ??= this.now();
         this.setState("waiting");
         job.timer = this.setTimer(step, this.opts.pollMs ?? DRAIN_POLL_MS);
       };
       step();
     });
+  }
+
+  private get drainAfterMs(): number {
+    return this.opts.drainAfterMs ?? DRAIN_AFTER_MS;
   }
 
   /** One synchronous step: every gate admits nothing and every runtime runs nothing → every gate closes. */
@@ -368,6 +420,9 @@ export class SelfUpdate {
     if (job.timer !== null) this.clearTimer(job.timer);
     job.timer = null;
     job.abort.abort();
+    const wake = job.wake;
+    job.wake = null;
+    wake?.();
     if (job.holding) {
       job.holding = false;
       this.openAll();
