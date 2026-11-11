@@ -3,18 +3,18 @@ import { DEVICE_LINK_PROTOCOL_VERSION, DeviceToServerFrame, RuntimeMaintenanceFr
 import {
   DeviceRuntimeMaintenance,
   OCW_RUNTIME_TARGET,
+  RUNTIME_SELF_BLOCK_SENTENCES,
+  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
   RUNTIME_UPDATE_TARGET_LABEL,
   RuntimeBuild,
+  RuntimeSelfBlock,
   RuntimeSelfStatus,
+  RuntimeSelfUpdateRefusal,
   RuntimeServedBuild,
   RuntimeUpdateHistoryQuery,
   RuntimeUpdateParams,
   RuntimeUpdatePayload,
   RuntimeUpdateRun,
-  RUNTIME_SELF_BLOCK_SENTENCES,
-  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
-  RuntimeSelfBlock,
-  RuntimeSelfUpdateRefusal,
   RuntimeUpdateTarget,
   runtimeBuildOf,
   scrubHostPaths,
@@ -280,7 +280,12 @@ describe("refusals and their sentences (D-05, PD-13)", () => {
 
 describe("held-session subject (PD-18)", () => {
   it("a runtime.update event may name the OCW runtime as what it waits for", () => {
-    const held = { type: "runtime.update", runtime: "codex", phase: "waiting", subject: "ocw-runtime" } as const;
+    const held = {
+      type: "runtime.update",
+      runtime: "codex",
+      phase: "waiting",
+      subject: "ocw-runtime",
+    } as const;
     expect(SessionEvent.parse(held)).toEqual(held);
     const plain = { type: "runtime.update", runtime: "codex", phase: "waiting" } as const;
     expect(SessionEvent.parse(plain)).toEqual(plain);

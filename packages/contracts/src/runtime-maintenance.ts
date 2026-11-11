@@ -415,6 +415,45 @@ export type RuntimeSelfUpdateState = z.infer<typeof RuntimeSelfUpdateState>;
 export const RuntimeSelfBlock = z.enum(["not_installed", "not_supervised", "node_too_old"]);
 export type RuntimeSelfBlock = z.infer<typeof RuntimeSelfBlock>;
 
+/**
+ * What people read for each block (D-05 verbatim for `not_supervised`). The daemon answers these when it re-decides a
+ * request; the API answers them as 409 messages and the web shows them as the row's note.
+ */
+export const RUNTIME_SELF_BLOCK_SENTENCES: Readonly<Record<RuntimeSelfBlock, string>> = {
+  not_installed:
+    "This runtime was not installed with the install command. Re-run it from Settings › Devices › Add a device › Server to update from the browser.",
+  not_supervised: "Run as a service to update from the browser; or re-run the install command",
+  node_too_old:
+    "This server's Node is older than the new runtime needs. Upgrade Node, then re-run the install command.",
+};
+
+/** Why the API refuses an OCW runtime update request (409 codes, PD-13). */
+export const RuntimeSelfUpdateRefusal = z.enum([
+  "not_a_service",
+  "self_update_unsupported",
+  "not_supervised",
+  "not_installed",
+  "node_too_old",
+  "runtime_not_served",
+  "already_current",
+]);
+export type RuntimeSelfUpdateRefusal = z.infer<typeof RuntimeSelfUpdateRefusal>;
+
+/**
+ * The 409 message for each refusal: the API answers them and the web shows them in the refusal toast. The three block
+ * codes reuse `RUNTIME_SELF_BLOCK_SENTENCES`, so the API and the device say the same words.
+ */
+export const RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES: Readonly<Record<RuntimeSelfUpdateRefusal, string>> = {
+  not_a_service: "This device updates with the desktop app.",
+  self_update_unsupported:
+    "This runtime is too old to update from the browser. Re-run the install command once to turn on one-click updates.",
+  not_supervised: RUNTIME_SELF_BLOCK_SENTENCES.not_supervised,
+  not_installed: RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
+  node_too_old: RUNTIME_SELF_BLOCK_SENTENCES.node_too_old,
+  runtime_not_served: "This workspace serves no runtime to update to.",
+  already_current: "This device already runs the runtime your workspace serves.",
+};
+
 /** The last finished self-update the device remembers, with both builds. */
 export const RuntimeSelfLastRun = RuntimeLastRun.extend({
   fromBuild: RuntimeBuild.nullable(),
