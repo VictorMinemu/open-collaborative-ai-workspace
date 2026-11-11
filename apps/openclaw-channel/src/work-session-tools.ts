@@ -5,6 +5,8 @@ import type {
 } from "openclaw/plugin-sdk/channel-core";
 import { ZodError } from "zod";
 import {
+  AgentChannelWorkSessionDownload,
+  type AgentChannelWorkSessionDownloadResponse,
   type AgentChannelWorkSessionPromptResponse,
   type AgentChannelWorkSessionReadResponse,
   AgentChannelWorkSessionStart,
@@ -29,6 +31,7 @@ import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js"
 // tool-guard.ts never imports this module (it reads the names from turn-scoped-tools.ts), so this import is one-way.
 import { type ActiveTurn, approvalLabel, type ToolGuard } from "./tool-guard.js";
 import {
+  WORK_SESSION_DOWNLOAD_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_READ_TOOL,
   WORK_SESSION_START_TOOL,
@@ -67,6 +70,7 @@ import {
  */
 
 export {
+  WORK_SESSION_DOWNLOAD_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_READ_TOOL,
   WORK_SESSION_START_TOOL,
@@ -109,6 +113,8 @@ export const WORK_SESSION_TOOL_SENTENCES = {
     [WORK_SESSION_STOP_TOOL]: "The Work Zone could not be reached; the session was not stopped.",
     [WORK_SESSION_UPLOAD_TOOL]:
       "The Work Zone could not be reached; the file may not be in the session. Read the session before trying again.",
+    [WORK_SESSION_DOWNLOAD_TOOL]:
+      "The Work Zone could not be reached; the file may not have come back. Try again in a moment, or tell the person.",
   } satisfies Record<WorkSessionToolName, string>,
   extra_keys:
     "That tool only takes a project, a prompt and optional model, effort, fastMode, contextWindow and permissionMode. " +
@@ -120,6 +126,9 @@ export const WORK_SESSION_TOOL_SENTENCES = {
     [WORK_SESSION_UPLOAD_TOOL]:
       "That tool only takes a workSessionId, an attachmentId, a path and an optional overwrite. The device and the " +
       "people who see the file come from the session.",
+    [WORK_SESSION_DOWNLOAD_TOOL]:
+      "That tool only takes a workSessionId and a path. The file comes back as an attachment of your reply in this " +
+      "conversation.",
   },
   bad_session: "workSessionId must be the id of a Work Zone session you started.",
   bad_attachment:
@@ -779,6 +788,99 @@ function uploadTool(deps: Deps, ctx: WorkSessionToolContext): OpenClawAgentTool 
   };
 }
 
+// ---------------------------------------------------------------- ocw_work_session_download (07.17.1.1)
+
+/**
+ * What the model reads for a download answer: the file's name and size and where it went (the reply's attachment).
+ * Never its content: the bytes reach the model only through `ocw_attachment_read` on a later turn (07.15, tainted).
+ */
+export function renderWorkSessionDownload(r: AgentChannelWorkSessionDownloadResponse): WorkSessionToolResult {
+  if (r.kind === "downloaded") {
+    const name = label(r.name, 255) ?? "the file";
+    return answer(
+      `Downloaded ${name} (${fileSizeLabel(r.sizeBytes)}) from session ${r.workSessionId}. It is attached to your ` +
+        "reply; read it with ocw_attachment_read on a later turn if you need its content.",
+      true,
+    );
+  }
+  return renderFileRefusal(r);
+}
+
+/** The keys the download tool takes: never an attachment (the API allocates it) or an overwrite. */
+const DOWNLOAD_KEYS: ReadonlySet<string> = new Set(["workSessionId", "path"]);
+
+/** The download body, or why the params are invalid (checked locally; the API and the device check again). */
+export function workSessionDownloadOf(
+  t: Pick<ActiveTurn, "eventId" | "agentId">,
+  p: Record<string, unknown>,
+): { body: AgentChannelWorkSessionDownload } | { error: string; code: string } {
+  if (Object.keys(p).some((k) => !DOWNLOAD_KEYS.has(k))) {
+    return {
+      error: WORK_SESSION_TOOL_SENTENCES.extra_keys_session[WORK_SESSION_DOWNLOAD_TOOL],
+      code: "extra_keys",
+    };
+  }
+  const workSessionId = typeof p.workSessionId === "string" ? p.workSessionId.trim() : "";
+  if (!UUID.test(workSessionId))
+    return { error: WORK_SESSION_TOOL_SENTENCES.bad_session, code: "bad_params" };
+  const body = AgentChannelWorkSessionDownload.safeParse({
+    eventId: t.eventId,
+    agentId: t.agentId,
+    workSessionId,
+    path: p.path,
+  });
+  if (!body.success) return { error: WORK_SESSION_TOOL_SENTENCES.bad_path, code: "bad_params" };
+  return { body: body.data };
+}
+
+const DOWNLOAD_DESCRIPTION =
+  "Send one file from a Work Zone session you started back to this conversation; it is attached to your reply. " +
+  "You can't read its content in this turn.";
+
+function downloadTool(deps: Deps, ctx: WorkSessionToolContext): OpenClawAgentTool {
+  const name = WORK_SESSION_DOWNLOAD_TOOL;
+  return {
+    name,
+    label: "Get a file from a Work Zone session",
+    description: DOWNLOAD_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        workSessionId: SESSION_ID_PARAM,
+        path: {
+          type: "string",
+          minLength: 1,
+          maxLength: BOT_FILE_LIMITS.pathMaxChars,
+          description: "The file to send back, relative to the project root, for example dist/report.pdf.",
+        },
+      },
+      required: ["workSessionId", "path"],
+    },
+    async execute(_toolCallId, params, signal) {
+      const found = turnFor(name, deps, ctx);
+      if ("refused" in found) return found.refused;
+      const { turn: t, client } = found;
+      // D-10, D-11: taint and the session-output mark are the route's to decide, as for the upload.
+      const built = workSessionDownloadOf(t, asParams(params));
+      if ("error" in built) return answer(built.error, false, built.code);
+      try {
+        const r = await client.workSessionDownload(built.body, signal);
+        if (r.kind === "downloaded") {
+          deps.logger?.info?.(
+            `${name}: ${t.eventId} downloaded (${r.workSessionId}, ${r.attachmentId}, ${r.sizeBytes} bytes)`,
+          );
+        } else deps.logger?.warn?.(`${name}: ${t.eventId} refused (${r.code})`);
+        return renderWorkSessionDownload(r);
+      } catch (error) {
+        const failure = failureOf(name, error);
+        deps.logger?.warn?.(`${name}: ${t.eventId} failed (${failure.log})`);
+        return failure.result;
+      }
+    },
+  };
+}
+
 export function registerWorkSessionTools(api: OpenClawPluginApi, deps: Deps): void {
   api.registerTool((ctx: WorkSessionToolContext) => startTool(deps, ctx), { name: WORK_SESSION_START_TOOL });
   api.registerTool((ctx: WorkSessionToolContext) => promptTool(deps, ctx), {
@@ -788,5 +890,8 @@ export function registerWorkSessionTools(api: OpenClawPluginApi, deps: Deps): vo
   api.registerTool((ctx: WorkSessionToolContext) => stopTool(deps, ctx), { name: WORK_SESSION_STOP_TOOL });
   api.registerTool((ctx: WorkSessionToolContext) => uploadTool(deps, ctx), {
     name: WORK_SESSION_UPLOAD_TOOL,
+  });
+  api.registerTool((ctx: WorkSessionToolContext) => downloadTool(deps, ctx), {
+    name: WORK_SESSION_DOWNLOAD_TOOL,
   });
 }

@@ -53,6 +53,7 @@ export const WORK_SESSION_TOOL_NAMES = [
   WORK_SESSION_READ_TOOL,
   WORK_SESSION_STOP_TOOL,
   WORK_SESSION_UPLOAD_TOOL,
+  WORK_SESSION_DOWNLOAD_TOOL,
 ] as const;
 export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
 /**

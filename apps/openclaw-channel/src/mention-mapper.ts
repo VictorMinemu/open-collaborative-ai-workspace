@@ -10,13 +10,17 @@ import {
   type AgentMentionEvent,
   type AgentTurnOrigin,
   AgentWorkSessionEvent,
+  BOT_FILE_LIMIT_SOURCE_LABELS,
+  BOT_FILE_LIMITS,
   BOT_WORK_ZONE_LIMITS,
+  type BotFileLimit,
   BROWSER_TOOL_NAMES,
   type CellAgent,
   CONNECTOR_LOGICAL_TOOL,
   EMPTY_TURN,
   type EscalationTargetView,
   escalationSentence,
+  fileSizeLabel,
   TOOL_APPROVAL_LIMITS,
   type TurnAttachment,
   type TurnContext,
@@ -29,10 +33,12 @@ import {
   ATTACHMENT_TOOL_NAME,
   BOARD_TOOL_NAME,
   CONSULT_TOOL_NAME,
+  WORK_SESSION_DOWNLOAD_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_READ_TOOL,
   WORK_SESSION_START_TOOL,
   WORK_SESSION_STOP_TOOL,
+  WORK_SESSION_UPLOAD_TOOL,
   withTurnScopedTools,
 } from "./turn-scoped-tools.js";
 import {
@@ -386,12 +392,29 @@ function workZoneBlock(wz: TurnWorkZone): ContextBlock {
                 `${blockId(s.id)} · ${workZoneName(s.projectName)} · ${WORK_SESSION_STATUS_LABELS[s.status]}`,
             )
           : "You have no sessions in this conversation.",
+      // 07.17.1.1 (D-07, PD-11, PD-21): only on a turn that carries the two file tools (`files` present); a 07.16 turn's
+      // block stays byte-identical.
+      ...(wz.files ? { files: workZoneFilesLine(wz.files) } : {}),
       text:
         `Start a session with ${WORK_SESSION_START_TOOL}, send it more work with ${WORK_SESSION_PROMPT_TOOL}, ` +
         `check it with ${WORK_SESSION_READ_TOOL} and stop it with ${WORK_SESSION_STOP_TOOL}. ` +
+        (wz.files
+          ? `Put a file attached in this thread into it with ${WORK_SESSION_UPLOAD_TOOL} and send one of its files ` +
+            `back with ${WORK_SESSION_DOWNLOAD_TOOL}. `
+          : "") +
         "You can only control sessions you started.",
     },
   };
+}
+
+/** The per-file limit the file tools apply on this turn, the level that set it and the turn's rules (D-07, D-12, D-13). */
+function workZoneFilesLine(limit: BotFileLimit): string {
+  return (
+    `Move files with ${WORK_SESSION_UPLOAD_TOOL} and ${WORK_SESSION_DOWNLOAD_TOOL}: up to ` +
+    `${fileSizeLabel(limit.bytes)} each (${BOT_FILE_LIMIT_SOURCE_LABELS[limit.source]}), ` +
+    `${BOT_FILE_LIMITS.filesPerTurnEachWay} each way per turn, only in this conversation; uploads only while the ` +
+    "session is idle."
+  );
 }
 
 // ---------------------------------------------------------------- attachments (07.15, D-02, D-04, PD-10)

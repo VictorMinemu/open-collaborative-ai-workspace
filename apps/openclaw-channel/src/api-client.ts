@@ -52,6 +52,8 @@ import {
   type AgentChannelToolCallResult,
   type AgentChannelTurnDone,
   type AgentChannelTyping,
+  type AgentChannelWorkSessionDownload,
+  AgentChannelWorkSessionDownloadResponse,
   type AgentChannelWorkSessionPrompt,
   AgentChannelWorkSessionPromptResponse,
   type AgentChannelWorkSessionRead,
@@ -763,6 +765,25 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         WORK_SESSION_FILE_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelWorkSessionUploadResponse.parse(raw);
+    },
+    /**
+     * `ocw_work_session_download` (07.17.1.1 D-01, D-03): the turn's ids, the session and a repo-relative path; the API
+     * waits for the device's file and stores it as a pending attachment the bot's reply links. One attempt of
+     * `WORK_SESSION_FILE_REQUEST_TIMEOUT_MS`; never bytes in the answer. Never logs the path.
+     */
+    async workSessionDownload(
+      body: AgentChannelWorkSessionDownload,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionDownloadResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/download",
+        body,
+        signal,
+        1,
+        WORK_SESSION_FILE_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionDownloadResponse.parse(raw);
     },
     /**
      * `ocw_conversation_open` (07.17 D-02, PD-07): the run turn's ids and the items it found; the API takes the
