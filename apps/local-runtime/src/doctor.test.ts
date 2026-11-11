@@ -25,6 +25,7 @@ import {
   safeLine,
 } from "./doctor.js";
 import type { RuntimeInstallInfo } from "./install-info.js";
+import type { SelfUpdateMarker } from "./maintenance/self-update.js";
 import type { ServiceEnvSummary, ServiceStatus } from "./service/types.js";
 
 // ---------------------------------------------------------------- a protocol-faithful fake server
@@ -179,6 +180,7 @@ function deps(
     updatesLevel: async () => ({ level: "automatic", source: "config" }),
     homeDir: () => HOME,
     now: () => new Date("2026-10-29T10:00:00.000Z"),
+    selfUpdateMarker: async () => null,
   };
   return { ...base, ...over, fetch: over.fetch ?? fetch, requests };
 }
@@ -215,7 +217,13 @@ describe("ocw-runtime doctor: node, runtime, pairing, server (07.12, D-05, D-06,
   });
 
   it("warns when the installed bundle differs from the server's, with the re-install and restart fix", async () => {
-    const report = await runDoctor(deps({}, { version: manifest("b".repeat(64), "0.1.1") }));
+    // Without an installed service (07.17.1: a service host gets the one-click hint, tested below).
+    const report = await runDoctor(
+      deps(
+        { service: async () => ({ ...serviceActive, installed: false, active: null, unitPath: null }) },
+        { version: manifest("b".repeat(64), "0.1.1") },
+      ),
+    );
     const runtime = check(report, "runtime");
     expect(runtime.status).toBe("warn");
     expect(runtime.summary).toContain("0.1.0");
@@ -678,6 +686,115 @@ describe("createDoctorDeps (07.12, PD-12)", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1 (runtime self-update, D-07, PD-20)
+
+const PREVIOUS_SHA = `0123456789ab${"c".repeat(52)}`;
+const updateMarker: SelfUpdateMarker = {
+  runId: "5b0f6a52-3c1e-4c55-9f0d-0f8f3f6c2a11",
+  commandId: null,
+  trigger: "manual",
+  from: { version: "0.3.1", sha256: PREVIOUS_SHA },
+  to: { version: "0.3.2", sha256: `abcdef012345${"d".repeat(52)}` },
+  startedAt: "2026-10-29T09:55:00.000Z",
+};
+const STUCK = "The runtime did not come back after updating to 0.3.2 (abcdef012345)";
+const STUCK_FIX =
+  "Re-run the install command from Settings › Devices, or point ~/.ocw/runtime/current back to " +
+  "versions/0123456789ab and run `ocw-runtime service restart`";
+
+describe("ocw-runtime doctor names an update that did not come back (07.17.1, D-07, PD-20)", () => {
+  const withMarker = { selfUpdateMarker: async () => updateMarker };
+
+  it("daemon: a marker with no running daemon names the update and the way back", async () => {
+    const daemon = check(await runDoctor(deps({ ...notRunning, ...withMarker })), "daemon");
+    expect(daemon).toEqual({ id: "daemon", status: "fail", summary: STUCK, fix: STUCK_FIX });
+  });
+
+  it("service: a marker with the unit failed or inactive names the update the same way", async () => {
+    for (const active of [false, null]) {
+      const service = check(
+        await runDoctor(
+          deps({ ...notRunning, ...withMarker, service: async () => ({ ...serviceActive, active }) }),
+        ),
+        "service",
+      );
+      expect(service).toEqual({ id: "service", status: "fail", summary: STUCK, fix: STUCK_FIX });
+    }
+  });
+
+  it("a marker while the daemon runs is the normal boot window: the 07.12 findings stay", async () => {
+    const report = await runDoctor(deps(withMarker));
+    expect(check(report, "daemon").status).toBe("ok");
+    expect(check(report, "service").status).toBe("ok");
+  });
+
+  it("without a marker the 07.12 findings are exactly as before", async () => {
+    expect(check(await runDoctor(deps(notRunning)), "daemon")).toEqual({
+      id: "daemon",
+      status: "fail",
+      summary: "The runtime is not running although its service is installed",
+      fix: "not running: `ocw-runtime service status`, then `ocw-runtime service logs`",
+    });
+    const inactive = check(
+      await runDoctor(deps({ ...notRunning, service: async () => ({ ...serviceActive, active: false }) })),
+      "service",
+    );
+    expect(inactive.summary).toBe("The systemd user service is installed but not running");
+  });
+
+  it("runtime: a behind runtime on a service host points at the one-click update; other hosts keep the 07.12 hint", async () => {
+    const behind = { version: manifest("b".repeat(64), "0.1.1") };
+    const onService = check(await runDoctor(deps({}, behind)), "runtime");
+    expect(onService.status).toBe("warn");
+    expect(onService.fix).toBe(
+      "Update it from Settings › Devices (Runtime › Update), or re-run the install command",
+    );
+
+    const noService = check(
+      await runDoctor(
+        deps(
+          { service: async () => ({ ...serviceActive, installed: false, active: null, unitPath: null }) },
+          behind,
+        ),
+      ),
+      "runtime",
+    );
+    expect(noService.fix).toBe(
+      "re-run the install command from Settings › Devices, then `ocw-runtime service restart` when no session runs",
+    );
+  });
+
+  it("keeps DOCTOR_CHECK_IDS and the report schema, and the new lines are safe to paste", async () => {
+    expect([...DOCTOR_CHECK_IDS]).toEqual([
+      "node",
+      "runtime",
+      "pairing",
+      "server",
+      "daemon",
+      "service",
+      "claude-code",
+      "codex",
+      "runtimes",
+      "git",
+      "projects",
+      "updates",
+      "service-env",
+    ]);
+    const report = await runDoctor(
+      deps(
+        { ...notRunning, ...withMarker, service: async () => ({ ...serviceActive, active: false }) },
+        { version: manifest("b".repeat(64), "0.1.1") },
+      ),
+    );
+    expect(DoctorReport.parse(JSON.parse(formatDoctorJson(report)))).toEqual(report);
+    for (const out of [formatDoctorText(report), formatDoctorJson(report)]) {
+      expect(out).not.toContain(`${HOME}/`);
+      expect(out).not.toContain("ocwd_SECRET");
+      expect(out).not.toMatch(/\/(tmp|opt|usr|var|Users|private|srv)\//);
     }
   });
 });
