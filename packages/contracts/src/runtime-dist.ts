@@ -119,6 +119,25 @@ export const RuntimeDistManifest = z.strictObject({
 });
 export type RuntimeDistManifest = z.infer<typeof RuntimeDistManifest>;
 
+/** The manifest's shape with every unknown key dropped (top level, `source`, each pin and bundled package). */
+const ServedRuntimeDistManifestShape = RuntimeDistManifest.extend({
+  external: z.array(NpmPackagePin.strip()),
+  bundled: z.array(BundledPackage.strip()),
+  source: RuntimeDistManifest.shape.source.strip(),
+}).strip();
+
+/**
+ * 07.17.1 review WR-04: how a daemon reads the manifest its workspace serves. Keys a later release adds (a signature,
+ * a minimum daemon version) are dropped instead of refused, so an older daemon keeps updating with one click; every
+ * field the daemon uses is still checked exactly as `RuntimeDistManifest` checks it (the result is parsed by it). The
+ * API's own dist store keeps the strict `RuntimeDistManifest`.
+ */
+export function parseServedRuntimeManifest(json: unknown): z.ZodSafeParseResult<RuntimeDistManifest> {
+  const shape = ServedRuntimeDistManifestShape.safeParse(json);
+  // A value the tolerant shape refuses fails the strict schema too, which then names the field.
+  return RuntimeDistManifest.safeParse(shape.success ? shape.data : json);
+}
+
 /**
  * 07.17.1 (D-03, PD-16): the two npm files installed beside a bundle, from its manifest and its
  * `RUNTIME_EXTERNAL_LOCK_FILE`. Written the same way by `install.sh` (rendered by the API) and by the daemon's

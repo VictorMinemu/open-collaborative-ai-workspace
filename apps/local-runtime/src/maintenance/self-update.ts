@@ -28,11 +28,12 @@ import { pipeline } from "node:stream/promises";
 import {
   CLAUDE_AGENT_SDK_PACKAGE,
   IsoDateTime,
+  parseServedRuntimeManifest,
   RUNTIME_BUNDLE_FILE,
   RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
   RUNTIME_SELF_BLOCK_SENTENCES,
-  RuntimeDistManifest,
+  type RuntimeDistManifest,
   RuntimeUpdateTrigger,
   RuntimeVersion,
   runtimeBuildOf,
@@ -211,7 +212,10 @@ async function readCapped(res: Response, cap: number, abort: AbortController): P
   return Buffer.concat(chunks);
 }
 
-/** The manifest the paired workspace serves now (`RUNTIME_ROUTES.version`), strictly parsed (PD-06). */
+/**
+ * The manifest the paired workspace serves now (`RUNTIME_ROUTES.version`), parsed with `parseServedRuntimeManifest`
+ * (PD-06; unknown keys dropped, every known field strict: review WR-04).
+ */
 export async function fetchServedManifest(p: {
   serverUrl: string;
   env: NodeJS.ProcessEnv;
@@ -236,7 +240,8 @@ export async function fetchServedManifest(p: {
   } catch (err) {
     throw new SelfUpdateError("bad_manifest", err);
   }
-  const parsed = RuntimeDistManifest.safeParse(json);
+  // Review WR-04: keys a later release adds are dropped, every field used here is still checked strictly.
+  const parsed = parseServedRuntimeManifest(json);
   if (!parsed.success) throw new SelfUpdateError("bad_manifest", undefined, parsed.error.message);
   return parsed.data;
 }

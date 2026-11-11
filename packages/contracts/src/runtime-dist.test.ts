@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BUNDLE_LICENSE_ALLOWLIST,
+  parseServedRuntimeManifest,
   RUNTIME_BUNDLE_FILE,
   RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
@@ -60,6 +61,43 @@ describe("RuntimeDistManifest (07.12, D-01, D-10, D-13)", () => {
     ["an extra key", { extra: true }],
   ])("refuses %s", (_label, patch) => {
     expect(RuntimeDistManifest.safeParse({ ...manifest, ...patch }).success).toBe(false);
+  });
+});
+
+describe("parseServedRuntimeManifest (07.17.1 review WR-04)", () => {
+  it("drops keys a later release adds (top level, source, pins, bundled) and returns the strict manifest", () => {
+    const later = {
+      ...manifest,
+      signature: "sig",
+      minDaemon: "0.3.1",
+      source: { ...manifest.source, tag: "v0.3.2" },
+      external: manifest.external.map((p) => ({ ...p, integrity: "sha512-x" })),
+      bundled: manifest.bundled.map((p) => ({ ...p, url: "https://example.com" })),
+    };
+    const parsed = parseServedRuntimeManifest(later);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data).toEqual(manifest);
+    expect(RuntimeDistManifest.parse(parsed.data)).toEqual(manifest);
+  });
+
+  it.each([
+    ["a 63-character sha256", { sha256: "a".repeat(63) }],
+    ["a size of zero", { bytes: 0 }],
+    ["no version", { version: undefined }],
+    ["minNode 22", { minNode: 22 }],
+    ["an external list that does not start with the SDK", { external: [{ name: "zod", version: "4.6.5" }] }],
+    [
+      "an external range instead of an exact version",
+      { external: [{ name: "@anthropic-ai/claude-agent-sdk", version: "^0.3.0" }] },
+    ],
+    ["a short lockfile sha256", { externalLockSha256: "b".repeat(63) }],
+  ])("still refuses %s", (_label, patch) => {
+    expect(parseServedRuntimeManifest({ ...manifest, extra: true, ...patch }).success).toBe(false);
+  });
+
+  it("refuses what is not an object", () => {
+    for (const v of [null, "manifest", 1, []]) expect(parseServedRuntimeManifest(v).success).toBe(false);
   });
 
   it("names the file, the routes and the install command", () => {

@@ -236,15 +236,31 @@ describe("prepareVersion failures (07.17.1, D-07, E1–E10, E23)", () => {
     expect(stub.redirectRequests).toEqual([]);
   });
 
-  it("a 503 → unreachable; a manifest with an unknown key or no JSON → bad_manifest", async () => {
+  it("a 503 → unreachable; a manifest with a bad field or no JSON → bad_manifest", async () => {
     stub.set("unavailable");
     await failureOf(fetchServedManifest({ serverUrl: stub.url, env }), "unreachable");
     stub.set("ok");
-    const extra = JSON.stringify({ ...stub.manifest, installCommand: "run-me" });
-    const f: typeof fetch = async () => new Response(extra, { status: 200 });
+    const badSha = JSON.stringify({ ...stub.manifest, sha256: "x".repeat(64) });
+    const f: typeof fetch = async () => new Response(badSha, { status: 200 });
     await failureOf(fetchServedManifest({ serverUrl: stub.url, env, fetch: f }), "bad_manifest");
     const notJson: typeof fetch = async () => new Response("<html>", { status: 200 });
     await failureOf(fetchServedManifest({ serverUrl: stub.url, env, fetch: notJson }), "bad_manifest");
+  });
+
+  it("review WR-04: a manifest a later release extended (unknown keys) still parses and prepares; the extra keys are dropped", async () => {
+    const later = JSON.stringify({
+      ...stub.manifest,
+      signature: "sig",
+      installCommand: "run-me",
+      source: { ...stub.manifest.source, tag: "v0.3.2" },
+    });
+    const f: typeof fetch = async () => new Response(later, { status: 200 });
+    const manifest = await fetchServedManifest({ serverUrl: stub.url, env, fetch: f });
+    expect(manifest).toEqual(stub.manifest);
+    expect(manifest).not.toHaveProperty("installCommand");
+    const opts = await options();
+    const prepared = await prepareVersion({ ...opts, manifest });
+    expect(prepared.sha12).toBe(stub.manifest.sha256.slice(0, 12));
   });
 
   it("a server that never answers → unreachable at the timeout", async () => {
