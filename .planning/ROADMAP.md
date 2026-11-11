@@ -1156,14 +1156,48 @@ Plans:
 
 ### Phase 07.17.1.1: Bot file exchange with its Work Zone sessions: upload chat attachments into the session's working tree and download session files back to the chat as attachments (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 07.17.1
-**Plans:** 0 plans
+**Goal:** A bot that started a Work Zone session moves files between that session and the conversation it started it
+from: it uploads an attachment of the thread into the session's working tree and downloads a file of the session back to
+the conversation as an attachment people open and download, each bounded by a per-file limit the organization and the
+bot's profile configure (the lower wins), decided server-side, audited, and never sending an absolute path.
+
+- **Tools:** `ocw_work_session_upload` and `ocw_work_session_download`, offered with the four 07.16 tools, all or none.
+- **Transport:** commands carry no bytes; files stream over `/api/v1/runtime/files/:transferId` with the device token.
+- **Rules:** origin conversation only; uploads only while the session is idle; one deny list (`.git`, `.claude`,
+  `.codex`, `.mcp.json`, `.ocw-worktrees`, secrets) both ways; 5 files per turn each way; the hourly prompt budget.
+
+**Requirements**: BWF-01, BWF-02, BWF-03, BWF-04, BWF-05, BWF-06, BWF-07, BWF-08
+**Depends on:** Phase 07.17.1 + PR #71 merged into main
+**ADR:** 0041
+**Success Criteria** (what must be TRUE):
+
+  1. A bot uploads a thread attachment into the session it started and the file shows in the session's changes; a
+     file outside the turn's reach, above the limit or at a denied path never moves
+  2. A bot downloads a session file; its reply carries it and people download it
+  3. "Largest file a bot moves" (organization) and "Largest file" (bot) are configurable; the lower wins and refusals
+     name it
+  4. Integration tests (containment, transport, caps, taint, tenant isolation) and an e2e spec pass on desktop and
+     mobile; ADR-0041 records the decisions
+
+**Plans:** 15 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.17.1.1 to break down)
+- [ ] 07.17.1.1-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, path rule, deny list, limits, device commands) + the phase hub
+- [ ] 07.17.1.1-02-PLAN.md — Wave 1: ADR-0041 and the AGENTS.md row
+- [ ] 07.17.1.1-03-PLAN.md — Wave 2: The migration (limit columns, transfer ledger, hourly load)
+- [ ] 07.17.1.1-04-PLAN.md — Wave 2: The daemon (containment, `session.file.read|write`, transfer requests, bounded diff frame)
+- [ ] 07.17.1.1-05-PLAN.md — Wave 2: The plugin (two tools, guard sets, Work Zone block line, real-cell smoke)
+- [ ] 07.17.1.1-06-PLAN.md — Wave 3: The limits in the API (policy and profile, `loadBotFileLimit`)
+- [ ] 07.17.1.1-07-PLAN.md — Wave 3: Transfer read side (device JWT auth, ledger primitives, `GET /api/v1/runtime/files/:transferId`)
+- [ ] 07.17.1.1-08-PLAN.md — Wave 4: Transfer write side (multipart storage, `PUT …/:transferId`, pre-claim refusals)
+- [ ] 07.17.1.1-09-PLAN.md — Wave 4: Web: "Largest file a bot moves" and the profile's "Largest file"
+- [ ] 07.17.1.1-10-PLAN.md — Wave 4: The offer of six tools with the file limit; shared route helpers
+- [ ] 07.17.1.1-11-PLAN.md — Wave 5: The work-session file service (prepare, wait, finish, caps, audit, injectable deadline)
+- [ ] 07.17.1.1-12-PLAN.md — Wave 6: The upload route (the phase's API end to end, upload) and its own refusals
+- [ ] 07.17.1.1-13-PLAN.md — Wave 7: The download route and the refusal matrix both tools share
+- [ ] 07.17.1.1-14-PLAN.md — Wave 8: The browser journey e2e (upload, download, limit refusal; desktop and mobile)
+- [ ] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 

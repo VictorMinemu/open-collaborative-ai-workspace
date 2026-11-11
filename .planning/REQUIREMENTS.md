@@ -420,6 +420,17 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [x] **AFO-04**: In channel posts (threads and board cards included; not DMs, group DMs or AI chats), people and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
 - [x] **AFO-05**: Proven by integration tests and an e2e spec (fake MCP of orders → card → Work Zone session → team mention on finish), desktop and mobile; ADR-0039 records the decisions
 
+### Bot Work Zone File Exchange (BWF) — added 2026-11-11 by the owner
+
+- [ ] **BWF-01**: A bot with an active Work Zone profile is offered `ocw_work_session_upload` and `ocw_work_session_download` together with the four 07.16 session tools (all or none); every call re-decides the live turn, the bot's own session, the profile and the sponsor's rights in the Agent Channel API
+- [ ] **BWF-02**: Upload copies only an attachment the turn may read (the 07.15 rule, as the asker) into a contained repo-relative path of the session's working tree, only while the session is idle; absolute paths, `..`, symlink escapes and existing files without `overwrite` are refused; after outside content it follows the profile's "act on outside content" like a prompt
+- [ ] **BWF-03**: Download turns one contained regular file of the session into an attachment of the bot's reply in the conversation the session started in, which people open and download; one deny list (`.git`, `.claude`, `.codex`, `.mcp.json`, `.ocw-worktrees`, `.env` and keys) applies both ways; after outside content it follows the profile's flag; reading a session's output does not block downloading from it
+- [ ] **BWF-04**: The device handles `session.file.write` / `session.file.read` only for a session active on it, with repo-relative paths only; bytes never cross the Device Link (a device-token HTTP stream instead); an old runtime answers "too old, update it in Settings › Devices"
+- [ ] **BWF-05**: Every upload and download is audited (bot, sponsor, session, attachment, size, sha256) without a path or content
+- [ ] **BWF-06**: File moves count in the bot's hourly prompt budget and the turn's 8 tool calls; at most 5 files per turn each way
+- [ ] **BWF-07**: The per-file limit is configurable: the organization's "Largest file a bot moves" (default 25 MB, at most the server's `OCW_ATTACHMENT_MAX_BYTES`) and the bot's "Largest file" (at most the organization's); the lower wins, refusals name it, the check happens before any byte moves, and large files stream
+- [ ] **BWF-08**: The device's `diff.result` frames never exceed the API's 256 KiB inbound limit (a large diff is shown truncated instead of closing the link)
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -664,6 +675,14 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | AFO-03 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
 | AFO-04 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
 | AFO-05 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
+| BWF-01 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-02 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-03 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-04 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-05 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-06 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-07 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| BWF-08 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
