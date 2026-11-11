@@ -602,16 +602,25 @@ describe("SelfUpdate: requests the device refuses (07.17.1, D-05, PD-11)", () =>
 });
 
 describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => {
-  it("stop() while waiting: gates open, lock released, no staging, finished failed cancelled, no exit", async () => {
+  it("stop() while waiting: lock released, no staging, finished failed cancelled, no exit; the gates stay shut (review WR-01)", async () => {
     const r = await makeRig();
     r.turns.codex = 1;
     expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
     await untilState(r, "waiting");
     expect(gatesClosed(r)).toBe(true);
     expect(existsSync(lockFileOf(r))).toBe(true);
+    // A turn held at the gate: the daemon is stopping, so it must not start (the server re-queues it, PD-27).
+    const ran: string[] = [];
+    void r.gates.get("claude-code")?.admit(async () => {
+      ran.push("claude-code");
+    });
 
     await r.su.stop();
-    expect(gatesOpen(r)).toBe(true);
+    await flush();
+    expect(gatesClosed(r)).toBe(true);
+    expect(ran).toEqual([]);
+    expect(r.gates.get("claude-code")?.heldCount).toBe(1);
+    expect(r.su.holding).toBe(false);
     expect(existsSync(lockFileOf(r))).toBe(false);
     expect(stagingLeft(r)).toEqual([]);
     expect(r.frames.map((f) => [f.phase, f.outcome, f.commandId])).toEqual([

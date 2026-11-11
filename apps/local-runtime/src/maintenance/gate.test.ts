@@ -219,3 +219,32 @@ describe("RuntimeGate (07.11 PD-07)", () => {
     await expect(gate.waitIdle(() => 0)).resolves.toBeUndefined();
   });
 });
+
+describe("RuntimeGate.seal (07.17.1 review WR-01)", () => {
+  it("a sealed gate holds what waits and what arrives, and open() no longer releases anything", async () => {
+    const gate = new RuntimeGate();
+    gate.close();
+    const held = vi.fn(async () => "held");
+    void gate.admit(held);
+    await flush();
+    gate.seal();
+    expect(gate.isOpen).toBe(false);
+    gate.open();
+    const late = vi.fn(async () => "late");
+    void gate.admit(late);
+    await flush();
+    expect(gate.isOpen).toBe(false);
+    expect(held).not.toHaveBeenCalled();
+    expect(late).not.toHaveBeenCalled();
+    expect(gate.heldCount).toBe(2);
+  });
+
+  it("sealing an open gate closes it", async () => {
+    const gate = new RuntimeGate();
+    gate.seal();
+    const fn = vi.fn(async () => undefined);
+    void gate.admit(fn);
+    await flush();
+    expect(fn).not.toHaveBeenCalled();
+  });
+});

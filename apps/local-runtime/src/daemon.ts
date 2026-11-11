@@ -549,8 +549,12 @@ export class Daemon {
    * reopen, `finished failed`). Once it switched (the exit hand-over, gates still held) the link closes right after the
    * last snapshot went out: no ack, run frame or session event from the teardown reaches the server, and nothing
    * reopens a gate on an open socket. The next daemon reports the run from the marker.
+   *
+   * Review WR-01: every gate is sealed first, so nothing held (by the self-update or a 07.11 CLI update) or newly
+   * arriving starts a turn in a daemon that is stopping; the server re-queues those prompts after the restart (PD-27).
    */
   async stop(): Promise<void> {
+    for (const gate of this.gates.values()) gate.seal();
     await this.selfUpdate?.stop();
     if (this.selfUpdate?.holding) {
       await this.snapshotChain;

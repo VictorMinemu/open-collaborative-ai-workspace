@@ -215,10 +215,12 @@ export class SelfUpdate {
   }
 
   /**
-   * The daemon stops. Before the switch the job is cancelled: every gate reopens, the lock goes back (once nothing is
-   * being prepared under it), and the run is closed `finished failed` "cancelled: the runtime stopped" (an automatic
-   * run nothing announced yet ends silently). From the switch on (`restarting`) nothing is sent, reopened or released:
-   * the exit hand-over owns the gates and the lock, and the next daemon reports the run from the marker (E29).
+   * The daemon stops. Before the switch the job is cancelled: the lock goes back (once nothing is being prepared under
+   * it), and the run is closed `finished failed` "cancelled: the runtime stopped" (an automatic run nothing announced
+   * yet ends silently). The gates it closed stay closed (review WR-01): reopening them would start held turns in a
+   * daemon that is about to stop them; the server re-queues a held prompt after the restart (PD-27). From the switch on
+   * (`restarting`) nothing is sent or released: the exit hand-over owns the gates and the lock, and the next daemon
+   * reports the run from the marker (E29).
    */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -228,7 +230,9 @@ export class SelfUpdate {
     const job = this.job;
     if (!job || job.switching || job.ended) return;
     const preparing = this.state === "downloading" || this.state === "installing";
-    this.end(job, job.started || job.trigger === "manual" ? "failed" : null, CANCELLED_STOPPED);
+    this.end(job, job.started || job.trigger === "manual" ? "failed" : null, CANCELLED_STOPPED, {
+      reopen: false,
+    });
     // A prepare still running under the lock releases it when it settles (the job's own `finally`).
     if (!preparing) await this.releaseLock(job);
   }
@@ -556,10 +560,16 @@ export class SelfUpdate {
   }
 
   /**
-   * Ends a job that did not switch: every gate it closed reopens, the `finished` frame (when `outcome` is set) and the
-   * last run are recorded, state back to idle. Idempotent; the lock is released by the job's own `finally`.
+   * Ends a job that did not switch: every gate it closed reopens (not on a daemon stop, `reopen: false`, review
+   * WR-01), the `finished` frame (when `outcome` is set) and the last run are recorded, state back to idle.
+   * Idempotent; the lock is released by the job's own `finally`.
    */
-  private end(job: Job, outcome: RuntimeUpdateOutcome | null, error?: string): void {
+  private end(
+    job: Job,
+    outcome: RuntimeUpdateOutcome | null,
+    error?: string,
+    opts: { reopen?: boolean } = {},
+  ): void {
     if (job.ended || job.switched) return;
     job.ended = true;
     if (job.timer !== null) this.clearTimer(job.timer);
@@ -570,7 +580,7 @@ export class SelfUpdate {
     wake?.();
     if (job.holding) {
       job.holding = false;
-      this.openAll();
+      if (opts.reopen !== false) this.openAll();
     }
     if (outcome !== null) {
       const running = this.opts.running;

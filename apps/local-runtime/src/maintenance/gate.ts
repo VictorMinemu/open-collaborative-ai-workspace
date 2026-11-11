@@ -12,6 +12,8 @@
 
 export class RuntimeGate {
   private openState = true;
+  /** `seal()` was called: the gate never opens again (review WR-01). */
+  private sealed = false;
   private inFlight = 0;
   /** Held callers, in arrival order; `open()` releases them first in, first out. */
   private readonly waiters: Array<() => void> = [];
@@ -81,9 +83,20 @@ export class RuntimeGate {
     });
   }
 
-  /** Opens the gate and releases the held callers in arrival order. */
+  /** Opens the gate and releases the held callers in arrival order. A sealed gate stays closed. */
   open(): void {
+    if (this.sealed) return;
     this.openState = true;
     for (const release of this.waiters.splice(0)) release();
+  }
+
+  /**
+   * 07.17.1 review WR-01: the daemon is stopping. The gate closes for good: what waits keeps waiting, what arrives
+   * waits too, and no later `open()` (a cancelled update reopening its gates) releases anything into a daemon that is
+   * shutting down. The server re-queues a held prompt after the restart (PD-27); running turns are not touched.
+   */
+  seal(): void {
+    this.sealed = true;
+    this.openState = false;
   }
 }

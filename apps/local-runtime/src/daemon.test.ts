@@ -2477,6 +2477,45 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${new12()}`);
   }, 60_000);
 
+  it("review WR-01: stopping the daemon during the hold never starts the held prompt; the run closes cancelled and the prompt stays unacked for PD-27", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({ exitForUpdate: spy });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    await server.frame("event", (f) => f.sessionId === "C" && f.event.type === "approval.requested", 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 10_000);
+
+    // `ocw-runtime service restart` / `systemctl stop` while the hold is on.
+    await d.stop();
+    await sleep(300);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(
+      server.allFrames.some(
+        (f) => f.type === "event" && f.sessionId === "A" && f.event.type === "prompt.started",
+      ),
+    ).toBe(false);
+    expect(hasAck("pa1")).toBe(false);
+    expect(
+      server.allFrames.find(
+        (f) => f.type === "runtime.update.run" && f.phase === "finished" && f.commandId === cmd.id,
+      ),
+    ).toMatchObject({ outcome: "failed", output: "cancelled: the runtime stopped" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+  }, 60_000);
+
   it("not a service run: the click is refused with the device's sentence; nothing is fetched, current is unchanged", async () => {
     const spy = vi.fn(async (_code: number) => undefined);
     const d = await selfDaemon({
