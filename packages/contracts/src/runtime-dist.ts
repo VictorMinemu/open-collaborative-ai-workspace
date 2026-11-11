@@ -21,6 +21,11 @@ export const RUNTIME_ROUTES = {
   bundle: "/api/v1/runtime/bundle",
   bundleSha256: "/api/v1/runtime/bundle.sha256",
   version: "/api/v1/runtime/version",
+  /**
+   * 07.17.1 (D-03, PD-16): the served bundle's `RUNTIME_EXTERNAL_LOCK_FILE`, read by the daemon's self-update (the
+   * lockfile is otherwise only inside `install.sh`'s heredoc). Same rate limit and verification as the bundle.
+   */
+  externalLock: "/api/v1/runtime/npm-shrinkwrap.json",
 } as const;
 
 /** The one command a server owner pastes (Settings › Devices › Add a device › Server, D-01). */

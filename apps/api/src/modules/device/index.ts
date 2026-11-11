@@ -1,6 +1,6 @@
 import type { RuntimeCompatibilityManifest } from "@ocw/contracts";
 import type { ApiModule, Core } from "../../core";
-import { registerRuntimeDistRoutes } from "./distribution";
+import { defaultRuntimeDistDir, RuntimeDistStore, registerRuntimeDistRoutes } from "./distribution";
 import { DeviceHub } from "./hub";
 import { registerDeviceLink } from "./link";
 import { registerDeviceRoutes } from "./routes";
@@ -37,13 +37,18 @@ export interface DeviceModule extends ApiModule {
  * device module: pairing (enrollment codes and device-code pairing → device tokens), the device-token → device-JWT
  * exchange, devices list/rename/share/revoke, projects announced by devices, the Device Link `GET /runtime/ws`
  * (mounted at the root), and the Local Runtime distribution (07.12-06: the public `GET /api/v1/runtime/version`,
- * `/bundle`, `/bundle.sha256` and `/install.sh`, see `distribution.ts`).
+ * `/bundle`, `/bundle.sha256`, `/install.sh` and, 07.17.1-03, `/npm-shrinkwrap.json`, see `distribution.ts`). One
+ * `RuntimeDistStore` per API process reads the dist directory (07.17.1 PD-15).
  */
 export function createDeviceModule(
   core: Core,
   opts: { maxFrameBytes?: number; runtimeManifest?: RuntimeCompatibilityManifest } = {},
 ): DeviceModule {
   const graceEnv = Number(process.env.OCW_DEVICE_OFFLINE_GRACE_MS);
+  const runtimeDist = new RuntimeDistStore(
+    core.env.OCW_RUNTIME_DIST_DIR ?? defaultRuntimeDistDir(),
+    core.log,
+  );
   const hub = new DeviceHub({
     db: core.db,
     bus: core.bus,
@@ -64,7 +69,7 @@ export function createDeviceModule(
         async (scope) => {
           registerDeviceRoutes(scope as typeof app, core, hub);
           registerDeviceTokenRoute(scope as typeof app, core);
-          registerRuntimeDistRoutes(scope as typeof app, core);
+          registerRuntimeDistRoutes(scope as typeof app, core, runtimeDist);
         },
         { prefix: "/api/v1" },
       );

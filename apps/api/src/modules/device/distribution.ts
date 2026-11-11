@@ -16,10 +16,13 @@ import { renderInstallScript } from "./install-script";
  * Phase 07.12-06 (HSR-01, D-01, D-13, PD-05): the workspace serves its own Local Runtime, so a server installs it from
  * the same origin as the web app (no npm publish, no third-party host, principle 10).
  *
- * Four public, read-only routes under `/api/v1/runtime/` (no session exists on a server yet; nothing tenant-scoped is
+ * Public, read-only routes under `/api/v1/runtime/` (no session exists on a server yet; nothing tenant-scoped is
  * read), each limited to 30 requests per minute per client IP: `version` (the manifest), `bundle` (the file),
- * `bundle.sha256` (its checksum line) and `install.sh` (rendered from `OCW_PUBLIC_API_URL`, never from Host or
- * X-Forwarded-Host). The dist directory is `OCW_RUNTIME_DIST_DIR`, else this checkout's `apps/local-runtime/dist`.
+ * `bundle.sha256` (its checksum line), `install.sh` (rendered from `OCW_PUBLIC_API_URL`, never from Host or
+ * X-Forwarded-Host) and `npm-shrinkwrap.json` (07.17.1-03, D-03, PD-16: the lockfile the daemon's self-update installs
+ * from, the exact bytes hashed against the manifest). The dist directory is `OCW_RUNTIME_DIST_DIR`, else this
+ * checkout's `apps/local-runtime/dist`; `createDeviceModule` builds the one `RuntimeDistStore` of the API process
+ * (PD-15) and passes it to these routes and to the device hub.
  * It is read on first use and re-hashed against its manifest (the bundle's sha256 and bytes, and the sha256 of the npm
  * lockfile `install.sh` embeds, 07.12 review ME-03); only a verified load is cached (until
  * the API restarts). A missing dist answers 404 `runtime_unavailable` and a mismatching one 503 `runtime_corrupt`, both
@@ -38,6 +41,8 @@ export interface RuntimeDist {
   bundle: Buffer;
   /** The npm lockfile embedded in install.sh (hashed in the manifest). */
   externalLock: string;
+  /** The exact bytes `load()` hashed against `externalLockSha256`: the lockfile route's body (07.17.1-03, PD-16). */
+  externalLockBytes: Buffer;
   /** `"<sha256>"`, the bundle's strong ETag. */
   etag: string;
 }
@@ -105,7 +110,13 @@ export class RuntimeDistStore {
     if (sha256 !== manifest.sha256 || bundle.length !== manifest.bytes) return "corrupt";
     // The lockfile install.sh embeds (ME-03): the bytes the build hashed into the manifest, or nothing is served.
     if (createHash("sha256").update(lock).digest("hex") !== manifest.externalLockSha256) return "corrupt";
-    this.verified = { manifest, bundle, externalLock: lock.toString("utf8"), etag: `"${manifest.sha256}"` };
+    this.verified = {
+      manifest,
+      bundle,
+      externalLock: lock.toString("utf8"),
+      externalLockBytes: lock,
+      etag: `"${manifest.sha256}"`,
+    };
     return this.verified;
   }
 }
@@ -126,8 +137,8 @@ const runtimeCorrupt = () =>
 /** Strips `/api/v1` from a contract route: the routes register inside the device module's `/api/v1` scope. */
 const scoped = (route: string) => route.replace(/^\/api\/v1/, "");
 
-export function registerRuntimeDistRoutes(app: App, core: Core): void {
-  const store = new RuntimeDistStore(core.env.OCW_RUNTIME_DIST_DIR ?? defaultRuntimeDistDir(), core.log);
+/** The distribution routes over `store`, the device module's one dist store (PD-15; never constructed here). */
+export function registerRuntimeDistRoutes(app: App, core: Core, store: RuntimeDistStore): void {
   let script: { sha256: string; text: string } | null = null;
 
   const need = async (): Promise<RuntimeDist> => {
@@ -171,6 +182,17 @@ export function registerRuntimeDistRoutes(app: App, core: Core): void {
       .header("cache-control", "no-cache")
       .type("text/plain; charset=utf-8")
       .send(`${manifest.sha256}  ${RUNTIME_BUNDLE_FILE}\n`);
+  });
+
+  // 07.17.1-03 (D-03, PD-16): the lockfile the daemon's self-update installs from. No input is read; the body is the
+  // exact bytes the store hashed, and the daemon re-checks them against the manifest it fetched.
+  app.get(scoped(RUNTIME_ROUTES.externalLock), { ...route, schema: { tags } }, async (_req, reply) => {
+    const { manifest, externalLockBytes } = await need();
+    return reply
+      .header("cache-control", "no-cache")
+      .header("x-content-sha256", manifest.externalLockSha256)
+      .type("application/json; charset=utf-8")
+      .send(externalLockBytes);
   });
 
   app.get(scoped(RUNTIME_ROUTES.installScript), { ...route, schema: { tags } }, async (_req, reply) => {

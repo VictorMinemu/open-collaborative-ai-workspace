@@ -19,7 +19,9 @@ export const TEST_RUNTIME_PINS = [
 ] as const;
 
 /** The npm lockfile shape `build-bundle.mjs` writes, rooted at the pins (lockfile v3). */
-export function testRuntimeLock(pins: readonly { name: string; version: string }[] = TEST_RUNTIME_PINS): string {
+export function testRuntimeLock(
+  pins: readonly { name: string; version: string }[] = TEST_RUNTIME_PINS,
+): string {
   return `${JSON.stringify(
     {
       name: "ocw-runtime-deps",
@@ -43,8 +45,7 @@ export async function writeRuntimeDist(
   dir: string,
   opts: { version?: string; bundle?: Buffer; lock?: string } = {},
 ): Promise<{ manifest: RuntimeDistManifest; bundle: Buffer; lock: string }> {
-  const bundle =
-    opts.bundle ?? Buffer.from('#!/usr/bin/env node\nconsole.log("ocw-runtime test bundle");\n');
+  const bundle = opts.bundle ?? Buffer.from('#!/usr/bin/env node\nconsole.log("ocw-runtime test bundle");\n');
   const lock = opts.lock ?? testRuntimeLock();
   const manifest = RuntimeDistManifest.parse({
     version: opts.version ?? "0.3.1",

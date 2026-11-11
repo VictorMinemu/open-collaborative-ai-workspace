@@ -200,7 +200,9 @@ describe("runtime lockfile route (07.17.1-03, D-03, PD-16)", () => {
   it("answers the verified lockfile: its sha256 is the manifest's externalLockSha256, JSON, no-cache", async () => {
     const res = await lockGet(RUNTIME_ROUTES.externalLock);
     expect(res.statusCode).toBe(200);
-    expect(createHash("sha256").update(res.rawPayload).digest("hex")).toBe(served.manifest.externalLockSha256);
+    expect(createHash("sha256").update(res.rawPayload).digest("hex")).toBe(
+      served.manifest.externalLockSha256,
+    );
     expect(res.rawPayload.toString("utf8")).toBe(served.lock);
     expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
     expect(res.headers["cache-control"]).toBe("no-cache");
