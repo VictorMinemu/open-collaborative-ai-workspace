@@ -1179,7 +1179,7 @@ bot's profile configure (the lower wins), decided server-side, audited, and neve
   4. Integration tests (containment, transport, caps, taint, tenant isolation) and an e2e spec pass on desktop and
      mobile; ADR-0041 records the decisions
 
-**Plans:** 5/15 plans executed
+**Plans:** 6/15 plans executed
 
 Plans:
 
@@ -1188,7 +1188,7 @@ Plans:
 - [x] 07.17.1.1-03-PLAN.md — Wave 2: The migration (limit columns, transfer ledger, hourly load)
 - [x] 07.17.1.1-04-PLAN.md — Wave 2: The daemon (containment, `session.file.read|write`, transfer requests, bounded diff frame)
 - [x] 07.17.1.1-05-PLAN.md — Wave 2: The plugin (two tools, guard sets, Work Zone block line, real-cell smoke)
-- [ ] 07.17.1.1-06-PLAN.md — Wave 3: The limits in the API (policy and profile, `loadBotFileLimit`)
+- [x] 07.17.1.1-06-PLAN.md — Wave 3: The limits in the API (policy and profile, `loadBotFileLimit`)
 - [ ] 07.17.1.1-07-PLAN.md — Wave 3: Transfer read side (device JWT auth, ledger primitives, `GET /api/v1/runtime/files/:transferId`)
 - [ ] 07.17.1.1-08-PLAN.md — Wave 4: Transfer write side (multipart storage, `PUT …/:transferId`, pre-claim refusals)
 - [ ] 07.17.1.1-09-PLAN.md — Wave 4: Web: "Largest file a bot moves" and the profile's "Largest file"
