@@ -271,8 +271,10 @@ export class Daemon {
   private selfUpdate: SelfUpdate | null = null;
   /** 07.17.1 (PD-12): the run a self-update restart carried over, reported once in the handshake. */
   private boot: { report: SelfUpdateBoot; running: { version: string; sha256: string } | null } | null = null;
-  /** 07.17.1 (PD-18): sessions told the OCW runtime is restarting during the current hold (once each). */
-  private readonly selfHeldSessions = new Set<string>();
+  /** 07.17.1 (PD-18): sessions told the OCW runtime is restarting during the current hold (once each), and their runtime. */
+  private readonly selfHeldSessions = new Map<string, RuntimeId>();
+  /** `stop()` began: a hold that ends now is the daemon going away, not an update that did not run (review IN-04). */
+  private stopping = false;
   /** Snapshots with `self` go out in the order their status was read. */
   private snapshotChain: Promise<void> = Promise.resolve();
   private readonly sessions = new Map<string, ActiveSession>();
@@ -416,11 +418,28 @@ export class Daemon {
     }
   }
 
-  /** The self-update's status changed: a fresh snapshot (while connected); a hold that ended forgets its sessions. */
+  /**
+   * The self-update's status changed: a fresh snapshot (while connected). A hold that ended without the restart (the
+   * update failed, was cancelled or gave up waiting) tells each session it held that the update did not run, so its
+   * "Restarting…" line is taken back (review IN-04); on a daemon stop nothing is said (the next daemon runs the turn).
+   */
   private onSelfUpdateChange(): void {
     const su = this.selfUpdate;
     if (!su) return;
-    if (!su.holding) this.selfHeldSessions.clear();
+    if (!su.holding && this.selfHeldSessions.size > 0) {
+      const held = [...this.selfHeldSessions];
+      this.selfHeldSessions.clear();
+      if (!this.stopping) {
+        for (const [sessionId, runtime] of held) {
+          this.forwardEvent(sessionId, {
+            type: "runtime.update",
+            runtime,
+            phase: "failed",
+            subject: OCW_RUNTIME_TARGET,
+          });
+        }
+      }
+    }
     const m = this.maintenance;
     if (!m || !this.isConnected) return;
     const self = su.status();
@@ -561,6 +580,7 @@ export class Daemon {
    * arriving starts a turn in a daemon that is stopping; the server re-queues those prompts after the restart (PD-27).
    */
   async stop(): Promise<void> {
+    this.stopping = true;
     for (const gate of this.gates.values()) gate.seal();
     await this.selfUpdate?.stop();
     if (this.selfUpdate?.holding) {
@@ -817,7 +837,7 @@ export class Daemon {
     // daemon does not know the holds; the server runs the held prompt after the restart, PD-27).
     if (this.selfUpdate?.holding) {
       if (this.selfHeldSessions.has(sessionId)) return;
-      this.selfHeldSessions.add(sessionId);
+      this.selfHeldSessions.set(sessionId, runtime);
       this.forwardEvent(sessionId, {
         type: "runtime.update",
         runtime,

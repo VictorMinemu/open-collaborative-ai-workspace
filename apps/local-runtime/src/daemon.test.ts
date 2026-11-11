@@ -2215,6 +2215,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
       running?: { version: string; sha256: string } | null;
       supervision?: SelfUpdateOptions["supervision"];
       exitForUpdate?: ((code: number) => Promise<void>) | null;
+      maxHoldMs?: number;
     } = {},
   ): Promise<Daemon> {
     runtime = new FakeRuntime();
@@ -2240,6 +2241,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
         running: o.running === undefined ? oldSelf() : o.running,
         supervision: o.supervision ?? { supervised: true, reason: null },
         pollMs: 20,
+        ...(o.maxHoldMs !== undefined ? { maxHoldMs: o.maxHoldMs } : {}),
         prepare: (p: PrepareVersionOptions) => prepareVersion({ ...p, npmPath }),
       },
     });
@@ -2514,6 +2516,37 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     ).toMatchObject({ outcome: "failed", output: "cancelled: the runtime stopped" });
     expect(spy).not.toHaveBeenCalled();
     expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+  }, 60_000);
+
+  it("review IN-04 / WR-02: a hold that gives up tells the held session the update did not run, and its turn runs", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({ exitForUpdate: spy, maxHoldMs: 1_500 });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    await server.frame("event", (f) => f.sessionId === "C" && f.event.type === "approval.requested", 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    await server.frame("runtime.update.run", (f) => f.phase === "finished" && f.commandId === cmd.id, 15_000);
+    await vi.waitFor(() => expect(runtime.prompts.map((p) => p.promptId)).toContain("a1"), {
+      timeout: 10_000,
+      interval: 20,
+    });
+    expect(updateEvents("A")).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting", subject: "ocw-runtime" },
+      { type: "runtime.update", runtime: "claude-code", phase: "failed", subject: "ocw-runtime" },
+    ]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
   }, 60_000);
 
   it("review IN-06: a snapshot whose send throws does not stop later CLI snapshots, and stop() still closes the link", async () => {

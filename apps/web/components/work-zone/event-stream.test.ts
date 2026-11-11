@@ -75,4 +75,15 @@ describe("buildItems › runtime.update", () => {
       testId: "runtime-update-line",
     });
   });
+
+  it("review IN-04: takes the restart line back when the OCW runtime update did not run", () => {
+    const [item] = buildItems(
+      live([{ type: "runtime.update", runtime: "codex", phase: "failed", subject: "ocw-runtime" }]),
+    );
+    expect(item).toMatchObject({
+      kind: "system",
+      text: "The OCW runtime update did not run; your turn continues",
+      testId: "runtime-update-line",
+    });
+  });
 });
