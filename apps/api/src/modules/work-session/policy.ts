@@ -1,8 +1,10 @@
 import {
   BOT_FILE_LIMITS,
   BOT_WORK_ZONE_LIMITS,
+  type BotFileLimit,
   DEFAULT_WORK_ZONE_POLICY,
   EffortLevel,
+  effectiveBotFileMaxBytes,
   fileSizeLabel,
   PermissionMode,
   type RuntimeId,
@@ -89,6 +91,23 @@ function changedKeys(before: WorkZonePolicy, after: WorkZonePolicy): string[] {
 /** 07.17.1.1 (D-07, PD-11): this server's ceiling for every bot file limit, `OCW_ATTACHMENT_MAX_BYTES`. */
 export function serverFileMaxBytes(env: Pick<Env, "OCW_ATTACHMENT_MAX_BYTES">): number {
   return env.OCW_ATTACHMENT_MAX_BYTES;
+}
+
+/**
+ * 07.17.1.1 (D-07, PD-11, E7): the per-file limit one bot file call applies, recomputed at every call from the bot's
+ * stored profile value (null = none), the organization's stored value and the server's ceiling, so an organization
+ * that lowered its limit after the bot saved a higher one wins at once. The one place every file call asks.
+ */
+export async function loadBotFileLimit(
+  tx: Tx,
+  profile: { fileMaxBytes: number | null } | null,
+  serverMaxBytes: number,
+): Promise<BotFileLimit> {
+  return effectiveBotFileMaxBytes({
+    bot: profile?.fileMaxBytes ?? null,
+    organization: (await loadWorkZonePolicy(tx)).botFileMaxBytes,
+    server: serverMaxBytes,
+  });
 }
 
 /**

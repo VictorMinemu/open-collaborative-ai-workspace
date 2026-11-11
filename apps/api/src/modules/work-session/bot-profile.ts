@@ -1,4 +1,5 @@
 import {
+  BOT_FILE_LIMITS,
   BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_ZONE_LIMITS,
   type BotProfileInactiveReason,
@@ -8,6 +9,7 @@ import {
   type ContextWindow,
   DeviceBotConsentsView,
   type EffortLevel,
+  fileSizeLabel,
   Id,
   IdParams,
   PERMISSION_MODE_RANK,
@@ -34,7 +36,7 @@ import { loadDeviceAccess } from "../device";
 import { agentResource, orgResource, type PermissionService } from "../organization";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import { buildRuntimeControls, catalogFor } from "./controls";
-import { loadWorkZonePolicy } from "./policy";
+import { loadWorkZonePolicy, serverFileMaxBytes } from "./policy";
 import { mayCreate, mayStartIn, mayUse } from "./proposals";
 import type { ReauthorizeReason } from "./service";
 
@@ -275,11 +277,17 @@ interface NormalizedProfile {
   allowedModels: string[];
   allowedEfforts: EffortLevel[];
   allowedContextWindows: ContextWindow[];
+  /** 07.17.1.1 (D-07, PD-21): the body's value; absent (an older client) = the stored one, or null for a new profile. */
+  fileMaxBytes: number | null;
 }
 
-/** The body's allowed sets with the defaults added (pure; the API always stores the defaults inside the sets). */
-function normalize(body: BotWorkZoneProfileBody): NormalizedProfile {
+/**
+ * The body's allowed sets with the defaults added (pure; the API always stores the defaults inside the sets), and the
+ * largest file the profile keeps.
+ */
+function normalize(body: BotWorkZoneProfileBody, stored: BotProfileRow | null): NormalizedProfile {
   return {
+    fileMaxBytes: body.fileMaxBytes !== undefined ? body.fileMaxBytes : (stored?.fileMaxBytes ?? null),
     allowedModels: unique([...body.allowedModels, ...(body.defaultModel ? [body.defaultModel] : [])]),
     allowedEfforts: unique([...body.allowedEfforts, ...(body.defaultEffort ? [body.defaultEffort] : [])]),
     allowedContextWindows: unique([
@@ -371,6 +379,16 @@ async function validateProfile(
       : controls.permissionModes.some((p) => p.value === mode && p.available);
   if (!modeOk(body.maxMode)) throw invalid("maxMode", "You can't use this mode on this device");
   if (!modeOk(body.defaultMode)) throw invalid("defaultMode", "You can't use this mode on this device");
+
+  // 07.17.1.1 (D-07, PD-11): a bot's largest file only narrows the organization's. Only a value the body sends is a
+  // choice to decide: a body without the key (an older client) keeps the stored value, and the lower of the two applies
+  // at every call anyway (`loadBotFileLimit`), so an organization lowered later never breaks an unrelated save.
+  if (typeof body.fileMaxBytes === "number") {
+    const organization = mc.ctx.policy.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes;
+    if (body.fileMaxBytes > organization) {
+      throw invalid("fileMaxBytes", `At most ${fileSizeLabel(organization)}, the organization's limit.`);
+    }
+  }
 }
 
 /** Every stored field but the flag equals the (normalized) body: an admin's save that only flips the flag. */
@@ -407,20 +425,32 @@ function onlyFlagDiffers(p: BotProfileRow, body: BotWorkZoneProfileBody, n: Norm
     p.worktree === body.worktree &&
     p.maxConcurrent === body.maxConcurrent &&
     p.promptsPerHour === body.promptsPerHour &&
-    p.wakesPerSessionDay === body.wakesPerSessionDay
+    p.wakesPerSessionDay === body.wakesPerSessionDay &&
+    (p.fileMaxBytes === null ? null : Number(p.fileMaxBytes)) === n.fileMaxBytes
   );
 }
 
 // ---------------------------------------------------------------- views
 
+/**
+ * The profile as its editors see it. `serverMaxBytes` is this server's `OCW_ATTACHMENT_MAX_BYTES` (07.17.1.1, D-07):
+ * with the organization's value it is the `limits` the "Largest file" field needs, on every view (a new profile too).
+ */
 async function profileView(
   tx: Tx,
   perms: PermissionService,
   profile: BotProfileRow | null,
   viewer: { admin: boolean },
+  serverMaxBytes: number,
 ): Promise<BotWorkZoneProfileView> {
   const viewerCan = { edit: true, setOutsideContent: viewer.admin };
-  if (!profile) return { profile: null, status: { active: false, reason: null, sentence: null }, viewerCan };
+  const limits = {
+    organizationFileMaxBytes:
+      (await loadWorkZonePolicy(tx)).botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes,
+    serverFileMaxBytes: serverMaxBytes,
+  };
+  if (!profile)
+    return { profile: null, status: { active: false, reason: null, sentence: null }, viewerCan, limits };
   const names = await namesOf(tx, [profile.sponsorUserId, profile.actOnOutsideContentBy]);
   const d = await deviceRow(tx, profile.deviceId);
   const projectRows =
@@ -453,6 +483,7 @@ async function profileView(
       maxConcurrent: profile.maxConcurrent,
       promptsPerHour: profile.promptsPerHour,
       wakesPerSessionDay: profile.wakesPerSessionDay,
+      fileMaxBytes: profile.fileMaxBytes === null ? null : Number(profile.fileMaxBytes),
       actOnOutsideContent: profile.actOnOutsideContent,
       sponsor: person(profile.sponsorUserId),
       device: {
@@ -471,6 +502,7 @@ async function profileView(
       ? { active: true, reason: null, sentence: null }
       : { active: false, reason: status.reason, sentence: BOT_PROFILE_STATUS_SENTENCES[status.reason] },
     viewerCan,
+    limits,
   };
 }
 
@@ -533,6 +565,8 @@ export function registerBotProfileRoutes(
   service: AccessSweeper,
 ): void {
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
+  // 07.17.1.1 (D-07): the server's ceiling, shown with the organization's limit on every profile view.
+  const fileCeiling = serverFileMaxBytes(core.env);
 
   /** The `configurableBot` steps of the bot routes: `bot.read` hidden as 404, then `bot.configure` (403). */
   async function managedBot(req: FastifyRequest, tx: Tx, id: string): Promise<AgentRow> {
@@ -559,7 +593,7 @@ export function registerBotProfileRoutes(
       return core.db.withTenant(tenant(req), async (tx) => {
         const bot = await managedBot(req, tx, req.params.id);
         const admin = await perms.can(req, tx, "work_zone.manage", orgResource());
-        return profileView(tx, perms, await loadBotProfile(tx, bot.id), { admin });
+        return profileView(tx, perms, await loadBotProfile(tx, bot.id), { admin }, fileCeiling);
       });
     },
   );
@@ -602,7 +636,7 @@ export function registerBotProfileRoutes(
             "Only an admin can change whether this bot acts on outside content",
           );
         }
-        const n = normalize(body);
+        const n = normalize(body, existing);
         const flagOnly =
           admin &&
           existing !== null &&
@@ -640,6 +674,7 @@ export function registerBotProfileRoutes(
           maxConcurrent: body.maxConcurrent,
           promptsPerHour: body.promptsPerHour,
           wakesPerSessionDay: body.wakesPerSessionDay,
+          fileMaxBytes: n.fileMaxBytes,
           actOnOutsideContent: flag,
           actOnOutsideContentBy:
             flagChange === null ? (existing?.actOnOutsideContentBy ?? null) : flag ? auth.userId : null,
@@ -704,7 +739,7 @@ export function registerBotProfileRoutes(
         }
         const saved = await loadBotProfile(tx, bot.id);
         return {
-          view: await profileView(tx, perms, saved, { admin }),
+          view: await profileView(tx, perms, saved, { admin }, fileCeiling),
           swept: [...(existing ? [existing.deviceId] : []), body.deviceId],
         };
       });
@@ -734,7 +769,10 @@ export function registerBotProfileRoutes(
           metadata: { agentId: bot.id, deviceId: existing.deviceId, sponsorUserId: existing.sponsorUserId },
         });
         const admin = await perms.can(req, tx, "work_zone.manage", orgResource());
-        return { view: await profileView(tx, perms, null, { admin }), deviceId: existing.deviceId };
+        return {
+          view: await profileView(tx, perms, null, { admin }, fileCeiling),
+          deviceId: existing.deviceId,
+        };
       });
       await sweep(auth.organizationId, [deviceId]);
       return view;
