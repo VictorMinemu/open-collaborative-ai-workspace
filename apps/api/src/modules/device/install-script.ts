@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import {
   RUNTIME_BUNDLE_FILE,
   RUNTIME_EXTERNAL_LOCK_FILE,
-  RUNTIME_EXTERNAL_LOCK_ROOT,
   RUNTIME_ROUTES,
   RuntimeDistManifest,
+  runtimeExternalFiles,
 } from "@ocw/contracts";
 
 /**
@@ -70,28 +70,16 @@ const LOCK_MARKER = "OCW_EXTERNAL_LOCK";
 const PACKAGE_MARKER = "OCW_PACKAGE_JSON";
 
 /**
- * The lockfile, checked against the manifest (ME-03): the bytes it hashed, lockfile v3, rooted at
- * `RUNTIME_EXTERNAL_LOCK_ROOT` with exactly the manifest's pins. Returns the matching `package.json` text `npm ci`
- * needs beside it.
+ * The lockfile, checked against the manifest (ME-03): the bytes it hashed (here, the API side hashes), then the
+ * structure and the matching `package.json` text from `runtimeExternalFiles` (contracts, shared with the daemon's
+ * self-update, 07.17.1-03), then neither may hold a heredoc marker line. Returns both without their trailing newline,
+ * as the heredocs embed them.
  */
 function externalLockFiles(m: RuntimeDistManifest, lockText: string): { lock: string; packageJson: string } {
   if (createHash("sha256").update(lockText).digest("hex") !== m.externalLockSha256) {
     throw new Error("the external lockfile does not match the manifest's externalLockSha256");
   }
-  const lock = JSON.parse(lockText) as {
-    lockfileVersion?: unknown;
-    packages?: Record<string, { name?: unknown; dependencies?: unknown }>;
-  };
-  const root = lock.packages?.[""];
-  const pins = Object.fromEntries(m.external.map((p) => [p.name, p.version]));
-  if (
-    lock.lockfileVersion !== 3 ||
-    root?.name !== RUNTIME_EXTERNAL_LOCK_ROOT ||
-    JSON.stringify(root.dependencies) !== JSON.stringify(pins)
-  ) {
-    throw new Error("the external lockfile is not rooted at the manifest's pins");
-  }
-  const packageJson = `${JSON.stringify({ name: RUNTIME_EXTERNAL_LOCK_ROOT, private: true, dependencies: pins }, null, 2)}\n`;
+  const { packageJson } = runtimeExternalFiles(m, lockText);
   for (const text of [lockText, packageJson]) {
     const lines = text.split("\n");
     if (lines.includes(LOCK_MARKER) || lines.includes(PACKAGE_MARKER)) {
