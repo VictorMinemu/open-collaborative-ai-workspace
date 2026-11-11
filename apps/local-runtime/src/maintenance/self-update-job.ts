@@ -57,6 +57,17 @@ import {
 } from "./self-update.js";
 import { forgetFailedBuild, type SelfUpdateBoot } from "./self-update-boot.js";
 
+/**
+ * Review WR-02: once every gate is closed, the longest the self-update holds new turns for the running ones to end. Past
+ * it the job gives up (`HOLD_TIMED_OUT`): every gate reopens, nothing is cut, nothing changes on disk but the prepared
+ * version, which the next run reuses.
+ */
+export const SELF_UPDATE_MAX_HOLD_MS = 30 * 60_000;
+
+/** The run's output when the hold reached `SELF_UPDATE_MAX_HOLD_MS` (a cancel: no backoff for an automatic run). */
+export const HOLD_TIMED_OUT =
+  "cancelled: sessions were still running after the longest wait; nothing changed, press Update again when they finish";
+
 /** The answers a request gets when this device will not run it (the ack's error text). */
 export const SELF_UPDATE_REFUSALS = {
   busy: "an update of the OCW runtime is already running",
@@ -105,6 +116,8 @@ export interface SelfUpdateOptions {
   drainAfterMs?: number;
   /** How often a waiting update re-checks the gates (default `DRAIN_POLL_MS`). */
   pollMs?: number;
+  /** Review WR-02: the longest hold with every gate closed (default `SELF_UPDATE_MAX_HOLD_MS`). */
+  maxHoldMs?: number;
   /** The automatic and `notify` check cadence (`CHECK_EVERY_MS` ± `CHECK_JITTER_MS`, the 07.11 one). */
   checkEveryMs?: number;
   /** A failed automatic run of a build is not retried automatically for this long (`FAILED_BACKOFF_MS`). */
@@ -153,6 +166,8 @@ interface Job {
   /** The `finished` frame went out (or the job ended silently): nothing else is sent for it. */
   ended: boolean;
   pendingSince: number | null;
+  /** When every gate closed for this job (review WR-02: the hold's bound counts from here). */
+  holdingSince: number | null;
   timer: TimerHandle | null;
   /** Resolves a pending `hold()` (the job ended while it waited). */
   wake: (() => void) | null;
@@ -372,6 +387,7 @@ export class SelfUpdate {
       switched: false,
       ended: false,
       pendingSince: null,
+      holdingSince: null,
       timer: null,
       wake: null,
       abort: new AbortController(),
@@ -494,7 +510,8 @@ export class SelfUpdate {
    * restart cuts nothing. Never closes a gate while a 07.11 CLI job is past `pending` (`cliBusy`). A click drains at
    * once (every gate closes, running turns finish, new turns wait); an automatic update first waits up to
    * `drainAfterMs` for a moment when everything is idle, closing every gate in that same synchronous step, then drains
-   * like a click. State `waiting` until then.
+   * like a click. State `waiting` until then. Review WR-02: a hold that lasts `maxHoldMs` with every gate closed gives
+   * up (`HOLD_TIMED_OUT`): the gates reopen and the running turns go on (nothing is ever cut).
    */
   private hold(job: Job): Promise<void> {
     job.pendingSince = this.now();
@@ -514,9 +531,15 @@ export class SelfUpdate {
             for (const gate of this.opts.gates.values()) gate.close();
             job.holding = true;
           }
+          if (job.holding) job.holdingSince = this.now();
         }
         if (job.holding && this.allIdle()) {
           job.wake = null;
+          return resolve();
+        }
+        const maxHold = this.opts.maxHoldMs ?? SELF_UPDATE_MAX_HOLD_MS;
+        if (job.holding && this.now() >= (job.holdingSince ?? this.now()) + maxHold) {
+          this.end(job, "failed", HOLD_TIMED_OUT);
           return resolve();
         }
         this.setState("waiting");
@@ -596,7 +619,7 @@ export class SelfUpdate {
         toBuild: frame.toBuild,
       };
       // A failed automatic run of a build is not retried automatically for a while; a cancel is not its failure.
-      const cancelled = error === CANCELLED_OFF || error === CANCELLED_STOPPED;
+      const cancelled = error === CANCELLED_OFF || error === CANCELLED_STOPPED || error === HOLD_TIMED_OUT;
       if (outcome === "failed" && job.trigger === "automatic" && job.manifest && !cancelled) {
         this.backoff.set(job.manifest.sha256, this.now() + (this.opts.failedBackoffMs ?? FAILED_BACKOFF_MS));
       }

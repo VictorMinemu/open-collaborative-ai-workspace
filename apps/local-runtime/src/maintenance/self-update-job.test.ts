@@ -49,7 +49,13 @@ import {
   startDistStub,
   testBundle,
 } from "./self-update-harness.js";
-import { SELF_UPDATE_REFUSALS, SelfUpdate, type SelfUpdateOptions } from "./self-update-job.js";
+import {
+  HOLD_TIMED_OUT,
+  SELF_UPDATE_MAX_HOLD_MS,
+  SELF_UPDATE_REFUSALS,
+  SelfUpdate,
+  type SelfUpdateOptions,
+} from "./self-update-job.js";
 
 const sha256 = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
 const COMMAND_ID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -466,6 +472,53 @@ describe("SelfUpdate: never cut a turn (07.17.1, D-04, PD-09, E12)", () => {
     expect(await r.su.request("automatic")).toEqual({ accepted: true });
     await untilExit(r);
     expect(r.published.map((s) => s.state)).toEqual(["downloading", "installing", "restarting"]);
+  });
+
+  it("review WR-02: a click whose sessions never go idle gives up after maxHoldMs: gates reopen, held turns run, the running turn is not cut, finished failed with a clear sentence", async () => {
+    const r = await makeRig({ maxHoldMs: 60_000 });
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    expect(gatesClosed(r)).toBe(true);
+    const ran: string[] = [];
+    void r.gates.get("claude-code")?.admit(async () => {
+      ran.push("claude-code");
+    });
+    await r.clock.advance(59_000);
+    expect(r.su.status().state).toBe("waiting");
+    expect(ran).toEqual([]);
+
+    await r.clock.advance(2_000);
+    await untilIdleWith(r, 2);
+    expect(gatesOpen(r)).toBe(true);
+    expect(ran).toEqual(["claude-code"]);
+    expect(r.turns.codex).toBe(1);
+    expect(r.frames.map((f) => [f.phase, f.outcome, f.commandId])).toEqual([
+      ["started", undefined, COMMAND_ID],
+      ["finished", "failed", COMMAND_ID],
+    ]);
+    expect(r.frames[1]?.output).toBe(HOLD_TIMED_OUT);
+    expect(r.su.status().lastRun).toMatchObject({ outcome: "failed" });
+    expect(existsSync(lockFileOf(r))).toBe(false);
+    expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
+    await r.clock.advance(120_000);
+    expect(r.exit).not.toHaveBeenCalled();
+  });
+
+  it("review WR-02: the bound defaults to SELF_UPDATE_MAX_HOLD_MS (30 min) and an automatic run that hit it is not backed off", async () => {
+    expect(SELF_UPDATE_MAX_HOLD_MS).toBe(30 * 60_000);
+    const r = await makeRig({ drainAfterMs: 0 }, { level: "automatic" });
+    r.turns.codex = 1;
+    await r.su.onConfig();
+    await untilState(r, "waiting");
+    await r.clock.advance(SELF_UPDATE_MAX_HOLD_MS + 1_000);
+    await untilIdleWith(r, 2);
+    expect(r.frames[1]).toMatchObject({ phase: "finished", outcome: "failed", output: HOLD_TIMED_OUT });
+    expect(gatesOpen(r)).toBe(true);
+    // Not the build's failure: the next check may run it again.
+    r.turns.codex = 0;
+    await r.su.onConfig();
+    await untilExit(r);
   });
 
   it("a command admitted but not yet at its adapter counts as running: no switch until it is through", async () => {
