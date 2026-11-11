@@ -10,23 +10,37 @@
 
 import { createHash } from "node:crypto";
 import { constants, createWriteStream, realpathSync } from "node:fs";
-import { access, rename as fsRename, mkdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises";
+import {
+  access,
+  rename as fsRename,
+  symlink as fsSymlink,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  statfs,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   CLAUDE_AGENT_SDK_PACKAGE,
+  IsoDateTime,
   RUNTIME_BUNDLE_FILE,
   RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
   RUNTIME_SELF_BLOCK_SENTENCES,
   RuntimeDistManifest,
+  RuntimeUpdateTrigger,
+  RuntimeVersion,
   runtimeBuildOf,
   runtimeExternalFiles,
   scrubHostPaths,
 } from "@ocw/contracts";
-import { runtimeDir } from "../install-info.js";
+import { z } from "zod";
+import { installInfoPath, RuntimeInstallInfo, readInstallInfo, runtimeDir } from "../install-info.js";
 import { errorMessage } from "../logger.js";
 import { runFixedCommand, UPDATE_TIMEOUT_MS, updateChildEnv } from "./runner.js";
 
@@ -516,5 +530,156 @@ async function prepare(p: PrepareVersionOptions): Promise<PreparedVersion> {
     return { manifest, sha12, reused: false };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+// ---- the marker (PD-08, PD-12) ----
+
+const BuildRef = z
+  .object({
+    version: RuntimeVersion,
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+
+/**
+ * The run in flight across the restart (`<OCW_HOME>/runtime/self-update.json`, 0600): written just before `current`
+ * moves, read at boot by `reconcileSelfUpdate` (07), which reports the run and deletes it. Versions, hashes, ids and a
+ * time only: never a path.
+ */
+export const SelfUpdateMarker = z
+  .object({
+    runId: z.uuid(),
+    commandId: z.uuid().nullable(),
+    trigger: RuntimeUpdateTrigger,
+    from: BuildRef,
+    to: BuildRef,
+    startedAt: IsoDateTime,
+  })
+  .strict();
+export type SelfUpdateMarker = z.infer<typeof SelfUpdateMarker>;
+
+/** `<ocwHome>/runtime/self-update.json`. */
+export function selfUpdateMarkerPath(ocwHome: string): string {
+  return join(runtimeDir(ocwHome), "self-update.json");
+}
+
+/** The marker, or null when there is none or it does not parse strictly. */
+export async function readSelfUpdateMarker(ocwHome: string): Promise<SelfUpdateMarker | null> {
+  let text: string;
+  try {
+    text = await readFile(selfUpdateMarkerPath(ocwHome), "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = SelfUpdateMarker.safeParse(JSON.parse(text));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The filesystem calls of the switch (a test seam for injected failures and the step order). */
+export interface SwitchFs {
+  rename: (from: string, to: string) => Promise<void>;
+  symlink: (target: string, path: string) => Promise<void>;
+}
+
+const realFs: SwitchFs = { rename: fsRename, symlink: fsSymlink };
+
+/** Writes `value` as JSON to `file` in one step: a 0600 temp file renamed over it. */
+async function writeJsonAtomic(file: string, value: unknown, fs: SwitchFs): Promise<void> {
+  const tmp = `${file}.tmp-${process.pid}`;
+  await rm(tmp, { force: true });
+  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  try {
+    await fs.rename(tmp, file);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function writeMarker(ocwHome: string, m: SelfUpdateMarker, fs: SwitchFs): Promise<void> {
+  const parsed = SelfUpdateMarker.parse(m);
+  await mkdir(runtimeDir(ocwHome), { recursive: true, mode: 0o700 });
+  await writeJsonAtomic(selfUpdateMarkerPath(ocwHome), parsed, fs);
+}
+
+/** Writes the marker (validated strictly; 0600; temp file + rename). */
+export async function writeSelfUpdateMarker(ocwHome: string, m: SelfUpdateMarker): Promise<void> {
+  await writeMarker(ocwHome, m, realFs);
+}
+
+/** Removes the marker; a missing one is fine. */
+export async function removeSelfUpdateMarker(ocwHome: string): Promise<void> {
+  await rm(selfUpdateMarkerPath(ocwHome), { force: true });
+}
+
+// ---- the switch (PD-08) ----
+
+/**
+ * Makes the prepared version the one that runs at the next start (PD-08), in this order: the marker → a relative
+ * `versions/<sha12>` symlink at `current.tmp-<pid>` (a leftover one is replaced) renamed over `current` (atomic: there
+ * is never a moment without a `current`) → `install.json` (temp file + rename, 0600) with `serverUrl` (the daemon's
+ * `config.serverUrl`), the new version and sha256, and the old record's `nodePath` (else `process.execPath`). The
+ * previous `versions/<sha12>` stays (rollback = point `current` back). No exit here (the caller restarts, 10).
+ *
+ * Throws `switch_failed` when anything before or at the link fails, and then leaves `current` where it was and no
+ * marker behind. An `install.json` that cannot be written after the link moved is not a failure: `current` is the
+ * authority, and the next boot rewrites a stale record from the running build (07, PD-12).
+ */
+export async function switchToVersion(p: {
+  ocwHome: string;
+  prepared: PreparedVersion;
+  marker: SelfUpdateMarker;
+  serverUrl: string;
+  now?: () => Date;
+  fs?: Partial<SwitchFs>;
+}): Promise<void> {
+  const fs: SwitchFs = { ...realFs, ...p.fs };
+  const runtime = runtimeDir(p.ocwHome);
+  const { manifest, sha12 } = p.prepared;
+  const target = `versions/${sha12}`;
+
+  // Everything that can be checked is checked before anything changes.
+  const old = await readInstallInfo(p.ocwHome);
+  const record = RuntimeInstallInfo.safeParse({
+    serverUrl: p.serverUrl,
+    version: manifest.version,
+    sha256: manifest.sha256,
+    installedAt: (p.now ?? (() => new Date()))().toISOString(),
+    nodePath: old?.nodePath ?? process.execPath,
+  });
+  if (!record.success)
+    throw new SelfUpdateError("switch_failed", undefined, "the install record would not parse");
+  try {
+    if (!(await stat(join(runtime, target, RUNTIME_BUNDLE_FILE))).isFile()) throw new Error("not a file");
+  } catch (err) {
+    throw new SelfUpdateError("switch_failed", err);
+  }
+
+  try {
+    await writeMarker(p.ocwHome, p.marker, fs);
+  } catch (err) {
+    throw new SelfUpdateError("switch_failed", err);
+  }
+
+  const tmp = join(runtime, `current.tmp-${process.pid}`);
+  try {
+    await rm(tmp, { force: true });
+    await fs.symlink(target, tmp);
+    await fs.rename(tmp, join(runtime, "current"));
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    await removeSelfUpdateMarker(p.ocwHome).catch(() => undefined);
+    throw new SelfUpdateError("switch_failed", err);
+  }
+
+  try {
+    await writeJsonAtomic(installInfoPath(p.ocwHome), record.data, fs);
+  } catch {
+    // Not fatal: `current` already names the new version; the next boot rewrites the record (PD-12).
   }
 }
