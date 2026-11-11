@@ -4041,3 +4041,182 @@ describe("automation item mirror parity (07.17-01: plugin ↔ packages/contracts
     }
   });
 });
+
+describe("bot Work Zone file mirror parity (07.17.1.1-01: plugin ↔ packages/contracts work-session-files.ts, bot-work-zone.ts; PD-21, Pitfall 9)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    files: (await import(contracts("work-session-files.ts"))) as Record<string, unknown>,
+    wz: (await import(contracts("bot-work-zone.ts"))) as Record<string, Schema>,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f21";
+  const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f22";
+  const SESSION = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f23";
+  const ATTACHMENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f24";
+  const DEVICE = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f25";
+  const MiB = 1024 * 1024;
+  const ids = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
+
+  it("the limits the plugin needs, the limit sources and their labels are the contracts'", async () => {
+    const { files, m } = await load();
+    const limits = files.BOT_FILE_LIMITS as Record<string, number>;
+    expect({ ...m.BOT_FILE_LIMITS }).toEqual({
+      pathMaxChars: limits.pathMaxChars,
+      segmentMaxChars: limits.segmentMaxChars,
+      filesPerTurnEachWay: limits.filesPerTurnEachWay,
+      transferMaxMs: limits.transferMaxMs,
+    });
+    expect([...m.BotFileLimitSource.options]).toEqual([
+      ...(files.BotFileLimitSource as { options: string[] }).options,
+    ]);
+    expect({ ...m.BOT_FILE_LIMIT_SOURCE_LABELS }).toEqual({
+      ...(files.BOT_FILE_LIMIT_SOURCE_LABELS as Record<string, string>),
+    });
+  });
+
+  it("WorkSessionFilePath: the mirror accepts and refuses what the contract does", async () => {
+    const { files, m } = await load();
+    expectSameVerdicts(m.WorkSessionFilePath, files.WorkSessionFilePath as Schema, [
+      "docs/spec v2.pdf",
+      "src/a.b/c.ts",
+      ".env.example",
+      "x".repeat(255),
+      "x".repeat(256),
+      "a".repeat(1025),
+      "",
+      "/etc/passwd",
+      "~/x",
+      "C:/x",
+      "a\\b",
+      "a//b",
+      "./a",
+      "a/..",
+      "a/./b",
+      `a${String.fromCodePoint(0)}b`,
+      `a${String.fromCodePoint(0x202e)}b`,
+      `a${String.fromCodePoint(0x7f)}b`,
+      "notes.",
+      "notes ",
+    ]);
+  });
+
+  it("the upload and download requests: same verdicts, strict, never a device, user, conversation, URL or bytes", async () => {
+    const { wz, m } = await load();
+    const upload = { ...ids, attachmentId: ATTACHMENT, path: "docs/spec.pdf" };
+    const download = { ...ids, path: "README.md" };
+    expectSameVerdicts(m.AgentChannelWorkSessionUpload, wz.AgentChannelWorkSessionUpload as Schema, [
+      upload,
+      { ...upload, overwrite: true },
+      { ...upload, overwrite: "yes" },
+      { ...upload, deviceId: DEVICE },
+      { ...upload, userId: AGENT },
+      { ...upload, conversationId: AGENT },
+      { ...upload, url: "https://example.test/f" },
+      { ...upload, absolutePath: "/Users/ana/x" },
+      { ...upload, bytes: "aGk=" },
+      { ...ids, path: "docs/spec.pdf" },
+      { ...upload, path: "../x" },
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionDownload, wz.AgentChannelWorkSessionDownload as Schema, [
+      download,
+      { ...download, attachmentId: ATTACHMENT },
+      { ...download, overwrite: true },
+      { ...download, deviceId: DEVICE },
+      { ...download, path: "/Users/ana/repo/README.md" },
+    ]);
+  });
+
+  it("the upload and download answers, and a refusal with limit and sizeBytes, parse identically in both copies", async () => {
+    const { wz, m } = await load();
+    const uploaded = { kind: "uploaded", workSessionId: SESSION, path: "docs/spec.pdf", sizeBytes: 1234 };
+    const downloaded = {
+      kind: "downloaded",
+      workSessionId: SESSION,
+      attachmentId: ATTACHMENT,
+      name: "README.md",
+      sizeBytes: 2048,
+      contentType: "text/markdown",
+    };
+    const tooLarge = {
+      kind: "refused",
+      code: "file_too_large",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.file_too_large,
+      limit: { bytes: 10 * MiB, source: "bot" },
+      sizeBytes: 12 * MiB,
+    };
+    const tooOld = {
+      kind: "refused",
+      code: "runtime_too_old",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.runtime_too_old,
+    };
+    const up = wz.AgentChannelWorkSessionUploadResponse as Schema;
+    const down = wz.AgentChannelWorkSessionDownloadResponse as Schema;
+    for (const answer of [uploaded, tooLarge, tooOld]) {
+      expect(up.safeParse(answer).data).toEqual(answer);
+      expect(m.AgentChannelWorkSessionUploadResponse.parse(answer)).toEqual(up.safeParse(answer).data);
+    }
+    for (const answer of [downloaded, tooLarge, tooOld]) {
+      expect(down.safeParse(answer).data).toEqual(answer);
+      expect(m.AgentChannelWorkSessionDownloadResponse.parse(answer)).toEqual(down.safeParse(answer).data);
+    }
+    expectSameVerdicts(m.AgentChannelWorkSessionUploadResponse, up, [
+      uploaded,
+      { ...uploaded, path: "/abs" },
+      { ...uploaded, sizeBytes: -1 },
+      downloaded,
+      tooLarge,
+      tooOld,
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionDownloadResponse, down, [
+      downloaded,
+      { ...downloaded, name: "x".repeat(256) },
+      { ...downloaded, contentType: "x".repeat(201) },
+      uploaded,
+      tooLarge,
+      tooOld,
+    ]);
+  });
+
+  it("an unknown limit source from a newer API is dropped by the mirror; the sentence still reaches the model", async () => {
+    const { wz, m } = await load();
+    const newer = {
+      kind: "refused",
+      code: "file_too_large",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.file_too_large,
+      limit: { bytes: 10 * MiB, source: "user" },
+    };
+    expect((wz.AgentChannelWorkSessionUploadResponse as Schema).safeParse(newer).success).toBe(false);
+    const parsed = m.AgentChannelWorkSessionUploadResponse.parse(newer);
+    expect(parsed).toEqual({ kind: "refused", code: "file_too_large", sentence: newer.sentence });
+  });
+
+  it("the 07.16 answers still parse unchanged in both copies", async () => {
+    const { wz, m } = await load();
+    const queued = { kind: "queued", workSessionId: SESSION, promptId: EVENT, position: 1, status: "queued" };
+    const stopped = { kind: "stopped", workSessionId: SESSION };
+    const refused = {
+      kind: "refused",
+      code: "session_ended",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.session_ended,
+    };
+    expect((wz.AgentChannelWorkSessionPromptResponse as Schema).safeParse(queued).data).toEqual(queued);
+    expect(m.AgentChannelWorkSessionPromptResponse.parse(queued)).toEqual(queued);
+    expect((wz.AgentChannelWorkSessionStopResponse as Schema).safeParse(stopped).data).toEqual(stopped);
+    expect(m.AgentChannelWorkSessionStopResponse.parse(stopped)).toEqual(stopped);
+    expect((wz.AgentChannelWorkSessionStopResponse as Schema).safeParse(refused).data).toEqual(refused);
+    expect(m.AgentChannelWorkSessionStopResponse.parse(refused)).toEqual(refused);
+  });
+});

@@ -30,6 +30,8 @@ import {
   TurnContext,
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
+  WORK_SESSION_FILE_TOOL_FLAGS,
+  WORK_SESSION_FILE_TOOL_NAMES,
   WORK_SESSION_TOOL_FLAGS,
   WORK_SESSION_TOOL_NAMES,
 } from "./index";
@@ -803,5 +805,29 @@ describe("the fan-out open tool (07.17 D-02, PD-07)", () => {
       toolFlags: { ...turn.toolFlags, [BUILTIN_TOOLS.conversationOpen]: CONVERSATION_OPEN_FLAGS },
     };
     expect(TurnContext.parse(offered)).toEqual(offered);
+  });
+});
+
+describe("the two Work Zone file tools (07.17.1.1 D-01, PD-04, PD-26)", () => {
+  it("are built-ins, side-effecting with trusted output, declared apart from the four 07.16 tools", () => {
+    expect(BUILTIN_TOOLS.workSessionUpload).toBe("ocw_work_session_upload");
+    expect(BUILTIN_TOOLS.workSessionDownload).toBe("ocw_work_session_download");
+    expect([...WORK_SESSION_FILE_TOOL_NAMES]).toEqual(["ocw_work_session_upload", "ocw_work_session_download"]);
+    expect(WORK_SESSION_FILE_TOOL_FLAGS).toEqual({
+      ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
+    });
+    // 07.17.1.1-10 extends the offer to six; until then the 07.16 set is unchanged.
+    expect(WORK_SESSION_TOOL_NAMES).toHaveLength(4);
+  });
+
+  it("are never approvable and never a dangerous name, on either host", () => {
+    for (const name of WORK_SESSION_FILE_TOOL_NAMES) {
+      expect(isApprovableTool(name), name).toBe(false);
+      expect(isApprovableTool(name.toUpperCase()), name).toBe(false);
+      expect(ToolPattern.safeParse(name).success, name).toBe(false);
+      expect(isDangerousToolName(name), name).toBe(false);
+      expect(isDangerousToolName(name, "sandbox"), name).toBe(false);
+    }
   });
 });
