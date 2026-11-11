@@ -3,6 +3,7 @@ import { IsoDateTime } from "./common";
 import { RuntimeUpdatesLevel } from "./runtime-maintenance";
 import { PermissionMode } from "./session-events";
 import { EffortLevel } from "./session-settings";
+import { BOT_FILE_LIMITS } from "./work-session-files";
 
 /**
  * Organization Work Zone policy (Phase 03.2, D-02, D-11; ADR-0012). One row per organization
@@ -37,6 +38,17 @@ export const WorkZonePolicy = z.object({
    * sessions; absent = 10.
    */
   botSessionsMax: z.number().int().min(0).max(1000).optional(),
+  /**
+   * 07.17.1.1 (D-07, PD-11): "Largest file a bot moves", per file, for bot uploads into and downloads from their Work
+   * Zone sessions. Absent = 25 MiB. Never above `OCW_ATTACHMENT_MAX_BYTES`, which only the API knows (it refuses a
+   * higher value and reports the ceiling as `WorkZonePolicyView.serverFileMaxBytes`).
+   */
+  botFileMaxBytes: z
+    .number()
+    .int()
+    .min(BOT_FILE_LIMITS.minMaxBytes)
+    .max(BOT_FILE_LIMITS.ceilingMaxBytes)
+    .optional(),
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -61,5 +73,7 @@ const KnownModel = z.object({ id: z.string(), displayName: z.string() });
 /** `GET/PUT /api/v1/work-zone-policy` response: the policy plus the models the org's devices reported. */
 export const WorkZonePolicyView = WorkZonePolicy.extend({
   knownModels: z.object({ "claude-code": z.array(KnownModel), codex: z.array(KnownModel) }),
+  /** 07.17.1.1 (D-07): this server's `OCW_ATTACHMENT_MAX_BYTES`, the ceiling of `botFileMaxBytes` (the field says it). */
+  serverFileMaxBytes: z.number().int().positive().optional(),
 });
 export type WorkZonePolicyView = z.infer<typeof WorkZonePolicyView>;

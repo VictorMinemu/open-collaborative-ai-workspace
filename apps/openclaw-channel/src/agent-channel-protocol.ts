@@ -537,6 +537,12 @@ const WorkZoneName = z.string().max(200);
 export const BotFastMode = z.enum(["off", "allowed", "on"]);
 export type BotFastMode = z.infer<typeof BotFastMode>;
 
+/** Contracts `BotFileLimitSource` and `BotFileLimit` (07.17.1.1 D-07): the per-file limit and the level that set it. */
+export const BotFileLimitSource = z.enum(["bot", "organization", "server"]);
+export type BotFileLimitSource = z.infer<typeof BotFileLimitSource>;
+export const BotFileLimit = z.object({ bytes: z.number().int().positive(), source: BotFileLimitSource });
+export type BotFileLimit = z.infer<typeof BotFileLimit>;
+
 /**
  * `TurnContext.workZone` (07.16 D-05, PD-17): what this bot may do in the Work Zone on this turn, from its active
  * profile. Names and ids only (never a host path, a token or a user).
@@ -556,6 +562,11 @@ export const TurnWorkZone = z.object({
   sessions: z
     .array(z.object({ id: Id, status: WorkSessionStatus, projectName: WorkZoneName }))
     .max(BOT_WORK_ZONE_LIMITS.turnSessions),
+  /**
+   * 07.17.1.1 (D-07): the per-file limit the two file tools apply on this turn, present only when they are offered.
+   * An unknown value reads as absent, never dropping the whole offer.
+   */
+  files: BotFileLimit.optional().catch(undefined),
 });
 export type TurnWorkZone = z.infer<typeof TurnWorkZone>;
 
@@ -653,11 +664,7 @@ export const WorkSessionFilePath = z
     { message: "must be a file path inside the session's working tree" },
   );
 
-/** Contracts `BotFileLimitSource`, `BotFileLimit` and `BOT_FILE_LIMIT_SOURCE_LABELS`. */
-export const BotFileLimitSource = z.enum(["bot", "organization", "server"]);
-export type BotFileLimitSource = z.infer<typeof BotFileLimitSource>;
-export const BotFileLimit = z.object({ bytes: z.number().int().positive(), source: BotFileLimitSource });
-export type BotFileLimit = z.infer<typeof BotFileLimit>;
+/** Contracts `BOT_FILE_LIMIT_SOURCE_LABELS` (`BotFileLimit` is declared before `TurnWorkZone`, which carries it). */
 export const BOT_FILE_LIMIT_SOURCE_LABELS: Readonly<Record<BotFileLimitSource, string>> = {
   bot: "this bot's limit",
   organization: "the organization's limit",

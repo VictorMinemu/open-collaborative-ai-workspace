@@ -6,7 +6,7 @@ import { DiffFileStatus } from "./device-link";
 import { PermissionMode, RuntimeId, WorkSessionStatus } from "./session-events";
 import { ContextWindow, EffortLevel } from "./session-settings";
 import { PromptStatus } from "./work-session";
-import { BotFileLimit, WorkSessionFilePath } from "./work-session-files";
+import { BOT_FILE_LIMITS, BotFileLimit, WorkSessionFilePath } from "./work-session-files";
 
 /**
  * Bot Work Zone orchestration (Phase 07.16, D-05, D-07, BWZ-01…BWZ-05): the vocabulary a bot with a Work Zone profile
@@ -88,6 +88,11 @@ export const TurnWorkZone = z.object({
   sessions: z
     .array(z.object({ id: Id, status: WorkSessionStatus, projectName: Name }))
     .max(BOT_WORK_ZONE_LIMITS.turnSessions),
+  /**
+   * 07.17.1.1 (D-07, 07.17.1.1-10): the per-file limit the upload and download tools apply on this turn and the level
+   * that set it. Present only on turns that carry the two file tools.
+   */
+  files: BotFileLimit.optional(),
 });
 export type TurnWorkZone = z.infer<typeof TurnWorkZone>;
 
@@ -511,6 +516,17 @@ const profileFields = {
   promptsPerHour: z.number().int().min(1).max(BOT_WORK_ZONE_LIMITS.promptsPerHourMax),
   wakesPerSessionDay: z.number().int().min(0).max(BOT_WORK_ZONE_LIMITS.wakesPerSessionDayMax),
   actOnOutsideContent: z.boolean(),
+  /**
+   * 07.17.1.1 (D-07, PD-11): the profile's "Largest file", per file moved. null or absent = the organization's value;
+   * never above it (the API refuses a higher value with `fileMaxBytes`, and recomputes the lower of the two per call).
+   */
+  fileMaxBytes: z
+    .number()
+    .int()
+    .min(BOT_FILE_LIMITS.minMaxBytes)
+    .max(BOT_FILE_LIMITS.ceilingMaxBytes)
+    .nullable()
+    .optional(),
 };
 
 /**
@@ -558,6 +574,16 @@ export const BotWorkZoneProfileView = z.object({
     sentence: z.string().max(300).nullable(),
   }),
   viewerCan: z.object({ edit: z.boolean(), setOutsideContent: z.boolean() }),
+  /**
+   * 07.17.1.1 (D-07): what the settings need to show the profile's Largest file: the organization's value (the field's
+   * maximum and placeholder) and the server's ceiling, so the applied limit can be named.
+   */
+  limits: z
+    .object({
+      organizationFileMaxBytes: z.number().int().positive(),
+      serverFileMaxBytes: z.number().int().positive(),
+    })
+    .optional(),
 });
 export type BotWorkZoneProfileView = z.infer<typeof BotWorkZoneProfileView>;
 
