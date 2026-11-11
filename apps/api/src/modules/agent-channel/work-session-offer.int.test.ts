@@ -4,6 +4,7 @@ import {
   BUILTIN_TOOLS,
   CONVERSATION_OPEN_FLAGS,
   type SessionAudienceInput,
+  TURN_TOOLS_MAX,
   TurnWorkZone,
   WORK_SESSION_TOOL_FLAGS,
   WORK_SESSION_TOOL_NAMES,
@@ -248,8 +249,10 @@ describe("tracer: a channel mention of a team bot with an active profile carries
       outsideContent: false,
       sessions: [],
     });
-    // The proposal tools keep their own rule (Ana may start sessions): both are still offered.
-    expect(ev.turn.tools).toEqual(expect.arrayContaining(["ocw_work_zone_projects", "ocw_start_work_zone"]));
+    // The session tools replace the proposal tools: offered both, the model kept proposing instead of starting.
+    expect(ev.turn.tools).toEqual(expect.arrayContaining(["ocw_work_session_start"]));
+    expect(ev.turn.tools).not.toContain("ocw_start_work_zone");
+    expect(ev.turn.tools).not.toContain("ocw_work_zone_projects");
     // Repo-relative data only: no absolute path, no URL.
     expect(JSON.stringify(wz)).not.toMatch(/https?:\/\/|\/Users\/|\/home\//u);
   });
@@ -570,8 +573,8 @@ describe("organization B never influences an organization-A turn", () => {
   });
 });
 
-describe("the four tools need four free slots (MAX_TURN_TOOLS = 64)", () => {
-  it("61 tools before the offer: none of the four; 60 tools: all four", async () => {
+describe("the four tools need four free slots (TURN_TOOLS_MAX)", () => {
+  it("TURN_TOOLS_MAX - 3 tools besides the proposal tools: none of the four (the proposals stay); one fewer: all four, replacing them", async () => {
     const base = (await mentionTurn(atlasId)).turn.tools.length - WORK_SESSION_TOOL_NAMES.length;
     const serverMcp = randomUUID();
     await su.query(
@@ -579,7 +582,10 @@ describe("the four tools need four free slots (MAX_TURN_TOOLS = 64)", () => {
        values ($1, $2, 'Bulk', 'bulk', 'streamable-http', 'https://bulk.example.test/mcp', 'ready', 'org_secret')`,
       [serverMcp, orgId],
     );
-    const names = Array.from({ length: 61 - base }, (_, i) => `bulk__t${String(i).padStart(2, "0")}`);
+    const names = Array.from(
+      { length: TURN_TOOLS_MAX - 3 - base },
+      (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
+    );
     for (const name of names) {
       await su.query(
         "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
@@ -595,13 +601,15 @@ describe("the four tools need four free slots (MAX_TURN_TOOLS = 64)", () => {
     try {
       await grant(names);
       const full = await mentionTurn(atlasId);
-      expect(full.turn.tools).toHaveLength(61);
+      // No room for the four: the turn keeps the two proposal tools, so the bot can still propose.
+      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX - 1);
+      expect(full.turn.tools).toContain("ocw_start_work_zone");
       await expectNoOffer(full);
 
       await grant(names.slice(1));
       const room = await mentionTurn(atlasId);
       await expectOffer(room);
-      expect(room.turn.tools).toHaveLength(64);
+      expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
     } finally {
       await grant([]);
     }

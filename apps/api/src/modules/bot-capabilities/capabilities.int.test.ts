@@ -283,6 +283,42 @@ describe("PATCH /agents/:id/capabilities", () => {
     });
   });
 
+  it("more usable tools than one turn carries: the view counts the ones left out (toolsOverLimit), none when they fit", async () => {
+    const bulkId = randomUUID();
+    await su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status)
+       values ($1, $2, 'Bulk', 'bulk', 'streamable-http', 'https://bulk.example.test/mcp', 'ready')`,
+      [bulkId, orgId],
+    );
+    const names = Array.from({ length: 140 }, (_, i) => `t${String(i).padStart(3, "0")}`);
+    for (const name of names) {
+      await su.query(
+        `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only)
+         values ($1, $2, $3, $4, true)`,
+        [orgId, bulkId, name, `bulk__${name}`],
+      );
+    }
+    const grant = (n: number) =>
+      ok(
+        admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+          tools: names.slice(0, n).map((t) => ({ sourceKind: "mcp", sourceId: bulkId, tool: `bulk__${t}` })),
+        }),
+      );
+    try {
+      const full = await grant(140);
+      const usable = full.tools.filter((t: Json) => t.effective).length;
+      expect(usable).toBe(140);
+      // The platform's tools come first, so fewer than 128 MCP tools fit: the rest are counted, never silently lost.
+      expect(full.toolsOverLimit).toBeGreaterThan(140 - 128);
+      expect(full.toolsOverLimit).toBeLessThan(140);
+      const fits = await grant(10);
+      expect(fits.toolsOverLimit).toBe(0);
+    } finally {
+      await grant(0);
+      await su.query("delete from app.mcp_servers where id = $1", [bulkId]);
+    }
+  });
+
   it("other members cannot change a personal bot (404) nor a developer a team bot (403)", async () => {
     expect(
       (await admin.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { internet: false })).status,
