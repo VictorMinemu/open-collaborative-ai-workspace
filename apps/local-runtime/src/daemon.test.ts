@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -12,7 +12,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -34,7 +40,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { type WebSocket, WebSocketServer } from "ws";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
-import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE } from "./daemon.js";
+import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
@@ -87,6 +93,8 @@ class FakeRuntime implements AgentRuntime {
   supportsImages = false;
   /** When set, `prompt()` rejects with this message (a runtime error echoing its input). */
   promptError: string | null = null;
+  /** 07.17.1.1: when set, `prompt()` emits `prompt.started`, waits for it, then `prompt.completed` (a running turn). */
+  promptHold: Promise<void> | null = null;
   interrupts: string[] = [];
   readonly started: StartSessionOptions[] = [];
   readonly resolved: Array<[string, ApprovalDecision]> = [];
@@ -184,6 +192,12 @@ class FakeRuntime implements AgentRuntime {
     const sink = this.sinks.get(sessionId);
     const cwd = this.started.find((s) => s.sessionId === sessionId)?.cwd ?? "";
     sink?.({ type: "prompt.started", promptId: p.promptId });
+    // 07.17.1.1: a held turn (started, not yet handed back); it completes when the test releases it.
+    if (this.promptHold) {
+      await this.promptHold;
+      sink?.({ type: "prompt.completed", promptId: p.promptId });
+      return;
+    }
     sink?.({ type: "assistant.message", messageId: "m1", text: `Edited ${cwd}/src/x.ts using ${LEAKY_KEY}` });
     sink?.({
       type: "approval.requested",
@@ -212,6 +226,20 @@ class FakeRuntime implements AgentRuntime {
 
 type TokenAnswer = { status: number; body?: unknown };
 
+/** One request to the fake transfer route (07.17.1.1). */
+interface FileRequest {
+  method: string;
+  url: string;
+  authorization: string | undefined;
+  contentLength: string | undefined;
+  sha256: string;
+  bytes: number;
+}
+
+function sha256Hex(b: Uint8Array | string): string {
+  return createHash("sha256").update(b).digest("hex");
+}
+
 /**
  * The API as the daemon sees it: `POST /api/v1/devices/token` (device token → device JWT) and the Device
  * Link WebSocket on the same HTTP server.
@@ -228,9 +256,26 @@ class FakeServer {
   tokenAnswer: () => TokenAnswer = () => this.issue(600_000);
   private listeners: Array<() => void> = [];
 
+  /** 07.17.1.1: a path prefix every HTTP route is served under (a server behind `/ocw`); others answer 404. */
+  prefix = "";
+  /** 07.17.1.1 (PD-05): every `GET|PUT /api/v1/runtime/files/:id`, in order (the body only as its size and sha256). */
+  readonly fileRequests: FileRequest[] = [];
+  /** Statuses the transfer route answers, one per request; 200 once empty. */
+  fileStatuses: number[] = [];
+  /** The bytes a `GET` answers with. */
+  fileBody: Buffer = Buffer.alloc(0);
+  /** Called with each transfer request before it is answered (a test may await something). */
+  onFileRequest: ((r: FileRequest) => Promise<void> | void) | null = null;
+
   constructor() {
     this.http = createServer((req, res) => {
-      if (req.method !== "POST" || req.url !== "/api/v1/devices/token") {
+      const url = req.url ?? "";
+      const path = this.prefix ? (url.startsWith(`${this.prefix}/`) ? url.slice(this.prefix.length) : "") : url;
+      if (path.startsWith("/api/v1/runtime/files/") && (req.method === "GET" || req.method === "PUT")) {
+        void this.serveFile(req, res, url);
+        return;
+      }
+      if (req.method !== "POST" || path !== "/api/v1/devices/token") {
         res.writeHead(404).end();
         return;
       }
@@ -249,6 +294,42 @@ class FakeServer {
       });
       for (const l of this.listeners) l();
     });
+  }
+  private async serveFile(req: IncomingMessage, res: ServerResponse, url: string): Promise<void> {
+    const chunks: Buffer[] = [];
+    try {
+      for await (const c of req) chunks.push(c as Buffer);
+    } catch {
+      res.destroy();
+      return;
+    }
+    const body = Buffer.concat(chunks);
+    const record: FileRequest = {
+      method: req.method ?? "",
+      url,
+      authorization: req.headers.authorization,
+      contentLength: req.headers["content-length"],
+      sha256: sha256Hex(body),
+      bytes: body.byteLength,
+    };
+    this.fileRequests.push(record);
+    for (const l of this.listeners) l();
+    await this.onFileRequest?.(record);
+    const status = this.fileStatuses.shift() ?? 200;
+    if (status !== 200) {
+      res.writeHead(status, { "content-type": "application/json" }).end('{"error":"refused"}');
+    } else if (req.method === "PUT") {
+      res
+        .writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, sizeBytes: body.byteLength }));
+    } else {
+      res
+        .writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(this.fileBody.byteLength),
+        })
+        .end(this.fileBody);
+    }
   }
   listen(): Promise<void> {
     return new Promise((resolve) => this.http.listen(0, "127.0.0.1", () => resolve()));
@@ -2679,4 +2760,207 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
       readdirSync(join(scratch.ocwHome, "runtime", "versions")).filter((n) => BUILD_DIR.test(n)),
     ).toEqual([scratch.oldSha12]);
   }, 30_000);
+});
+
+// -------------------------------------------------------------------------------------------------
+// 07.17.1.1: a bot's files between a session's tree and its server (D-02 … D-04, D-08, D-13, PD-05, PD-10, PD-18)
+
+/** Replaces the default daemon with one whose transfer retries wait milliseconds, not seconds. */
+async function fileDaemon(o: { serverUrl?: string; logger?: Logger } = {}): Promise<Daemon> {
+  await daemon.stop();
+  daemon = await Daemon.create({
+    home,
+    env: {},
+    token: "device-token-123",
+    config: { serverUrl: o.serverUrl ?? server.url },
+    runtimes: [runtime],
+    logger: o.logger ?? silentLogger,
+    controlSocket: false,
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    fileRetryDelaysMs: [10, 20],
+  });
+  return daemon;
+}
+
+/** Registers the scratch project, connects and starts `sessionId` on it (cwd = the project). */
+async function activeSession(sessionId: string): Promise<void> {
+  const localId = (await daemon.registry.add(project)).localId;
+  await daemon.start();
+  await server.frame("hello");
+  const id = `start-${sessionId}`;
+  server.send({
+    id,
+    kind: "session.start",
+    sessionId,
+    payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+  });
+  expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+}
+
+function fileCmd(
+  kind: "session.file.read" | "session.file.write",
+  sessionId: string,
+  payload: Record<string, unknown>,
+): Omit<CommandFrame, "type"> {
+  return { id: randomUUID(), kind, sessionId, payload };
+}
+
+function fileAck(id: string, timeoutMs = 5000) {
+  return server.frame("ack", (f) => f.commandId === id, timeoutMs);
+}
+
+describe("07.17.1.1 session.file.read: one contained file streams to the server under the device JWT", () => {
+  it("toRuntimeFileUrl keeps the server URL's path prefix and drops its query and hash", () => {
+    expect(toRuntimeFileUrl("http://127.0.0.1:4000", "abc-1")).toBe(
+      "http://127.0.0.1:4000/api/v1/runtime/files/abc-1",
+    );
+    expect(toRuntimeFileUrl("https://ocw.example/base/?x=1#h", "abc-1")).toBe(
+      "https://ocw.example/base/api/v1/runtime/files/abc-1",
+    );
+    expect(() => toRuntimeFileUrl("https://ocw.example", "../devices/token")).toThrow();
+  });
+
+  it("PUTs exactly the file's bytes with the device JWT and content-length, then acks ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-r1");
+    const bytes = randomBytes(70_000);
+    writeFileSync(join(project, "data.bin"), bytes);
+    const cmd = fileCmd("session.file.read", "wf-r1", { path: "data.bin", maxBytes: 1_048_576 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toEqual({ type: "ack", commandId: cmd.id, ok: true });
+    expect(server.fileRequests).toEqual([
+      {
+        method: "PUT",
+        url: `/api/v1/runtime/files/${cmd.id}`,
+        authorization: `Bearer ${server.issued.at(-1)}`,
+        contentLength: "70000",
+        sha256: sha256Hex(bytes),
+        bytes: 70_000,
+      },
+    ]);
+  });
+
+  it("an empty file moves as zero bytes", async () => {
+    await fileDaemon();
+    await activeSession("wf-r0");
+    writeFileSync(join(project, "empty.txt"), "");
+    const cmd = fileCmd("session.file.read", "wf-r0", { path: "empty.txt", maxBytes: 10 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests[0]).toMatchObject({ method: "PUT", contentLength: "0", bytes: 0 });
+  });
+
+  it("a server under a path prefix gets the prefix; a url key in the payload changes nothing (P3)", async () => {
+    server.prefix = "/ocw";
+    await fileDaemon({ serverUrl: `${server.url}/ocw` });
+    await activeSession("wf-r2");
+    const cmd = fileCmd("session.file.read", "wf-r2", {
+      path: "README.md",
+      maxBytes: 1024,
+      url: "http://evil.test/x",
+    });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests.map((r) => r.url)).toEqual([`/ocw/api/v1/runtime/files/${cmd.id}`]);
+  });
+
+  it("maps the server's answers: 413 too_large, 410 expired, 500 transfer_failed; a 401 is retried once with a fresh JWT", async () => {
+    await fileDaemon();
+    await activeSession("wf-r3");
+    for (const [status, code] of [
+      [413, "too_large"],
+      [410, "expired"],
+      [500, "transfer_failed"],
+    ] as const) {
+      server.fileStatuses = [status];
+      const cmd = fileCmd("session.file.read", "wf-r3", { path: "README.md", maxBytes: 1024 });
+      server.send(cmd);
+      expect(await fileAck(cmd.id), String(status)).toMatchObject({ ok: false, error: code });
+    }
+    server.fileRequests.length = 0;
+    server.fileStatuses = [401];
+    const cmd = fileCmd("session.file.read", "wf-r3", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests).toHaveLength(2);
+    expect(server.fileRequests[1]!.authorization).toBe(`Bearer ${server.issued.at(-1)}`);
+    expect(server.fileRequests[0]!.authorization).not.toBe(server.fileRequests[1]!.authorization);
+  });
+
+  it("503 busy (the transfer stays pending): retried at most twice", async () => {
+    await fileDaemon();
+    await activeSession("wf-r4");
+    server.fileStatuses = [503];
+    const ok = fileCmd("session.file.read", "wf-r4", { path: "README.md", maxBytes: 1024 });
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests).toHaveLength(2);
+    server.fileRequests.length = 0;
+    server.fileStatuses = [503, 503, 503];
+    const busy = fileCmd("session.file.read", "wf-r4", { path: "README.md", maxBytes: 1024 });
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "transfer_failed" });
+    expect(server.fileRequests).toHaveLength(3);
+  });
+
+  it("refusals happen before any request: not_running, too_large with the size, not_a_file, not_found, path_not_allowed, invalid_path", async () => {
+    await fileDaemon();
+    await activeSession("wf-r5");
+    mkdirSync(join(project, "docs"));
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["no-such-session", { path: "README.md", maxBytes: 1024 }, "not_running"],
+      ["wf-r5", { path: "README.md", maxBytes: 2 }, "too_large: 6"],
+      ["wf-r5", { path: "docs", maxBytes: 1024 }, "not_a_file"],
+      ["wf-r5", { path: "missing.md", maxBytes: 1024 }, "not_found"],
+      ["wf-r5", { path: ".git/config", maxBytes: 1024 }, "path_not_allowed"],
+      ["wf-r5", { path: "../x", maxBytes: 1024 }, "invalid_path"],
+      ["wf-r5", { path: `${project}/README.md`, maxBytes: 1024 }, "invalid_path"],
+    ];
+    for (const [sessionId, payload, error] of cases) {
+      const cmd = fileCmd("session.file.read", sessionId, payload);
+      server.send(cmd);
+      expect(await fileAck(cmd.id), error).toMatchObject({ ok: false, error });
+    }
+    expect(server.fileRequests).toEqual([]);
+  });
+
+  it("a running turn of the same session does not delay a read (never in session order)", async () => {
+    await fileDaemon();
+    await activeSession("wf-r6");
+    let release!: () => void;
+    runtime.promptHold = new Promise<void>((r) => {
+      release = r;
+    });
+    server.send({ id: "wf-r6-p", kind: "prompt", sessionId: "wf-r6", payload: { promptId: "pp", text: "go" } });
+    await server.frame("event", (f) => f.sessionId === "wf-r6" && f.event.type === "prompt.started");
+    const cmd = fileCmd("session.file.read", "wf-r6", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.allFrames.some((f) => f.type === "ack" && f.commandId === "wf-r6-p")).toBe(false);
+    release();
+    expect(await fileAck("wf-r6-p")).toMatchObject({ ok: true });
+  });
+
+  it("no ack error and no log line names the scratch directory; logs carry the command id and the code", async () => {
+    const logger = captureLogger();
+    await fileDaemon({ logger });
+    await activeSession("wf-r7");
+    mkdirSync(join(project, "docs"));
+    server.fileStatuses = [500];
+    const ids: string[] = [];
+    for (const payload of [
+      { path: "docs", maxBytes: 1024 },
+      { path: "README.md", maxBytes: 1 },
+      { path: "README.md", maxBytes: 1024 },
+    ]) {
+      const cmd = fileCmd("session.file.read", "wf-r7", payload);
+      ids.push(cmd.id);
+      server.send(cmd);
+      expect(await fileAck(cmd.id)).toMatchObject({ ok: false });
+    }
+    expect(JSON.stringify(server.allFrames)).not.toContain(home);
+    expect(logger.lines.join("\n")).not.toContain(home);
+    for (const id of ids) expect(logger.lines.some((l) => l.includes(id))).toBe(true);
+    expect(logger.lines.some((l) => l.includes('"code":"not_a_file"'))).toBe(true);
+  });
 });
