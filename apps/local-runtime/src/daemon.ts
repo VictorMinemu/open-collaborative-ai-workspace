@@ -797,6 +797,19 @@ export class Daemon {
   }
 
   private tellWaiting(runtime: RuntimeId, sessionId: string): void {
+    // 07.17.1 (PD-18): the OCW runtime's own restart holds this turn; told once per hold, never `done` (the next
+    // daemon does not know the holds; the server runs the held prompt after the restart, PD-27).
+    if (this.selfUpdate?.holding) {
+      if (this.selfHeldSessions.has(sessionId)) return;
+      this.selfHeldSessions.add(sessionId);
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase: "waiting",
+        subject: OCW_RUNTIME_TARGET,
+      });
+      return;
+    }
     let held = this.heldSessions.get(runtime);
     if (!held) {
       held = new Set();
