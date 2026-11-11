@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type RuntimeSelfStatus, runtimeBuildOf } from "@ocw/contracts";
+import {
+  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
+  type RuntimeSelfStatus,
+  type RuntimeSelfUpdateRefusal,
+  runtimeBuildOf,
+} from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, selfStatus, sleep } from "../../testing-device";
 import { writeRuntimeDist } from "../../testing-runtime-dist";
-import { invite, pairDevice, shareDevice } from "../../testing-workzone";
+import { errorCode, invite, pairDevice, shareDevice } from "../../testing-workzone";
 
 /**
  * The OCW runtime's own update on the Control Plane (07.17.1-09, D-01, D-02, D-05, D-07, D-09, PD-13, PD-14, PD-15,
@@ -29,6 +34,8 @@ let dist: string;
 let ada: TestClient;
 let owen: TestClient;
 let gail: TestClient;
+let eve: TestClient;
+let adaId: string;
 let owenId: string;
 /** Owen's service device, shared with Gail. */
 let dId: string;
@@ -99,6 +106,73 @@ async function report(dev: FakeDevice, deviceId: string, self: RuntimeSelfStatus
   });
 }
 
+/** The `runtime.update` commands ever queued for `deviceId`. */
+async function updateCommands(deviceId: string): Promise<number> {
+  const res = await su.query(
+    "select count(*)::int as n from app.device_commands where device_id = $1 and kind = 'runtime.update'",
+    [deviceId],
+  );
+  return (res.rows[0] as { n: number }).n;
+}
+
+const requestedRows = async (deviceId: string) =>
+  (await runs(deviceId)).filter((r) => r.state === "requested");
+
+/** A 409 with `code` and the contracts' sentence, that queued nothing and recorded nothing. */
+async function expectRefusal(
+  as: TestClient,
+  deviceId: string,
+  code: RuntimeSelfUpdateRefusal | "device_offline",
+): Promise<void> {
+  const commands = await updateCommands(deviceId);
+  const rows = (await runs(deviceId)).length;
+  const res = await as.request("POST", updateUrl(deviceId));
+  expect(res.status, JSON.stringify(res.body)).toBe(409);
+  expect(errorCode(res)).toBe(code);
+  if (code !== "device_offline") {
+    expect((res.body!.error as { message: string }).message).toBe(
+      RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES[code],
+    );
+  }
+  expect(await updateCommands(deviceId)).toBe(commands);
+  expect((await runs(deviceId)).length).toBe(rows);
+}
+
+async function setLevel(level: "automatic" | "notify" | "off"): Promise<void> {
+  const res = await ada.request("PUT", "/api/v1/work-zone-policy", { runtimeUpdates: level });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  expect(res.body!.runtimeUpdates).toBe(level);
+}
+
+/** The device refuses the waiting command (its own re-decision), closing the request as `refused`. */
+async function refuseNext(dev: FakeDevice, deviceId: string, error: string): Promise<Row> {
+  const cmd = await dev.command("runtime.update");
+  dev.ack(cmd.id, false, error);
+  return eventually(async () =>
+    (await runs(deviceId)).find((r) => r.command_id === cmd.id && r.state === "refused"),
+  );
+}
+
+/** Organization B: Eve leaves A and becomes the admin of her own organization (the 07.11 matrix pattern). */
+async function moveToOrgB(userId: string): Promise<void> {
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+    orgB,
+    `o-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userId]);
+  await su.query("delete from app.org_members where user_id = $1", [userId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
+}
+
 async function seen(as: TestClient, deviceId: string): Promise<DeviceDto | undefined> {
   const res = await as.request("GET", "/api/v1/devices");
   expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -117,6 +191,7 @@ beforeAll(async () => {
     orgName: "Autofy Labs",
   });
   expect(setup.status, JSON.stringify(setup.body)).toBe(200);
+  adaId = ((await ada.request("GET", "/api/v1/me")).body!.user as { id: string }).id;
   ({ client: owen, userId: owenId } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
   let gailId: string;
   ({ client: gail, userId: gailId } = await invite(stack, ada, "gail@example.test", "Gail", "developer"));
@@ -127,6 +202,9 @@ beforeAll(async () => {
   d = await FakeDevice.connect(stack.baseUrl, dToken, undefined, { host: "service" });
   open.push(d);
   await shareDevice(owen, dId, gailId);
+  let eveId: string;
+  ({ client: eve, userId: eveId } = await invite(stack, ada, "eve@example.test", "Eve", "developer"));
+  await moveToOrgB(eveId);
 }, 240_000);
 
 afterEach(() => {
@@ -139,6 +217,16 @@ afterAll(async () => {
   await su?.end();
   await stack?.stop();
   if (dist) await rm(dist, { recursive: true, force: true });
+});
+
+describe("07.17.1-09 Task 2 (runs first, before the bundle exists): no served bundle", () => {
+  it("with no bundle served the DTO's served is null and the click is 409 runtime_not_served", async () => {
+    await report(d, dId, selfStatus({ build: A }));
+    const mine = await seen(owen, dId);
+    expect(mine?.runtimeMaintenance?.self).toMatchObject({ build: A });
+    expect(mine?.runtimeMaintenance?.served).toBeNull();
+    await expectRefusal(owen, dId, "runtime_not_served");
+  });
 });
 
 describe("07.17.1-09 Task 1: the owner's click reaches the device, and its report closes the run with its builds", () => {
@@ -248,5 +336,101 @@ describe("07.17.1-09 Task 1: the owner's click reaches the device, and its repor
       to: "0.3.2",
       method: "ocw_bundle",
     });
+  });
+});
+
+describe("07.17.1-09 Task 2: who may update, which devices qualify, and the organization's `off` level", () => {
+  it("a device that already runs the served build is 409 already_current", async () => {
+    const B = (await serveBundle()).build;
+    await report(d, dId, selfStatus({ version: "0.3.2", build: B }));
+    await expectRefusal(owen, dId, "already_current");
+  });
+
+  it("a device whose runtime cannot update itself answers its reason as the code; no self is self_update_unsupported", async () => {
+    const blocks = [
+      { reason: "not_supervised", supervised: false },
+      { reason: "not_installed", supervised: true },
+      { reason: "node_too_old", supervised: true },
+    ] as const;
+    for (const b of blocks) {
+      await report(d, dId, selfStatus({ build: A, canUpdate: false, ...b }));
+      await expectRefusal(owen, dId, b.reason);
+    }
+    // A daemon older than 07.17.1 reports no `self`: the API never sends it a command it does not know.
+    await report(d, dId, null);
+    expect((await seen(owen, dId))?.runtimeMaintenance).not.toHaveProperty("self");
+    await expectRefusal(owen, dId, "self_update_unsupported");
+  });
+
+  it("a desktop host is 409 not_a_service and an offline device is 409 device_offline", async () => {
+    const desk = await pairDevice(stack, owen, "Owen's laptop");
+    const laptop = await FakeDevice.connect(stack.baseUrl, desk.token, undefined, { host: "desktop" });
+    open.push(laptop);
+    await report(laptop, desk.deviceId, selfStatus({ build: null, supervised: false, canUpdate: false }));
+    await expectRefusal(owen, desk.deviceId, "not_a_service");
+    // A host that never said how it runs is not a service either.
+    const unknown = await pairDevice(stack, owen, "Owen's old box");
+    const box = await FakeDevice.connect(stack.baseUrl, unknown.token);
+    open.push(box);
+    await report(box, unknown.deviceId, selfStatus({ build: A }));
+    await expectRefusal(owen, unknown.deviceId, "not_a_service");
+
+    const asleep = await pairDevice(stack, owen, "Owen's other server");
+    await expectRefusal(owen, asleep.deviceId, "device_offline");
+  });
+
+  it("a grantee member gets 403 and organization B's admin gets 404; neither queues anything", async () => {
+    await report(d, dId, selfStatus({ build: A }));
+    const commands = await updateCommands(dId);
+    const rows = (await runs(dId)).length;
+    const grantee = await gail.request("POST", updateUrl(dId));
+    expect(grantee.status, JSON.stringify(grantee.body)).toBe(403);
+    const other = await eve.request("POST", updateUrl(dId));
+    expect(other.status, JSON.stringify(other.body)).toBe(404);
+    const otherHistory = await eve.request("GET", historyUrl(dId, "ocw-runtime"));
+    expect(otherHistory.status, JSON.stringify(otherHistory.body)).toBe(404);
+    const otherList = await eve.request("GET", "/api/v1/devices");
+    expect(otherList.status).toBe(200);
+    expect(JSON.stringify(otherList.body)).not.toContain(dId);
+    expect(await updateCommands(dId)).toBe(commands);
+    expect((await runs(dId)).length).toBe(rows);
+  });
+
+  it("an admin may update the owner's server; a second click waits (update_pending); the device's refusal closes it as refused", async () => {
+    await report(d, dId, selfStatus({ build: A }));
+    const res = await ada.request("POST", updateUrl(dId));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((res.body!.run as Row).requestedBy).toEqual({ id: adaId, name: "Ada Admin" });
+    const again = await owen.request("POST", updateUrl(dId));
+    expect(again.status, JSON.stringify(again.body)).toBe(409);
+    expect(errorCode(again)).toBe("update_pending");
+    expect(await requestedRows(dId)).toHaveLength(1);
+
+    const sentence = "Run as a service to update from the browser; or re-run the install command";
+    const refused = await refuseNext(d, dId, sentence);
+    expect(refused).toMatchObject({ runtime: "ocw-runtime", error: sentence, requested_by: adaId });
+    const finished = (await audits("device.runtime_update_finished", dId)).filter(
+      (a) => a.actor_id === adaId,
+    );
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({
+      result: "error",
+      metadata: { runtime: "ocw-runtime", outcome: "refused", fromBuild: A },
+    });
+  });
+
+  it("the organization's `off` level never blocks the OCW runtime click, and still blocks Claude Code (07.11)", async () => {
+    await setLevel("off");
+    try {
+      await report(d, dId, selfStatus({ build: A }));
+      const ocw = await owen.request("POST", updateUrl(dId));
+      expect(ocw.status, JSON.stringify(ocw.body)).toBe(200);
+      await refuseNext(d, dId, "updates are off on this device");
+      const cli = await owen.request("POST", updateUrl(dId, "claude-code"));
+      expect(cli.status, JSON.stringify(cli.body)).toBe(409);
+      expect(errorCode(cli)).toBe("runtime_updates_off");
+    } finally {
+      await setLevel("automatic");
+    }
   });
 });
