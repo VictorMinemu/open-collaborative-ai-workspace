@@ -798,6 +798,20 @@ describe("SelfUpdate: when the device checks its workspace and updates by itself
     expect(r.exit).not.toHaveBeenCalled();
   });
 
+  it("review IN-01: a served build that needs a newer Node reports node_too_old (canUpdate false) once checked", async () => {
+    const r = await makeRig({ nodeVersion: "22.11.0" }, { level: "notify" });
+    expect(r.su.status()).toMatchObject({ reason: null, canUpdate: true });
+    await r.su.onConfig();
+    expect(r.su.status()).toMatchObject({ reason: "node_too_old", canUpdate: false });
+    // Supervision's own reason still comes first.
+    const s = await makeRig(
+      { nodeVersion: "22.11.0", supervision: { supervised: false, reason: "not_supervised" } },
+      { level: "notify" },
+    );
+    await s.su.onConfig();
+    expect(s.su.status()).toMatchObject({ reason: "not_supervised" });
+  });
+
   it("notify: the timer checks again every checkEveryMs ± jitter", async () => {
     const r = await makeRig({ random: () => 1 }, { level: "notify" });
     r.su.start();

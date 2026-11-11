@@ -193,7 +193,7 @@ export class SelfUpdate {
   private state: RuntimeSelfUpdateState = "idle";
   private job: Job | null = null;
   private lastRun: RuntimeSelfLastRun | null = null;
-  private served: { version: string; sha256: string } | null = null;
+  private served: { version: string; sha256: string; minNode: number } | null = null;
   private checkedAt: number | null = null;
   private readonly knownCommands = new Set<string>();
   /** Served build (sha256) → no automatic run of it before this time (PD-10). */
@@ -348,7 +348,7 @@ export class SelfUpdate {
         env: this.opts.env,
       });
       if (this.stopped) return;
-      this.served = { version: manifest.version, sha256: manifest.sha256 };
+      this.served = { version: manifest.version, sha256: manifest.sha256, minNode: manifest.minNode };
       this.checkedAt = this.now();
       // Review CR-01: the workspace serves another build than the one that did not come back: forget it.
       if (this.failedBuild !== null && manifest.sha256 !== this.failedBuild) {
@@ -433,7 +433,7 @@ export class SelfUpdate {
         }));
       if (job.ended) return;
       job.manifest = manifest;
-      this.served = { version: manifest.version, sha256: manifest.sha256 };
+      this.served = { version: manifest.version, sha256: manifest.sha256, minNode: manifest.minNode };
       this.checkedAt = this.now();
 
       if (manifest.sha256 === running.sha256) {
@@ -715,11 +715,16 @@ export class SelfUpdate {
   /** What the device reports about its own runtime (`runtime.maintenance.self`): strict, no path. */
   status(): RuntimeSelfStatus {
     const { running, supervision } = this.opts;
-    const reason: RuntimeSelfBlock | null =
-      running === null ? (supervision.reason ?? "not_installed") : supervision.reason;
     // `served*` and `checkedAt` are this device's last check: none at `off` (the contract's reading).
     const off = this.opts.level() === "off";
     const served = off ? null : this.served;
+    // Review IN-01: the build the workspace serves needs a newer Node than the one running this daemon.
+    const nodeMajor = Number.parseInt((this.opts.nodeVersion ?? process.versions.node).replace(/^v/, ""), 10);
+    const nodeTooOld = served !== null && (!Number.isFinite(nodeMajor) || nodeMajor < served.minNode);
+    const reason: RuntimeSelfBlock | null =
+      running === null
+        ? (supervision.reason ?? "not_installed")
+        : (supervision.reason ?? (nodeTooOld ? "node_too_old" : null));
     const status = {
       version: running?.version ?? this.opts.version ?? RUNTIME_VERSION,
       build: running ? runtimeBuildOf(running.sha256) : null,
