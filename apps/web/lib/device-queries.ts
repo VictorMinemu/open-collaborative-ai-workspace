@@ -7,8 +7,8 @@ import {
   Ok,
   type PermissionMode,
   RequestRuntimeUpdateResponse,
-  type RuntimeId,
   RuntimeUpdateRunList,
+  type RuntimeUpdateTarget,
 } from "@ocw/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
@@ -67,15 +67,16 @@ export function useDeleteDeviceGrant(deviceId: string) {
 }
 
 /**
- * Runtime CLI updates (Phase 07.11, D-05, D-06): a device's update history and "Update now", both for the device owner
- * and admins only (`device.maintain`, decided by the API). The device list refetches on every `device.updated` ping,
- * so a row's state follows the device live; an open history refetches with it (`useWorkZoneOrgSync`).
+ * Runtime updates (Phase 07.11, D-05, D-06; 07.17.1 adds the OCW runtime itself): a device's update history and
+ * "Update now", both for the device owner and admins only (`device.maintain`, decided by the API). The device list
+ * refetches on every `device.updated` ping, so a row's state follows the device live; an open history refetches with it
+ * (`useWorkZoneOrgSync`).
  */
 export const runtimeUpdatesKey = (deviceId: string) => ["wz", "device-runtime-updates", deviceId] as const;
 
 export function useRuntimeUpdateHistory(
   deviceId: string,
-  runtime: RuntimeId | undefined,
+  runtime: RuntimeUpdateTarget | undefined,
   enabled: boolean,
   opts: { refetchInterval?: number | false } = {},
 ) {
@@ -96,7 +97,7 @@ export function useRuntimeUpdateHistory(
 export function useRequestRuntimeUpdate(deviceId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (runtime: RuntimeId) =>
+    mutationFn: (runtime: RuntimeUpdateTarget) =>
       api.post(`/api/v1/devices/${deviceId}/runtimes/${encodeURIComponent(runtime)}/update`, {
         schema: RequestRuntimeUpdateResponse,
       }),
