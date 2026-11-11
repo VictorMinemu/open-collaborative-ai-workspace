@@ -1127,6 +1127,17 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 07.17.1 to break down)
 
+### Phase 07.17.1.1: Bot file exchange with its Work Zone sessions: upload chat attachments into the session's working tree and download session files back to the chat as attachments (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 07.17.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.17.1.1 to break down)
+
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
 **Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and
