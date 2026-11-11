@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuntimeId } from "@ocw/contracts";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Daemon } from "./daemon.js";
 import { DoctorReport } from "./doctor.js";
 import { silentLogger } from "./logger.js";
@@ -1087,79 +1087,4 @@ describe("ocw-runtime doctor and service (07.12-08, D-04, D-05)", () => {
     expect(usage.code).toBe(1);
     expect(usage.stdout).toContain("usage: ocw-runtime service");
   }, 60_000);
-});
-
-// 07.17.1 (D-05, PD-08, PD-19): `ocw-runtime run` hands the self-update's restart to the service manager. The module is
-// imported with the import-only flag (no command runs); stop and exit are spies, nothing exits and no signal is sent.
-describe("ocw-runtime run: the self-update exit hook (07.17.1, D-05, PD-08)", () => {
-  type CliModule = typeof import("./cli.js");
-  let mod: CliModule;
-
-  beforeAll(async () => {
-    (globalThis as { __OCW_CLI_IMPORT_ONLY__?: boolean }).__OCW_CLI_IMPORT_ONLY__ = true;
-    mod = await import("./cli.js");
-  });
-
-  beforeEach(() => {
-    mod.cliShutdown.stopping = false;
-  });
-
-  afterAll(() => {
-    mod.cliShutdown.stopping = false;
-  });
-
-  it("marks the shared stopping guard first, stops the daemon once, then exits with the code", async () => {
-    const order: string[] = [];
-    let release: () => void = () => undefined;
-    const stop = vi.fn(
-      () =>
-        new Promise<void>((r) => {
-          order.push("stop");
-          release = r;
-        }),
-    );
-    const exit = vi.fn((code: number) => {
-      order.push(`exit:${code}`);
-    });
-    const hook = mod.selfUpdateExit({ stop, exit });
-    const done = hook(75);
-    // A SIGTERM arriving now finds the guard set: the exit-0 path does not run (the signal handler reads this guard).
-    expect(mod.cliShutdown.stopping).toBe(true);
-    await new Promise((r) => setImmediate(r));
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(exit).not.toHaveBeenCalled();
-    release();
-    await done;
-    expect(order).toEqual(["stop", "exit:75"]);
-    // A second call does nothing.
-    await hook(75);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(exit).toHaveBeenCalledTimes(1);
-  });
-
-  it("a stop that rejects still exits with the code", async () => {
-    const stop = vi.fn(async () => {
-      throw new Error("boom");
-    });
-    const exit = vi.fn((_code: number) => undefined);
-    await mod.selfUpdateExit({ stop, exit })(75);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(exit).toHaveBeenCalledWith(75);
-  });
-
-  it("a stop that hangs still exits with the code after the hand-over timeout", async () => {
-    const stop = vi.fn(() => new Promise<void>(() => undefined));
-    const exit = vi.fn((_code: number) => undefined);
-    await mod.selfUpdateExit({ stop, exit, timeoutMs: 20 })(75);
-    expect(exit).toHaveBeenCalledWith(75);
-  });
-
-  it("after a signal began stopping, the hook does nothing (the signal's exit 0 stands)", async () => {
-    mod.cliShutdown.stopping = true;
-    const stop = vi.fn(async () => undefined);
-    const exit = vi.fn((_code: number) => undefined);
-    await mod.selfUpdateExit({ stop, exit })(75);
-    expect(stop).not.toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
-  });
 });

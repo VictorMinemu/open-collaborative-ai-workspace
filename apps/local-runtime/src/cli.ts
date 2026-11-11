@@ -62,6 +62,7 @@ import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
 import { assertProjectDirAllowed, noGitNotice } from "./project-dir.js";
+import { createShutdownGuard, selfUpdateExit } from "./service/hand-over.js";
 import { defaultServiceDeps, serviceCommand } from "./service/index.js";
 import { applyServiceEnv } from "./service-env.js";
 import {
@@ -429,47 +430,11 @@ async function doctorCommand(argv: string[]): Promise<void> {
   process.exitCode = doctorExitCode(report);
 }
 
-/** `run`'s one stopping guard, shared by the signal handler and the self-update hand-over: only the first one exits. */
-export const cliShutdown = { stopping: false };
-
-/** How long the self-update hand-over waits for the daemon to stop before it exits anyway. */
-const HAND_OVER_TIMEOUT_MS = 10_000;
-
-/**
- * 07.17.1 (D-05, PD-08): the self-update's exit hook (`DaemonOptions.exitForUpdate`). It marks the shared stopping
- * guard first (a SIGTERM during the hand-over then does not exit 0), stops the daemon, then exits with `code` (75:
- * systemd's `Restart=on-failure` and launchd's `KeepAlive` start the new build). A stop that fails or hangs past the
- * timeout still exits with `code`. A second call, or a call after a signal began stopping, does nothing. Never calls a
- * service manager.
- */
-export function selfUpdateExit(deps: {
-  stop: () => Promise<void>;
-  exit: (code: number) => void;
-  timeoutMs?: number;
-}): (code: number) => Promise<void> {
-  return async (code) => {
-    if (cliShutdown.stopping) return;
-    cliShutdown.stopping = true;
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, deps.timeoutMs ?? HAND_OVER_TIMEOUT_MS);
-      timer.unref?.();
-    });
-    try {
-      await Promise.race([deps.stop(), timeout]);
-    } catch {
-      // The exit below is the hand-over; a failed stop must not keep the old build running.
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    deps.exit(code);
-  };
-}
-
 /**
  * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
  * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon. 07.17.1: the
- * daemon gets the self-update exit hook (stop, then exit 75); SIGTERM / SIGINT still stop and exit 0.
+ * daemon gets the self-update exit hook (`service/hand-over.ts`: stop, then exit 75); SIGTERM / SIGINT still stop and
+ * exit 0. One stopping guard per run, shared by both, so only the first one exits.
  */
 async function run(): Promise<void> {
   const home = ocwHome();
@@ -478,7 +443,9 @@ async function run(): Promise<void> {
     .catch(() => "info" as const);
   await applyServiceEnv(home, process.env, createLogger(level));
   let current: Daemon | null = null;
+  const guard = createShutdownGuard();
   const exitForUpdate = selfUpdateExit({
+    guard,
     stop: async () => {
       process.stderr.write("runtime updated, restarting\n");
       await current?.stop();
@@ -491,8 +458,8 @@ async function run(): Promise<void> {
   // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.
   let started: Promise<void> = Promise.resolve();
   const shutdown = (signal: string) => {
-    if (cliShutdown.stopping) return;
-    cliShutdown.stopping = true;
+    if (guard.stopping) return;
+    guard.stopping = true;
     process.stderr.write(`received ${signal}, stopping\n`);
     started
       .catch(() => undefined)
@@ -579,16 +546,7 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-/**
- * Set only by a unit test before it imports this module (07.17.1, PD-19): the import then defines the exports and
- * runs no command (a bare import would otherwise start `run` on the real `~/.ocw`). Every real entry (the bin script,
- * the bundle, `tsx src/cli.ts`) leaves it unset.
- */
-const IMPORT_ONLY = (globalThis as { __OCW_CLI_IMPORT_ONLY__?: boolean }).__OCW_CLI_IMPORT_ONLY__ === true;
-
-if (!IMPORT_ONLY) {
-  main(process.argv.slice(2)).catch((err: unknown) => {
-    process.stderr.write(`ocw-runtime: ${errorMessage(err)}\n`);
-    process.exit(1);
-  });
-}
+main(process.argv.slice(2)).catch((err: unknown) => {
+  process.stderr.write(`ocw-runtime: ${errorMessage(err)}\n`);
+  process.exit(1);
+});
