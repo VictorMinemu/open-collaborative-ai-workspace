@@ -15,6 +15,7 @@ import {
   rename as fsRename,
   symlink as fsSymlink,
   mkdir,
+  open,
   readFile,
   rm,
   stat,
@@ -71,6 +72,7 @@ export type SelfUpdateFailure =
   | "checksum"
   | "bad_lockfile"
   | "npm_missing"
+  | "npm_not_js"
   | "npm_failed"
   | "preflight_failed"
   | "wrong_version"
@@ -89,6 +91,7 @@ export const SELF_UPDATE_FAILURE_SENTENCES: Readonly<Record<SelfUpdateFailure, s
   checksum: "checksum mismatch",
   bad_lockfile: "the lockfile does not match the manifest",
   npm_missing: "npm was not found next to node; re-run the install command",
+  npm_not_js: "npm next to node is not a JavaScript entry; re-run the install command",
   npm_failed: "npm could not install the runtime's dependencies",
   preflight_failed: "the new runtime does not start",
   wrong_version: "the new runtime reports another version",
@@ -344,6 +347,23 @@ async function resolveNpm(p: PrepareVersionOptions): Promise<string | null> {
   return null;
 }
 
+/** A file node can run: a `.js`/`.cjs`/`.mjs` name, or a first line that is a node shebang. */
+async function isJavaScriptEntry(file: string): Promise<boolean> {
+  if (/\.(c|m)?js$/.test(file)) return true;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(file, "r");
+    const buf = Buffer.alloc(128);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    const first = buf.subarray(0, bytesRead).toString("utf8").split("\n")[0] ?? "";
+    return /^#!.*\bnode\b/.test(first);
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function fileSha256(file: string): Promise<string> {
   return createHash("sha256")
     .update(await readFile(file))
@@ -514,6 +534,8 @@ async function prepare(p: PrepareVersionOptions): Promise<PreparedVersion> {
     if (p.requireScratchHome && !insideDir(npm, tryRealpath(tmpdir()) ?? tmpdir())) {
       throw new SelfUpdateError("outside_scratch_home");
     }
+    // Review IN-08: npm runs as `node <npm>`; a shim (volta, mise, asdf) would fail as "npm could not install".
+    if (!(await isJavaScriptEntry(npm))) throw new SelfUpdateError("npm_not_js");
 
     const f = p.fetch ?? fetch;
     await rm(staging, { recursive: true, force: true });

@@ -347,6 +347,18 @@ describe("prepareVersion failures (07.17.1, D-07, E1–E10, E23)", () => {
     expectUntouched(before);
   });
 
+  it("review IN-08: an npm that is not a JavaScript entry (a shell shim) → npm_not_js; nothing runs it", async () => {
+    const before = installJsonBytes();
+    const bin = join(home.ocwHome, "..", "shim-bin");
+    mkdirSync(bin);
+    const shim = join(bin, "npm");
+    writeFileSync(shim, `#!/bin/sh\necho ran > "${join(bin, "ran")}"\n`, { mode: 0o755 });
+    const err = await failureOf(prepareVersion(await options({ npmPath: shim })), "npm_not_js");
+    expect(err.message).toBe("npm next to node is not a JavaScript entry; re-run the install command");
+    expect(existsSync(join(bin, "ran"))).toBe(false);
+    expectUntouched(before);
+  });
+
   it("an npm outside the OS temp directory is refused in tests (PD-19)", async () => {
     const before = installJsonBytes();
     await failureOf(prepareVersion(await options({ npmPath: "/usr/bin/env" })), "outside_scratch_home");
