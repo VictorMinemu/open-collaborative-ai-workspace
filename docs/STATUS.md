@@ -182,3 +182,17 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   counts only. Limits: fan-out only from schedules; items past the bot's "Sessions at once" wait and are queued
   again when one of its sessions ends (at the daily limit: the next day), at most 5 times (code review WR-02); handles
   cannot be edited; fan-out needs the matching cell image (ADR-0039, docs/self-hosting/automations.md).
+- **07.17.1 Runtime self-update:** a headless server's Local Runtime updates itself to the build its workspace serves,
+  with one click (**Update** on the OCW runtime row in Settings › Devices, `device.maintain`, any level) or by itself
+  at the 07.11 *Automatic* level (also to an older build after a server rollback; *Off* stops the checks, the click
+  still works). The daemon fetches the manifest, bundle and lockfile only from its own paired server URL (https except
+  loopback or `OCW_INSTALL_ALLOW_HTTP`, no redirects, byte cap, SHA-256 of both against the manifest, new read-only
+  `/api/v1/runtime/npm-shrinkwrap.json`), installs beside the running version with the fixed `npm ci`, waits until no
+  turn runs on any runtime (one gate decision; new turns wait with a "Restarting the OCW runtime…" line), switches
+  `~/.ocw/runtime/current` atomically and exits with 75 so systemd or launchd restarts it; the run survives the restart
+  through a marker, and a prompt that never started is requeued and runs after any daemon restart instead of failing.
+  Only a real service run qualifies (`OCW_RUNTIME_HOST=service`, the service manager's marker, a bundle under
+  `versions/`); the previous version stays; the doctor names a build that did not come back. The runtime's version
+  follows the release (0.3.1, shown as "0.3.1 · <build>"). History and audit carry builds, never a path. Limits: a
+  v0.3.0 runtime still needs the install command once; no desktop app self-update, no bundle signatures, no Windows
+  service (ADR-0040, docs/SERVER.md › Updates).

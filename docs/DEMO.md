@@ -832,6 +832,42 @@ in `.planning/phases/07.12-headless-work-zone-server/07.12-VALIDATION.md` › Ma
 6. **A safe doctor.** Paste the output of `ocw-runtime doctor` from the Linux VM into a draft issue: it shows no token,
    no service.env value and no absolute path outside the home.
 
+## Runtime self-update (Phase 07.17.1)
+
+Phase 07.17.1 (ADR-0040). A headless server's runtime updates itself from the workspace it is paired with, without SSH
+([SERVER.md › Updates](SERVER.md#updates)):
+
+- **One click.** Settings › Devices › the server's card › Runtime updates: the **OCW runtime** row shows "0.3.1 ·
+  <build>" and what the workspace serves. When they differ: "{version} available" and **Update** (device owner and
+  admins). Desktop devices show "Updates with the desktop app"; a server on an older runtime shows the install command
+  to run once.
+- **By itself.** At the organization's *Automatic* level the server updates when the workspace serves another build
+  (also an older one after a server rollback). *Notify only* shows Update; *Off* stops the checks and Update still
+  works.
+- **Never cuts a turn.** The new version is downloaded, checked (SHA-256) and installed beside the running one. Then
+  the update waits ("Waiting for sessions to finish") until no turn runs on the server, switches, and the service
+  manager restarts it. A prompt sent meanwhile says "Restarting the OCW runtime on this device… your turn starts when it
+  is back" and runs after the restart.
+- **Recorded.** History shows each run (Downloading… → Installing… → Restarting… → Succeeded or Failed, from → to
+  builds, By you or Automatic); the audit log has the request, start and result with the builds and no path.
+
+**Owner check** (never run by an agent: it restarts a real systemd service on a real server; record each result in
+`.planning/phases/07.17.1-runtime-self-update-from-the-browser-one-click-in-settings-d/07.17.1-VALIDATION.md` ›
+Manual-Only Verifications, where the full steps are):
+
+0. **Once from v0.3.0.** Deploy this build. On Server-1 re-run the install command from Settings › Devices › Add a
+   device › Server, then `ocw-runtime service restart` when no session runs (v0.3.0 has no self-update code).
+1. **Up to date.** The OCW runtime row shows "0.3.1 · <build>" and Up to date.
+2. **One click.** Make it behind (a later workspace build, or point `~/.ocw/runtime/current` at the previous
+   `versions/<build>` and restart). Press **Update** with no session running: Downloading… → Installing… →
+   Restarting…, back online within about 30 s, Up to date; History says Succeeded, By you.
+3. **A running turn.** Behind again, start a long Claude Code turn and press **Update**: the turn is not cut, the row
+   says Waiting for sessions to finish, a second member's prompt waits with the restart line and runs after it.
+4. **Audit and doctor.** Admin › Audit shows requested, started and finished with builds and no path;
+   `ocw-runtime doctor` is all ok and the runtime matches the server.
+5. **Levels.** At *Automatic* the server updates by itself (History: Automatic). At *Off* the row says "Automatic
+   checks are off. Update still works." and Update works. Set it back to Automatic.
+
 ## Automations and watched records (Phase 07.6)
 
 Phase 07.6 (ADR-0028, [self-hosting/automations.md](self-hosting/automations.md)). Bots act without being asked: on a

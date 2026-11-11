@@ -248,6 +248,11 @@ On the server, `ocw-runtime setup` pairs it with a code you approve in the web, 
 systemd or launchd service; `ocw-runtime doctor` checks it. You then share the server with members and teams in
 Settings › Devices. Requirements, sign-ins, the service, proxies and troubleshooting: [SERVER.md](SERVER.md).
 
+A server's runtime updates itself from your workspace: one click on **Update** in Settings › Devices › the server's
+card › Runtime updates, or by itself at the organization's *Automatic* level. It waits until no turn runs and restarts
+through systemd or launchd. A server still on v0.3.0 needs the install command once more; after that, updates are one
+click. Details: [SERVER.md › Updates](SERVER.md#updates).
+
 ## Automations and job workers
 
 Bots' automations (schedules, signed webhooks, mailboxes), watched records, digests and Work Zone summaries run as jobs
@@ -304,6 +309,10 @@ corporate npm mirror instead. The device makes no other outbound call for this, 
 downloads. At *Off* it makes none.
 
 The owner and admins see versions, status and history in Settings › Devices; other members see only the versions.
+
+The runtime itself follows the same level on servers: the **OCW runtime** row in the same list updates it to the
+build your workspace serves ([SERVER.md › Updates](SERVER.md#updates)). On a desktop, the runtime ships inside the
+app and changes when you install a new app release.
 
 ## Back up, restore and upgrade
 
