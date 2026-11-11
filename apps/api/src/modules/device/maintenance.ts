@@ -313,8 +313,8 @@ export async function onRuntimeMaintenance(
  * 07.11 review ME-04: this device's runs `started` more than `RUNTIME_UPDATE_RUN_ABANDON_MS` ago and never finished
  * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. CLI runs are checked
  * at every snapshot (the handshake carries one on every connect); `ocw-runtime` runs (07.17.1 PD-14) at a snapshot
- * whose `self` is idle and on reading the history while the device is offline or its stored `self` is idle. Returns
- * how many it closed.
+ * whose `self` is idle, only (review WR-06: the history read shows them interrupted without writing,
+ * `selfRunReadsInterrupted`). Returns how many it closed.
  */
 async function closeAbandonedRuns(
   tx: Tx,
@@ -358,6 +358,31 @@ async function closeAbandonedRuns(
     );
   }
   return closed.length;
+}
+
+/**
+ * 07.17.1 PD-14, review WR-06: how the history READS an `ocw-runtime` run the device never closed. Started more than
+ * `RUNTIME_UPDATE_RUN_ABANDON_MS` ago, on a device not seen for that long (offline, `lastSeenAt` past the window) or
+ * whose stored `self` is idle, it reads as failed `RUN_INTERRUPTED`. A pure view: nothing is written or audited, so a
+ * device that was merely offline for a moment and then finishes the run leaves one honest trail.
+ */
+function selfRunReadsInterrupted(device: {
+  status: string;
+  lastSeenAt: string | null;
+  runtimeMaintenance: unknown;
+}): (row: RunRow) => RunRow {
+  const cutoff = Date.now() - RUNTIME_UPDATE_RUN_ABANDON_MS;
+  const gone =
+    device.status !== "online" && (device.lastSeenAt === null || Date.parse(device.lastSeenAt) < cutoff);
+  const idle = selfIdle(storedMaintenance(device.runtimeMaintenance)?.self);
+  return (row) =>
+    isSelfRun(row) &&
+    row.state === "started" &&
+    row.startedAt !== null &&
+    Date.parse(row.startedAt) < cutoff &&
+    (gone || idle)
+      ? { ...row, state: "failed", error: RUN_INTERRUPTED }
+      : row;
 }
 
 /** PD-04: this device's "Update now" requests the device never answered within the hour become `expired`. */
@@ -707,20 +732,11 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, false);
         // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
         await expireRequests(tx, row.id);
-        // 07.17.1 PD-14: an OCW runtime update that never reported back (the device is gone, or back and idle) reads
-        // as failed, not as "Updating…" for ever; one still waiting for its sessions keeps its row open.
-        const self = storedMaintenance(row.runtimeMaintenance)?.self;
-        if (row.status !== "online" || selfIdle(self)) {
-          const device = {
-            deviceId: row.id,
-            organizationId: row.organizationId,
-            ownerUserId: row.ownerUserId,
-          };
-          const deps = { audit: core.audit, realtime: core.realtime };
-          if (await closeAbandonedRuns(tx, deps, device, { cli: false, self: true })) {
-            await pingOrg(tx, deps, device, row.status);
-          }
-        }
+        // 07.17.1 PD-14, review WR-06: an OCW runtime update that never reported back READS as failed (interrupted)
+        // once the device has been gone for the abandon time, or its stored `self` is idle. Nothing is written or
+        // audited here: the device's own idle snapshot closes the row (`onRuntimeMaintenance`, under the device lock),
+        // and its real outcome, when it comes back, is the run's only finished audit.
+        const interruptedRead = selfRunReadsInterrupted(row);
         const runtime = req.query.runtime;
         const rows = await tx
           .select()
@@ -734,7 +750,7 @@ export function registerDeviceMaintenanceRoutes(
           .orderBy(desc(deviceRuntimeUpdates.createdAt), desc(deviceRuntimeUpdates.id))
           .limit(50);
         const names = await memberDirectory(tx);
-        return { runs: rows.map((r) => toRuntimeUpdateRun(r, names)) };
+        return { runs: rows.map((r) => toRuntimeUpdateRun(interruptedRead(r), names)) };
       }),
   );
 

@@ -483,7 +483,7 @@ const interrupted = async (deviceId: string) =>
   ).length;
 
 describe("07.17.1-09 Task 3: an update that never reports back reads as failed (PD-14)", () => {
-  it("offline past the abandon time: the read closes the row as failed RUN_INTERRUPTED, audited once; a CLI row is untouched; a late finished frame still wins", async () => {
+  it("review WR-06: offline past the abandon time, the read shows the row as failed RUN_INTERRUPTED without writing or auditing; a brief drop shows it running; the late finished frame is the one audit", async () => {
     const srv = await pairDevice(stack, owen, "Owen's build server");
     let dev = await FakeDevice.connect(stack.baseUrl, srv.token, undefined, { host: "service" });
     open.push(dev);
@@ -495,21 +495,32 @@ describe("07.17.1-09 Task 3: an update that never reports back reads as failed (
     await age(cliRun);
     await dev.close();
     await eventually(async () => (await deviceRow(srv.deviceId)).status === "offline");
+    const before = await interrupted(srv.deviceId);
+    const selfRun = async () => {
+      const read = await owen.request("GET", historyUrl(srv.deviceId, "ocw-runtime"));
+      expect(read.status, JSON.stringify(read.body)).toBe(200);
+      expect(read.body!.runs as Row[]).toHaveLength(1);
+      return (read.body!.runs as Row[])[0];
+    };
 
-    const read = await owen.request("GET", historyUrl(srv.deviceId, "ocw-runtime"));
-    expect(read.status, JSON.stringify(read.body)).toBe(200);
-    expect(read.body!.runs as Row[]).toHaveLength(1);
-    expect((read.body!.runs as Row[])[0]).toMatchObject({
+    // Offline for seconds only (it may still be waiting for its sessions): the read shows the run as it is.
+    expect(await selfRun()).toMatchObject({ runtime: "ocw-runtime", state: "started", error: null });
+
+    // Not seen for longer than the abandon time: the read says interrupted, and still writes nothing.
+    await su.query("update app.devices set last_seen_at = now() - interval '31 minutes' where id = $1", [
+      srv.deviceId,
+    ]);
+    expect(await selfRun()).toMatchObject({
       runtime: "ocw-runtime",
       state: "failed",
       error: RUN_INTERRUPTED,
     });
-    expect(await interrupted(srv.deviceId)).toBe(1);
+    expect((await runs(srv.deviceId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+    expect(await interrupted(srv.deviceId)).toBe(before);
     // 07.11 closes CLI rows only at a snapshot: the read leaves them alone.
     expect((await runs(srv.deviceId)).find((r) => r.run_id === cliRun)).toMatchObject({ state: "started" });
-    // A second read writes nothing new.
     expect((await owen.request("GET", historyUrl(srv.deviceId))).status).toBe(200);
-    expect(await interrupted(srv.deviceId)).toBe(1);
+    expect(await interrupted(srv.deviceId)).toBe(before);
 
     // The new daemon's real outcome, replayed from its offline log, still closes the row (07.11 ME-04).
     dev = await FakeDevice.connect(stack.baseUrl, srv.token, undefined, { host: "service" });
@@ -534,10 +545,16 @@ describe("07.17.1-09 Task 3: an update that never reports back reads as failed (
       to_version: "0.3.2",
       to_build: served!.build,
     });
+    // One honest trail: the run's only finished audit is the device's real outcome.
+    const finished = (await audits("device.runtime_update_finished", srv.deviceId)).filter(
+      (a) => a.metadata.runtime === "ocw-runtime",
+    );
+    expect(finished.map((a) => a.metadata.outcome)).toEqual(["succeeded"]);
+    expect(await interrupted(srv.deviceId)).toBe(before);
   });
 
-  it("online and waiting for sessions to finish keeps the row open (snapshot and read); the stored self at idle closes it on read", async () => {
-    const { runId } = await startedSelfUpdate(d, dId);
+  it("review WR-06: online and waiting keeps the row open; a stored self at idle reads as interrupted without a write, and the next idle snapshot closes it with one audit", async () => {
+    const { id, runId } = await startedSelfUpdate(d, dId);
     await age(runId);
     // A snapshot while the device still waits does not close it either.
     await report(d, dId, selfStatus({ build: A, state: "waiting" }));
@@ -547,7 +564,7 @@ describe("07.17.1-09 Task 3: an update that never reports back reads as failed (
     expect((waiting.body!.runs as Row[]).find((r) => r.state === "started")).toBeDefined();
     expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
 
-    // The stored report says idle (no new snapshot): the read closes the run.
+    // The stored report says idle (no new snapshot): the read shows the run interrupted, but writes nothing.
     await su.query(
       "update app.devices set runtime_maintenance = jsonb_set(runtime_maintenance, '{self,state}', '\"idle\"') where id = $1",
       [dId],
@@ -560,10 +577,21 @@ describe("07.17.1-09 Task 3: an update that never reports back reads as failed (
     expect(await interrupted(dId)).toBe(before);
     const idle = await owen.request("GET", historyUrl(dId, "ocw-runtime"));
     expect(idle.status).toBe(200);
+    expect((idle.body!.runs as Row[]).find((r) => r.id === id)).toMatchObject({
+      state: "failed",
+      error: RUN_INTERRUPTED,
+    });
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+    expect(await interrupted(dId)).toBe(before);
+
+    // The device's own idle snapshot (the place that has the facts) closes it, under the device lock, audited once.
+    await report(d, dId, selfStatus({ build: A }));
     expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({
       state: "failed",
       error: RUN_INTERRUPTED,
     });
+    expect(await interrupted(dId)).toBe(before + 1);
+    await report(d, dId, selfStatus({ build: A }));
     expect(await interrupted(dId)).toBe(before + 1);
   });
 });
