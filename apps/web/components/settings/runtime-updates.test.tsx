@@ -638,3 +638,63 @@ describe("the OCW runtime's history", () => {
     expect(runtimeHistoryTitle(undefined)).toBe("All coding agents · newest first");
   });
 });
+
+describe("devices one click can't update", () => {
+  it("a desktop device updates with the desktop app, with or without a report", () => {
+    const bare = service(null, { hostKind: "desktop", daemonVersion: "0.3.0" });
+    expect(runtimeSelfView(bare)).toEqual({ kind: "desktop", installed: "0.3.0" });
+    expect(runtimeSelfView(service({ build: null }, { hostKind: "desktop" }))).toEqual({
+      kind: "desktop",
+      installed: "0.3.1",
+    });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={bare} />));
+    expect(row).toContain('data-view="desktop"');
+    expect(row).toMatch(/data-testid="runtime-self-version"[^>]*>0\.3\.0</);
+    expect(row).toMatch(/data-testid="runtime-self-note"[^>]*>Updates with the desktop app</);
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+    expect(row).not.toContain('data-testid="runtime-self-history"');
+  });
+
+  it("an older server daemon asks for one more install command run, with the command", () => {
+    const d = service(null, { daemonVersion: "0.2.9" });
+    expect(runtimeSelfView(d)).toEqual({ kind: "legacy", installed: "0.2.9" });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={d} />));
+    expect(row).toContain('data-view="legacy"');
+    expect(row).toContain("Re-run the install command once to turn on one-click updates.");
+    expect(row).toMatch(
+      /data-testid="runtime-self-install-command"[\s\S]*curl -fsSL http:\/\/localhost:4000\/api\/v1\/runtime\/install\.sh \| sh/,
+    );
+    // The long command wraps on a phone instead of scrolling sideways.
+    expect(row).toContain("whitespace-pre-wrap");
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+  });
+
+  it("a runtime of unknown kind not installed with the command says so; one that reports nothing has no row", () => {
+    const d = service({ reason: "not_installed", build: null, canUpdate: false }, { hostKind: null });
+    expect(runtimeSelfView(d)).toEqual({
+      kind: "unmanaged",
+      installed: "0.3.1",
+      note: RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
+    });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={d} />));
+    expect(row).toContain('data-view="unmanaged"');
+    expect(row).toContain(RUNTIME_SELF_BLOCK_SENTENCES.not_installed);
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+    const none = service(null, { hostKind: null });
+    expect(runtimeSelfView(none)).toEqual({ kind: "hidden" });
+    const html = render(<DeviceRuntimeUpdates device={none} />);
+    expect(html).not.toContain('data-testid="runtime-self-row"');
+    expect(count(html, 'data-testid="runtime-update-row"')).toBe(2);
+  });
+
+  it("uses no faded text in these views either", () => {
+    for (const d of [
+      service(null, { hostKind: "desktop", daemonVersion: "0.3.0" }),
+      service(null),
+      service({ reason: "not_installed" }, { hostKind: null }),
+    ]) {
+      for (const c of selfRow(render(<DeviceRuntimeUpdates device={d} />)).matchAll(/class="([^"]*)"/g))
+        expect(c[1]).not.toMatch(/(^|\s)opacity-|text-muted-foreground\//);
+    }
+  });
+});
