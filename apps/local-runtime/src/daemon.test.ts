@@ -2516,6 +2516,38 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
   }, 60_000);
 
+  it("review IN-06: a snapshot whose send throws does not stop later CLI snapshots, and stop() still closes the link", async () => {
+    const d = await selfDaemon();
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const first = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    const inner = d as unknown as {
+      link: { send: (f: DeviceToServerFrame) => void };
+      maintenance: { opts: { sendSnapshot: (f: Snapshot) => void } };
+    };
+    const send = inner.link.send.bind(inner.link);
+    let thrown = 0;
+    inner.link.send = (f) => {
+      if (f.type === "runtime.maintenance" && thrown === 0) {
+        thrown += 1;
+        throw new Error("socket write failed");
+      }
+      send(f);
+    };
+    const before = server.allFrames.filter((f) => f.type === "runtime.maintenance").length;
+    const { self: _self, ...cli } = first;
+    inner.maintenance.opts.sendSnapshot(cli);
+    inner.maintenance.opts.sendSnapshot(cli);
+    await vi.waitFor(
+      () => expect(server.allFrames.filter((f) => f.type === "runtime.maintenance").length).toBe(before + 1),
+      { timeout: 5_000, interval: 20 },
+    );
+    expect(thrown).toBe(1);
+    await d.stop();
+    expect(d.isConnected).toBe(false);
+  }, 30_000);
+
   it("not a service run: the click is refused with the device's sentence; nothing is fetched, current is unchanged", async () => {
     const spy = vi.fn(async (_code: number) => undefined);
     const d = await selfDaemon({

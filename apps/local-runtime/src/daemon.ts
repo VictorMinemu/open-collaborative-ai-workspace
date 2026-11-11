@@ -466,9 +466,16 @@ export class Daemon {
           if (this.isConnected) this.send(frame);
           return;
         }
-        this.snapshotChain = this.snapshotChain.then(() => {
-          if (this.isConnected) this.send(this.withSelf(frame));
-        });
+        // Review IN-06: one failed send never breaks the chain for the snapshots after it, nor `stop()`'s await.
+        this.snapshotChain = this.snapshotChain
+          .then(() => {
+            if (this.isConnected) this.send(this.withSelf(frame));
+          })
+          .catch((err: unknown) =>
+            this.log.warn("runtime maintenance snapshot failed", {
+              error: sanitizeString(errorMessage(err), []),
+            }),
+          );
       },
       sendRun: (frame) => this.send(frame),
       notifySession: (runtime, phase, version) => this.notifyHeldSessions(runtime, phase, version),
