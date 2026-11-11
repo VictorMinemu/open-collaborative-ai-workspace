@@ -15,6 +15,8 @@ import {
   type AgentChannelWorkSessionStartResponse,
   type AgentChannelWorkSessionStop,
   type AgentChannelWorkSessionStopResponse,
+  type AgentChannelWorkSessionUpload,
+  type AgentChannelWorkSessionUploadResponse,
   BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_PROPOSED_SENTENCE,
   BOT_WORK_SESSION_SENTENCES,
@@ -38,6 +40,8 @@ import {
   WORK_SESSION_START_TOOL,
   WORK_SESSION_STOP_TOOL,
   WORK_SESSION_TOOL_NAMES,
+  WORK_SESSION_TOOL_SENTENCES,
+  WORK_SESSION_UPLOAD_TOOL,
   type WorkSessionToolContext,
 } from "./work-session-tools.js";
 
@@ -292,6 +296,7 @@ function setup(
     prompt?: (body: AgentChannelWorkSessionPrompt) => Promise<AgentChannelWorkSessionPromptResponse>;
     read?: (body: AgentChannelWorkSessionRead) => Promise<AgentChannelWorkSessionReadResponse>;
     stop?: (body: AgentChannelWorkSessionStop) => Promise<AgentChannelWorkSessionStopResponse>;
+    upload?: (body: AgentChannelWorkSessionUpload) => Promise<AgentChannelWorkSessionUploadResponse>;
   } = {},
 ) {
   const calls: Recorded[] = [];
@@ -319,6 +324,12 @@ function setup(
     workSessionStop: async (body: AgentChannelWorkSessionStop) => {
       calls.push({ route: "stop", body: { ...body } });
       return respond.stop ? respond.stop(body) : { kind: "stopped", workSessionId: body.workSessionId };
+    },
+    workSessionUpload: async (body: AgentChannelWorkSessionUpload) => {
+      calls.push({ route: "upload", body: { ...body } });
+      return respond.upload
+        ? respond.upload(body)
+        : { kind: "uploaded", workSessionId: body.workSessionId, path: body.path, sizeBytes: 1536 };
     },
   } as unknown as AgentChannelClient;
   const guard = createToolGuard({ client: () => client });
@@ -799,6 +810,201 @@ describe("the session-output mark (07.16 D-20, PD-15): a read makes the turn's o
     const r = await tool(WORK_SESSION_START_TOOL).execute("tc-1", START);
     expect(calls.map((c) => c.route)).toEqual(["start"]);
     expect(text(r)).toBe(`${BOT_WORK_SESSION_PROPOSED_SENTENCE} Proposal ${APPROVAL}.`);
+  });
+});
+
+const ATTACHMENT = "0199a6f0-0000-7000-8000-00000000f001";
+const UPLOAD = { workSessionId: WS, attachmentId: ATTACHMENT, path: "docs/spec.pdf" };
+const EXTRA_UPLOAD = WORK_SESSION_TOOL_SENTENCES.extra_keys_session[WORK_SESSION_UPLOAD_TOOL];
+
+describe("ocw_work_session_upload (07.17.1.1 D-01, D-02, PD-04, PD-13): ids and a repo-relative path, nothing else", () => {
+  it("has a closed schema: a session, an attachment, a path and an optional overwrite", () => {
+    const { tool } = setup();
+    const t = tool(WORK_SESSION_UPLOAD_TOOL);
+    expect(t.parameters.additionalProperties).toBe(false);
+    expect(Object.keys(t.parameters.properties).sort()).toEqual([
+      "attachmentId",
+      "overwrite",
+      "path",
+      "workSessionId",
+    ]);
+    expect(t.parameters.required).toEqual(["workSessionId", "attachmentId", "path"]);
+    expect(t.parameters.properties.path?.maxLength).toBe(1024);
+    expect(t.description).toBe(
+      "Copy a file attached in this thread into a Work Zone session you started. Only while the session is idle; an " +
+        "existing file is kept unless overwrite is true.",
+    );
+  });
+
+  it("posts exactly {eventId, agentId, workSessionId, attachmentId, path} and renders where the file is", async () => {
+    const { calls, begin, tool, logs } = setup();
+    begin();
+    const r = await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD);
+    expect(calls).toEqual([
+      {
+        route: "upload",
+        body: {
+          eventId: "evt-1",
+          agentId: BOT,
+          workSessionId: WS,
+          attachmentId: ATTACHMENT,
+          path: "docs/spec.pdf",
+        },
+      },
+    ]);
+    expect(text(r)).toBe(`Put docs/spec.pdf (1.5 KB) into session ${WS}.`);
+    expect(r.details).toMatchObject({ ok: true });
+    // Logs carry ids and sizes only, never the path (P1).
+    expect(logs.join("\n")).toContain(WS);
+    expect(logs.join("\n")).not.toContain("spec.pdf");
+  });
+
+  it("overwrite adds that key, and only that one", async () => {
+    const { calls, begin, tool } = setup();
+    begin();
+    await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", { ...UPLOAD, overwrite: true });
+    await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-2", { ...UPLOAD, overwrite: false });
+    expect(calls.map((c) => Object.keys(c.body).sort().join())).toEqual([
+      "agentId,attachmentId,eventId,overwrite,path,workSessionId",
+      "agentId,attachmentId,eventId,overwrite,path,workSessionId",
+    ]);
+    expect(calls[0]?.body.overwrite).toBe(true);
+    expect(calls[1]?.body.overwrite).toBe(false);
+  });
+
+  it("refuses a device, user, conversation, URL or absolute path, a non-uuid id or a path outside the tree locally, before any request", async () => {
+    const { calls, begin, tool } = setup();
+    begin();
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...UPLOAD, deviceId: WS }, EXTRA_UPLOAD],
+      [{ ...UPLOAD, userId: BOT }, EXTRA_UPLOAD],
+      [{ ...UPLOAD, conversationId: DM }, EXTRA_UPLOAD],
+      [{ ...UPLOAD, url: "https://x.test/a" }, EXTRA_UPLOAD],
+      [{ ...UPLOAD, absolutePath: "/etc/hosts" }, EXTRA_UPLOAD],
+      [{ ...UPLOAD, workSessionId: "billing-api" }, WORK_SESSION_TOOL_SENTENCES.bad_session],
+      [{ ...UPLOAD, attachmentId: "spec.pdf" }, WORK_SESSION_TOOL_SENTENCES.bad_attachment],
+      [{ workSessionId: WS, path: "docs/spec.pdf" }, WORK_SESSION_TOOL_SENTENCES.bad_attachment],
+      [{ ...UPLOAD, path: "../x" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "/etc/hosts" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "~/x" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "C:\\x" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "a\\b" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "a//b" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "./a" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: `a${String.fromCodePoint(0)}b` }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: `a${String.fromCodePoint(0x202e)}b.md` }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "x".repeat(1025) }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: "" }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, path: 7 }, WORK_SESSION_TOOL_SENTENCES.bad_path],
+      [{ ...UPLOAD, overwrite: "yes" }, WORK_SESSION_TOOL_SENTENCES.bad_overwrite],
+    ];
+    for (const [params, sentence] of cases) {
+      const r = await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", params);
+      expect(text(r), JSON.stringify(params)).toBe(sentence);
+      expect(r.details.ok).toBe(false);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("without an active turn, or on a turn that does not list it, it answers without a request", async () => {
+    const { calls, begin, tool } = setup();
+    expect(text(await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD))).toBe(NO_TURN);
+    begin(turn({ tools: [WORK_SESSION_START_TOOL] }));
+    const r = await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-2", UPLOAD);
+    expect(text(r)).toBe(BOT_WORK_SESSION_SENTENCES.not_in_turn);
+    expect(calls).toEqual([]);
+  });
+
+  it("a refusal shows the API's sentence first; file_too_large keeps the API's composed sentence, else composes it from the limit", async () => {
+    const busy = setup({
+      upload: async () => ({
+        kind: "refused",
+        code: "session_busy",
+        sentence: BOT_WORK_SESSION_SENTENCES.session_busy,
+      }),
+    });
+    busy.begin();
+    const b = await busy.tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD);
+    expect(text(b)).toBe("The session is working. Upload when its turn is done.");
+    expect(b.details).toMatchObject({ ok: false, code: "session_busy" });
+
+    const composed = "That file is 30 MB. This bot moves files up to 25 MB (the organization's limit).";
+    const large = setup({
+      upload: async () => ({
+        kind: "refused",
+        code: "file_too_large",
+        sentence: composed,
+        limit: { bytes: 25 * 1024 * 1024, source: "organization" },
+        sizeBytes: 30 * 1024 * 1024,
+      }),
+    });
+    large.begin();
+    expect(text(await large.tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD))).toBe(composed);
+
+    // An older API: no limit, its base sentence.
+    const older = setup({
+      upload: async () => ({
+        kind: "refused",
+        code: "file_too_large",
+        sentence: BOT_WORK_SESSION_SENTENCES.file_too_large,
+      }),
+    });
+    older.begin();
+    expect(text(await older.tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD))).toBe(
+      "That file is larger than this bot may move.",
+    );
+
+    // No usable sentence but a limit: the size sentence is composed here.
+    const bare = setup({
+      upload: async () => ({
+        kind: "refused",
+        code: "file_too_large",
+        sentence: "",
+        limit: { bytes: 10 * 1024 * 1024, source: "bot" },
+      }),
+    });
+    bare.begin();
+    expect(text(await bare.tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD))).toBe(
+      "That file is larger than this bot may move: up to 10 MB (this bot's limit).",
+    );
+  });
+
+  it("an ended turn is the turn sentence; a timeout or a 5xx is the fixed sentence; logs carry no path", async () => {
+    const ended = setup({
+      upload: async () => {
+        throw new AgentChannelHttpError(404, "/work-sessions/upload", "gone", "unknown_turn");
+      },
+    });
+    ended.begin();
+    const e = await ended.tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD);
+    expect(text(e)).toBe(WORK_SESSION_TOOL_SENTENCES.unknown_turn);
+    expect(e.details).toMatchObject({ ok: false, code: "unknown_turn" });
+    for (const failure of [
+      new DOMException("The operation timed out.", "TimeoutError"),
+      new AgentChannelHttpError(502, "/work-sessions/upload", `boom docs/spec.pdf ${FAKE_ERROR_CANARY}`),
+    ]) {
+      const { begin, tool, logs } = setup({
+        upload: async () => {
+          throw failure;
+        },
+      });
+      begin();
+      const r = await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD);
+      expect(text(r)).toBe(WORK_SESSION_TOOL_SENTENCES.unreachable[WORK_SESSION_UPLOAD_TOOL]);
+      expect(r.details).toMatchObject({ ok: false, code: "unreachable" });
+      expect(logs.join("\n")).toContain("evt-1");
+      expect(logs.join("\n")).not.toContain("spec.pdf");
+      expect(logs.join("\n")).not.toContain(FAKE_ERROR_CANARY);
+    }
+  });
+
+  it("the tool itself never blocks a tainted or session-read turn: the route decides (D-02, D-10, D-11)", async () => {
+    const { calls, guard, tool } = setup();
+    guard.beginTurn(SESSION, { eventId: "evt-t", agentId: BOT, turn: turn(), tainted: true });
+    const t = guard.activeTurn(SESSION);
+    if (t) t.sessionOutputRead = true;
+    await tool(WORK_SESSION_UPLOAD_TOOL).execute("tc-1", UPLOAD);
+    expect(calls.map((c) => c.route)).toEqual(["upload"]);
   });
 });
 
