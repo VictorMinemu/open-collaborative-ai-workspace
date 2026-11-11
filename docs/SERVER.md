@@ -193,7 +193,9 @@ What an update does:
 2. It installs the new version beside the running one, under `~/.ocw/runtime/versions/`, with the same fixed `npm ci`
    as the install command.
 3. It waits until no session has a turn running on the server. Running turns are never cut. New prompts wait and say
-   "Restarting the OCW runtime on this device… your turn starts when it is back".
+   "Restarting the OCW runtime on this device… your turn starts when it is back". If turns are still running after 30
+   minutes, it gives up without changing anything: the waiting prompts run ("The OCW runtime update did not run; your
+   turn continues") and the run reads as failed. Press **Update** again when they finish.
 4. It switches `~/.ocw/runtime/current` and exits, so systemd or launchd restarts it on the new version. Prompts that
    were waiting run after the restart.
 
@@ -214,7 +216,8 @@ every update is one click (or none, at *Automatic*).
 the install command. Keep https wherever you can.
 
 **A new build that does not come back** (it crash-loops under the service manager): the doctor's `daemon` and
-`service` lines name it ("The runtime did not come back after updating to …"). Turn automatic updates off (this
+`service` lines name it ("The runtime did not come back after updating to …"), and after three minutes offline the
+Runtime row in Settings › Devices says **Did not come back** instead of "Restarting…". Turn automatic updates off (this
 pauses the Claude Code and Codex updates too), point `current` back to the previous build and restart:
 
 ```bash

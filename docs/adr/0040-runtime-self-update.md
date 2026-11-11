@@ -236,3 +236,62 @@ and levels, the API route's permission, preconditions, audit and abandoned runs,
 web row at 1440 and 390 px in both themes, and the isolated e2e on CI. No test touches `~/.ocw`, the real npm registry,
 a real service manager or calls `process.exit`. The real systemd restart is proven only by the owner's UAT on Server-1
 (`07.17.1-VALIDATION.md`).
+
+## Amendment (code review), 2026-11-11
+
+The phase's code review (`.planning/phases/07.17.1-runtime-self-update-from-the-browser-one-click-in-settings-d/07.17.1-REVIEW.md`,
+its Fix log names each commit and test) changed the documented behaviour below. The accepted text above stays as
+written; where it disagrees, this section decides.
+
+- **CR-01, § 8 and § 12 (a build that did not come back is remembered).** Replaces "A failed automatic run of a build
+  is not retried for that build before a back-off" for that case. When the boot reconcile finds the previous build
+  running (`finished failed`, "came back on the previous version"), it writes the target's sha256 and a time to
+  `<OCW_HOME>/runtime/self-update-failed.json` (0600, temp file + rename, no path) before the marker is removed. The
+  daemon reads it at every boot; *Automatic* never installs that build again while the workspace serves it, across any
+  number of restarts. The first check that sees another build served forgets it (memory and disk); a boot of that build
+  that succeeds (an owner's click retried it) forgets it too. A click may always retry it (D-09). Failures before the
+  switch keep the in-memory back-off, unchanged.
+- **CR-01 and IN-02, § 12 (the doctor's way back).** Replaces the manual fix: "Run `ocw-runtime updates off`, then
+  point `<OCW_HOME>/runtime/current` back to `versions/<previous>` and run `ocw-runtime service restart`; re-running the
+  install command helps only once the workspace serves a fixed build". The path is the runtime's own `OCW_HOME`,
+  `~`-shortened (`<outside home>` otherwise). `docs/SERVER.md` says the same.
+- **WR-01, § 7 and § 14 (a stop during the hold).** A daemon that stops seals every gate first (closed for good; a
+  later reopen releases nothing), and a self-update cancelled by the stop does not reopen the gates. A prompt held at
+  the self-update's (or a 07.11 CLI's) gate therefore never starts in a stopping daemon; it stays unacknowledged, and
+  PD-27 re-queues it after the restart. The run still closes `finished failed` "cancelled: the runtime stopped".
+- **WR-02, § 7 (the hold has a bound).** Once every gate is closed, a job whose turns are still running after 30
+  minutes (`SELF_UPDATE_MAX_HOLD_MS`) gives up: every gate reopens, the held turns run, nothing is cut or switched (the
+  prepared version stays for the next run), and the run reads `finished failed` with "cancelled: sessions were still
+  running after the longest wait; nothing changed, press Update again when they finish". For an automatic run this is
+  a cancel, not the build's failure: no back-off. A cancel button (a command or `DELETE` route) is **not** added.
+- **IN-04, § 7 (the session hears the hold ended).** When a hold ends without the restart and the daemon is not
+  stopping, each session it held gets `runtime.update` `failed` with `subject: "ocw-runtime"`; the web shows "The OCW
+  runtime update did not run; your turn continues".
+- **WR-03, § 11 (the web row's "did not come back").** A device offline during its own update (`self.state` not
+  idle) and not seen for 3 minutes (`SELF_NOT_BACK_AFTER_MS`) shows **Did not come back** (warning, no spinner), when
+  it was last seen, "run `ocw-runtime doctor` on the server" with `ocw-runtime updates off`, and the install command.
+- **WR-04, § 4 (the manifest is read tolerantly on the device).** The daemon parses the served manifest with
+  `parseServedRuntimeManifest`: keys a later release adds (top level, `source`, pins, bundled packages) are dropped,
+  and the result is parsed by the strict `RuntimeDistManifest`, so `sha256`, `bytes`, `version`, `minNode`, the pins
+  and `externalLockSha256` are checked exactly as before. The API's dist store stays strict.
+- **WR-05, § 5 (a stop cancels the prepare).** The job's abort kills `npm ci` and the preflight with their whole
+  process group (SIGTERM, then SIGKILL after the grace); a prepare aborted after the preflight adopts nothing. The
+  daemon's stop waits up to 5 s for the aborted prepare to remove its staging and release the lock. The boot's staging
+  cleanup retries a leftover npm made read-only.
+- **IN-03, § 5.** A complete `versions/<sha12>` is reused only when its lockfile also hashes to
+  `externalLockSha256`; after `npm ci` the bundle is hashed again before the preflight runs it.
+- **IN-08, § 5.** npm must be a JavaScript entry (`.js`/`.cjs`/`.mjs`, or a node shebang); a shim is refused with "npm
+  next to node is not a JavaScript entry; re-run the install command" and never run.
+- **IN-01, § 11.** The device reports `node_too_old` in `self.reason` when the build it last saw served needs a newer
+  Node than the one running it.
+- **WR-06, § 11 (abandoned runs).** Replaces "closed as failed … when its device is offline or reports idle" for the
+  history read. Reading `GET /devices/:id/runtime-updates` never writes or audits an `ocw-runtime` run: a run started
+  more than 30 minutes ago reads as failed "interrupted" when the device has not been seen for that long, or its stored
+  `self` is idle. The row is closed (and audited once, by the system) only by the device's own idle snapshot, under the
+  device lock, and the device's real outcome still replaces it when it comes back.
+- **IN-09, § 6.** A stop signal during the exit hand-over lowers its exit code to 0, so a `systemctl stop` does not
+  leave the unit failed; `current` already names the new build.
+- **WR-07.** The exit hand-over lives in `apps/local-runtime/src/service/hand-over.ts` (no side effects on import, one
+  guard per `run`); `cli.ts` runs its command on every import again.
+- **Not changed by the review:** the boot marker is still removed once the handshake frames were written (IN-05), and
+  the Linux service marker is still `INVOCATION_ID` with `OCW_RUNTIME_HOST=service` (IN-07).
