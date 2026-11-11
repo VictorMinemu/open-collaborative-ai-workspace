@@ -3,7 +3,10 @@ import {
   EventTypes,
   IdParams,
   InstallMethod,
+  OCW_RUNTIME_TARGET,
   RequestRuntimeUpdateResponse,
+  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
+  RUNTIME_UPDATE_TARGET_LABEL,
   type RuntimeId,
   type RuntimeMaintenanceFrame,
   type RuntimeMaintenanceStatus,
@@ -62,7 +65,6 @@ export const RUNTIME_UPDATE_REQUEST_TTL_MS = 60 * 60_000;
 export const RUNTIME_UPDATE_RUN_ABANDON_MS = 30 * 60_000;
 export const RUN_INTERRUPTED = "interrupted: the device never reported how this update ended";
 const REQUESTED_UQ = "device_runtime_updates_requested_uq";
-const RUNTIME_LABEL: Readonly<Record<RuntimeId, string>> = { "claude-code": "Claude Code", codex: "Codex" };
 
 /** The stored snapshot: the device's report plus whether it had the org level when it sent it (D-10). */
 const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true }).extend({
@@ -331,6 +333,10 @@ async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Pr
     );
 }
 
+/** A run frame about one of the two runtime CLIs (07.11); `ocw-runtime` runs are stored from 07.17.1-09. */
+type CliRunFrame = RuntimeUpdateRunFrame & { runtime: RuntimeId };
+const isCliRun = (frame: RuntimeUpdateRunFrame): frame is CliRunFrame => frame.runtime !== OCW_RUNTIME_TARGET;
+
 const byRunId = (device: DeviceRef, runId: string) =>
   and(eq(deviceRuntimeUpdates.deviceId, device.deviceId), eq(deviceRuntimeUpdates.runId, runId));
 
@@ -348,7 +354,7 @@ async function runStarted(
   tx: Tx,
   deps: MaintenanceDeps,
   device: DeviceRef,
-  frame: RuntimeUpdateRunFrame,
+  frame: CliRunFrame,
 ): Promise<boolean> {
   const [known] = await tx
     .select({ id: deviceRuntimeUpdates.id })
@@ -417,7 +423,7 @@ async function runFinished(
   tx: Tx,
   deps: MaintenanceDeps,
   device: DeviceRef,
-  frame: RuntimeUpdateRunFrame,
+  frame: CliRunFrame,
 ): Promise<boolean> {
   const outcome = frame.outcome!;
   const finished = {
@@ -527,6 +533,8 @@ export async function onRuntimeUpdateRun(
   device: DeviceRef,
   frame: RuntimeUpdateRunFrame,
 ): Promise<void> {
+  // Stored from 07.17.1-09; the CHECK refuses the value until 07.17.1-04.
+  if (!isCliRun(frame)) return;
   const locked = await lockDevice(tx, device);
   if (!locked) return;
   const changed =
@@ -588,8 +596,8 @@ function manualUpdateMessage(runtime: RuntimeId, status: RuntimeMaintenanceStatu
     ? ` Run \`${status.updateCommand}\` on the device.`
     : " Update it on the device.";
   return status.reason === "needs_admin"
-    ? `${RUNTIME_LABEL[runtime]} on this device needs administrator rights to update.${how}`
-    : `${RUNTIME_LABEL[runtime]} on this device was installed in a way OCW can't update.${how}`;
+    ? `${RUNTIME_UPDATE_TARGET_LABEL[runtime]} on this device needs administrator rights to update.${how}`
+    : `${RUNTIME_UPDATE_TARGET_LABEL[runtime]} on this device was installed in a way OCW can't update.${how}`;
 }
 
 /**
@@ -637,13 +645,16 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, false);
         // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
         await expireRequests(tx, row.id);
+        // No `ocw-runtime` row exists until 07.17.1-04 widens the column and 07.17.1-09 stores the runs.
+        if (req.query.runtime === OCW_RUNTIME_TARGET) return { runs: [] };
+        const runtime = req.query.runtime;
         const rows = await tx
           .select()
           .from(deviceRuntimeUpdates)
           .where(
             and(
               eq(deviceRuntimeUpdates.deviceId, row.id),
-              ...(req.query.runtime ? [eq(deviceRuntimeUpdates.runtime, req.query.runtime)] : []),
+              ...(runtime ? [eq(deviceRuntimeUpdates.runtime, runtime)] : []),
             ),
           )
           .orderBy(desc(deviceRuntimeUpdates.createdAt), desc(deviceRuntimeUpdates.id))
@@ -666,6 +677,13 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, true);
         if (row.status !== "online") {
           throw conflict("This device is offline. Update it once it is connected", "device_offline");
+        }
+        if (runtime === OCW_RUNTIME_TARGET) {
+          // 07.17.1-09 replaces this with the full precondition list, PD-13.
+          throw conflict(
+            RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES.self_update_unsupported,
+            "self_update_unsupported",
+          );
         }
         if ((await hub.runtimePolicy(tx)) === "off") {
           throw conflict("Runtime updates are off for this organization", "runtime_updates_off");

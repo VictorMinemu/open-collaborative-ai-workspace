@@ -3,6 +3,8 @@
 import {
   type Device,
   type InstallMethod,
+  OCW_RUNTIME_TARGET,
+  RUNTIME_UPDATE_TARGET_LABEL,
   RUNTIME_UPDATES_RANK,
   type RuntimeCompatibility,
   type RuntimeId,
@@ -11,7 +13,7 @@ import {
   type RuntimeUpdateRunState,
   type RuntimeUpdatesLevel,
 } from "@ocw/contracts";
-import { ChevronRight, History, Lock, RefreshCw, TriangleAlert, X } from "lucide-react";
+import { ChevronRight, History, Lock, RefreshCw, Server, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
@@ -53,6 +55,7 @@ export const METHOD_LABEL: Record<InstallMethod, string> = {
   windows: "Windows",
   unknown: "Unknown",
   not_installed: "Not installed",
+  ocw_bundle: "Installed from your workspace",
 };
 
 export const LEVEL_LABEL: Record<RuntimeUpdatesLevel, string> = {
@@ -489,8 +492,12 @@ function RunItem({ run }: { run: RuntimeUpdateRun }) {
   return (
     <li className="grid gap-1 px-5 py-3" data-testid="runtime-update-run" data-state={run.state}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <RuntimeLogo runtime={run.runtime} className="size-4 shrink-0 rounded-[4px]" />
-        <span className="font-medium text-sm">{RUNTIMES[run.runtime].label}</span>
+        {run.runtime === OCW_RUNTIME_TARGET ? (
+          <Server className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        ) : (
+          <RuntimeLogo runtime={run.runtime} className="size-4 shrink-0 rounded-[4px]" />
+        )}
+        <span className="font-medium text-sm">{RUNTIME_UPDATE_TARGET_LABEL[run.runtime]}</span>
         {versions ? <span className="font-mono text-muted-foreground text-xs">{versions}</span> : null}
         <Badge variant={outcome.tone}>{outcome.label}</Badge>
       </div>

@@ -27,6 +27,7 @@ import {
   type DeviceHostKind,
   type DeviceToServerFrame,
   DiffRequestPayload,
+  OCW_RUNTIME_TARGET,
   type PermissionMode,
   PromptPayload,
   RUNTIME_BYPASS_LITERALS,
@@ -114,6 +115,8 @@ export const FULL_ACCESS_OFF_MESSAGE =
 export const INVALID_PAYLOAD_MESSAGE = "invalid payload";
 /** 07.11 (PD-19): a daemon that does not maintain its CLIs (test runtimes, fake mode without a scratch HOME). */
 export const RUNTIME_UPDATES_UNAVAILABLE_MESSAGE = "runtime updates are not available on this device";
+/** 07.17.1 (PD-26): the ack of an `ocw-runtime` update on a daemon that cannot update itself. */
+export const SELF_UPDATE_UNAVAILABLE_MESSAGE = "runtime self-update is not available on this device";
 
 /** The daemon's Full access gate, shared with every adapter it builds (read on every call). */
 interface FullAccessGate {
@@ -877,8 +880,11 @@ export class Daemon {
   private async requestRuntimeUpdate(cmd: CommandFrame): Promise<void> {
     const payload = RuntimeUpdatePayload.safeParse(cmd.payload);
     if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const runtime = payload.data.runtime;
+    // 07.17.1-10 routes it to the SelfUpdate.
+    if (runtime === OCW_RUNTIME_TARGET) throw new Error(SELF_UPDATE_UNAVAILABLE_MESSAGE);
     if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
-    const answer = await this.maintenance.requestUpdate(payload.data.runtime, "manual", cmd.id);
+    const answer = await this.maintenance.requestUpdate(runtime, "manual", cmd.id);
     if (!answer.accepted) throw new Error(answer.reason);
   }
 
