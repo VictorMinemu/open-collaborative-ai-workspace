@@ -25,7 +25,14 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type InstallResolution, resolveInstall } from "./install-method.js";
-import { InstallLock, type RunProgress, runUpdate, sanitizeUpdateOutput, updateChildEnv } from "./runner.js";
+import {
+  InstallLock,
+  type RunProgress,
+  runFixedCommand,
+  runUpdate,
+  sanitizeUpdateOutput,
+  updateChildEnv,
+} from "./runner.js";
 
 const FAKE = fileURLToPath(new URL("./fake-cli/fake-cli.mjs", import.meta.url));
 
@@ -653,6 +660,55 @@ describe("sanitizeUpdateOutput (Phase 07.11, Pitfall 9)", () => {
   it("truncates above 10 KB with the marker, keeping the tail where installers print their error (07.11 review LO-06)", () => {
     const out = sanitizeUpdateOutput(`${"x".repeat(20_000)}npm error code EACCES`, [], home);
     expect(out).toMatch(/^…\[truncated 9781 bytes\]\nx{10219}npm error code EACCES$/);
+  });
+});
+
+describe("runFixedCommand (Phase 07.17.1, D-03, PD-07)", () => {
+  const base = () => ({ env, cwd: tmp, roots: [] as string[], home: "/home/x" });
+
+  it("runs a fixed argv without a shell and returns its exit code and output", async () => {
+    const r = await runFixedCommand({
+      ...base(),
+      file: process.execPath,
+      args: ["-e", "console.log(1)"],
+      timeoutMs: 10_000,
+    });
+    expect(r).toEqual({ exitCode: 0, output: "1\n", timedOut: false });
+  });
+
+  it("times out a child that outlives its limit and kills it", async () => {
+    const r = await runFixedCommand({
+      ...base(),
+      file: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60_000)"],
+      timeoutMs: 200,
+    });
+    expect(r.timedOut).toBe(true);
+    expect(r.exitCode).not.toBe(0);
+  });
+
+  it("scrubs host paths out of the output (PD-25)", async () => {
+    const r = await runFixedCommand({
+      ...base(),
+      file: process.execPath,
+      args: ["-e", "console.error('failed at /home/x/y and /opt/z/w')"],
+      timeoutMs: 10_000,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.output).not.toContain("/home/x/y");
+    expect(r.output).not.toContain("/opt/z/w");
+    expect(r.output).not.toMatch(/\/(home|tmp|opt|usr|var|Users|private)\//);
+  });
+
+  it("answers a spawn failure as a non-zero settle, never a throw", async () => {
+    const r = await runFixedCommand({
+      ...base(),
+      file: join(tmp, "does-not-exist"),
+      args: [],
+      timeoutMs: 10_000,
+    });
+    expect(r.exitCode).toBeNull();
+    expect(r.timedOut).toBe(false);
   });
 });
 
