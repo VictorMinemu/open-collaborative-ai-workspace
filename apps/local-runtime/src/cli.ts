@@ -533,7 +533,16 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-main(process.argv.slice(2)).catch((err: unknown) => {
-  process.stderr.write(`ocw-runtime: ${errorMessage(err)}\n`);
-  process.exit(1);
-});
+/**
+ * Set only by a unit test before it imports this module (07.17.1, PD-19): the import then defines the exports and
+ * runs no command (a bare import would otherwise start `run` on the real `~/.ocw`). Every real entry (the bin script,
+ * the bundle, `tsx src/cli.ts`) leaves it unset.
+ */
+const IMPORT_ONLY = (globalThis as { __OCW_CLI_IMPORT_ONLY__?: boolean }).__OCW_CLI_IMPORT_ONLY__ === true;
+
+if (!IMPORT_ONLY) {
+  main(process.argv.slice(2)).catch((err: unknown) => {
+    process.stderr.write(`ocw-runtime: ${errorMessage(err)}\n`);
+    process.exit(1);
+  });
+}
