@@ -1088,11 +1088,18 @@ export async function turnPolicy(
 
   // Phase 07.16 (D-05, PD-17): the four Work Zone session tools are turn-scoped, all or none: offered only with the
   // caller's offer and room for the four. The routes re-decide every call (the live turn, the profile, the sponsor).
-  const workZone =
-    p.workZone && computed.tools.length + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS
-      ? p.workZone
-      : null;
+  // They replace the 07.5 proposal tools: offered both, the model kept proposing (a card the person had to start) and
+  // told them it could not start sessions. The start route still falls back to a proposal after outside content.
+  const proposalTools: readonly string[] = [BUILTIN_TOOLS.workZoneProjects, BUILTIN_TOOLS.startWorkZone];
+  const kept = computed.tools.filter((name) => !proposalTools.includes(name)).length;
+  const workZone = p.workZone && kept + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS ? p.workZone : null;
   if (workZone) {
+    for (const name of proposalTools) {
+      const at = computed.tools.indexOf(name);
+      if (at === -1) continue;
+      computed.tools.splice(at, 1);
+      delete computed.toolFlags[name];
+    }
     for (const name of WORK_SESSION_TOOL_NAMES) {
       if (computed.toolFlags[name]) continue;
       computed.tools.push(name);

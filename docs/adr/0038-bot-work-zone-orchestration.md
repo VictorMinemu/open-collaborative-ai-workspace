@@ -486,3 +486,12 @@ bypasses RLS. Without `app.organization_id` it counted zero and every cap passed
   person in the audience chose outside the profile is lowered at the next sweep, not only on the bot's own turns.
   This is deliberate: the session runs under the bot's sponsor and profile. People keep every right they have on
   sessions people start.
+
+## Amendment (owner testing, 2026-11-11)
+
+**A bot with an active profile is not offered the proposal tools (§12).** On ocw.autofy.ing a bot with an active
+profile and Full access consent kept calling `ocw_start_work_zone`: offered both, the model chose the proposal card and
+told the person it could not start sessions. A delivery that offers the four `ocw_work_session_*` tools now removes
+`ocw_start_work_zone` and `ocw_work_zone_projects` from the same turn. The proposal path stays where it matters: the
+start route still falls back to a proposal after outside content (§10, D-18), and a turn with no room for the four tools
+keeps the proposal tools. A bot without a profile, or with an inactive one, gets the turn it got before.
