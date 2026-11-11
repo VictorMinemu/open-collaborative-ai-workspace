@@ -6,6 +6,7 @@ import { DiffFileStatus } from "./device-link";
 import { PermissionMode, RuntimeId, WorkSessionStatus } from "./session-events";
 import { ContextWindow, EffortLevel } from "./session-settings";
 import { PromptStatus } from "./work-session";
+import { BotFileLimit, WorkSessionFilePath } from "./work-session-files";
 
 /**
  * Bot Work Zone orchestration (Phase 07.16, D-05, D-07, BWZ-01…BWZ-05): the vocabulary a bot with a Work Zone profile
@@ -141,6 +142,34 @@ export const AgentChannelWorkSessionStop = z.strictObject({
 });
 export type AgentChannelWorkSessionStop = z.infer<typeof AgentChannelWorkSessionStop>;
 
+/**
+ * `POST /work-sessions/upload` (`ocw_work_session_upload`, 07.17.1.1 D-01, D-02): write one attachment the turn may read
+ * (the 07.15 attachment rule) to `path` in a session this bot started, only while it is idle. Strict: the bot never
+ * names a device, a user, a conversation, a URL, an absolute path or bytes; an existing file is replaced only with
+ * `overwrite: true`.
+ */
+export const AgentChannelWorkSessionUpload = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  attachmentId: Id,
+  path: WorkSessionFilePath,
+  overwrite: z.boolean().optional(),
+});
+export type AgentChannelWorkSessionUpload = z.infer<typeof AgentChannelWorkSessionUpload>;
+
+/**
+ * `POST /work-sessions/download` (`ocw_work_session_download`, 07.17.1.1 D-01, D-03): read one regular file at `path`
+ * of a session this bot started into a pending attachment of the turn's conversation, which the bot's reply links.
+ */
+export const AgentChannelWorkSessionDownload = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  path: WorkSessionFilePath,
+});
+export type AgentChannelWorkSessionDownload = z.infer<typeof AgentChannelWorkSessionDownload>;
+
 // ---------------------------------------------------------------- refusals (D-05, D-08)
 
 /** Why a Work Zone tool call was refused. A closed set; each code has one fixed sentence. */
@@ -164,6 +193,20 @@ export const BotWorkSessionRefusal = z.enum([
   "not_your_session",
   "session_ended",
   "not_allowed",
+  // 07.17.1.1 (D-01 … D-13): the upload and download tools. Appended, never reordered.
+  "attachment_not_found",
+  "path_not_allowed",
+  "file_exists",
+  "file_not_found",
+  "not_a_file",
+  "file_too_large",
+  "file_cap_reached",
+  "session_busy",
+  "session_not_running",
+  "runtime_too_old",
+  "storage_unavailable",
+  "transfer_failed",
+  "transfer_timeout",
 ]);
 export type BotWorkSessionRefusal = z.infer<typeof BotWorkSessionRefusal>;
 
@@ -196,6 +239,24 @@ export const BOT_WORK_SESSION_SENTENCES: Readonly<Record<BotWorkSessionRefusal, 
   not_your_session: "This bot can only control Work Zone sessions it started.",
   session_ended: "That session has ended.",
   not_allowed: "The bot's sponsor is not allowed to do this in the Work Zone any more.",
+  attachment_not_found:
+    "That attachment is not one this turn can use. Use a file attached in this thread before the request.",
+  path_not_allowed:
+    "That path can't be used. Name a file inside the project, outside .git, .claude, .codex and .ocw-worktrees, and not a secrets file such as .env or a private key.",
+  file_exists:
+    "That file already exists in the session. Choose another path, or set overwrite to replace it.",
+  file_not_found: "There is no file at that path in the session's working tree.",
+  not_a_file: "That path is not a regular file. Name one file; folders and links can't be moved.",
+  /** The route sends `botFileTooLargeSentence` instead when it knows the limit (07.17.1.1 PD-11). */
+  file_too_large: "That file is larger than this bot may move.",
+  file_cap_reached: "This turn has moved as many files as it may. Ask the person to send the request again.",
+  session_busy: "The session is working. Upload when its turn is done.",
+  session_not_running:
+    "The session isn't running on its device. Send it a prompt to resume it, then try again.",
+  runtime_too_old: "The device's runtime is too old to move files. Update it in Settings › Devices.",
+  storage_unavailable: "File storage is not set up on this server, so files can't be moved.",
+  transfer_failed: "The file could not be moved. Try again, or tell the person.",
+  transfer_timeout: "The device did not finish moving the file in time. Try again, or try a smaller file.",
 };
 
 /** The sentence of a `proposed` start answer (D-08, PD-15). */
@@ -222,6 +283,12 @@ export const BotWorkSessionRefused = z.object({
   sentence: z.string().max(300),
   reason: BotProfileInactiveReason.optional(),
   field: z.enum(["model", "effort", "contextWindow", "fastMode", "permissionMode"]).optional(),
+  /**
+   * 07.17.1.1 (D-07, PD-11): on `file_too_large`, the per-file limit that applied and the level that set it, and the
+   * file's size when known. Optional and plain-object: an older plugin strips them.
+   */
+  limit: BotFileLimit.optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
 });
 export type BotWorkSessionRefused = z.infer<typeof BotWorkSessionRefused>;
 
@@ -268,6 +335,36 @@ export const AgentChannelWorkSessionStopResponse = z.discriminatedUnion("kind", 
   BotWorkSessionRefused,
 ]);
 export type AgentChannelWorkSessionStopResponse = z.infer<typeof AgentChannelWorkSessionStopResponse>;
+
+/** 07.17.1.1 (D-02): the file is in the session's tree at `path` (repo-relative), `sizeBytes` long. */
+export const AgentChannelWorkSessionUploadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("uploaded"),
+    workSessionId: Id,
+    path: WorkSessionFilePath,
+    sizeBytes: z.number().int().nonnegative(),
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionUploadResponse = z.infer<typeof AgentChannelWorkSessionUploadResponse>;
+
+/**
+ * 07.17.1.1 (D-03, PD-17): the file is a pending attachment of the turn's conversation (`attachmentId`), linked by the
+ * bot's reply; `name` is the sanitised base name, `contentType` the sniffed type. Never the bytes: the bot reads them
+ * only through `ocw_attachment_read` on a later turn.
+ */
+export const AgentChannelWorkSessionDownloadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("downloaded"),
+    workSessionId: Id,
+    attachmentId: Id,
+    name: z.string().max(255),
+    sizeBytes: z.number().int().nonnegative(),
+    contentType: z.string().max(200),
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionDownloadResponse = z.infer<typeof AgentChannelWorkSessionDownloadResponse>;
 
 // ---------------------------------------------------------------- the redacted read model (PD-14, D-10)
 

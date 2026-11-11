@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import { AgentCard } from "./agent-cards";
 import {
+  AgentChannelWorkSessionDownload,
+  AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionPrompt,
   AgentChannelWorkSessionPromptResponse,
   AgentChannelWorkSessionRead,
@@ -10,8 +12,6 @@ import {
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionStop,
   AgentChannelWorkSessionStopResponse,
-  AgentChannelWorkSessionDownload,
-  AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionUpload,
   AgentChannelWorkSessionUploadResponse,
   BOT_PROFILE_STATUS_SENTENCES,
@@ -837,9 +837,10 @@ describe("upload and download bodies, answers and refusals (07.17.1.1 D-01, D-02
       { absolutePath: "/Users/ana/repo/docs/spec.pdf" },
       { bytes: "aGVsbG8=" },
     ]) {
-      expect(AgentChannelWorkSessionUpload.safeParse({ ...upload, ...extra }).success, Object.keys(extra)[0]).toBe(
-        false,
-      );
+      expect(
+        AgentChannelWorkSessionUpload.safeParse({ ...upload, ...extra }).success,
+        Object.keys(extra)[0],
+      ).toBe(false);
     }
     const { attachmentId: _, ...noAttachment } = upload;
     expect(AgentChannelWorkSessionUpload.safeParse(noAttachment).success).toBe(false);
@@ -849,7 +850,9 @@ describe("upload and download bodies, answers and refusals (07.17.1.1 D-01, D-02
 
   it("the download body is ids and a path, nothing else", () => {
     expect(AgentChannelWorkSessionDownload.parse(download)).toEqual(download);
-    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, attachmentId: ATTACHMENT }).success).toBe(false);
+    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, attachmentId: ATTACHMENT }).success).toBe(
+      false,
+    );
     expect(AgentChannelWorkSessionDownload.safeParse({ ...download, overwrite: true }).success).toBe(false);
     expect(AgentChannelWorkSessionDownload.safeParse({ ...download, deviceId: DEVICE }).success).toBe(false);
     expect(AgentChannelWorkSessionDownload.safeParse({ ...download, path: "a\\b" }).success).toBe(false);
@@ -881,12 +884,18 @@ describe("upload and download bodies, answers and refusals (07.17.1.1 D-01, D-02
     const wrongSource = { ...tooLarge, limit: { bytes: 10 * MiB, source: "user" } };
     expect(AgentChannelWorkSessionUploadResponse.safeParse(wrongSource).success).toBe(false);
     expect(AgentChannelWorkSessionDownloadResponse.safeParse(wrongSource).success).toBe(false);
-    expect(AgentChannelWorkSessionUploadResponse.safeParse({ ...uploaded, path: "/abs" }).success).toBe(false);
-    expect(AgentChannelWorkSessionDownloadResponse.safeParse({ ...downloaded, name: "x".repeat(256) }).success).toBe(
+    expect(AgentChannelWorkSessionUploadResponse.safeParse({ ...uploaded, path: "/abs" }).success).toBe(
       false,
     );
+    expect(
+      AgentChannelWorkSessionDownloadResponse.safeParse({ ...downloaded, name: "x".repeat(256) }).success,
+    ).toBe(false);
     // 07.16 answers and refusals keep parsing without the new optional fields.
-    const legacy = { kind: "refused", code: "session_ended", sentence: BOT_WORK_SESSION_SENTENCES.session_ended };
+    const legacy = {
+      kind: "refused",
+      code: "session_ended",
+      sentence: BOT_WORK_SESSION_SENTENCES.session_ended,
+    };
     expect(AgentChannelWorkSessionStopResponse.parse(legacy)).toEqual(legacy);
   });
 
@@ -910,18 +919,21 @@ describe("upload and download bodies, answers and refusals (07.17.1.1 D-01, D-02
         "That attachment is not one this turn can use. Use a file attached in this thread before the request.",
       path_not_allowed:
         "That path can't be used. Name a file inside the project, outside .git, .claude, .codex and .ocw-worktrees, and not a secrets file such as .env or a private key.",
-      file_exists: "That file already exists in the session. Choose another path, or set overwrite to replace it.",
+      file_exists:
+        "That file already exists in the session. Choose another path, or set overwrite to replace it.",
       file_not_found: "There is no file at that path in the session's working tree.",
       not_a_file: "That path is not a regular file. Name one file; folders and links can't be moved.",
       file_too_large: "That file is larger than this bot may move.",
-      file_cap_reached: "This turn has moved as many files as it may. Ask the person to send the request again.",
+      file_cap_reached:
+        "This turn has moved as many files as it may. Ask the person to send the request again.",
       session_busy: "The session is working. Upload when its turn is done.",
       session_not_running:
         "The session isn't running on its device. Send it a prompt to resume it, then try again.",
       runtime_too_old: "The device's runtime is too old to move files. Update it in Settings › Devices.",
       storage_unavailable: "File storage is not set up on this server, so files can't be moved.",
       transfer_failed: "The file could not be moved. Try again, or tell the person.",
-      transfer_timeout: "The device did not finish moving the file in time. Try again, or try a smaller file.",
+      transfer_timeout:
+        "The device did not finish moving the file in time. Try again, or try a smaller file.",
     });
     expect(BOT_WORK_SESSION_SENTENCES.not_in_turn).toBe("Work Zone sessions are not available on this turn.");
     expect(BOT_WORK_SESSION_SENTENCES.not_allowed).toBe(

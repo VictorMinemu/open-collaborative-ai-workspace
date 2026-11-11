@@ -570,6 +570,17 @@ export const BUILTIN_TOOLS = {
   workSessionRead: "ocw_work_session_read",
   workSessionStop: "ocw_work_session_stop",
   /**
+   * 07.17.1.1 (D-01, D-02, ADR-0041): upload one attachment of the turn's thread into a session this bot started, as a
+   * repo-relative path, through `POST /work-sessions/upload`. Turn-scoped (never in `GET /cell`), offered with the four
+   * 07.16 tools all-or-none, self-validated in the cell, never approvable (not in `APPROVABLE_BUILTINS`).
+   */
+  workSessionUpload: "ocw_work_session_upload",
+  /**
+   * 07.17.1.1 (D-01, D-03): download one file of a session this bot started back to the conversation as a pending
+   * attachment the bot's reply links, through `POST /work-sessions/download`. Same offer and gates as the upload.
+   */
+  workSessionDownload: "ocw_work_session_download",
+  /**
    * 07.17 (D-02, PD-07, ADR-0039): a fan-out automation's run turn opens one conversation per new item (a thread in
    * the automation's channel, or a card on its board) through `POST /conversations/open`, which decides the target,
    * the run, the caps and the dedupe from the stored turn and audits each call. Offered only on run turns of fan-out
@@ -598,6 +609,25 @@ export const WORK_SESSION_TOOL_FLAGS: Readonly<Record<WorkSessionToolName, TurnT
   ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
   ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+};
+
+/**
+ * 07.17.1.1 (D-01, PD-26): the two file tools, declared apart so 07.17.1.1-10 switches the offer (and
+ * `WORK_SESSION_TOOL_NAMES`) to six in one step.
+ */
+export const WORK_SESSION_FILE_TOOL_NAMES = [
+  BUILTIN_TOOLS.workSessionUpload,
+  BUILTIN_TOOLS.workSessionDownload,
+] as const;
+export type WorkSessionFileToolName = (typeof WORK_SESSION_FILE_TOOL_NAMES)[number];
+
+/**
+ * 07.17.1.1 (D-02, D-03, D-10): both write somewhere (the session's tree, the conversation), so side-effecting; the
+ * answer is the platform's own ids and the name the bot asked for, never the file's content.
+ */
+export const WORK_SESSION_FILE_TOOL_FLAGS: Readonly<Record<WorkSessionFileToolName, TurnToolFlags>> = {
+  ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
 };
 
 /**

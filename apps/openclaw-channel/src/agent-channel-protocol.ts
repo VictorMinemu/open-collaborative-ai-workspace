@@ -604,6 +604,86 @@ export const AgentChannelWorkSessionStop = z.strictObject({
 });
 export type AgentChannelWorkSessionStop = z.infer<typeof AgentChannelWorkSessionStop>;
 
+// ---------------------------------------------------------------- bot file exchange (07.17.1.1, mirror of contracts
+// work-session-files.ts and bot-work-zone.ts; parity: plugin-contract.test.ts)
+
+/** The members of the contracts' `BOT_FILE_LIMITS` the plugin uses (the local path check, the caps, the timeout). */
+export const BOT_FILE_LIMITS = {
+  pathMaxChars: 1024,
+  segmentMaxChars: 255,
+  filesPerTurnEachWay: 5,
+  transferMaxMs: 600_000,
+} as const;
+
+/** Contracts `hasUnsafePathChar`: C0 controls, DEL and the bidi controls, compared by code point. */
+function hasUnsafeFilePathChar(p: string): boolean {
+  for (const ch of p) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c <= 0x1f || c === 0x7f || c === 0x200e || c === 0x200f) return true;
+    if ((c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) return true;
+  }
+  return false;
+}
+
+const isSafeFileSegment = (seg: string) =>
+  seg !== "" &&
+  seg !== "." &&
+  seg !== ".." &&
+  seg.length <= BOT_FILE_LIMITS.segmentMaxChars &&
+  !seg.endsWith(" ") &&
+  !seg.endsWith(".");
+
+/**
+ * Contracts `WorkSessionFilePath`: a repo-relative file path (1 … 1 024 characters, never absolute, `~`, a drive, a
+ * backslash, a control or bidi character; every segment non-empty, not `.` or `..`, ≤ 255 characters, not ending in a
+ * space or a dot). The tools check it locally; the API and the device check it again.
+ */
+export const WorkSessionFilePath = z
+  .string()
+  .min(1)
+  .max(BOT_FILE_LIMITS.pathMaxChars)
+  .refine(
+    (p) =>
+      !p.startsWith("/") &&
+      !p.startsWith("~") &&
+      !/^[A-Za-z]:/.test(p) &&
+      !p.includes("\\") &&
+      !hasUnsafeFilePathChar(p) &&
+      p.split("/").every(isSafeFileSegment),
+    { message: "must be a file path inside the session's working tree" },
+  );
+
+/** Contracts `BotFileLimitSource`, `BotFileLimit` and `BOT_FILE_LIMIT_SOURCE_LABELS`. */
+export const BotFileLimitSource = z.enum(["bot", "organization", "server"]);
+export type BotFileLimitSource = z.infer<typeof BotFileLimitSource>;
+export const BotFileLimit = z.object({ bytes: z.number().int().positive(), source: BotFileLimitSource });
+export type BotFileLimit = z.infer<typeof BotFileLimit>;
+export const BOT_FILE_LIMIT_SOURCE_LABELS: Readonly<Record<BotFileLimitSource, string>> = {
+  bot: "this bot's limit",
+  organization: "the organization's limit",
+  server: "the server's limit",
+};
+
+/** `POST /work-sessions/upload` (`ocw_work_session_upload`): ids and a repo-relative path; strict. */
+export const AgentChannelWorkSessionUpload = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  attachmentId: Id,
+  path: WorkSessionFilePath,
+  overwrite: z.boolean().optional(),
+});
+export type AgentChannelWorkSessionUpload = z.infer<typeof AgentChannelWorkSessionUpload>;
+
+/** `POST /work-sessions/download` (`ocw_work_session_download`): ids and a repo-relative path; strict. */
+export const AgentChannelWorkSessionDownload = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  workSessionId: Id,
+  path: WorkSessionFilePath,
+});
+export type AgentChannelWorkSessionDownload = z.infer<typeof AgentChannelWorkSessionDownload>;
+
 /** The contracts' refusal codes, in their order. */
 export const BotWorkSessionRefusal = z.enum([
   "not_in_turn",
@@ -625,6 +705,19 @@ export const BotWorkSessionRefusal = z.enum([
   "not_your_session",
   "session_ended",
   "not_allowed",
+  "attachment_not_found",
+  "path_not_allowed",
+  "file_exists",
+  "file_not_found",
+  "not_a_file",
+  "file_too_large",
+  "file_cap_reached",
+  "session_busy",
+  "session_not_running",
+  "runtime_too_old",
+  "storage_unavailable",
+  "transfer_failed",
+  "transfer_timeout",
 ]);
 export type BotWorkSessionRefusal = z.infer<typeof BotWorkSessionRefusal>;
 
@@ -657,6 +750,23 @@ export const BOT_WORK_SESSION_SENTENCES: Readonly<Record<BotWorkSessionRefusal, 
   not_your_session: "This bot can only control Work Zone sessions it started.",
   session_ended: "That session has ended.",
   not_allowed: "The bot's sponsor is not allowed to do this in the Work Zone any more.",
+  attachment_not_found:
+    "That attachment is not one this turn can use. Use a file attached in this thread before the request.",
+  path_not_allowed:
+    "That path can't be used. Name a file inside the project, outside .git, .claude, .codex and .ocw-worktrees, and not a secrets file such as .env or a private key.",
+  file_exists:
+    "That file already exists in the session. Choose another path, or set overwrite to replace it.",
+  file_not_found: "There is no file at that path in the session's working tree.",
+  not_a_file: "That path is not a regular file. Name one file; folders and links can't be moved.",
+  file_too_large: "That file is larger than this bot may move.",
+  file_cap_reached: "This turn has moved as many files as it may. Ask the person to send the request again.",
+  session_busy: "The session is working. Upload when its turn is done.",
+  session_not_running:
+    "The session isn't running on its device. Send it a prompt to resume it, then try again.",
+  runtime_too_old: "The device's runtime is too old to move files. Update it in Settings › Devices.",
+  storage_unavailable: "File storage is not set up on this server, so files can't be moved.",
+  transfer_failed: "The file could not be moved. Try again, or tell the person.",
+  transfer_timeout: "The device did not finish moving the file in time. Try again, or try a smaller file.",
 };
 
 export const BOT_WORK_SESSION_PROPOSED_SENTENCE =
@@ -703,6 +813,9 @@ export const BotWorkSessionRefused = z.object({
     .enum(["model", "effort", "contextWindow", "fastMode", "permissionMode"])
     .optional()
     .catch(undefined),
+  /** 07.17.1.1 (D-07): the limit that applied and the file's size on `file_too_large`; unknown values read as absent. */
+  limit: BotFileLimit.optional().catch(undefined),
+  sizeBytes: z.number().int().nonnegative().optional().catch(undefined),
 });
 export type BotWorkSessionRefused = z.infer<typeof BotWorkSessionRefused>;
 
@@ -772,6 +885,32 @@ export const AgentChannelWorkSessionStopResponse = z.discriminatedUnion("kind", 
   BotWorkSessionRefused,
 ]);
 export type AgentChannelWorkSessionStopResponse = z.infer<typeof AgentChannelWorkSessionStopResponse>;
+
+/** 07.17.1.1: the file is in the session's tree at `path`, `sizeBytes` long. */
+export const AgentChannelWorkSessionUploadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("uploaded"),
+    workSessionId: Id,
+    path: WorkSessionFilePath,
+    sizeBytes: z.number().int().nonnegative(),
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionUploadResponse = z.infer<typeof AgentChannelWorkSessionUploadResponse>;
+
+/** 07.17.1.1: the file is a pending attachment of the turn's conversation; the bot's reply links it. Never bytes. */
+export const AgentChannelWorkSessionDownloadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("downloaded"),
+    workSessionId: Id,
+    attachmentId: Id,
+    name: z.string().max(255),
+    sizeBytes: z.number().int().nonnegative(),
+    contentType: z.string().max(200),
+  }),
+  BotWorkSessionRefused,
+]);
+export type AgentChannelWorkSessionDownloadResponse = z.infer<typeof AgentChannelWorkSessionDownloadResponse>;
 
 /** A person who may decide the session's approvals (the bot names them, it never decides). */
 export const WorkSessionDecider = z.object({ id: Id, handle: z.string().max(64), displayName: WorkZoneName });

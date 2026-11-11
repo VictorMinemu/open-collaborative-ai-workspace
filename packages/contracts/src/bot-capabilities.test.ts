@@ -812,7 +812,10 @@ describe("the two Work Zone file tools (07.17.1.1 D-01, PD-04, PD-26)", () => {
   it("are built-ins, side-effecting with trusted output, declared apart from the four 07.16 tools", () => {
     expect(BUILTIN_TOOLS.workSessionUpload).toBe("ocw_work_session_upload");
     expect(BUILTIN_TOOLS.workSessionDownload).toBe("ocw_work_session_download");
-    expect([...WORK_SESSION_FILE_TOOL_NAMES]).toEqual(["ocw_work_session_upload", "ocw_work_session_download"]);
+    expect([...WORK_SESSION_FILE_TOOL_NAMES]).toEqual([
+      "ocw_work_session_upload",
+      "ocw_work_session_download",
+    ]);
     expect(WORK_SESSION_FILE_TOOL_FLAGS).toEqual({
       ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
       ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },

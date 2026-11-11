@@ -56,7 +56,23 @@ describe("WorkSessionFilePath (07.17.1.1 D-02, D-03, principle 7)", () => {
   });
 
   it("refuses absolute, home, drive, backslash and traversal forms", () => {
-    for (const p of ["", "/etc/passwd", "~/x", "~", "C:/x", "c:x", "a\\b", "C:\\x", "a//b", "./a", "a/..", "a/./b", "../x", "a/", "/"]) {
+    for (const p of [
+      "",
+      "/etc/passwd",
+      "~/x",
+      "~",
+      "C:/x",
+      "c:x",
+      "a\\b",
+      "C:\\x",
+      "a//b",
+      "./a",
+      "a/..",
+      "a/./b",
+      "../x",
+      "a/",
+      "/",
+    ]) {
       expect(ok(p), JSON.stringify(p)).toBe(false);
     }
   });
