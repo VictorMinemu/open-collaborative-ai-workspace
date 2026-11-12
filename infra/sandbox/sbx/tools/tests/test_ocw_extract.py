@@ -289,5 +289,237 @@ class Pdf(Base):
         assert_reason(self, err)
 
 
+def lol_run(value):
+    """The longest run of consecutive `lol` in `value` (an expanded billion-laughs payload would be thousands)."""
+    runs = [len(m.group(0)) // 3 for m in re.finditer(r"(?:lol)+", value)]
+    return max(runs, default=0)
+
+
+def body_of(out):
+    return "\n".join(text(out).splitlines()[1:])
+
+
+class Ocr(Base):
+    def test_a_scanned_pdf_is_ocrd_page_by_page(self):
+        rc, out, err = cli("fx/scan.pdf")
+        self.assertEqual(rc, 0, err)
+        self.assertBounded(out)
+        result = text(out)
+        self.assertTrue(result.splitlines()[0].endswith("· text 0 · ocr 2 ==="), result.splitlines()[0])
+        p1, p2 = result.index("--- page 1 (ocr) ---"), result.index("--- page 2 (ocr) ---")
+        self.assertIn("politica de devoluciones", fold(result[p1:p2]))
+        self.assertIn("senalizacion de salidas", fold(result[p2:]))
+
+    def test_ocr_never_reports_pages_without_a_text_layer(self):
+        rc, out, err = cli("fx/scan.pdf", "--ocr", "never")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertTrue(result.splitlines()[0].endswith("· text 2 · ocr 0 ==="), result.splitlines()[0])
+        self.assertIn("no text layer", result)
+        self.assertNotIn("devoluciones", fold(result))
+
+    def test_a_mixed_pdf_reads_one_page_and_ocrs_the_other(self):
+        rc, out, err = cli("fx/mixed.pdf")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertIn("· text 1 · ocr 1 ===", result.splitlines()[0])
+        self.assertIn("--- page 1 ---", result)
+        self.assertIn("--- page 2 (ocr) ---", result)
+        self.assertIn("facturación", result)
+        self.assertIn("politica de devoluciones", fold(result))
+
+    def test_ocr_always_ocrs_text_pages_too(self):
+        rc, out, err = cli("fx/text.pdf", "--ocr", "always")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertIn("· text 0 · ocr 2 ===", result.splitlines()[0])
+        self.assertIn("--- page 1 (ocr) ---", result)
+        self.assertIn("--- page 2 (ocr) ---", result)
+        self.assertIn("facturacion", fold(result))
+
+    def test_a_huge_mediabox_is_rasterized_within_bounds(self):
+        started = time.monotonic()
+        rc, out, err = cli("fx/huge.pdf", timeout=180)
+        self.assertEqual(rc, 0, err)
+        self.assertLess(time.monotonic() - started, 120)
+        self.assertBounded(out)
+
+    def test_an_encrypted_pdf_exits_5_naming_the_password(self):
+        rc, _out, err = cli("fx/encrypted.pdf")
+        self.assertEqual(rc, 5, err)
+        assert_reason(self, err, "password")
+
+    def test_ocr_stops_at_50_pages_per_call(self):
+        rc, out, err = cli("fx/ocr55.pdf", timeout=900)
+        self.assertEqual(rc, 0, err)
+        self.assertBounded(out)
+        lines = text(out).rstrip("\n").splitlines()
+        self.assertEqual(lines[0], "=== ocr55.pdf · pdf · pages 1-50 of 55 · text 0 · ocr 50 ===")
+        self.assertEqual(lines[-1], "[ocr stopped at page 50 (50 pages per call): use --pages 51-55 or --batch]")
+
+    def test_only_spanish_and_english_are_accepted(self):
+        rc, _out, err = cli("fx/scan.pdf", "--lang", "deu")
+        self.assertEqual(rc, 2)
+        assert_reason(self, err, "--lang")
+
+
+class Images(Base):
+    def test_every_claimed_image_format_is_ocrd(self):
+        for name, label in (
+            ("sign.png", "PNG"),
+            ("sign.webp", "WEBP"),
+            ("sign.tiff", "TIFF"),
+            ("sign.avif", "AVIF"),
+            ("sign.heic", "HEIC"),
+        ):
+            with self.subTest(name=name):
+                rc, out, err = cli(f"fx/{name}")
+                self.assertEqual(rc, 0, err)
+                self.assertBounded(out)
+                result = text(out)
+                kind = name.split(".")[1]
+                self.assertTrue(result.startswith(f"=== {name} · {kind}"), result[:80])
+                self.assertIn(f"image: {label} · 1400x240", result)
+                self.assertIn("emergencia", fold(result))
+        rc, out, _err = cli("--types")
+        for kind in ("png", "webp", "tiff", "avif", "heic"):
+            self.assertIn(kind, text(out).split())
+
+    def test_a_tiny_image_gets_metadata_only_in_auto_mode(self):
+        rc, out, err = cli("fx/tiny.png")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertIn("image: PNG · 40x40", result)
+        self.assertIn("too small to OCR", result)
+
+
+class Office(Base):
+    def test_writer_documents_come_out_as_clean_utf8(self):
+        for name in ("plan.docx", "plan.odt", "plan.doc", "plan.rtf"):
+            with self.subTest(name=name):
+                rc, out, err = cli(f"fx/{name}")
+                self.assertEqual(rc, 0, err)
+                self.assertBounded(out)
+                result = text(out)
+                self.assertIn("Plan anual 2026", result)
+                self.assertIn("Región Norte", result)
+
+    def test_slides_keep_their_order(self):
+        for name in ("slides.pptx", "slides.odp", "slides.ppt"):
+            with self.subTest(name=name):
+                rc, out, err = cli(f"fx/{name}")
+                self.assertEqual(rc, 0, err)
+                self.assertBounded(out)
+                result = text(out)
+                s1, s2 = result.index("### slide 1"), result.index("### slide 2")
+                self.assertLess(s1, s2)
+                self.assertIn("Plan de acción", result[s1:s2])
+                self.assertIn("Próximos pasos", result[s2:])
+
+    def test_slides_take_a_page_range(self):
+        rc, out, err = cli("fx/slides.pptx", "--pages", "2-2")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("### slide 1", text(out))
+        self.assertIn("### slide 2", text(out))
+
+
+class Sheets(Base):
+    def test_every_sheet_is_csv_under_its_name(self):
+        # .xls goes through LibreOffice (xlrd was dropped for its license): converted to .xlsx, then read like one.
+        for name in ("ventas.xlsx", "ventas.xls", "ventas.ods"):
+            with self.subTest(name=name):
+                rc, out, err = cli(f"fx/{name}")
+                self.assertEqual(rc, 0, err)
+                self.assertBounded(out)
+                result = text(out)
+                v = result.index("### sheet: Ventas")
+                self.assertIn("Región,Importe", result[v:])
+                self.assertIn("Norte,1200", result[v:])
+                self.assertIn("### sheet: Notas", result)
+                self.assertLess(v, result.index("### sheet: Notas"))
+
+
+class TextFormats(Base):
+    def test_a_latin1_csv_comes_out_as_utf8(self):
+        rc, out, err = cli("fx/latin1.csv")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertIn("### sheet: latin1", result)
+        self.assertIn("Región;Importe;Año", result)
+        self.assertIn("Logística, almacén y distribución", result)
+
+    def test_json_is_text(self):
+        rc, out, err = cli("fx/data.json")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Señora Pérez", text(out))
+
+    def test_html_without_script_or_style(self):
+        rc, out, err = cli("fx/page.html")
+        self.assertEqual(rc, 0, err)
+        result = text(out)
+        self.assertIn("Texto visible", result)
+        self.assertIn("Información pública", result)
+        self.assertNotIn(make_fixtures.HTML_SCRIPT_TEXT, result)
+        self.assertNotIn(make_fixtures.HTML_STYLE_TEXT, result)
+
+    def test_entity_expansion_payloads_stay_unexpanded(self):
+        with open(f"{FX}/lol.xml", encoding="utf-8") as f:
+            source_run = lol_run(f.read())
+        started = time.monotonic()
+        rc, out, err = cli("fx/lol.xml", timeout=60)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Texto XML", text(out))
+        self.assertLessEqual(lol_run(text(out)), source_run)
+        started = time.monotonic()
+        rc, out, err = cli("fx/lol.xlsx", timeout=60)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn(rc, (0, 7), err)
+        self.assertLessEqual(lol_run(text(out) + err), source_run)
+        if rc == 7:
+            assert_reason(self, err, "entit")
+
+
+class Hostile(Base):
+    def test_a_load_event_macro_never_runs(self):
+        marker = f"{FX}/{make_fixtures.MACRO_MARKER}"
+        rc, out, err = cli("fx/macro.fodt")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(make_fixtures.MACRO_TEXT, text(out))
+        self.assertFalse(os.path.exists(marker))
+        # A bot's own plain conversion, with its profile in /workspace, does not run it either (finalized ocw.xcd).
+        profile = f"{WS}/.config/lo-test"
+        try:
+            proc = subprocess.run(
+                [
+                    "soffice",
+                    "--headless",
+                    "--norestore",
+                    f"-env:UserInstallation=file://{profile}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    f"{WS}/out-macro",
+                    f"{FX}/macro.fodt",
+                ],
+                capture_output=True,
+                timeout=180,
+                env=make_fixtures.env(WS),
+                cwd=WS,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+            self.assertTrue(os.path.isfile(f"{WS}/out-macro/macro.pdf"))
+            self.assertFalse(os.path.exists(marker))
+        finally:
+            shutil.rmtree(f"{WS}/.config", ignore_errors=True)
+            shutil.rmtree(f"{WS}/out-macro", ignore_errors=True)
+
+    def test_an_unknown_binary_is_unsupported(self):
+        rc, _out, err = cli("fx/blob.bin")
+        self.assertEqual(rc, 3)
+        assert_reason(self, err, "application/octet-stream", "--types")
+
+
 if __name__ == "__main__":
     unittest.main()
