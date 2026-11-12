@@ -469,7 +469,8 @@ class Batch:
         self.archive_rels.add(rel)
         entries = archives.list_archive(path, type_name, self.steps)
         problem = archives.check_caps(
-            entries, runner.free_bytes(), st.st_size if type_name in archives.TAR else None
+            entries, runner.room_bytes() - bounds.ARCHIVE_FREE_MARGIN_BYTES,
+            st.st_size if type_name in archives.TAR else None,
         )
         if problem:
             raise bounds.CapsError(problem)

@@ -13,6 +13,7 @@ back with a cap, so a hostile input cannot fill this process's memory through a 
 
 import contextlib
 import os
+import re
 import resource
 import secrets
 import shutil
@@ -247,14 +248,47 @@ def python_argv(module, function, *args):
     return [sys.executable, "-I", "-c", WORKER, LIB_DIR, module, function, *[str(a) for a in args]]
 
 
-def _remove_stale(root):
+def start_time(pid):
+    """The start time of `pid` in clock ticks since boot (/proc/<pid>/stat field 22), or None when it is gone. With the
+    pid it names one process for good: a reused pid starts later."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    rest = data[data.rfind(b")") + 2 :].split()
+    return rest[19].decode() if len(rest) > 19 else None
+
+
+def owner_tag():
+    """`<pid>-<start time>` of this process: scratch folders and LibreOffice profiles carry it in their names."""
+    return f"{os.getpid()}-{start_time(os.getpid()) or 0}"
+
+
+_OWNED = re.compile(r"^(?:run|ocw-lo)-(\d+)-(\d+)-")
+
+
+def _owner_gone(name):
+    """True when the folder's owner (its `<pid>-<start>` tag) is no longer running, None for a name without a tag."""
+    m = _OWNED.match(name)
+    if not m:
+        return None
+    return start_time(int(m.group(1))) != m.group(2)
+
+
+def _remove_stale(root, prefix=""):
+    """Remove what a killed run left under `root` (07.17.1.1.1 review WR-06): a folder whose owning run is gone at
+    once, a folder without an owner tag (an older ocw-extract) once it is an hour old. A live run's folder stays."""
     now = time.time()
     with contextlib.suppress(FileNotFoundError):
         for name in os.listdir(root):
+            if not name.startswith(prefix):
+                continue
             path = os.path.join(root, name)
             with contextlib.suppress(OSError):
                 st = os.lstat(path)
-                if now - st.st_mtime > SCRATCH_STALE_S:
+                gone = _owner_gone(name)
+                if gone or (gone is None and now - st.st_mtime > SCRATCH_STALE_S):
                     if os.path.isdir(path) and not os.path.islink(path):
                         shutil.rmtree(path, ignore_errors=True)
                     else:
@@ -264,14 +298,15 @@ def _remove_stale(root):
 @contextlib.contextmanager
 def scratch(root=None):
     """A private 0700 scratch directory for one run under /workspace/.ocw-extract-tmp (disk, not the memory-backed
-    /tmp), removed in a `finally`; leftovers older than one hour (a killed run) are removed first."""
+    /tmp), removed in a `finally`; what a killed run left (its scratch and LibreOffice profile) is removed first."""
     global _scratch
     root = root or SCRATCH_ROOT
     os.makedirs(root, mode=0o700, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(root, 0o700)
     _remove_stale(root)
-    path = tempfile.mkdtemp(prefix="run-", dir=root)
+    _remove_stale("/tmp", LO_PROFILE_PREFIX)
+    path = tempfile.mkdtemp(prefix=f"run-{owner_tag()}-", dir=root)
     previous = _scratch
     _scratch = path
     try:
@@ -286,7 +321,7 @@ def scratch(root=None):
 @contextlib.contextmanager
 def lo_profile():
     """A throwaway LibreOffice profile under /tmp (PD-06), removed afterwards; yields its file:// URL."""
-    path = tempfile.mkdtemp(prefix=LO_PROFILE_PREFIX + secrets.token_hex(4) + "-", dir="/tmp")
+    path = tempfile.mkdtemp(prefix=f"{LO_PROFILE_PREFIX}{owner_tag()}-{secrets.token_hex(4)}-", dir="/tmp")
     try:
         yield "file://" + path
     finally:
@@ -343,6 +378,15 @@ def confine(path, *, for_output=False, want_dir=False, allow_dir=False):
 def free_bytes(path=bounds.WORKSPACE):
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize
+
+
+def room_bytes(path=bounds.WORKSPACE):
+    """What may still be written to the workspace: the disk's free space, and never more than the room left under the
+    bot's soft quota that sandboxd exported (07.17.1.1.1 review WR-06), so an extraction cannot push the workspace over
+    its quota and get the shell stopped `disk_full` in the middle of it."""
+    free = free_bytes(path)
+    room = bounds.workspace_room(os.environ)
+    return free if room is None else min(free, room)
 
 
 class Steps:

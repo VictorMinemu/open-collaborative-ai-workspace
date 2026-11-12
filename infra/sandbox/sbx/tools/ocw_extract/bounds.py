@@ -40,6 +40,9 @@ ARCHIVE_RATIO_MIN_ENTRY_BYTES = 10 * 1024 * 1024
 ARCHIVE_MAX_DEPTH = 1
 ARCHIVE_FREE_MARGIN_BYTES = 64 * 1024 * 1024
 ARCHIVE_WATCH_INTERVAL_S = 0.25
+# The room left under the bot's soft disk quota when the exec started (07.17.1.1.1 review WR-06): sandboxd sets it
+# from the organization's quota and its last measurement of the workspace; absent when it knows neither.
+DISK_ROOM_ENV = "OCW_DISK_ROOM_BYTES"
 
 # Batch (PD-08).
 BATCH_DEFAULT_BUDGET_S = 450
@@ -199,6 +202,12 @@ def exec_deadline(environ):
     if not value.isdigit() or int(value) < 1:
         return None
     return int(value)
+
+
+def workspace_room(environ):
+    """The bytes left under the workspace's soft quota that sandboxd exported, or None (unknown, or a hand run)."""
+    value = str(environ.get(DISK_ROOM_ENV, "") or "")
+    return int(value) if value.isdigit() else None
 
 
 def batch_budget(requested, deadline):

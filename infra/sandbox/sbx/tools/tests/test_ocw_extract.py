@@ -291,6 +291,35 @@ class Runner(Base):
                         os.kill(pid, 9)
             shutil.rmtree(f"{WS}/.ocw-extract-tmp", ignore_errors=True)
 
+    def test_the_next_run_removes_what_a_killed_run_left(self):
+        """07.17.1.1.1 review WR-06: a SIGKILLed run's scratch folder and LibreOffice profile are removed by the next
+        run at once (their owner is gone), never only after an hour; a live run's are kept."""
+        from ocw_extract import runner
+
+        root = f"{WS}/.ocw-extract-tmp"
+        me = f"{os.getpid()}-{runner.start_time(os.getpid())}"
+        dead = [f"{root}/run-999999-1-dead", "/tmp/ocw-lo-999999-1-dead", f"{root}/run-1-1-reused"]
+        live = [f"{root}/run-{me}-live", f"/tmp/ocw-lo-{me}-live"]
+        legacy_old, legacy_new = f"{root}/run-legacyold", f"{root}/run-legacynew"
+        for path in dead + live + [legacy_old, legacy_new]:
+            os.makedirs(path, exist_ok=True)
+            with open(f"{path}/left.bin", "wb") as f:
+                f.write(b"x" * 1024)
+        old = time.time() - 2 * 3600
+        os.utime(legacy_old, (old, old))
+        try:
+            with runner.scratch():
+                pass
+            for path in dead + [legacy_old]:
+                self.assertFalse(os.path.exists(path), path)
+            for path in live + [legacy_new]:
+                self.assertTrue(os.path.isdir(path), path)
+        finally:
+            for path in dead + live + [legacy_old, legacy_new]:
+                shutil.rmtree(path, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                os.rmdir(root)
+
     def test_argv_is_never_a_string(self):
         from ocw_extract import runner
 

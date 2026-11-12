@@ -1,12 +1,13 @@
 """Archives (phase 07.17.1.1.1, D-05, PD-09; RESEARCH "Security Domain", "Don't Hand-Roll").
 
 Single-file mode only lists. `--batch` lists first and refuses the archive (exit 6 when it is the top-level argument)
-when the listing breaks a cap: a total over ARCHIVE_MAX_TOTAL_BYTES or the free space of /workspace, more than
-ARCHIVE_MAX_ENTRIES entries, an entry over 10 MiB packed more than ARCHIVE_MAX_RATIO to 1, an absolute or `..` path,
-a link or a special file. A listing can lie, so the extraction runs with RLIMIT_FSIZE and under a
-size watcher that sums the bytes really written every 0.25 s against min(cap, free space − 64 MiB): above it the
-child's process tree is killed, the destination removed and the archive refused (`caps: extracted size`). Every extracted
-path is re-checked to stay under the destination. Symbolic links are never stored on extraction.
+when the listing breaks a cap: a total over ARCHIVE_MAX_TOTAL_BYTES or the room left in /workspace (its free space,
+and the room under the bot's soft quota that sandboxd exports), more than ARCHIVE_MAX_ENTRIES entries, an entry over
+10 MiB packed more than ARCHIVE_MAX_RATIO to 1, an absolute or `..` path, a link or a special file. A listing can lie,
+so the extraction runs with RLIMIT_FSIZE and under a size watcher that sums the bytes really written every 0.25 s
+against min(cap, room − 64 MiB): above it the child's process tree is killed, the destination removed and the archive
+refused (`caps: extracted size`). Every extracted path is re-checked to stay under the destination. Symbolic links
+are never stored on extraction.
 
 zip and 7z go through 7-Zip (`7zz`); tar and tar.gz through the stdlib `tarfile` in a child interpreter (7-Zip lists
 a .tar.gz as the single .tar inside it), which writes regular files and folders only.
@@ -220,9 +221,9 @@ def check_tree(dest):
 def extract(path, dest, max_bytes=None, timeout=bounds.STEP_TIMEOUTS["7zz_extract"], type_name="zip"):
     """Extract `path` into the new folder `dest` under the PD-09 size watcher. On a cap the child's process group is
     killed, `dest` removed and CapsError raised (exit 6); on its timeout StepTimeout (exit 7)."""
-    limit = min(max_bytes or bounds.ARCHIVE_MAX_TOTAL_BYTES, runner.free_bytes() - bounds.ARCHIVE_FREE_MARGIN_BYTES)
+    limit = min(max_bytes or bounds.ARCHIVE_MAX_TOTAL_BYTES, runner.room_bytes() - bounds.ARCHIVE_FREE_MARGIN_BYTES)
     if limit <= 0:
-        raise bounds.CapsError("caps: extracted size (no free space left in /workspace)")
+        raise bounds.CapsError("caps: extracted size (no room left in /workspace or under its quota)")
     os.makedirs(dest, mode=0o700, exist_ok=False)
     if type_name in TAR:
         argv = runner.python_argv("ocw_extract.archives", "tar_extract_child", path, dest, limit)

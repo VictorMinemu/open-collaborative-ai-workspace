@@ -23,6 +23,7 @@ import { type Docker, DockerUnavailableError, demux } from "./docker";
 import type { Egress } from "./egress-attach";
 import {
   type ContainerLimits,
+  DISK_ROOM_ENV,
   type DockerRuntime,
   egressHostsCurrent,
   filesSpec,
@@ -1133,9 +1134,16 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
 
       const id = randomBytes(12).toString("base64url");
       const seconds = Math.ceil(input.timeoutMs / 1000);
+      // The room left under the soft quota at the last measurement (07.17.1.1.1 review WR-06): ocw-extract caps an
+      // archive's extraction with it, so it never pushes the workspace over and gets the shell stopped mid-run.
+      const quota = limitsFor(input.target.orgId)?.diskQuotaBytes;
+      const used = diskBytes.get(targetKey(input.target));
+      const room =
+        quota !== undefined && used !== undefined ? [`${DISK_ROOM_ENV}=${Math.max(0, quota - used)}`] : [];
       const created = await call("POST", `/containers/${encodeURIComponent(c.Id)}/exec`, {
         User: SANDBOX_USER,
         Cmd: [OCW_RUN, id, String(seconds), "--", ...input.argv],
+        ...(room.length > 0 ? { Env: room } : {}),
         WorkingDir: input.cwd ? `${WORKSPACE}/${input.cwd}` : WORKSPACE,
         AttachStdin: false,
         AttachStdout: true,

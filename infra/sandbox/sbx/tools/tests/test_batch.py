@@ -581,6 +581,27 @@ class Caps(Base):
             archives.extract(f"{FX}/big.zip", dest, max_bytes=8 * 1024 * 1024)
             self.assertEqual(os.path.getsize(os.path.join(dest, "big.bin")), 5 * 1024 * 1024)
 
+    def test_the_archive_cap_respects_the_workspace_room_sandboxd_passes(self):
+        """07.17.1.1.1 review WR-06: the room left under the bot's soft quota (OCW_DISK_ROOM_BYTES, set by sandboxd on
+        every exec) caps an extraction, not only the disk's free space."""
+        from test_ocw_extract import BOT_ENV
+
+        from ocw_extract import bounds
+
+        margin = bounds.ARCHIVE_FREE_MARGIN_BYTES
+        tight = dict(BOT_ENV, OCW_DISK_ROOM_BYTES=str(margin + 3 * 1024 * 1024))
+        fresh(f"{WS}/extracted/big.zip")
+        rc, _out, err = cli("--batch", "fx/big.zip", env=tight)
+        self.assertEqual(rc, 6, err)
+        assert_reason(self, err, "caps: total size")
+        roomy = dict(BOT_ENV, OCW_DISK_ROOM_BYTES=str(margin + 64 * 1024 * 1024))
+        fresh(f"{WS}/extracted/big.zip")
+        rc, _out, err = cli("--batch", "fx/big.zip", env=roomy)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(bounds.workspace_room({"OCW_DISK_ROOM_BYTES": "123"}), 123)
+        for bad in ({}, {"OCW_DISK_ROOM_BYTES": "x"}, {"OCW_DISK_ROOM_BYTES": "-1"}):
+            self.assertIsNone(bounds.workspace_room(bad), bad)
+
     def test_hostile_top_level_archives_exit_6(self):
         for name, needle in (("bomb.zip", "ratio"), ("traversal.zip", "path"), ("link.zip", "link")):
             with self.subTest(name=name):
