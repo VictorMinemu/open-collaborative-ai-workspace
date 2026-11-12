@@ -175,13 +175,6 @@
     "repo": "https://github.com/python/tzdata"
   },
   {
-    "name": "xlrd",
-    "version": "2.0.2",
-    "license": "BSD-3-Clause AND LicenseRef-xlrd-Giffin-advertising",
-    "source": "pypi",
-    "repo": "http://www.python-excel.org/"
-  },
-  {
     "name": "xlsxwriter",
     "version": "3.3.1",
     "license": "BSD-2-Clause",

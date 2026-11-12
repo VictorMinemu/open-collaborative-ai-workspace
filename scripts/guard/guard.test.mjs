@@ -446,9 +446,15 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
     ]);
   });
 
-  it("the pypdfium2 and xlrd records admit only their pinned versions", () => {
+  it("the pypdfium2 record admits only its pinned version; xlrd is not pinned and has no record", () => {
     const REAL = new Map(collectPythonLock(REPO_ROOT, PYTHON_LOCKS[0]).map((e) => [e.name, e]));
-    for (const name of ["pypdfium2", "xlrd"]) {
+    assert.equal(REAL.has("xlrd"), false, "xlrd was dropped: .xls goes through LibreOffice");
+    assert.equal(
+      policy.exceptions.some((e) => e.name === "xlrd"),
+      false,
+      "no policy exception for a dropped pin",
+    );
+    for (const name of ["pypdfium2"]) {
       const pinned = REAL.get(name);
       assert.ok(pinned, `${name} is pinned`);
       assert.equal(evaluate(pinned.license, policy), "deny", `${name} needs its policy record`);

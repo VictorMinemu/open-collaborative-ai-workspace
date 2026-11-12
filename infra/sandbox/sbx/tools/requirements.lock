@@ -824,9 +824,6 @@ typing-extensions==4.16.0 \
 tzdata==2026.6 \
     --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec
     # via python-dateutil
-xlrd==2.0.2 \
-    --hash=sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9
-    # via -r requirements.in
 xlsxwriter==3.3.1 \
     --hash=sha256:8e2c89e59d733fe59e112317218c64fbbc276d90a8c144ebd6f7fa15e7ab184a
     # via python-pptx

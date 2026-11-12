@@ -9,7 +9,9 @@
 #
 # Removed from D-03 (D-09): extract-msg (GPL, and a GPL/LGPL tree of about eight more pins; Debian `msgconvert` plus
 # the stdlib `email` parser read .msg), odfpy (sdist only, refused by `--only-binary :all:`; LibreOffice reads ODF),
-# chardet (charset-normalizer covers it and is already a pdfminer.six dependency), PyMuPDF (AGPL/commercial).
+# chardet (charset-normalizer covers it and is already a pdfminer.six dependency), PyMuPDF (AGPL/commercial), xlrd
+# (its LICENSE adds a four-clause BSD-style text with an advertising clause, outside the allow list; dropped on
+# 2026-11-12 by the orchestrator: `ocw-extract` reads legacy .xls through LibreOffice, 07.17.1.1.1-03).
 # held back by the 14-day rule on 2026-11-12 (7.0.0 uploaded 2026-11-06, 7.0.1 on 2026-11-10)
 pypdf<7.0.0
 pdfplumber
@@ -18,7 +20,6 @@ openpyxl
 python-pptx
 # held back by the 14-day rule on 2026-11-12 (3.1.1 uploaded 2026-11-04)
 pandas<3.1.1
-xlrd
 Pillow
 pytesseract
 charset-normalizer

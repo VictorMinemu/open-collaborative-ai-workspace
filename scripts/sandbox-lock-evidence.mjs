@@ -63,7 +63,6 @@ export const KNOWN_PROJECTS = {
   soupsieve: ["github.com/facelessuser/soupsieve"],
   "typing-extensions": ["github.com/python/typing_extensions"],
   tzdata: ["github.com/python/tzdata"],
-  xlrd: ["github.com/python-excel/xlrd", "www.python-excel.org"],
   xlsxwriter: ["github.com/jmcnamara/xlsxwriter"],
 };
 

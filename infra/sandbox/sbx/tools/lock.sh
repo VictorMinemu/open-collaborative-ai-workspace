@@ -13,7 +13,7 @@
 #   pip-tools lives only in a scratch venv of this throwaway container (dev-time, never in the image).
 # - Prints one JSON line per pin: name, version, License-Expression, the first line of License, the `License ::`
 #   classifiers, Home-page, every Project-URL and the license files the wheel ships. `--show` also prints the text of
-#   those license files for the named wheels (for example xlrd's LICENSE or pypdfium2's BUILD_LICENSES/).
+#   those license files for the named wheels (for example pypdfium2's BUILD_LICENSES/).
 # - Needs the network: deb.debian.org (python3, pip, venv) and pypi.org / files.pythonhosted.org. Nothing secret is
 #   mounted; only this folder, at /work.
 # - Never runs on CI. Re-run it when `requirements.in` changes and at the 07.17.1.1.1 gate, then review
