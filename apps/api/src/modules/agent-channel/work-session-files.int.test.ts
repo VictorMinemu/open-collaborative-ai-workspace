@@ -137,10 +137,15 @@ async function ask(
   await su.query("delete from app.agent_usage_daily");
   const bot = opts.bot ?? { id: atlasId, handle: "atlas" };
   const { threadRootId, attachmentIds } = opts;
-  const messageId = await post(ana, opts.conv ?? engId, `@${bot.handle} ${text} ${randomUUID().slice(0, 6)}`, {
-    ...(threadRootId ? { threadRootId } : {}),
-    ...(attachmentIds ? { attachmentIds } : {}),
-  });
+  const messageId = await post(
+    ana,
+    opts.conv ?? engId,
+    `@${bot.handle} ${text} ${randomUUID().slice(0, 6)}`,
+    {
+      ...(threadRootId ? { threadRootId } : {}),
+      ...(attachmentIds ? { attachmentIds } : {}),
+    },
+  );
   return { messageId, eventId: await turnOf(messageId, bot.id) };
 }
 
@@ -392,7 +397,10 @@ const saveProfile = (over: Partial<BotWorkZoneProfileInput> = {}) =>
 beforeAll(async () => {
   // The device's working tree: the FakeDevice reads the session's README from here (only its bytes cross the wire).
   scratch = await mkdtemp(join(tmpdir(), "ocw-bot-files-"));
-  await writeFile(join(scratch, "README.md"), `# billing-api\n\nInvoices, ledgers and the tests for all of them.\n`);
+  await writeFile(
+    join(scratch, "README.md"),
+    `# billing-api\n\nInvoices, ledgers and the tests for all of them.\n`,
+  );
   readme = new Uint8Array(await readFile(join(scratch, "README.md")));
   expect(readme.length).toBe(64);
   storage = await startTestStorage();

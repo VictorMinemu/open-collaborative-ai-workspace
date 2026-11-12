@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
+  AgentChannelWorkSessionDownload,
+  AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionUpload,
   AgentChannelWorkSessionUploadResponse,
   type BotFileLimit,
@@ -37,10 +39,14 @@ import { type CallRecord, createWorkSessionCalls, readOnly } from "./work-sessio
 /**
  * Phase 07.17.1.1 (D-01 … D-13; PD-06, PD-07, PD-09, PD-11 … PD-14, PD-16, PD-18): a bot moves files between the
  * conversation it started a Work Zone session from and that session, through the Agent Channel API.
- * `POST /agent-channel/v1/work-sessions/upload` (`ocw_work_session_upload`, this plan) puts a file someone attached in
- * the turn's thread into the session's working tree; 07.17.1.1-13 adds `/work-sessions/download` through the same
- * order (`runFileCall`, one copy). The body names the turn, the bot, the session, the attachment and a repo-relative
- * path only (strict: no device, user, conversation, URL, absolute path or bytes; 400 otherwise, P6).
+ * `POST /agent-channel/v1/work-sessions/upload` (`ocw_work_session_upload`, 07.17.1.1-12) puts a file someone attached
+ * in the turn's thread into the session's working tree; `POST /agent-channel/v1/work-sessions/download`
+ * (`ocw_work_session_download`, 07.17.1.1-13) brings one file of the session back as a pending attachment of the turn,
+ * which the bot's reply for that turn links (`linkTurnAttachments`) so the conversation's readers open it (D-03,
+ * PD-17). Both run the same order (`runFileCall`, one copy); a direction is a `FileMove`. The body names the turn, the
+ * bot, the session, (upload) the attachment and a repo-relative path only (strict: no device, user, conversation, URL,
+ * absolute path or bytes; 400 otherwise, P6). A download works while the session runs; only an upload needs it idle
+ * (D-13, decided by `botFiles.prepare*`).
  *
  * Decided like a prompt (07.16-16), in the PD-06 order:
  * - tx0, user-less: the delivered turn of THIS bot in the cell's organization (RLS hides another organization's) → 404
@@ -50,7 +56,8 @@ import { type CallRecord, createWorkSessionCalls, readOnly } from "./work-sessio
  *   (`storage_unavailable`) → upload: the attachment the turn may read (`attachmentForTurn`, the 07.15 rule; anything
  *   else answers `attachment_not_found` exactly like a missing id, D-02) and its size against the limit
  *   (`file_too_large` with the limit and the size, before any byte moves). Never resolved as the sponsor: RLS would
- *   decide on the wrong person's rights (ADR-0037 D-16, P4).
+ *   decide on the wrong person's rights (ADR-0037 D-16, P4). A download has no step here: the device reports the file's
+ *   size against the limit before any byte moves (`too_large: <n>` → `file_too_large`).
  * - The transfer id is created and its ack waiter subscribed BEFORE the command can exist (PD-18), aborted on any
  *   refusal.
  * - txB, AS THE SESSION'S SPONSOR (`bot_work_sessions.sponsor_user_id`): the live turn → the tool → the bot's own
@@ -71,6 +78,7 @@ import { type CallRecord, createWorkSessionCalls, readOnly } from "./work-sessio
 const tags = ["agent-channel"];
 const bearer = [{ cellToken: [] as string[] }];
 const UPLOAD = BUILTIN_TOOLS.workSessionUpload;
+const DOWNLOAD = BUILTIN_TOOLS.workSessionDownload;
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
 const UNKNOWN: unique symbol = Symbol("unknown_turn");
 
@@ -100,7 +108,7 @@ type RefuseBeforeClaim = (
 
 /** One direction of a file move: what differs between the upload and the download; the order is `runFileCall`'s. */
 interface FileMove<S, A extends { kind: string }> {
-  tool: typeof UPLOAD | typeof BUILTIN_TOOLS.workSessionDownload;
+  tool: typeof UPLOAD | typeof DOWNLOAD;
   done: {
     action: "bot.work_session_upload" | "bot.work_session_download";
     outcome: "uploaded" | "downloaded";
@@ -380,5 +388,38 @@ export function registerBotWorkSessionFileRoutes(
         finish: (tx, transferId, ack) => botFiles.finish(tx, { transferId, direction: "to_device", ack }),
       });
     },
+  );
+
+  scope.post(
+    "/work-sessions/download",
+    {
+      config: { authz: "cell" as const },
+      schema: {
+        tags,
+        security: bearer,
+        body: AgentChannelWorkSessionDownload,
+        response: { 200: AgentChannelWorkSessionDownloadResponse },
+      },
+    },
+    async (req) =>
+      runFileCall<null, AgentChannelWorkSessionDownloadResponse>(cellOf(req), req.body, {
+        tool: DOWNLOAD,
+        done: { action: "bot.work_session_download", outcome: "downloaded" },
+        // Nothing to take from the chat: the file comes from the session's tree.
+        asAsker: async () => ({ source: null }),
+        // PD-18: the file's size is unknown until the device reports it, so the deadline is the limit's.
+        deadlineBytes: (_source, limit) => limit.bytes,
+        // PD-17: the attachment id is chosen here; the device's PUT stores the bytes under it, pending for the turn.
+        prepare: (tx, p) =>
+          botFiles.prepareDownload(tx, {
+            turn: p.turn,
+            profile: p.profile,
+            own: p.own,
+            path: p.path,
+            limit: p.limit,
+            transferId: p.transferId,
+          }),
+        finish: (tx, transferId, ack) => botFiles.finish(tx, { transferId, direction: "from_device", ack }),
+      }),
   );
 }
