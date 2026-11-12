@@ -1134,6 +1134,58 @@ Verifications). On `https://ocw.autofy.ing`, with the headless server and the te
 8. **Audit.** The rows show ids and counts only:
    `select action, result, metadata from app.audit_events where action like 'automation.%' order by occurred_at desc limit 10;`
 
+## Bot file exchange with its Work Zone sessions (Phase 07.17.1.1)
+
+Phase 07.17.1.1 (ADR-0041). A bot with a Work Zone profile moves files between the thread and the session it started
+there:
+
+- **Upload.** `ocw_work_session_upload` copies an attachment of the thread into the bot's own session, at a
+  repo-relative path (`docs/notes.md`). The file shows in the session's changes like any new file. An existing file
+  is replaced only when the bot asks for it.
+- **Download.** `ocw_work_session_download` copies one file of the session back into the thread as an attachment of
+  the bot's reply. People open and download it like any other attachment.
+- **Where it works.** Only in the conversation where the bot started the session (elsewhere: "not your session").
+  Uploads only while the session is idle, with no prompt waiting or running (one writer per working tree). Downloads
+  also while it runs.
+- **The limits.** Settings › Work Zone policy › Bots › **Largest file a bot moves**: default 25 MB, at most the
+  server's `OCW_ATTACHMENT_MAX_BYTES`. The bot's sheet › Work Zone › Limits › **Largest file**: empty means the
+  organization's, never above it. The lower one applies, and a refusal names it: "That file is 40 MB. This bot moves
+  files up to 25 MB (the organization's limit)."
+- **What is refused, both ways.** Any path outside the project (absolute, `..`, symlinks out of the tree), `.git`,
+  `.ocw-worktrees`, `.claude`, `.codex`, `.mcp.json`, `.env` and `.env.*` (but `.env.example`), key and credential
+  files (`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, …). Symlinks, folders and other non-regular files are refused
+  too.
+- **Budgets.** At most 5 files each way per turn, inside the turn's 8 tool calls. Each move counts as one prompt of
+  the profile's hourly prompt budget (30 by default), whatever its outcome.
+- **The device.** Bytes go over HTTPS between the device and its own workspace (`/api/v1/runtime/files/`, the
+  device's token), never over the Device Link. A device on an older runtime answers "update the runtime" (Settings ›
+  Devices › Update). Behind your own proxy or CDN, see
+  [reverse-proxy.md](self-hosting/reverse-proxy.md#bringing-your-own-reverse-proxy) (rule 5).
+- **Audit.** `bot.work_session_upload`, `bot.work_session_download` and `bot.work_session_refused` carry ids, the
+  size, the sha256 and the path's length, never a path, a file name or content.
+
+The automated tests use the real local-runtime daemon with a fake runtime and a fake cell (e2e) and a real OpenClaw
+cell (smoke).
+
+**Owner check** (never run by an agent: it needs a real model, the real cell and the real Work Zone server; record the
+result in
+`.planning/phases/07.17.1.1-bot-file-exchange-with-its-work-zone-sessions-upload-chat-at/07.17.1.1-VALIDATION.md` ›
+Manual-Only Verifications). On `https://ocw.autofy.ing`, with the headless server and the team bot of Phase 07.16, the
+server updated to this runtime (Settings › Devices › the server › Runtime updates › **Update**, Phase 07.17.1):
+
+1. **Upload.** In a thread where the bot runs a session, attach a small file and ask the bot to put it in the session
+   (for example at `docs/notes.md`). The bot says it did. **Open session** › Changes lists the file as new.
+2. **Download.** Ask for a file of the project back (`README.md`). The bot's reply carries it as an attachment.
+   Download it and open it: it is the project's file.
+3. **A big file.** Attach a 20 MB file and ask the bot to put it in the session, then to send it back. Both work
+   within the default 25 MB (a long tool call through the real cell).
+4. **The bot's limit.** The bot's sheet › Work Zone › Limits › **Largest file**: 1 MB, Save. Ask it to put a 2 MB file
+   in the session. The bot relays "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit)." Empty the
+   field and Save.
+5. **Secrets.** Ask the bot to download `.env` from the session. It is refused.
+6. **Audit.** The rows show ids, sizes and hashes only, never a path:
+   `select action, result, metadata from app.audit_events where action in ('bot.work_session_upload', 'bot.work_session_download', 'bot.work_session_refused') order by occurred_at desc limit 10;`
+
 ## Troubleshooting
 
 | Symptom | Fix |

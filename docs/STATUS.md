@@ -196,3 +196,23 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   follows the release (0.3.1, shown as "0.3.1 · <build>"). History and audit carry builds, never a path. Limits: a
   v0.3.0 runtime still needs the install command once; no desktop app self-update, no bundle signatures, no Windows
   service (ADR-0040, docs/SERVER.md › Updates).
+- **07.17.1.1 Bot file exchange with its Work Zone sessions:** a bot with a Work Zone profile gets two more turn-scoped
+  tools, offered with the four of 07.16 (all six or none): `ocw_work_session_upload` copies an attachment of the thread
+  (`attachmentForTurn`, decided as the asker) into its own session at a repo-relative `WorkSessionFilePath`, and
+  `ocw_work_session_download` copies one regular file of the session back as a pending attachment the bot's reply
+  links (`POST /agent-channel/v1/work-sessions/upload|download`, `agent-channel/work-session-files.ts`, strict ids-only
+  bodies). Both work only in the session's origin conversation, run as the sponsor (`work_session.prompt` to upload,
+  `work_session.read` to download), follow the 07.16 taint and session-output rules, and cost one unit of the hourly
+  prompt budget each (ledger `app.bot_work_session_files`, tenant RLS, no path column), at most 5 a turn each way.
+  Uploads need an idle session (one writer per tree); downloads also run while it works. The per-file limit is the
+  lowest of the bot's "Largest file", the organization's "Largest file a bot moves" (25 MB default) and
+  `OCW_ATTACHMENT_MAX_BYTES`, recomputed per call and named in the refusal. One shared deny list (`.git`,
+  `.ocw-worktrees`, `.claude`, `.codex`, `.mcp.json`, `.env*`, keys and credentials) applies both ways in the API and,
+  authoritatively, on the device, which also checks realpath containment, `O_NOFOLLOW` regular files, size, sha256 and
+  free space. Bytes never cross the Device Link: `session.file.write|read` carry a path and bounds, and the daemon
+  streams over `GET|PUT /api/v1/runtime/files/:transferId` on its own server URL with its device JWT (single use,
+  expiring, 4 streams per process, 413 before reading, Garage multipart in 8 MiB parts). An older daemon answers
+  "update the runtime". `diff.result` frames are bounded under the 256 KiB device frame. Audit
+  (`bot.work_session_upload|download|refused`) carries ids, size, sha256 and the path's length, never a path. Limits:
+  no downloads from a finished session, no file list on the live card, proxies and CDNs must pass the body (ADR-0041,
+  docs/self-hosting/reverse-proxy.md).
