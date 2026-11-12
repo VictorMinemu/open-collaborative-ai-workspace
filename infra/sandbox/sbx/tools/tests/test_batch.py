@@ -390,6 +390,41 @@ class BudgetRule(Base):
         self.assertRegex(out.splitlines()[0], SUMMARY)
 
 
+class Housekeeping(Base):
+    """07.17.1.1.1 review IN-06: a `done` row whose mirror was deleted is rebuilt, and the mirrors and rows of sources
+    that are gone are removed; nothing else is redone."""
+
+    def test_a_deleted_mirror_is_rebuilt_and_a_deleted_source_leaves_no_orphan(self):
+        import zipfile
+
+        src = copy_fixtures(f"{WS}/house", ["latin1.csv", "text.pdf"])
+        with zipfile.ZipFile(f"{src}/pack.zip", "w") as z:
+            z.writestr("a.txt", "una nota\n")
+            z.writestr("b.txt", "otra nota\n")
+        out_root = fresh(f"{WS}/extracted/house")
+        rc, _out, err = cli("--batch", src)
+        self.assertEqual(rc, 0, err)
+        _header, before = index(out_root)
+        pdf_mtime = os.stat(f"{out_root}/text.pdf.txt").st_mtime_ns
+
+        os.unlink(f"{out_root}/latin1.csv.txt")
+        os.unlink(f"{out_root}/pack.zip.d/b.txt.txt")
+        rc, _out, err = cli("--batch", src)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.isfile(f"{out_root}/latin1.csv.txt"))
+        self.assertTrue(os.path.isfile(f"{out_root}/pack.zip.d/b.txt.txt"))
+        self.assertEqual(os.stat(f"{out_root}/text.pdf.txt").st_mtime_ns, pdf_mtime)  # untouched, not redone
+
+        os.unlink(f"{src}/text.pdf")
+        os.unlink(f"{src}/pack.zip")
+        rc, _out, err = cli("--batch", src)
+        self.assertEqual(rc, 0, err)
+        _header, after = index(out_root)
+        self.assertEqual(sorted(after), ["latin1.csv"])
+        self.assertEqual(after["latin1.csv"]["_line"], before["latin1.csv"]["_line"])
+        self.assertEqual(sorted(listing(out_root)), ["_index.tsv", "_index.tsv.lock", "latin1.csv.txt"])
+
+
 class Lock(Base):
     """07.17.1.1.1 review WR-07: one batch at a time writes an output folder; a second is refused, never interleaved."""
 

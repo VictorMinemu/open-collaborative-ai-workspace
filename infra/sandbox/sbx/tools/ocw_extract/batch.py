@@ -256,6 +256,47 @@ class Batch:
             if os.path.exists(tmp):
                 os.unlink(tmp)
 
+    def member_mirror(self, arch, member):
+        return os.path.normpath(os.path.join(self.out, arch + ".d", member + ".txt"))
+
+    def mirrors_kept(self, rel, row):
+        """A final row is trusted only while what it wrote is still there (07.17.1.1.1 review IN-06): a `done` file's
+        mirror, or every `done` member's mirror of an archive. A deleted mirror makes the entry run again."""
+        if row.status != "done":
+            return True
+        if row.f["type"] in detect.FAMILIES["archive"] and "!" not in rel:
+            prefix = rel + "!"
+            return all(
+                os.path.isfile(self.member_mirror(rel, key[len(prefix) :]))
+                for key, member in self.rows.items()
+                if key.startswith(prefix) and member.status == "done"
+            )
+        if "!" in rel and rel.split("!", 1)[0] in self.rows:
+            arch, member = rel.split("!", 1)
+            return os.path.isfile(self.member_mirror(arch, member))
+        return os.path.isfile(self.mirror_for(rel))
+
+    def inside_out(self, path):
+        folder = os.path.realpath(os.path.dirname(path))
+        return path.startswith(self.out + "/") and (folder == self.out or folder.startswith(self.out + "/"))
+
+    def forget_gone(self):
+        """Remove the rows of sources the walk no longer finds, and what they wrote (07.17.1.1.1 review IN-06): a
+        file's `.txt` (and `.partial`), an archive's `<rel>.d/` tree of member mirrors. Only paths under the output
+        folder are touched, never through a symbolic link."""
+        kept = {row.f["path"] for row in self.ordered()}
+        for key in [k for k in self.rows if k not in kept]:
+            row = self.rows.pop(key)
+            if "!" in key:
+                continue  # a member of an archive that is gone: its `.d` tree goes with the archive's row
+            target = os.path.normpath(os.path.join(self.out, key + ".txt"))
+            if self.inside_out(target):
+                self.drop(target)
+            if row.f["type"] in detect.FAMILIES["archive"]:
+                tree = os.path.normpath(os.path.join(self.out, key + ".d"))
+                if self.inside_out(tree) and os.path.isdir(tree) and not os.path.islink(tree):
+                    shutil.rmtree(tree, ignore_errors=True)
+
     @staticmethod
     def drop(path):
         for p in (path, path + ".partial"):
@@ -279,7 +320,7 @@ class Batch:
             self.note_moved(rel)
             return
         prev = self.rows.get(rel)
-        if prev is not None and prev.status in FINAL and prev.same_file(st):
+        if prev is not None and prev.status in FINAL and prev.same_file(st) and self.mirrors_kept(rel, prev):
             return
         self.process_file(rel, entry.path, st, prev, top=entry.top)
 
@@ -490,7 +531,7 @@ class Batch:
                 key = f"{rel}!{os.path.relpath(mpath, dest)}"
                 mst = os.lstat(mpath)
                 mprev = self.rows.get(key)
-                if mprev is not None and mprev.status in FINAL and mprev.same_file(mst):
+                if mprev is not None and mprev.status in FINAL and mprev.same_file(mst) and self.mirrors_kept(key, mprev):
                     continue
                 self.process_file(key, mpath, mst, mprev, member=True)
                 self.maybe_write()
@@ -566,6 +607,7 @@ class Batch:
     def finish(self, more):
         """Write the index and the summary; 75 while work remains, 0 when done, and exit 8 (StuckError) when work
         remains but this run left the index exactly as it found it: running it again would do the same."""
+        self.forget_gone()
         self.write()
         stuck = more and [row.line() for row in self.ordered()] == self.loaded_lines
         self.summary(more=more and not stuck)
