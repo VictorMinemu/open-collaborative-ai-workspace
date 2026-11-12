@@ -1342,6 +1342,17 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         const name = nameFor("files", ns, target.agentId);
         let h = await inspectContainer(name);
         if (h && !labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        // An idle helper built from an older image (a rebuilt tag) is removed and created again from the current one
+        // before it is reused (07.17.1.1.1 review IN-08), as a stopped shell is; one with a file op in flight is kept.
+        if (h && !filesBusy.has(h.Id) && h.Image) {
+          const want = await currentImageId();
+          if (want && h.Image !== want) {
+            const removed = await call("DELETE", `/containers/${encodeURIComponent(h.Id)}?force=1`);
+            if (removed.status !== 204 && removed.status !== 404) throw dockerDown();
+            filesUsed.delete(h.Id);
+            h = null;
+          }
+        }
         if (!h) {
           const p = await probe();
           if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);

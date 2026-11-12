@@ -412,3 +412,38 @@ describe("restart re-creates a drifted shell and restarts an up-to-date one in p
     );
   });
 });
+
+describe("the files helper follows a rebuilt image too (07.17.1.1.1 review IN-08)", () => {
+  const helper = (s: ReturnType<typeof setup>) => s.docker.container(nameFor("files", NS, AGENT));
+
+  it("an idle helper built from an older image is removed and created again before it is reused", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    await s.sandboxes.stop({ target, reason: "idle" });
+    const first = await s.sandboxes.workspace(target);
+    expect(first.kind).toBe("files");
+    expect(helper(s)?.ImageId).toBe("sha256:old");
+    s.docker.images.set(IMAGE, "sha256:new");
+    s.mark();
+    const second = await s.sandboxes.workspace(target);
+    expect(second.kind).toBe("files");
+    expect(second.containerId).not.toBe(first.containerId);
+    expect(helper(s)?.ImageId).toBe("sha256:new");
+    expect(s.deletes().map((c) => c.path)).toEqual([
+      `/containers/${encodeURIComponent(first.containerId)}?force=1`,
+    ]);
+    expect(s.volumeCalls()).toEqual([]);
+  });
+
+  it("a helper on the current image is reused as before", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    await s.sandboxes.stop({ target, reason: "idle" });
+    const first = await s.sandboxes.workspace(target);
+    s.mark();
+    const second = await s.sandboxes.workspace(target);
+    expect(second.containerId).toBe(first.containerId);
+    expect(s.deletes()).toEqual([]);
+    expect(s.creates()).toEqual([]);
+  });
+});
