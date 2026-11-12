@@ -521,5 +521,59 @@ class Hostile(Base):
         assert_reason(self, err, "application/octet-stream", "--types")
 
 
+def workspace_files():
+    found = set()
+    for root, dirs, files in os.walk(WS):
+        dirs[:] = [d for d in dirs if d != ".ocw-extract-tmp"]
+        found.update(os.path.join(root, n) for n in files)
+    return found
+
+
+class Mail(Base):
+    def test_an_eml_prints_headers_body_and_attachments(self):
+        rc, out, err = cli("fx/pedido.eml")
+        self.assertEqual(rc, 0, err)
+        self.assertBounded(out)
+        result = text(out)
+        self.assertIn("From: Ana Gómez <ana@example.invalid>", result)
+        self.assertIn("To: Equipo de ventas <ventas@example.invalid>", result)
+        self.assertIn("Subject: Pedido 42", result)
+        self.assertIn("Date: ", result)
+        self.assertIn("Hola equipo", result)
+        size = os.path.getsize(f"{FX}/text.pdf")
+        self.assertIn(f"### attachment: factura.pdf · application/pdf · {size} bytes", result)
+
+    def test_a_file_that_is_not_an_outlook_message_fails_naming_msgconvert(self):
+        rc, _out, err = cli("fx/fake.msg")
+        self.assertEqual(rc, 7, err)
+        assert_reason(self, err, "msgconvert")
+
+
+class Listing(Base):
+    def test_archives_are_listed_never_extracted(self):
+        before = workspace_files()
+        sizes = {
+            "a.txt": len(make_fixtures.ZIP_TEXT) + 1,
+            "informe.pdf": os.path.getsize(f"{FX}/text.pdf"),
+        }
+        for name in ("pack.zip", "pack.7z", "pack.tar.gz"):
+            with self.subTest(name=name):
+                rc, out, err = cli(f"fx/{name}")
+                self.assertEqual(rc, 0, err)
+                self.assertBounded(out)
+                result = text(out)
+                self.assertIn("· entries 3 ===", result.splitlines()[0])
+                for member, size in sizes.items():
+                    self.assertIn(f"{member} · {size} bytes", result)
+                self.assertRegex(result, r"(?m)^inner\.zip · \d+ bytes$")
+        self.assertEqual(workspace_files(), before)
+
+    def test_a_hostile_archive_is_only_listed(self):
+        rc, out, err = cli("fx/traversal.zip")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("../evil.txt · 8 bytes", text(out))
+        self.assertFalse(os.path.exists(f"{WS}/evil.txt"))
+
+
 if __name__ == "__main__":
     unittest.main()

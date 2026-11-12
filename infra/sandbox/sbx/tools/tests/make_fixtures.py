@@ -490,6 +490,167 @@ def _blob_bin(out, _paths):
     return path
 
 
+@fixture("pedido.eml", "text.pdf")
+def _pedido_eml(out, paths):
+    from email.message import EmailMessage
+    from email.utils import format_datetime
+    import datetime
+
+    msg = EmailMessage()
+    msg["From"] = "Ana Gómez <ana@example.invalid>"
+    msg["To"] = "Equipo de ventas <ventas@example.invalid>"
+    msg["Subject"] = "Pedido 42"
+    msg["Date"] = format_datetime(datetime.datetime(2026, 11, 12, 10, 30, tzinfo=datetime.timezone.utc))
+    msg.set_content("Hola equipo,\nadjunto la factura del pedido 42.\n")
+    with open(paths["text.pdf"], "rb") as f:
+        msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename="factura.pdf")
+    path = os.path.join(out, "pedido.eml")
+    with open(path, "wb") as f:
+        f.write(bytes(msg))
+    return path
+
+
+@fixture("fake.msg")
+def _fake_msg(out, _paths):
+    path = os.path.join(out, "fake.msg")
+    with open(path, "wb") as f:
+        f.write(b"This is not an Outlook message.\n" * 32)
+    return path
+
+
+ZIP_TEXT = "contenido del zip"
+
+
+def pack_members(out, paths):
+    """The files every pack archive holds: a.txt, informe.pdf (= text.pdf) and inner.zip (one b.txt)."""
+    import zipfile
+
+    folder = os.path.join(build_dir(out), "pack-members")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "a.txt"), "w", encoding="utf-8") as f:
+        f.write(ZIP_TEXT + "\n")
+    shutil.copyfile(paths["text.pdf"], os.path.join(folder, "informe.pdf"))
+    with zipfile.ZipFile(os.path.join(folder, "inner.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("b.txt", "dentro del zip interior\n")
+    return folder, ("a.txt", "informe.pdf", "inner.zip")
+
+
+@fixture("pack.zip", "text.pdf")
+def _pack_zip(out, paths):
+    import zipfile
+
+    folder, names = pack_members(out, paths)
+    path = os.path.join(out, "pack.zip")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in names:
+            z.write(os.path.join(folder, name), name)
+    return path
+
+
+@fixture("pack.7z", "text.pdf")
+def _pack_7z(out, paths):
+    folder, names = pack_members(out, paths)
+    path = os.path.join(out, "pack.7z")
+    run(["7zz", "a", "-bd", path, *names], cwd=folder)
+    return path
+
+
+@fixture("pack.tar.gz", "text.pdf")
+def _pack_tgz(out, paths):
+    import tarfile
+
+    folder, names = pack_members(out, paths)
+    path = os.path.join(out, "pack.tar.gz")
+    with tarfile.open(path, "w:gz") as t:
+        for name in names:
+            t.add(os.path.join(folder, name), name)
+    return path
+
+
+MIB = 1024 * 1024
+
+
+def zeros_zip(path, name, mib):
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z, z.open(name, "w") as f:
+        for _ in range(mib):
+            f.write(b"\0" * MIB)
+    return path
+
+
+@fixture("bomb.zip")
+def _bomb_zip(out, _paths):
+    return zeros_zip(os.path.join(out, "bomb.zip"), "zeros.bin", 60)
+
+
+@fixture("big.zip")
+def _big_zip(out, _paths):
+    # Honest listing (5 MiB, under the 10 MiB ratio threshold): only a lowered cap catches it, through the watcher.
+    return zeros_zip(os.path.join(out, "big.zip"), "big.bin", 5)
+
+
+@fixture("traversal.zip")
+def _traversal_zip(out, _paths):
+    import zipfile
+
+    path = os.path.join(out, "traversal.zip")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("ok.txt", "fine\n")
+        z.writestr("../evil.txt", "escaped\n")
+    return path
+
+
+@fixture("link.zip")
+def _link_zip(out, _paths):
+    import zipfile
+
+    path = os.path.join(out, "link.zip")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("ok.txt", "fine\n")
+        info = zipfile.ZipInfo("passwd-link")
+        info.external_attr = 0o120777 << 16  # a symbolic link entry
+        z.writestr(info, "/etc/passwd")
+    return path
+
+
+PACK_LAYOUT = {
+    "sub": ("text.pdf", "scan.pdf", "plan.docx", "ventas.xlsx"),
+    "docs": ("slides.pptx", "sign.png", "latin1.csv", "page.html", "blob.bin", "pedido.eml"),
+}
+
+
+@fixture("pack", "pack.zip", *sorted({n for names in PACK_LAYOUT.values() for n in names}))
+def _pack_folder(out, paths):
+    """A folder like a knowledge pack: two sub-folders of fixtures, an archive and a link pointing outside."""
+    root = os.path.join(out, "pack")
+    staging = root + ".building"
+    shutil.rmtree(staging, ignore_errors=True)
+    for folder, names in PACK_LAYOUT.items():
+        os.makedirs(os.path.join(staging, folder))
+        for name in names:
+            shutil.copyfile(paths[name], os.path.join(staging, folder, name))
+    shutil.copyfile(paths["pack.zip"], os.path.join(staging, "pack.zip"))
+    os.symlink("/etc/hostname", os.path.join(staging, "outside-link"))
+    os.rename(staging, root)
+    return root
+
+
+@fixture("badpack", "bomb.zip", "traversal.zip", "link.zip")
+def _badpack_folder(out, paths):
+    """Hostile archives inside a folder walk: each is a failed row, the walk goes on."""
+    root = os.path.join(out, "badpack")
+    staging = root + ".building"
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    for name in ("bomb.zip", "traversal.zip", "link.zip"):
+        shutil.copyfile(paths[name], os.path.join(staging, name))
+    with open(os.path.join(staging, "nota.txt"), "w", encoding="utf-8") as f:
+        f.write("una nota legible\n")
+    os.rename(staging, root)
+    return root
+
+
 def make_all(out, only=None):
     """Build the fixtures (all, or `only` and their dependencies) into `out`; returns name → path."""
     os.makedirs(out, exist_ok=True)
