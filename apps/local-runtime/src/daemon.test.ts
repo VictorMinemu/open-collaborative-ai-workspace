@@ -3163,6 +3163,87 @@ describe("07.17.1.1 session.file.write: a file lands in an idle session's tree, 
   });
 });
 
+describe("07.17.1.1 a redelivered file command is answered with its real outcome (review CR-03)", () => {
+  function writePayload(path: string, bytes: Buffer) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite: false };
+  }
+  const acksOf = (id: string) =>
+    server.allFrames.filter((f): f is Extract<DeviceToServerFrame, { type: "ack" }> => {
+      return f.type === "ack" && f.commandId === id;
+    });
+
+  it("a copy that arrives while the upload still streams is not acked; the only answer is the real one", async () => {
+    await fileDaemon();
+    await activeSession("wf-x1");
+    const bytes = Buffer.from("hello");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    server.onFileRequest = () => held;
+    // The bytes the server will send do not match the payload: the write fails after its GET.
+    server.fileBody = Buffer.from("jello");
+    const cmd = fileCmd("session.file.write", "wf-x1", writePayload("x.txt", bytes));
+    server.send(cmd);
+    await server.waitFor(() => (server.fileRequests.length === 1 ? true : undefined));
+    server.send(cmd); // the hub's redelivery after a link blip
+    await sleep(200);
+    expect(acksOf(cmd.id)).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "mismatch" });
+    await sleep(100);
+    expect(acksOf(cmd.id)).toHaveLength(1);
+    expect(existsSync(join(project, "x.txt"))).toBe(false);
+    // Redelivered after it finished (its ack was lost): the same failure again, never a blind ok, never a second GET.
+    server.send(cmd);
+    await server.waitFor(() => (acksOf(cmd.id).length === 2 ? true : undefined));
+    expect(acksOf(cmd.id)[1]).toMatchObject({ ok: false, error: "mismatch" });
+    expect(server.fileRequests).toHaveLength(1);
+  });
+
+  it("a finished failure is answered again with its code; a finished success with ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-x2");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    server.fileStatuses = [410];
+    const expired = fileCmd("session.file.write", "wf-x2", writePayload("y.txt", bytes));
+    server.send(expired);
+    expect(await fileAck(expired.id)).toMatchObject({ ok: false, error: "expired" });
+    server.send(expired);
+    await server.waitFor(() => (acksOf(expired.id).length === 2 ? true : undefined));
+    expect(acksOf(expired.id)[1]).toMatchObject({ ok: false, error: "expired" });
+
+    const read = fileCmd("session.file.read", "wf-x2", { path: "README.md", maxBytes: 1 });
+    server.send(read);
+    expect(await fileAck(read.id)).toMatchObject({ ok: false, error: "too_large: 6" });
+    server.send(read);
+    await server.waitFor(() => (acksOf(read.id).length === 2 ? true : undefined));
+    expect(acksOf(read.id)[1]).toMatchObject({ ok: false, error: "too_large: 6" });
+  });
+
+  it("a copy that arrives while a download's PUT streams waits for the PUT's answer", async () => {
+    await fileDaemon();
+    await activeSession("wf-x3");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    server.onFileRequest = () => held;
+    server.fileStatuses = [500];
+    const cmd = fileCmd("session.file.read", "wf-x3", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    await server.waitFor(() => (server.fileRequests.length === 1 ? true : undefined));
+    server.send(cmd);
+    await sleep(200);
+    expect(acksOf(cmd.id)).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "transfer_failed" });
+    await sleep(100);
+    expect(acksOf(cmd.id)).toHaveLength(1);
+  });
+});
+
 describe("07.17.1.1 diff.result never closes the link (D-14, PD-19)", () => {
   it("a 400 KiB change answers a frame within the API's inbound limit, truncated", async () => {
     const localId = await addProject();

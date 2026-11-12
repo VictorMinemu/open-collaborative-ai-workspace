@@ -837,11 +837,13 @@ describe("the device's ack and the transfer route's own record race (found by th
     return { workSessionId, eventId, file, pending, transferId: transfer!.id as string, cmd };
   }
 
-  it("an ok ack while the row is still streaming (the GET's `streamed` not yet recorded) is uploaded", async () => {
+  it("an ok ack while the row is still streaming waits for the GET's `streamed`, then is uploaded", async () => {
     const { workSessionId, eventId, file, pending, transferId, cmd } = await enqueued();
     // The device claimed the transfer and read every byte; the route's after-response record has not committed yet.
     await su.query("update app.bot_work_session_files set status = 'streaming' where id = $1", [transferId]);
     server.ack(cmd.id);
+    await new Promise((r) => setTimeout(r, 400));
+    await su.query("update app.bot_work_session_files set status = 'streamed' where id = $1", [transferId]);
     const r = await pending;
     expect(r.body, JSON.stringify(r.body)).toEqual({
       kind: "uploaded",
@@ -851,6 +853,15 @@ describe("the device's ack and the transfer route's own record race (found by th
     });
     expect((await ledgerOfTurn(eventId))[0]!.status).toBe("done");
     expect(await auditsOf("bot.work_session_upload", eventId)).toHaveLength(1);
+  });
+
+  it("an ok ack for a transfer whose GET never finished (still streaming) is transfer_failed, never uploaded (review CR-03)", async () => {
+    const { eventId, pending, transferId, cmd } = await enqueued();
+    await su.query("update app.bot_work_session_files set status = 'streaming' where id = $1", [transferId]);
+    server.ack(cmd.id);
+    await refusedWith(pending, "transfer_failed");
+    expect((await ledgerOfTurn(eventId))[0]!.status).toBe("failed");
+    expect(await auditsOf("bot.work_session_upload", eventId)).toEqual([]);
   });
 
   it("an ok ack for a transfer the device never fetched (still pending) is transfer_failed", async () => {

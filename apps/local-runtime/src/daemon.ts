@@ -337,6 +337,10 @@ export class Daemon {
   private readonly rootsBySession = new Map<string, string[]>();
   private readonly seqBySession = new Map<string, number>();
   private readonly processedCommands = new Set<string>();
+  /** Review CR-03: file commands running now, by id (= transfer id); a redelivered copy is not run or answered. */
+  private readonly fileInFlight = new Set<string>();
+  /** Review CR-03: finished file commands' outcomes (bounded like `processedCommands`), answered again on redelivery. */
+  private readonly fileOutcomes = new Map<string, { error: string | undefined }>();
   /**
    * Per-session order for `session.configure` and `prompt` (D-14): a prompt queued right after a settings change
    * reaches the runtime only once the change was handed over. Other commands stay immediate.
@@ -963,20 +967,54 @@ export class Daemon {
     }
   }
 
+  /** Review CR-03: the finished outcome of a file command (`undefined` error = ok), answered again on redelivery. */
+  private rememberFileOutcome(commandId: string, error: string | undefined): void {
+    this.fileOutcomes.set(commandId, { error });
+    if (this.fileOutcomes.size > MAX_REMEMBERED_COMMANDS) {
+      const first = this.fileOutcomes.keys().next().value;
+      if (first !== undefined) this.fileOutcomes.delete(first);
+    }
+  }
+
+  /**
+   * Review CR-03: a file command is keyed by its id (= the transfer id). A copy redelivered while the first still runs
+   * is not answered (the running one acks with its real outcome); a copy of a finished one gets that outcome again.
+   * Never a blind `ok`: the API would report and audit a file that may never have landed.
+   */
+  private async handleFileCommand(cmd: CommandFrame): Promise<void> {
+    if (this.fileInFlight.has(cmd.id)) return;
+    const done = this.fileOutcomes.get(cmd.id);
+    if (done) {
+      this.ack(cmd.id, done.error, this.rootsBySession.get(cmd.sessionId) ?? []);
+      return;
+    }
+    this.fileInFlight.add(cmd.id);
+    try {
+      // 07.17.1.1 (D-13, principle 4): a write is handed over between turns, never beside a prompt or configure.
+      if (cmd.kind === "session.file.write")
+        await this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
+      else await this.execute(cmd);
+    } finally {
+      this.fileInFlight.delete(cmd.id);
+    }
+  }
+
   async handleCommand(cmd: CommandFrame): Promise<void> {
+    if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+      return this.handleFileCommand(cmd);
+    }
     if (this.processedCommands.has(cmd.id)) {
       this.ack(cmd.id); // replayed command; already executed
       return;
     }
     this.remember(cmd.id);
-    // 07.17.1.1 (D-13, principle 4): a file write is handed over between turns, never beside a prompt or configure.
-    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure" && cmd.kind !== "session.file.write") {
+    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") {
       return this.execute(cmd);
     }
     return this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
   }
 
-  /** Runs `fn` after every earlier configure / prompt / file write of this session (D-14 order). */
+  /** Runs `fn` after every earlier configure / prompt / file write of this session (D-14 order; writes since 07.17.1.1). */
   private inSessionOrder<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.sessionChains.get(sessionId) ?? Promise.resolve();
     const run = prev.then(fn);
@@ -1165,11 +1203,15 @@ export class Daemon {
           await this.requestRuntimeUpdate(cmd);
           break;
       }
+      if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+        this.rememberFileOutcome(cmd.id, undefined);
+      }
       this.ack(cmd.id);
     } catch (err) {
       if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
         // 07.17.1.1 (P1): a code and at most a size; the log line carries the command id and the code only.
         const e = err instanceof SessionFileError ? err : new SessionFileError("transfer_failed");
+        this.rememberFileOutcome(cmd.id, e.message);
         this.log.warn("session file command failed", { kind: cmd.kind, commandId: cmd.id, code: e.code });
         this.ack(cmd.id, e.message, this.rootsBySession.get(cmd.sessionId) ?? roots);
         return;

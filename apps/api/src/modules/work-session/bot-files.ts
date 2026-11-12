@@ -235,6 +235,11 @@ export interface BotFiles {
   deadlineFor(bytes: number): number;
   /** Wait for the device's ack of `transferId` (the hub's `waitForFileAck`; the Agent Channel never holds the hub). */
   waitForAck(transferId: string, timeoutMs: number, signal?: AbortSignal): Promise<FileCommandAck | null>;
+  /**
+   * Review CR-03: true while the transfer route still serves the row's bytes (`streaming`). An upload's GET records
+   * `streamed` just after its response finished, so the route polls this briefly after an ok before `finish`.
+   */
+  streaming(tx: Tx, transferId: string): Promise<boolean>;
   /** One chat attachment into the bot's own idle session (D-02, D-13), in the sponsor's transaction. */
   prepareUpload(tx: Tx, p: BotFileUploadParams): Promise<BotFilePrepared>;
   /** One file of the bot's own active session into a pending attachment of its turn (D-03), in the sponsor's tx. */
@@ -501,11 +506,11 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
       await fail(failure);
       return { answer: refusedAnswer(code), audit };
     }
-    // 07.17.1.1-12: an upload's GET records `streamed` after its response finished, outside the request, so the
-    // device's ok (sent once it checked every byte's size and sha256 against the payload) can arrive first. A row the
-    // device claimed (`streaming`) is then done; a row it never fetched (`pending`) is not. A download's PUT records
-    // `streamed` before it answers the device, so only `streamed` counts there.
-    const moved = row.status === "streamed" || (row.direction === "to_device" && row.status === "streaming");
+    // Review CR-03 (supersedes the 07.17.1.1-12 rule that took `streaming` as done): only a row whose bytes the
+    // transfer route served or stored in full (`streamed`) is a success. An upload's GET records it after its response
+    // finished, so the device's ok can arrive first; the route waits for it (`streaming`) before this call. A row still
+    // `streaming` (the GET never finished) or `pending` (never fetched) did not move, whatever the device said.
+    const moved = row.status === "streamed";
     if (moved && typeof path === "string") {
       if (row.direction === "to_device") {
         await markTransfer(tx, row.id, { status: "done", completedAt: new Date().toISOString() });
@@ -552,6 +557,15 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     limitFor: (tx, profile) => loadBotFileLimit(tx, profile, deps.serverMaxBytes),
     deadlineFor,
     waitForAck: (transferId, timeoutMs, signal) => hub.waitForFileAck(transferId, timeoutMs, signal),
+
+    async streaming(tx, transferId) {
+      const [row] = await tx
+        .select({ status: botWorkSessionFiles.status })
+        .from(botWorkSessionFiles)
+        .where(eq(botWorkSessionFiles.id, transferId))
+        .limit(1);
+      return row?.status === "streaming";
+    },
 
     async prepareUpload(tx, p) {
       const pre = precheck(p);

@@ -81,6 +81,9 @@ const UPLOAD = BUILTIN_TOOLS.workSessionUpload;
 const DOWNLOAD = BUILTIN_TOOLS.workSessionDownload;
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
 const UNKNOWN: unique symbol = Symbol("unknown_turn");
+/** Review CR-03: how long an ok waits for the GET's `streamed` record, and how often the row is re-read. */
+const STREAMED_WAIT_MS = 5_000;
+const STREAMED_POLL_MS = 100;
 
 /** The device's ack of a transfer, or null when the deadline passed (`botFiles.waitForAck`). */
 type FileAck = Awaited<ReturnType<BotFiles["waitForAck"]>>;
@@ -309,6 +312,17 @@ export function registerBotWorkSessionFileRoutes(
 
     // The wait, outside any transaction; then txC as the sponsor: the outcome and its one record.
     const ack = await wait;
+    // Review CR-03: an upload's GET records `streamed` just after its response finished, so the device's ok can come
+    // first. Wait a moment for it; a row still `streaming` after that never counts as moved (`finish`).
+    if (ack?.ok) {
+      const until = Date.now() + STREAMED_WAIT_MS;
+      while (
+        Date.now() < until &&
+        (await core.db.withTenant(tenantAs(sponsorUserId), (tx) => botFiles.streaming(tx, transferId)))
+      ) {
+        await new Promise((r) => setTimeout(r, STREAMED_POLL_MS));
+      }
+    }
     return core.db.withTenant(tenantAs(sponsorUserId), async (tx): Promise<A | BotWorkSessionRefused> => {
       const { answer, audit } = await move.finish(tx, transferId, ack);
       if (answer.kind === "refused") {
