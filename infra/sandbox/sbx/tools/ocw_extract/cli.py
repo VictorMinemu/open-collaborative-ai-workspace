@@ -9,7 +9,8 @@ import argparse
 import os
 import sys
 
-from . import bounds, detect, images, office, pdf, runner, sheets, text
+from . import archives, bounds, detect, images, mail, office, pdf, runner, sheets, text
+from . import batch as batching
 
 DESCRIPTION = """\
 Print the text of a file in your workspace as UTF-8: PDFs, scanned PDFs and images (OCR in Spanish and English),
@@ -47,6 +48,8 @@ def handlers():
         "sheets": sheets.extract,
         "text": text.extract,
         "image": images.extract,
+        "mail": mail.extract,
+        "archive": archives.listing_doc,
     }
 
 
@@ -170,7 +173,8 @@ def single(args):
 
 
 def batch(args):
-    raise bounds.UsageError("--batch is not available in this build")
+    budget = bounds.parse_budget(args.budget) if args.budget is not None else bounds.BATCH_DEFAULT_BUDGET_S
+    return batching.run_batch(args.batch, out=args.out, budget=budget, ocr=args.ocr, lang=args.lang)
 
 
 def run(argv):
