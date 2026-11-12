@@ -62,6 +62,7 @@ import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
 import { assertProjectDirAllowed, noGitNotice } from "./project-dir.js";
+import { createShutdownGuard, selfUpdateExit, stopSignal } from "./service/hand-over.js";
 import { defaultServiceDeps, serviceCommand } from "./service/index.js";
 import { applyServiceEnv } from "./service-env.js";
 import {
@@ -431,7 +432,9 @@ async function doctorCommand(argv: string[]): Promise<void> {
 
 /**
  * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
- * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon.
+ * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon. 07.17.1: the
+ * daemon gets the self-update exit hook (`service/hand-over.ts`: stop, then exit 75); SIGTERM / SIGINT still stop and
+ * exit 0. One stopping guard per run, shared by both, so only the first one exits.
  */
 async function run(): Promise<void> {
   const home = ocwHome();
@@ -439,14 +442,23 @@ async function run(): Promise<void> {
     .then((c) => c.logLevel)
     .catch(() => "info" as const);
   await applyServiceEnv(home, process.env, createLogger(level));
-  const daemon = await Daemon.create();
+  let current: Daemon | null = null;
+  const guard = createShutdownGuard();
+  const exitForUpdate = selfUpdateExit({
+    guard,
+    stop: async () => {
+      process.stderr.write("runtime updated, restarting\n");
+      await current?.stop();
+    },
+    exit: (code) => process.exit(code),
+  });
+  const daemon = await Daemon.create({ exitForUpdate });
+  current = daemon;
   // Handlers go in before start: the control socket exists before start() resolves, and a service manager (or a
   // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.
-  let stopping = false;
   let started: Promise<void> = Promise.resolve();
   const shutdown = (signal: string) => {
-    if (stopping) return;
-    stopping = true;
+    if (!stopSignal(guard)) return;
     process.stderr.write(`received ${signal}, stopping\n`);
     started
       .catch(() => undefined)

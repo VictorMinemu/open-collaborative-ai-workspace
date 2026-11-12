@@ -84,8 +84,8 @@
 # who asked and for whom; the chain's human is the turn's asker, Archie only relays) and answers in the thread; Archie gets `agent.consult_reply.v1` (her answer only inside its attributed untrusted block, never the message body) and replies to it; each
 # turn reports done; a return turn delivered tainted (`turn.tainted`) cannot consult again (blocked in the cell: no
 # consultation, no `/tool-calls`); no model request lists a session or agent-to-agent tool.
-# Scenario bot_work_sessions (07.16-14 / BWZ-02, BWZ-03, BWZ-05, D-05, PD-09): the four `ocw_work_session_*` tools are
-# in the bot's alsoAllow (turn-scoped); a DM turn carrying `turn.workZone` makes the model start a session and read it,
+# Scenario bot_work_sessions (07.16-14 / BWZ-02, BWZ-03, BWZ-05, D-05, PD-09): the six `ocw_work_session_*` tools
+# (07.17.1.1-05 adds upload and download) are in the bot's alsoAllow (turn-scoped); a DM turn carrying `turn.workZone` makes the model start a session and read it,
 # and the fake API records one start body (`agentId,eventId,projectId,prompt`) and one read body
 # (`agentId,eventId,workSessionId`), never a device, user, visibility or worktree key and never `/tool-calls`; the
 # reply relays the started sentence and the read's header. A turn that read outside content still sends its start to
@@ -93,6 +93,10 @@
 # `ocw_memory_save` is blocked in the cell and `ocw_work_session_prompt` still reaches its route (D-20); an
 # `agent.work_session.v1` is answered on the session's card with the "Work Zone session update" block (D-09); no
 # person's prompt, host path or session output outside a read's answer reaches a model request or the cell log (P1, P2).
+# 07.17.1.1 (BWF-01, D-01, D-03, D-07, PD-24): a DM turn offering the file tools with `turn.workZone.files` makes the
+# model upload a thread's attachment and download a session file; the fake API records one upload body
+# (`agentId,attachmentId,eventId,path,workSessionId`) and one download body (`agentId,eventId,path,workSessionId`), never
+# `/tool-calls`; the reply relays both answers and a model request carries the Work Zone block's files line.
 # Scenario automation-fan-out (07.17-15 / AFO-02, AFO-05, D-02, D-05, PD-07): `ocw_conversation_open` is in the bot's
 # alsoAllow (turn-scoped) and offered only on the fan-out run turn; a run turn that reads outside content first
 # (`web_search`) still opens its items through one `POST /conversations/open` with exactly `agentId,eventId,items` (items:
@@ -2424,15 +2428,16 @@ await fetch('http://127.0.0.1:4000/__test/work-sessions', { method: 'POST', head
 }
 bws_mark all
 
-echo "== [bot_work_sessions] the four session tools are in the bot's alsoAllow (turn-scoped, like ocw_start_work_zone)"
+echo "== [bot_work_sessions] the six session tools are in the bot's alsoAllow (turn-scoped, like ocw_start_work_zone)"
+# 07.17.1.1 (D-01): the four 07.16 tools plus ocw_work_session_upload and ocw_work_session_download.
 ALSO="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
 const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const lists = Object.values(cfg.agents?.entries ?? {}).map((a) => a.tools?.alsoAllow ?? []);
 console.log(JSON.stringify(lists.map((l) => l.filter((t) => t.startsWith("ocw_work_session_")).sort())));
 ')"
 echo "   alsoAllow  : $ALSO"
-[[ "$ALSO" == *'["ocw_work_session_prompt","ocw_work_session_read","ocw_work_session_start","ocw_work_session_stop"]'* ]] ||
-  { echo "FAIL: the four Work Zone session tools are not in the bot's alsoAllow"; exit 1; }
+[[ "$ALSO" == *'["ocw_work_session_download","ocw_work_session_prompt","ocw_work_session_read","ocw_work_session_start","ocw_work_session_stop","ocw_work_session_upload"]'* ]] ||
+  { echo "FAIL: the six Work Zone session tools are not in the bot's alsoAllow"; exit 1; }
 
 echo "== [bot_work_sessions] the model starts a session and reads it: the turn's ids and the tool's fields only"
 bws_answers ""
@@ -2546,6 +2551,44 @@ const ok =
   m.text.includes(`Tool ocw_work_session_prompt said: Queued in session ${WS} at position 1.`) &&
   gated.length === 0;
 if (!ok) { console.log("FAIL: after a read only the prompt may act: no note saved, one prompt posted"); process.exit(1); }
+'
+
+echo "== [bot_work_sessions] files: the model uploads a thread's file and downloads one back, ids and paths only"
+# 07.17.1.1 (D-01, D-03, D-07, PD-24): both are plugin tools that post the turn's ids, the session and a repo-relative
+# path to /work-sessions/upload|download (self-validated, never /tool-calls); the Work Zone block states the limit.
+bws_answers ""
+bws_mark files
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-work-session-files.json" 0199a6f0-0000-7000-8000-00000000d0f7)"
+echo "$STATE" | BWS_SESSION="$BWS_SESSION" BWS_AGENT="$BWS_AGENT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f7";
+const WS = process.env.BWS_SESSION;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f7");
+if (!m) { console.log("FAIL: no reply to the Work Zone files mention"); process.exit(1); }
+const ws = s.workSessions;
+const uploads = (ws.uploads ?? []).filter((b) => b.eventId === EV);
+const downloads = (ws.downloads ?? []).filter((b) => b.eventId === EV);
+const keys = (b) => Object.keys(b).sort().join();
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ uploads: uploads.map(keys), downloads: downloads.map(keys) }));
+const ok =
+  uploads.length === 1 && keys(uploads[0]) === "agentId,attachmentId,eventId,path,workSessionId" &&
+  uploads[0].agentId === process.env.BWS_AGENT && uploads[0].workSessionId === WS &&
+  uploads[0].attachmentId === "0199a6f0-0000-7000-8000-00000000f0a1" && uploads[0].path === "docs/spec.pdf" &&
+  downloads.length === 1 && keys(downloads[0]) === "agentId,eventId,path,workSessionId" &&
+  downloads[0].workSessionId === WS && downloads[0].path === "README.md" &&
+  // Self-validated: neither ever goes to /tool-calls.
+  s.toolCalls.filter((c) => c.eventId === EV).length === 0 &&
+  m.text.includes(`Tool ocw_work_session_upload said: Put docs/spec.pdf (1.5 KB) into session ${WS}.`) &&
+  m.text.includes(`Tool ocw_work_session_download said: Downloaded README.md (64 B) from session ${WS}.`);
+if (!ok) { console.log("FAIL: expected one upload and one download with the turn ids, the session and a path only, relayed in the reply"); process.exit(1); }
+'
+bws_requests files | node -e '
+const reqs = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((r) => /-(openai|anthropic)\.json$/.test(r.file));
+const told = reqs.filter((r) => r.text.includes("0199a6f0-0000-7000-8000-00000000c0f7") &&
+  r.text.includes("Move files with ocw_work_session_upload and ocw_work_session_download: up to 25 MB each"));
+console.log(`   files line : ${told.length} model request(s) of the turn carry the Work Zone files line`);
+if (told.length === 0) { console.log("FAIL: the model never saw the Work Zone files line"); process.exit(1); }
 '
 
 echo "== [bot_work_sessions] wake-up: an agent.work_session.v1 is answered on the session's card, with the update block"

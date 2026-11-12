@@ -738,6 +738,12 @@ async function seedOrg(c: pg.Client, org: string) {
      values ($1, $2, $3, $4, $5, $5, $6, $7, $8)`,
     [ws, org, agent, bwzProfile, user, conv, msg, randomUUID()],
   );
+  // Phase 07.17.1.1 (D-05, D-06): one finished upload of the bot into the seeded bot session (ids, sizes, a digest and
+  // a path length only; no path or file name exists in the ledger).
+  await q(
+    "insert into app.bot_work_session_files (id, organization_id, work_session_id, agent_id, event_id, device_id, conversation_id, direction, attachment_id, max_bytes, limit_source, size_bytes, sha256, path_length, status, expires_at, completed_at) values ($1, $2, $3, $4, $5, $6, $7, 'to_device', $8, 26214400, 'organization', 1536, $9, 14, 'done', now() + interval '10 minutes', now())",
+    [randomUUID(), org, ws, agent, randomUUID(), device, conv, randomUUID(), "d".repeat(64)],
+  );
 
   // Phase 07.17 (D-02, D-03): a fan-out automation posting to the channel, one Run now and the one item it opened, with
   // the channel's message as its root (the item's key is stored only as a sha256 hex).
@@ -764,6 +770,9 @@ const BOT_WORK_ZONE_TABLES = [
   "app.device_bot_consents",
   "app.bot_work_sessions",
 ] as const;
+
+/** Phase 07.17.1.1: the transfer ledger of a bot's file moves with its Work Zone sessions. */
+const BOT_FILE_TABLES = ["app.bot_work_session_files"] as const;
 
 /** Phase 07.7: the agent-to-agent ledger (chains and their hops). */
 const AGENT_CHAIN_TABLES = ["app.agent_chains", "app.agent_chain_hops"] as const;
@@ -3151,6 +3160,21 @@ describe("tenant isolation (RLS)", () => {
       { policyname: "audience_backstop", permissive: "RESTRICTIVE" },
       { policyname: "tenant_isolation", permissive: "PERMISSIVE" },
     ]);
+  });
+
+  it("Phase 07.17.1.1: the bot file ledger is org-scoped, forced, seeded and invisible across tenants (D-05)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of BOT_FILE_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      for (const org of [A, B]) {
+        const own = await inTenant(org, () => app.query(`select count(*)::int as n from ${tbl}`));
+        expect(own.rows[0].n, `${tbl} seeded for ${org}`).toBeGreaterThan(0);
+      }
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+    }
   });
 
   it("Phase 07.11 schema constraints: the update history is org-scoped and checked, the policy level too (D-02, D-06, PD-04)", async () => {

@@ -158,6 +158,14 @@
 /apps/api/src/modules/automation/fan-out.ts               @VictorMinemu
 /apps/api/src/modules/automation/escalation.ts            @VictorMinemu
 /apps/api/src/modules/notification/team-mentions.ts       @VictorMinemu
+# Phase 07.17.1.1 (ADR-0041): bots move files between a thread and their own session: the device's containment and
+# deny list, the device-JWT transfer route, the sponsor's transaction with its ledger and budgets, the two bot routes,
+# and the device JWT check the transfer route shares with the Device Link.
+/apps/local-runtime/src/session-files.ts                    @VictorMinemu
+/apps/api/src/modules/work-session/file-transfer-routes.ts  @VictorMinemu
+/apps/api/src/modules/work-session/bot-files.ts             @VictorMinemu
+/apps/api/src/modules/agent-channel/work-session-files.ts   @VictorMinemu
+/apps/api/src/modules/device/auth.ts                        @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu

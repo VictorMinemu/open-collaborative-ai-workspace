@@ -135,6 +135,21 @@ export function buildItems(state: LiveSession): Item[] {
         items.push({ kind: "error", key, at, message: e.message });
         break;
       case "runtime.update": {
+        // 07.17.1 (PD-18): the hold is the OCW runtime's own restart; the new daemon sends no `done` line. Review IN-04:
+        // a hold that ended without the restart says so (`failed`), and the turn runs on the runtime already installed.
+        if (e.subject === "ocw-runtime") {
+          items.push({
+            kind: "system",
+            key,
+            at,
+            text:
+              e.phase === "failed"
+                ? "The OCW runtime update did not run; your turn continues"
+                : "Restarting the OCW runtime on this device… your turn starts when it is back",
+            testId: "runtime-update-line",
+          });
+          break;
+        }
         // 07.11 (D-03): a turn held while the device updates its CLI says why it waits, then how it ended.
         const label = RUNTIMES[e.runtime].label;
         const text =

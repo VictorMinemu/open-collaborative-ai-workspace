@@ -1,16 +1,25 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -21,21 +30,39 @@ import {
   type DeviceToServerFrame,
   type PromptPayload,
   RUNTIME_COMPATIBILITY_MANIFEST,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
   type RuntimeCatalog,
+  type RuntimeId,
   type RuntimeInfo,
   type ServerToDeviceFrame,
   type SessionEvent,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
-import { Daemon } from "./daemon.js";
+import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
+import { defaultLockDir } from "./maintenance/runner.js";
+import {
+  type PrepareVersionOptions,
+  prepareVersion,
+  selfUpdateMarkerPath,
+  writeSelfUpdateMarker,
+} from "./maintenance/self-update.js";
+import {
+  type DistStub,
+  fakeNpm,
+  HOST_PATH_TOKEN_RE,
+  type ScratchHome,
+  scratchOcwHome,
+  startDistStub,
+} from "./maintenance/self-update-harness.js";
+import type { SelfUpdateOptions } from "./maintenance/self-update-job.js";
 import type {
   AgentRuntime,
   EventSink,
@@ -68,6 +95,8 @@ class FakeRuntime implements AgentRuntime {
   supportsImages = false;
   /** When set, `prompt()` rejects with this message (a runtime error echoing its input). */
   promptError: string | null = null;
+  /** 07.17.1.1: when set, `prompt()` emits `prompt.started`, waits for it, then `prompt.completed` (a running turn). */
+  promptHold: Promise<void> | null = null;
   interrupts: string[] = [];
   readonly started: StartSessionOptions[] = [];
   readonly resolved: Array<[string, ApprovalDecision]> = [];
@@ -165,6 +194,16 @@ class FakeRuntime implements AgentRuntime {
     const sink = this.sinks.get(sessionId);
     const cwd = this.started.find((s) => s.sessionId === sessionId)?.cwd ?? "";
     sink?.({ type: "prompt.started", promptId: p.promptId });
+    // 07.17.1.1: a held turn (started, not yet handed back); it completes when the test releases it.
+    if (this.promptHold) {
+      await this.promptHold;
+      sink?.({
+        type: "prompt.completed",
+        promptId: p.promptId,
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      return;
+    }
     sink?.({ type: "assistant.message", messageId: "m1", text: `Edited ${cwd}/src/x.ts using ${LEAKY_KEY}` });
     sink?.({
       type: "approval.requested",
@@ -193,6 +232,20 @@ class FakeRuntime implements AgentRuntime {
 
 type TokenAnswer = { status: number; body?: unknown };
 
+/** One request to the fake transfer route (07.17.1.1). */
+interface FileRequest {
+  method: string;
+  url: string;
+  authorization: string | undefined;
+  contentLength: string | undefined;
+  sha256: string;
+  bytes: number;
+}
+
+function sha256Hex(b: Uint8Array | string): string {
+  return createHash("sha256").update(b).digest("hex");
+}
+
 /**
  * The API as the daemon sees it: `POST /api/v1/devices/token` (device token → device JWT) and the Device
  * Link WebSocket on the same HTTP server.
@@ -209,9 +262,32 @@ class FakeServer {
   tokenAnswer: () => TokenAnswer = () => this.issue(600_000);
   private listeners: Array<() => void> = [];
 
+  /** 07.17.1.1: a path prefix every HTTP route is served under (a server behind `/ocw`); others answer 404. */
+  prefix = "";
+  /** 07.17.1.1 (PD-05): every `GET|PUT /api/v1/runtime/files/:id`, in order (the body only as its size and sha256). */
+  readonly fileRequests: FileRequest[] = [];
+  /** Statuses the transfer route answers, one per request; 200 once empty. */
+  fileStatuses: number[] = [];
+  /** The bytes a `GET` answers with. */
+  fileBody: Buffer = Buffer.alloc(0);
+  /** Extra headers of a `GET`'s answer (review WR-01: the landing deadline). */
+  fileHeaders: Record<string, string> = {};
+  /** Called with each transfer request before it is answered (a test may await something). */
+  onFileRequest: ((r: FileRequest) => Promise<void> | void) | null = null;
+
   constructor() {
     this.http = createServer((req, res) => {
-      if (req.method !== "POST" || req.url !== "/api/v1/devices/token") {
+      const url = req.url ?? "";
+      const path = this.prefix
+        ? url.startsWith(`${this.prefix}/`)
+          ? url.slice(this.prefix.length)
+          : ""
+        : url;
+      if (path.startsWith("/api/v1/runtime/files/") && (req.method === "GET" || req.method === "PUT")) {
+        void this.serveFile(req, res, url);
+        return;
+      }
+      if (req.method !== "POST" || path !== "/api/v1/devices/token") {
         res.writeHead(404).end();
         return;
       }
@@ -230,6 +306,43 @@ class FakeServer {
       });
       for (const l of this.listeners) l();
     });
+  }
+  private async serveFile(req: IncomingMessage, res: ServerResponse, url: string): Promise<void> {
+    const chunks: Buffer[] = [];
+    try {
+      for await (const c of req) chunks.push(c as Buffer);
+    } catch {
+      res.destroy();
+      return;
+    }
+    const body = Buffer.concat(chunks);
+    const record: FileRequest = {
+      method: req.method ?? "",
+      url,
+      authorization: req.headers.authorization,
+      contentLength: req.headers["content-length"],
+      sha256: sha256Hex(body),
+      bytes: body.byteLength,
+    };
+    this.fileRequests.push(record);
+    for (const l of this.listeners) l();
+    await this.onFileRequest?.(record);
+    const status = this.fileStatuses.shift() ?? 200;
+    if (status !== 200) {
+      res.writeHead(status, { "content-type": "application/json" }).end('{"error":"refused"}');
+    } else if (req.method === "PUT") {
+      res
+        .writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, sizeBytes: body.byteLength }));
+    } else {
+      res
+        .writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(this.fileBody.byteLength),
+          ...this.fileHeaders,
+        })
+        .end(this.fileBody);
+    }
   }
   listen(): Promise<void> {
     return new Promise((resolve) => this.http.listen(0, "127.0.0.1", () => resolve()));
@@ -1433,6 +1546,7 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       env?: Record<string, string>;
       fakeUpdate?: Record<string, unknown>;
       maintenance?: Partial<RuntimeMaintenanceOptions>;
+      selfUpdate?: boolean;
     } = {},
   ): Promise<void> {
     await daemon.stop();
@@ -1462,6 +1576,17 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
         which: (name) => (name === "claude" ? join(claudeBin(), "claude") : null),
         ...o.maintenance,
       },
+      // 07.17.1 regression: the same daemon with a SelfUpdate (a checkout: no installed build, it never updates).
+      ...(o.selfUpdate
+        ? {
+            exitForUpdate: async () => undefined,
+            selfUpdate: {
+              serverUrl: "http://127.0.0.1:9",
+              running: null,
+              supervision: { supervised: false, reason: "not_installed" as const },
+            },
+          }
+        : {}),
     });
   }
 
@@ -1470,6 +1595,56 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
     deviceId: randomUUID(),
     organizationId: randomUUID(),
   });
+
+  it("07.17.1: with a SelfUpdate present, a Claude Code update command and its held turns behave exactly as in 07.11 (no subject)", async () => {
+    await updatesDaemon({
+      fakeUpdate: { delayMs: 1000 },
+      maintenance: { drainPollMs: 20 },
+      selfUpdate: true,
+    });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "notify", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    const behind = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.advisory === "behind"),
+      10_000,
+    );
+    expect(behind.self).toMatchObject({ build: null, reason: "not_installed", canUpdate: false });
+    server.send({
+      id: "start-B",
+      kind: "session.start",
+      sessionId: "B",
+      payload: { projectLocalId: localId, runtime: "claude-code", permissionMode: "default" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "start-B", 10_000)).toMatchObject({ ok: true });
+    const cmd = { id: randomUUID(), kind: "runtime.update" as const, sessionId: randomUUID() };
+    server.send({ ...cmd, payload: { runtime: "claude-code" } });
+    expect(await server.frame("ack", (f) => f.commandId === cmd.id, 10_000)).toMatchObject({ ok: true });
+    await server.frame("runtime.update.run", (f) => f.phase === "started" && f.commandId === cmd.id, 10_000);
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ runtime: "claude-code", commandId: cmd.id, outcome: "succeeded" });
+    expect(await server.frame("ack", (f) => f.commandId === "pb1", 5000)).toMatchObject({ ok: true });
+    const events = () =>
+      server.allFrames.flatMap((f) =>
+        f.type === "event" && f.sessionId === "B" && f.event.type === "runtime.update" ? [f.event] : [],
+      );
+    await server.waitFor(() => (events().length === 2 ? true : undefined));
+    expect(events()).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting" },
+      { type: "runtime.update", runtime: "claude-code", phase: "done", version: "2.1.300" },
+    ]);
+    // Every snapshot carries `self` while a SelfUpdate exists; it never asked anything.
+    expect(
+      server.allFrames.filter((f) => f.type === "runtime.maintenance").every((f) => f.self !== undefined),
+    ).toBe(true);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.runtime === "ocw-runtime")).toBe(
+      false,
+    );
+  }, 40_000);
 
   it("automatic: a behind Claude Code is updated at start while no turn runs, and the server hears every step", async () => {
     await updatesDaemon();
@@ -2085,4 +2260,1048 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       } as never),
     ).toMatchObject({ ok: false });
   }, 20_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.17.1 runtime self-update: the device end to end over a test Device Link (D-03, D-04, D-05, D-07, PD-12, PD-18,
+// PD-19). A scratch OCW_HOME at 0.3.1 is the daemon's home, a loopback stub serves 0.3.2, the fake npm installs it,
+// and the exit is a spy that runs the daemon's real hand-over (stop, then record the code; never process.exit).
+
+const sha256Of = (data: string) => createHash("sha256").update(data).digest("hex");
+const BUILD_DIR = /^[0-9a-f]{12}$/;
+
+describe("07.17.1 runtime self-update: the daemon updates itself over the Device Link", () => {
+  let scratch: ScratchHome;
+  let stub: DistStub;
+  let npmPath: string;
+  let userHome: string;
+  let codex: ScriptedRuntime;
+  const extra: Daemon[] = [];
+
+  beforeEach(async () => {
+    await daemon.stop();
+    scratch = await scratchOcwHome();
+    stub = await startDistStub({ version: "0.3.2" });
+    const root = join(scratch.ocwHome, "..");
+    npmPath = await fakeNpm(join(root, "fake-bin"));
+    userHome = join(root, "user");
+    mkdirSync(userHome, { recursive: true });
+  });
+
+  afterEach(async () => {
+    for (const d of extra.splice(0)) await d.stop();
+    // PD-19, E30: the install lock was taken in the scratch home's lock directory, never in the OS user's.
+    const lockName = `${sha256Of(join(scratch.ocwHome, "runtime"))}.lock`;
+    expect(existsSync(join(userInfo().homedir, ".cache", "ocw", "runtime-updates", lockName))).toBe(false);
+    await stub.close();
+    scratch.cleanup();
+  });
+
+  const oldSelf = () => ({ version: "0.3.1", sha256: scratch.oldSha256 });
+  const newSelf = () => ({ version: "0.3.2", sha256: stub.manifest.sha256 });
+  const new12 = () => stub.manifest.sha256.slice(0, 12);
+  const scratchLockFile = () =>
+    join(defaultLockDir(userHome), `${sha256Of(join(scratch.ocwHome, "runtime"))}.lock`);
+
+  /** A daemon on the scratch home with a Claude Code stub and a scripted Codex; the self-update aimed at the stub. */
+  async function selfDaemon(
+    o: {
+      running?: { version: string; sha256: string } | null;
+      supervision?: SelfUpdateOptions["supervision"];
+      exitForUpdate?: ((code: number) => Promise<void>) | null;
+      maxHoldMs?: number;
+    } = {},
+  ): Promise<Daemon> {
+    runtime = new FakeRuntime();
+    codex = new ScriptedRuntime("codex", 5);
+    const d = await Daemon.create({
+      home: scratch.ocwHome,
+      env: { PATH: ["/usr/bin", "/bin"].join(":"), HOME: userHome },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime, codex],
+      logger: silentLogger,
+      controlSocket: false,
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      maintenance: {
+        userHome,
+        which: () => null,
+        registry: { latest: async () => null },
+        freshRegistry: { latest: async () => null },
+      },
+      ...(o.exitForUpdate === null ? {} : { exitForUpdate: o.exitForUpdate ?? (async () => undefined) }),
+      selfUpdate: {
+        serverUrl: stub.url,
+        running: o.running === undefined ? oldSelf() : o.running,
+        supervision: o.supervision ?? { supervised: true, reason: null },
+        pollMs: 20,
+        ...(o.maxHoldMs !== undefined ? { maxHoldMs: o.maxHoldMs } : {}),
+        prepare: (p: PrepareVersionOptions) => prepareVersion({ ...p, npmPath }),
+      },
+    });
+    extra.push(d);
+    return d;
+  }
+
+  /** The exit spy: runs the daemon's real hand-over (`stop()`), then records the code; never exits the process. */
+  function handOverSpy(of: () => Daemon) {
+    const window = { from: -1, to: -1 };
+    const spy: Mock<(code: number) => Promise<void>> = vi.fn(async (_code: number) => {
+      window.from = server.allFrames.length;
+      await of().stop();
+      window.to = server.allFrames.length;
+    });
+    return { spy, window };
+  }
+
+  const welcome = (): ServerToDeviceFrame => ({
+    type: "welcome",
+    deviceId: randomUUID(),
+    organizationId: randomUUID(),
+  });
+  const notify = (): ServerToDeviceFrame => ({
+    type: "runtime.config",
+    policy: "notify",
+    manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+  });
+  const selfCmd = () => ({
+    id: randomUUID(),
+    kind: "runtime.update" as const,
+    sessionId: randomUUID(),
+    payload: { runtime: "ocw-runtime" },
+  });
+  const ackOf = (id: string, timeoutMs = 10_000) => server.frame("ack", (f) => f.commandId === id, timeoutMs);
+  const gatesOf = (d: Daemon) => (d as unknown as { gates: Map<RuntimeId, RuntimeGate> }).gates;
+  type Snapshot = Extract<DeviceToServerFrame, { type: "runtime.maintenance" }>;
+  const selfStates = (frames: DeviceToServerFrame[]) =>
+    frames.flatMap((f) => (f.type === "runtime.maintenance" && f.self ? [f.self.state] : []));
+
+  it("the click updates the daemon: started, downloading → installing → restarting, current switched, exit 75 once; the next daemon reports success", async () => {
+    const { spy, window } = handOverSpy(() => first);
+    const first = await selfDaemon({ exitForUpdate: spy });
+    daemon = first;
+    await first.start();
+    await server.frame("hello");
+    const hello = server.last;
+    const handshake = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    expect(handshake.self).toMatchObject({
+      version: "0.3.1",
+      build: scratch.oldSha12,
+      supervised: true,
+      canUpdate: true,
+      reason: null,
+      state: "idle",
+    });
+    server.push(welcome());
+    // runtime.config → onConfig(): the device checks what its workspace serves (the stub) and reports it.
+    server.push(notify());
+    await server.frame("runtime.maintenance", (f) => f.self?.servedBuild === new12(), 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    const started = await server.frame(
+      "runtime.update.run",
+      (f) => f.phase === "started" && f.commandId === cmd.id,
+      10_000,
+    );
+    expect(started).toMatchObject({
+      runtime: "ocw-runtime",
+      trigger: "manual",
+      fromVersion: "0.3.1",
+      toVersion: "0.3.2",
+      fromBuild: scratch.oldSha12,
+      toBuild: new12(),
+      method: "ocw_bundle",
+    });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled(), { timeout: 30_000, interval: 20 });
+    await vi.waitFor(() => expect(window.to).toBeGreaterThanOrEqual(0), { timeout: 10_000, interval: 20 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(75);
+    const states = selfStates(hello.frames);
+    const at = (s: string) => states.indexOf(s as never);
+    expect(at("downloading")).toBeGreaterThan(-1);
+    expect(at("downloading")).toBeLessThan(at("installing"));
+    expect(at("installing")).toBeLessThan(at("restarting"));
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${new12()}`);
+    // E29: the hand-over sends no run frame (no `finished`); every gate stays closed into the exit.
+    const during = server.allFrames.slice(window.from, window.to);
+    expect(during.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+    expect(
+      hello.frames.filter((f) => f.type === "runtime.update.run" && f.runId === started.runId),
+    ).toHaveLength(1);
+    expect([...gatesOf(first).values()].every((g) => !g.isOpen)).toBe(true);
+    // The lock directory is the maintenance scope's (the scratch home): the lock is held into the exit there.
+    expect(existsSync(scratchLockFile())).toBe(true);
+
+    // The service manager starts the new build: a second daemon on the same home, running 0.3.2.
+    const second = await selfDaemon({ running: newSelf() });
+    daemon = second;
+    await second.start();
+    const conn = await server.waitFor(
+      () => (server.connections.length > 1 && server.last.frames.length >= 3 ? server.last : undefined),
+      10_000,
+    );
+    expect(conn.frames[0]?.type).toBe("hello");
+    expect(conn.frames[1]).toMatchObject({
+      type: "runtime.update.run",
+      phase: "started",
+      runId: started.runId,
+      commandId: cmd.id,
+    });
+    expect(conn.frames[2]).toMatchObject({
+      type: "runtime.update.run",
+      phase: "finished",
+      outcome: "succeeded",
+      runId: started.runId,
+      commandId: cmd.id,
+      fromBuild: scratch.oldSha12,
+      toBuild: new12(),
+    });
+    const after = (await server.waitFor(
+      () => conn.frames.find((f) => f.type === "runtime.maintenance" && f.self !== undefined),
+      10_000,
+    )) as Snapshot;
+    expect(after.self).toMatchObject({ version: "0.3.2", build: new12(), lastRun: { outcome: "succeeded" } });
+    await vi.waitFor(() => expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    const versions = readdirSync(join(scratch.ocwHome, "runtime", "versions"));
+    expect(versions.filter((n) => BUILD_DIR.test(n)).sort()).toEqual([scratch.oldSha12, new12()].sort());
+    expect(versions.filter((n) => n.startsWith(".staging-"))).toEqual([]);
+
+    // E17: the server redelivers the first command to the new daemon: acked ok, nothing runs again.
+    const asked = stub.requests.length;
+    server.send(cmd);
+    expect(
+      await server.waitFor(() => conn.frames.find((f) => f.type === "ack" && f.commandId === cmd.id), 10_000),
+    ).toMatchObject({ ok: true });
+    await sleep(300);
+    expect(conn.frames.filter((f) => f.type === "runtime.update.run" && f.phase === "started")).toHaveLength(
+      1,
+    );
+    expect(stub.requests.length).toBe(asked);
+
+    // PD-25: no frame the server received carries a host path.
+    for (const f of server.allFrames) expect(JSON.stringify(f)).not.toMatch(HOST_PATH_TOKEN_RE);
+    // Only the stub was asked for the runtime (P1); nothing followed a redirect.
+    expect(stub.requests.length).toBeGreaterThan(0);
+    expect(stub.redirectRequests).toEqual([]);
+  }, 60_000);
+
+  // ---- Task 2: busy devices wait and say why; redelivered and refused commands are safe (D-04, D-05, PD-18) ----
+
+  const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
+  const updateEvents = (sessionId: string) =>
+    server.allFrames.flatMap((f) =>
+      f.type === "event" && f.sessionId === sessionId && f.event.type === "runtime.update" ? [f.event] : [],
+    );
+  async function startOn(sessionId: string, rt: RuntimeId, localId: string): Promise<void> {
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, runtime: rt, permissionMode: "default" },
+    });
+    expect(await ackOf(`start-${sessionId}`)).toMatchObject({ ok: true });
+  }
+
+  it("a Codex turn running: the update waits, a new Claude Code turn is held and told the OCW runtime restarts; the exit comes after the turn", async () => {
+    const { spy, window } = handOverSpy(() => d);
+    const d = await selfDaemon({ exitForUpdate: spy });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    // C's Codex turn runs and waits on an approval: a turn in flight.
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    const asked = await server.frame(
+      "event",
+      (f) => f.sessionId === "C" && f.event.type === "approval.requested",
+      10_000,
+    );
+    expect(codex.activeTurns()).toBe(1);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    // A new Claude Code turn (and a title for it) is held; its session hears once that the OCW runtime restarts.
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    server.send({
+      id: "ta1",
+      kind: "session.title",
+      sessionId: "A",
+      payload: { runtime: "claude-code", model: "opus", prompt: "Please fix the login redirect bug" },
+    });
+    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 10_000);
+    await sleep(300);
+    expect(updateEvents("A")).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting", subject: "ocw-runtime" },
+    ]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(hasAck("pa1")).toBe(false);
+    expect(hasAck("ta1")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(spy).not.toHaveBeenCalled();
+
+    // The Codex turn ends (its approval is resolved; approvals never wait at the gate): then the restart.
+    const approvalId = asked.event.type === "approval.requested" ? asked.event.approvalId : "";
+    server.send({
+      id: "rc1",
+      kind: "approval.resolve",
+      sessionId: "C",
+      payload: { approvalId, decision: "once" },
+    });
+    expect(await ackOf("rc1")).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(75), { timeout: 15_000, interval: 20 });
+    await vi.waitFor(() => expect(window.to).toBeGreaterThanOrEqual(0), { timeout: 10_000, interval: 20 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(
+      server.allFrames.some(
+        (f) => f.type === "event" && f.sessionId === "C" && f.event.type === "prompt.completed",
+      ),
+    ).toBe(true);
+    // The held prompt was never acked by this daemon: the server runs it after the restart (PD-27).
+    expect(hasAck("pa1")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(updateEvents("A")).toHaveLength(1);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${new12()}`);
+  }, 60_000);
+
+  it("review WR-01: stopping the daemon during the hold never starts the held prompt; the run closes cancelled and the prompt stays unacked for PD-27", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({ exitForUpdate: spy });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    await server.frame("event", (f) => f.sessionId === "C" && f.event.type === "approval.requested", 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    await server.waitFor(() => (updateEvents("A").length > 0 ? true : undefined), 10_000);
+
+    // `ocw-runtime service restart` / `systemctl stop` while the hold is on.
+    await d.stop();
+    await sleep(300);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("a1");
+    expect(
+      server.allFrames.some(
+        (f) => f.type === "event" && f.sessionId === "A" && f.event.type === "prompt.started",
+      ),
+    ).toBe(false);
+    expect(hasAck("pa1")).toBe(false);
+    expect(
+      server.allFrames.find(
+        (f) => f.type === "runtime.update.run" && f.phase === "finished" && f.commandId === cmd.id,
+      ),
+    ).toMatchObject({ outcome: "failed", output: "cancelled: the runtime stopped" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+  }, 60_000);
+
+  it("review IN-04 / WR-02: a hold that gives up tells the held session the update did not run, and its turn runs", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({ exitForUpdate: spy, maxHoldMs: 1_500 });
+    daemon = d;
+    const localId = (await d.registry.add(project)).localId;
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    await server.frame("event", (f) => f.sessionId === "C" && f.event.type === "approval.requested", 10_000);
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    server.send({ id: "pa1", kind: "prompt", sessionId: "A", payload: { promptId: "a1", text: "next" } });
+    await server.frame("runtime.update.run", (f) => f.phase === "finished" && f.commandId === cmd.id, 15_000);
+    await vi.waitFor(() => expect(runtime.prompts.map((p) => p.promptId)).toContain("a1"), {
+      timeout: 10_000,
+      interval: 20,
+    });
+    expect(updateEvents("A")).toEqual([
+      { type: "runtime.update", runtime: "claude-code", phase: "waiting", subject: "ocw-runtime" },
+      { type: "runtime.update", runtime: "claude-code", phase: "failed", subject: "ocw-runtime" },
+    ]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it("review IN-06: a snapshot whose send throws does not stop later CLI snapshots, and stop() still closes the link", async () => {
+    const d = await selfDaemon();
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const first = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    const inner = d as unknown as {
+      link: { send: (f: DeviceToServerFrame) => void };
+      maintenance: { opts: { sendSnapshot: (f: Snapshot) => void } };
+    };
+    const send = inner.link.send.bind(inner.link);
+    let thrown = 0;
+    inner.link.send = (f) => {
+      if (f.type === "runtime.maintenance" && thrown === 0) {
+        thrown += 1;
+        throw new Error("socket write failed");
+      }
+      send(f);
+    };
+    const before = server.allFrames.filter((f) => f.type === "runtime.maintenance").length;
+    const { self: _self, ...cli } = first;
+    inner.maintenance.opts.sendSnapshot(cli);
+    inner.maintenance.opts.sendSnapshot(cli);
+    await vi.waitFor(
+      () => expect(server.allFrames.filter((f) => f.type === "runtime.maintenance").length).toBe(before + 1),
+      { timeout: 5_000, interval: 20 },
+    );
+    expect(thrown).toBe(1);
+    await d.stop();
+    expect(d.isConnected).toBe(false);
+  }, 30_000);
+
+  it("not a service run: the click is refused with the device's sentence; nothing is fetched, current is unchanged", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({
+      supervision: { supervised: false, reason: "not_supervised" },
+      exitForUpdate: spy,
+    });
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const snap = await server.frame("runtime.maintenance", (f) => f.self !== undefined, 10_000);
+    expect(snap.self).toMatchObject({ supervised: false, canUpdate: false, reason: "not_supervised" });
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({
+      ok: false,
+      error: "Run as a service to update from the browser; or re-run the install command",
+    });
+    await sleep(200);
+    expect(stub.requests).toEqual([]);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("review CR-01: back on the previous build after a rollback, automatic does not re-install the build that did not come back, across restarts", async () => {
+    // The owner pointed `current` back at 0.3.1 after 0.3.2 crash-looped: the marker still names 0.3.2.
+    await writeSelfUpdateMarker(scratch.ocwHome, {
+      runId: randomUUID(),
+      commandId: null,
+      trigger: "automatic",
+      from: oldSelf(),
+      to: newSelf(),
+      startedAt: new Date().toISOString(),
+    });
+    const automatic = (): ServerToDeviceFrame => ({
+      type: "runtime.config",
+      policy: "automatic",
+      manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+    });
+    const startedRuns = () =>
+      server.allFrames.filter((f) => f.type === "runtime.update.run" && f.phase === "started").length;
+    const versionAsks = () => stub.requests.filter((p) => p.endsWith("/version")).length;
+    const spy = vi.fn(async (_code: number) => undefined);
+
+    const first = await selfDaemon({ exitForUpdate: spy });
+    daemon = first;
+    await first.start();
+    await server.frame("runtime.update.run", (f) => f.phase === "finished" && f.outcome === "failed", 10_000);
+    const reported = startedRuns();
+    server.push(welcome());
+    server.push(automatic());
+    await vi.waitFor(() => expect(versionAsks()).toBe(1), { timeout: 10_000, interval: 20 });
+    await sleep(500);
+    expect(startedRuns()).toBe(reported);
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    await vi.waitFor(() => expect(existsSync(selfUpdateMarkerPath(scratch.ocwHome))).toBe(false), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    await first.stop();
+
+    // The next start has no marker any more: the build is still remembered.
+    const second = await selfDaemon({ exitForUpdate: spy });
+    daemon = second;
+    await second.start();
+    await server.waitFor(() => (server.connections.length > 1 ? true : undefined), 10_000);
+    server.push(welcome());
+    server.push(automatic());
+    await vi.waitFor(() => expect(versionAsks()).toBe(2), { timeout: 10_000, interval: 20 });
+    await sleep(500);
+    expect(startedRuns()).toBe(reported);
+    expect(spy).not.toHaveBeenCalled();
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+  }, 60_000);
+
+  it("a daemon built without exitForUpdate refuses the click and its snapshots carry no self", async () => {
+    const d = await selfDaemon({ exitForUpdate: null });
+    daemon = d;
+    await d.start();
+    await server.frame("hello");
+    const snap = await server.frame("runtime.maintenance", () => true, 10_000);
+    expect(snap.self).toBeUndefined();
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: false, error: SELF_UPDATE_UNAVAILABLE_MESSAGE });
+    await sleep(200);
+    expect(stub.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.maintenance" && f.self !== undefined)).toEqual(
+      [],
+    );
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(readlinkSync(join(scratch.ocwHome, "runtime", "current"))).toBe(`versions/${scratch.oldSha12}`);
+    expect(
+      readdirSync(join(scratch.ocwHome, "runtime", "versions")).filter((n) => BUILD_DIR.test(n)),
+    ).toEqual([scratch.oldSha12]);
+  }, 30_000);
+});
+
+// -------------------------------------------------------------------------------------------------
+// 07.17.1.1: a bot's files between a session's tree and its server (D-02 … D-04, D-08, D-13, PD-05, PD-10, PD-18)
+
+/** Replaces the default daemon with one whose transfer retries wait milliseconds, not seconds. */
+async function fileDaemon(o: { serverUrl?: string; logger?: Logger } = {}): Promise<Daemon> {
+  await daemon.stop();
+  daemon = await Daemon.create({
+    home,
+    env: {},
+    token: "device-token-123",
+    config: { serverUrl: o.serverUrl ?? server.url },
+    runtimes: [runtime],
+    logger: o.logger ?? silentLogger,
+    controlSocket: false,
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    fileRetryDelaysMs: [10, 20],
+  });
+  return daemon;
+}
+
+/** Registers the scratch project, connects and starts `sessionId` on it (cwd = the project). */
+async function activeSession(sessionId: string): Promise<void> {
+  const localId = (await daemon.registry.add(project)).localId;
+  await daemon.start();
+  await server.frame("hello");
+  const id = `start-${sessionId}`;
+  server.send({
+    id,
+    kind: "session.start",
+    sessionId,
+    payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+  });
+  expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+}
+
+function fileCmd(
+  kind: "session.file.read" | "session.file.write",
+  sessionId: string,
+  payload: Record<string, unknown>,
+): Omit<CommandFrame, "type"> {
+  return { id: randomUUID(), kind, sessionId, payload };
+}
+
+function fileAck(id: string, timeoutMs = 5000) {
+  return server.frame("ack", (f) => f.commandId === id, timeoutMs);
+}
+
+describe("07.17.1.1 session.file.read: one contained file streams to the server under the device JWT", () => {
+  it("toRuntimeFileUrl keeps the server URL's path prefix and drops its query and hash", () => {
+    expect(toRuntimeFileUrl("http://127.0.0.1:4000", "abc-1")).toBe(
+      "http://127.0.0.1:4000/api/v1/runtime/files/abc-1",
+    );
+    expect(toRuntimeFileUrl("https://ocw.example/base/?x=1#h", "abc-1")).toBe(
+      "https://ocw.example/base/api/v1/runtime/files/abc-1",
+    );
+    expect(() => toRuntimeFileUrl("https://ocw.example", "../devices/token")).toThrow();
+  });
+
+  it("PUTs exactly the file's bytes with the device JWT and content-length, then acks ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-r1");
+    const bytes = randomBytes(70_000);
+    writeFileSync(join(project, "data.bin"), bytes);
+    const cmd = fileCmd("session.file.read", "wf-r1", { path: "data.bin", maxBytes: 1_048_576 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toEqual({ type: "ack", commandId: cmd.id, ok: true });
+    expect(server.fileRequests).toEqual([
+      {
+        method: "PUT",
+        url: `/api/v1/runtime/files/${cmd.id}`,
+        authorization: `Bearer ${server.issued.at(-1)}`,
+        contentLength: "70000",
+        sha256: sha256Hex(bytes),
+        bytes: 70_000,
+      },
+    ]);
+  });
+
+  it("an empty file moves as zero bytes", async () => {
+    await fileDaemon();
+    await activeSession("wf-r0");
+    writeFileSync(join(project, "empty.txt"), "");
+    const cmd = fileCmd("session.file.read", "wf-r0", { path: "empty.txt", maxBytes: 10 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests[0]).toMatchObject({ method: "PUT", contentLength: "0", bytes: 0 });
+  });
+
+  it("a server under a path prefix gets the prefix; a url key in the payload changes nothing (P3)", async () => {
+    server.prefix = "/ocw";
+    await fileDaemon({ serverUrl: `${server.url}/ocw` });
+    await activeSession("wf-r2");
+    const cmd = fileCmd("session.file.read", "wf-r2", {
+      path: "README.md",
+      maxBytes: 1024,
+      url: "http://evil.test/x",
+    });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests.map((r) => r.url)).toEqual([`/ocw/api/v1/runtime/files/${cmd.id}`]);
+  });
+
+  it("maps the server's answers: 413 too_large, 410 expired, 500 transfer_failed; a 401 is retried once with a fresh JWT", async () => {
+    await fileDaemon();
+    await activeSession("wf-r3");
+    for (const [status, code] of [
+      [413, "too_large"],
+      [410, "expired"],
+      [500, "transfer_failed"],
+    ] as const) {
+      server.fileStatuses = [status];
+      const cmd = fileCmd("session.file.read", "wf-r3", { path: "README.md", maxBytes: 1024 });
+      server.send(cmd);
+      expect(await fileAck(cmd.id), String(status)).toMatchObject({ ok: false, error: code });
+    }
+    server.fileRequests.length = 0;
+    server.fileStatuses = [401];
+    const cmd = fileCmd("session.file.read", "wf-r3", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests).toHaveLength(2);
+    expect(server.fileRequests[1]!.authorization).toBe(`Bearer ${server.issued.at(-1)}`);
+    expect(server.fileRequests[0]!.authorization).not.toBe(server.fileRequests[1]!.authorization);
+  });
+
+  it("503 busy (the transfer stays pending): retried at most twice", async () => {
+    await fileDaemon();
+    await activeSession("wf-r4");
+    server.fileStatuses = [503];
+    const ok = fileCmd("session.file.read", "wf-r4", { path: "README.md", maxBytes: 1024 });
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    expect(server.fileRequests).toHaveLength(2);
+    server.fileRequests.length = 0;
+    server.fileStatuses = [503, 503, 503];
+    const busy = fileCmd("session.file.read", "wf-r4", { path: "README.md", maxBytes: 1024 });
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "transfer_failed" });
+    expect(server.fileRequests).toHaveLength(3);
+  });
+
+  it("refusals happen before any request: not_running, too_large with the size, not_a_file, not_found, path_not_allowed, invalid_path", async () => {
+    await fileDaemon();
+    await activeSession("wf-r5");
+    mkdirSync(join(project, "docs"));
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["no-such-session", { path: "README.md", maxBytes: 1024 }, "not_running"],
+      ["wf-r5", { path: "README.md", maxBytes: 2 }, "too_large: 6"],
+      ["wf-r5", { path: "docs", maxBytes: 1024 }, "not_a_file"],
+      ["wf-r5", { path: "missing.md", maxBytes: 1024 }, "not_found"],
+      ["wf-r5", { path: ".git/config", maxBytes: 1024 }, "path_not_allowed"],
+      ["wf-r5", { path: "../x", maxBytes: 1024 }, "invalid_path"],
+      ["wf-r5", { path: `${project}/README.md`, maxBytes: 1024 }, "invalid_path"],
+    ];
+    for (const [sessionId, payload, error] of cases) {
+      const cmd = fileCmd("session.file.read", sessionId, payload);
+      server.send(cmd);
+      expect(await fileAck(cmd.id), error).toMatchObject({ ok: false, error });
+    }
+    expect(server.fileRequests).toEqual([]);
+  });
+
+  it("a running turn of the same session does not delay a read (never in session order)", async () => {
+    await fileDaemon();
+    await activeSession("wf-r6");
+    let release!: () => void;
+    runtime.promptHold = new Promise<void>((r) => {
+      release = r;
+    });
+    server.send({
+      id: "wf-r6-p",
+      kind: "prompt",
+      sessionId: "wf-r6",
+      payload: { promptId: "pp", text: "go" },
+    });
+    await server.frame("event", (f) => f.sessionId === "wf-r6" && f.event.type === "prompt.started");
+    const cmd = fileCmd("session.file.read", "wf-r6", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(server.allFrames.some((f) => f.type === "ack" && f.commandId === "wf-r6-p")).toBe(false);
+    release();
+    expect(await fileAck("wf-r6-p")).toMatchObject({ ok: true });
+  });
+
+  it("no ack error and no log line names the scratch directory; logs carry the command id and the code", async () => {
+    const logger = captureLogger();
+    await fileDaemon({ logger });
+    await activeSession("wf-r7");
+    mkdirSync(join(project, "docs"));
+    server.fileStatuses = [500];
+    const ids: string[] = [];
+    for (const payload of [
+      { path: "docs", maxBytes: 1024 },
+      { path: "README.md", maxBytes: 1 },
+      { path: "README.md", maxBytes: 1024 },
+    ]) {
+      const cmd = fileCmd("session.file.read", "wf-r7", payload);
+      ids.push(cmd.id);
+      server.send(cmd);
+      expect(await fileAck(cmd.id)).toMatchObject({ ok: false });
+    }
+    expect(JSON.stringify(server.allFrames)).not.toContain(home);
+    expect(logger.lines.join("\n")).not.toContain(home);
+    for (const id of ids) expect(logger.lines.some((l) => l.includes(id))).toBe(true);
+    expect(logger.lines.some((l) => l.includes('"code":"not_a_file"'))).toBe(true);
+  });
+});
+
+describe("07.17.1.1 session.file.write: a file lands in an idle session's tree, verified, with no second writer", () => {
+  function writePayload(path: string, bytes: Buffer, overwrite = false) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite };
+  }
+
+  it("GETs the transfer with the device JWT, writes exactly the bytes and acks ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-w1");
+    const bytes = randomBytes(40_000);
+    server.fileBody = bytes;
+    const cmd = fileCmd("session.file.write", "wf-w1", writePayload("notes/up.bin", bytes));
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toEqual({ type: "ack", commandId: cmd.id, ok: true });
+    expect(server.fileRequests).toEqual([
+      {
+        method: "GET",
+        url: `/api/v1/runtime/files/${cmd.id}`,
+        authorization: `Bearer ${server.issued.at(-1)}`,
+        contentLength: undefined,
+        sha256: sha256Hex(""),
+        bytes: 0,
+      },
+    ]);
+    expect(sha256Hex(readFileSync(join(project, "notes", "up.bin")))).toBe(sha256Hex(bytes));
+    expect(readdirSync(join(project, "notes"))).toEqual(["up.bin"]);
+  });
+
+  it("refused while a turn of the session runs (busy, no request); accepted once it completed", async () => {
+    await fileDaemon();
+    await activeSession("wf-w2");
+    server.fileBody = Buffer.from("hello");
+    // The test runtime's prompt starts a turn and returns without completing it.
+    server.send({
+      id: "wf-w2-p",
+      kind: "prompt",
+      sessionId: "wf-w2",
+      payload: { promptId: "pw", text: "go" },
+    });
+    expect(await fileAck("wf-w2-p")).toMatchObject({ ok: true });
+    const busy = fileCmd("session.file.write", "wf-w2", writePayload("a.txt", server.fileBody));
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "busy" });
+    expect(server.fileRequests).toEqual([]);
+    runtime.emit("wf-w2", {
+      type: "prompt.completed",
+      promptId: "pw",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const ok = fileCmd("session.file.write", "wf-w2", writePayload("a.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    expect(readFileSync(join(project, "a.txt"), "utf8")).toBe("hello");
+  });
+
+  it("a session.state that is not running or waiting_approval also ends the turn", async () => {
+    await fileDaemon();
+    await activeSession("wf-w3");
+    server.fileBody = Buffer.from("hello");
+    runtime.emit("wf-w3", { type: "session.state", status: "waiting_approval" });
+    const busy = fileCmd("session.file.write", "wf-w3", writePayload("b.txt", server.fileBody));
+    server.send(busy);
+    expect(await fileAck(busy.id)).toMatchObject({ ok: false, error: "busy" });
+    runtime.emit("wf-w3", { type: "session.state", status: "idle" });
+    const ok = fileCmd("session.file.write", "wf-w3", writePayload("b.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+  });
+
+  it("not active → not_running; 410 → expired; wrong bytes → mismatch; a repeated id runs once", async () => {
+    await fileDaemon();
+    await activeSession("wf-w4");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    const gone = fileCmd("session.file.write", "no-such-session", writePayload("c.txt", bytes));
+    server.send(gone);
+    expect(await fileAck(gone.id)).toMatchObject({ ok: false, error: "not_running" });
+    expect(server.fileRequests).toEqual([]);
+
+    server.fileStatuses = [410];
+    const expired = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(expired);
+    expect(await fileAck(expired.id)).toMatchObject({ ok: false, error: "expired" });
+    expect(existsSync(join(project, "c.txt"))).toBe(false);
+
+    server.fileBody = Buffer.from("jello");
+    const wrong = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(wrong);
+    expect(await fileAck(wrong.id)).toMatchObject({ ok: false, error: "mismatch" });
+    expect(existsSync(join(project, "c.txt"))).toBe(false);
+    expect(readdirSync(project).filter((n) => n.startsWith(".ocw-upload-"))).toEqual([]);
+
+    server.fileBody = bytes;
+    server.fileRequests.length = 0;
+    const once = fileCmd("session.file.write", "wf-w4", writePayload("c.txt", bytes));
+    server.send(once);
+    expect(await fileAck(once.id)).toMatchObject({ ok: true });
+    server.send(once);
+    await server.waitFor(() =>
+      server.allFrames.filter((f) => f.type === "ack" && f.commandId === once.id).length === 2
+        ? true
+        : undefined,
+    );
+    expect(server.fileRequests).toHaveLength(1);
+  });
+
+  it("refusals before any request: exists, not_a_file, path_not_allowed (.ocw-worktrees, .claude), invalid_path", async () => {
+    await fileDaemon();
+    await activeSession("wf-w5");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    mkdirSync(join(project, "docs"));
+    for (const [path, error, overwrite] of [
+      ["README.md", "exists", false],
+      ["docs", "not_a_file", true],
+      [".ocw-worktrees/other/x.md", "path_not_allowed", false],
+      [".claude/settings.json", "path_not_allowed", false],
+      ["../x.md", "invalid_path", false],
+    ] as const) {
+      const cmd = fileCmd("session.file.write", "wf-w5", writePayload(path, bytes, overwrite));
+      server.send(cmd);
+      expect(await fileAck(cmd.id), path).toMatchObject({ ok: false, error });
+    }
+    expect(server.fileRequests).toEqual([]);
+    expect(readFileSync(join(project, "README.md"), "utf8")).toBe("hello\n");
+  });
+
+  it("a write and a prompt of the same session run one after the other (session order), never at once", async () => {
+    await fileDaemon();
+    await activeSession("wf-w6");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    let release!: () => void;
+    runtime.promptHold = new Promise<void>((r) => {
+      release = r;
+    });
+    server.send({
+      id: "wf-w6-p",
+      kind: "prompt",
+      sessionId: "wf-w6",
+      payload: { promptId: "po", text: "go" },
+    });
+    await server.frame("event", (f) => f.sessionId === "wf-w6" && f.event.type === "prompt.started");
+    const cmd = fileCmd("session.file.write", "wf-w6", writePayload("d.txt", bytes));
+    server.send(cmd);
+    await sleep(200);
+    expect(server.allFrames.some((f) => f.type === "ack" && f.commandId === cmd.id)).toBe(false);
+    expect(server.fileRequests).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    const acks = server.allFrames.flatMap((f) => (f.type === "ack" ? [f.commandId] : []));
+    expect(acks.indexOf("wf-w6-p")).toBeLessThan(acks.indexOf(cmd.id));
+    expect(readFileSync(join(project, "d.txt"), "utf8")).toBe("hello");
+  });
+
+  it("a stopped session's turn is forgotten: a write after a restart of the session is not busy", async () => {
+    await fileDaemon();
+    await activeSession("wf-w7");
+    server.fileBody = Buffer.from("hello");
+    server.send({
+      id: "wf-w7-p",
+      kind: "prompt",
+      sessionId: "wf-w7",
+      payload: { promptId: "px", text: "go" },
+    });
+    expect(await fileAck("wf-w7-p")).toMatchObject({ ok: true });
+    server.send({ id: "wf-w7-s", kind: "session.stop", sessionId: "wf-w7" });
+    expect(await fileAck("wf-w7-s")).toMatchObject({ ok: true });
+    const stopped = fileCmd("session.file.write", "wf-w7", writePayload("e.txt", server.fileBody));
+    server.send(stopped);
+    expect(await fileAck(stopped.id)).toMatchObject({ ok: false, error: "not_running" });
+    const localId = daemon.registry.list()[0]!.localId;
+    server.send({
+      id: "wf-w7-r",
+      kind: "session.start",
+      sessionId: "wf-w7",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+    });
+    expect(await fileAck("wf-w7-r")).toMatchObject({ ok: true });
+    const ok = fileCmd("session.file.write", "wf-w7", writePayload("e.txt", server.fileBody));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+  });
+});
+
+describe("07.17.1.1 an upload lands only before the server's landing deadline (review WR-01)", () => {
+  function writePayload(path: string, bytes: Buffer) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite: false };
+  }
+
+  it("bytes that arrive after the time the GET allowed land nothing and ack expired", async () => {
+    await fileDaemon();
+    await activeSession("wf-l1");
+    const bytes = Buffer.from("too late");
+    server.fileBody = bytes;
+    server.fileHeaders = { [RUNTIME_FILE_LAND_WITHIN_HEADER]: "0" };
+    const cmd = fileCmd("session.file.write", "wf-l1", writePayload("late.txt", bytes));
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "expired" });
+    expect(existsSync(join(project, "late.txt"))).toBe(false);
+    expect(readdirSync(project).filter((n) => n.startsWith(".ocw-upload-"))).toEqual([]);
+  });
+
+  it("within the time, or from a server that names none, the file lands", async () => {
+    await fileDaemon();
+    await activeSession("wf-l2");
+    const bytes = Buffer.from("in time");
+    server.fileBody = bytes;
+    server.fileHeaders = { [RUNTIME_FILE_LAND_WITHIN_HEADER]: "60000" };
+    const ok = fileCmd("session.file.write", "wf-l2", writePayload("ok.txt", bytes));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    server.fileHeaders = {};
+    const old = fileCmd("session.file.write", "wf-l2", writePayload("old.txt", bytes));
+    server.send(old);
+    expect(await fileAck(old.id)).toMatchObject({ ok: true });
+    expect(readFileSync(join(project, "old.txt"), "utf8")).toBe("in time");
+  });
+});
+
+describe("07.17.1.1 a redelivered file command is answered with its real outcome (review CR-03)", () => {
+  function writePayload(path: string, bytes: Buffer) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite: false };
+  }
+  const acksOf = (id: string) =>
+    server.allFrames.filter((f): f is Extract<DeviceToServerFrame, { type: "ack" }> => {
+      return f.type === "ack" && f.commandId === id;
+    });
+
+  it("a copy that arrives while the upload still streams is not acked; the only answer is the real one", async () => {
+    await fileDaemon();
+    await activeSession("wf-x1");
+    const bytes = Buffer.from("hello");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    server.onFileRequest = () => held;
+    // The bytes the server will send do not match the payload: the write fails after its GET.
+    server.fileBody = Buffer.from("jello");
+    const cmd = fileCmd("session.file.write", "wf-x1", writePayload("x.txt", bytes));
+    server.send(cmd);
+    await server.waitFor(() => (server.fileRequests.length === 1 ? true : undefined));
+    server.send(cmd); // the hub's redelivery after a link blip
+    await sleep(200);
+    expect(acksOf(cmd.id)).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "mismatch" });
+    await sleep(100);
+    expect(acksOf(cmd.id)).toHaveLength(1);
+    expect(existsSync(join(project, "x.txt"))).toBe(false);
+    // Redelivered after it finished (its ack was lost): the same failure again, never a blind ok, never a second GET.
+    server.send(cmd);
+    await server.waitFor(() => (acksOf(cmd.id).length === 2 ? true : undefined));
+    expect(acksOf(cmd.id)[1]).toMatchObject({ ok: false, error: "mismatch" });
+    expect(server.fileRequests).toHaveLength(1);
+  });
+
+  it("a finished failure is answered again with its code; a finished success with ok", async () => {
+    await fileDaemon();
+    await activeSession("wf-x2");
+    const bytes = Buffer.from("hello");
+    server.fileBody = bytes;
+    server.fileStatuses = [410];
+    const expired = fileCmd("session.file.write", "wf-x2", writePayload("y.txt", bytes));
+    server.send(expired);
+    expect(await fileAck(expired.id)).toMatchObject({ ok: false, error: "expired" });
+    server.send(expired);
+    await server.waitFor(() => (acksOf(expired.id).length === 2 ? true : undefined));
+    expect(acksOf(expired.id)[1]).toMatchObject({ ok: false, error: "expired" });
+
+    const read = fileCmd("session.file.read", "wf-x2", { path: "README.md", maxBytes: 1 });
+    server.send(read);
+    expect(await fileAck(read.id)).toMatchObject({ ok: false, error: "too_large: 6" });
+    server.send(read);
+    await server.waitFor(() => (acksOf(read.id).length === 2 ? true : undefined));
+    expect(acksOf(read.id)[1]).toMatchObject({ ok: false, error: "too_large: 6" });
+  });
+
+  it("a copy that arrives while a download's PUT streams waits for the PUT's answer", async () => {
+    await fileDaemon();
+    await activeSession("wf-x3");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    server.onFileRequest = () => held;
+    server.fileStatuses = [500];
+    const cmd = fileCmd("session.file.read", "wf-x3", { path: "README.md", maxBytes: 1024 });
+    server.send(cmd);
+    await server.waitFor(() => (server.fileRequests.length === 1 ? true : undefined));
+    server.send(cmd);
+    await sleep(200);
+    expect(acksOf(cmd.id)).toEqual([]);
+    release();
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "transfer_failed" });
+    await sleep(100);
+    expect(acksOf(cmd.id)).toHaveLength(1);
+  });
+});
+
+describe("07.17.1.1 diff.result never closes the link (D-14, PD-19)", () => {
+  it("a 400 KiB change answers a frame within the API's inbound limit, truncated", async () => {
+    const localId = await addProject();
+    const line = `${"y".repeat(99)}\n`;
+    writeFileSync(join(project, "big.txt"), line.repeat(4096));
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: "dbig",
+      kind: "diff.request",
+      sessionId: "ws-big",
+      payload: { projectLocalId: localId },
+    });
+    const diff = await server.frame("diff.result", (f) => f.requestId === "dbig");
+    expect(Buffer.byteLength(JSON.stringify(diff))).toBeLessThanOrEqual(256 * 1024 - 4096);
+    expect(diff.truncated).toBe(true);
+    expect(diff.files.map((f) => f.path).sort()).toEqual(["README.md", "big.txt"]);
+    expect(diff.patch).toContain("b/big.txt");
+    expect(diff.patch.endsWith("\n")).toBe(true);
+    expect(await server.frame("ack", (f) => f.commandId === "dbig")).toMatchObject({ ok: true });
+  });
 });

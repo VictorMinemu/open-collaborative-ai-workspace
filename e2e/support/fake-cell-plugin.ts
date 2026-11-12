@@ -429,6 +429,9 @@ const WORK_SESSION_KEYS: Record<WorkSessionTool, readonly string[]> = {
   ocw_work_session_prompt: ["workSessionId", "prompt"],
   ocw_work_session_read: ["workSessionId", "cursor"],
   ocw_work_session_stop: ["workSessionId"],
+  // 07.17.1.1 (D-02, D-03): a chat attachment into the session's tree, and a file of the tree back into the chat.
+  ocw_work_session_upload: ["workSessionId", "attachmentId", "path", "overwrite"],
+  ocw_work_session_download: ["workSessionId", "path"],
 };
 
 /**
@@ -1308,7 +1311,8 @@ export class FakeCellPlugin {
    * (07.16-08): `POST /agent-channel/v1/work-sessions/<verb>` with the mention's `eventId` and `agentId` and only the
    * tool's own keys the model gave (`WORK_SESSION_KEYS`; strings trimmed). Self-validated by its route, never
    * `/tool-calls`. Lines: `started <projectName> (<mode>)`, `proposed`, `queued`, `read <status>: <last output line>`,
-   * `stopped`, `refused (<code>)` for an in-band refusal or the error envelope's code (else the HTTP status).
+   * `stopped`, `uploaded <path>`, `downloaded <name>` (07.17.1.1-14), `refused (<code>)` for an in-band refusal or the
+   * error envelope's code (else the HTTP status).
    */
   async workSessionCall(
     m: MentionPayload,
@@ -1341,6 +1345,11 @@ export class FakeCellPlugin {
         return { line: String(b.kind), body: b };
       case "read":
         return { line: `read ${b.session?.status}: ${lastOutputLine(b)}`, body: b };
+      // 07.17.1.1-14 (D-02, D-03): the repo-relative path written, and the base name of the file brought back.
+      case "uploaded":
+        return { line: `uploaded ${b.path}`, body: b };
+      case "downloaded":
+        return { line: `downloaded ${b.name}`, body: b };
       default:
         return { line: `refused (${b.code ?? res.status})`, body: b };
     }

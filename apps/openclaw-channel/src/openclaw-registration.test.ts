@@ -100,6 +100,8 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_work_session_prompt",
       "ocw_work_session_read",
       "ocw_work_session_stop",
+      "ocw_work_session_upload",
+      "ocw_work_session_download",
       "ocw_sandbox_exec",
       "ocw_sandbox_process",
       "ocw_sandbox_read",

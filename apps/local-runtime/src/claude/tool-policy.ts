@@ -3,25 +3,16 @@
 
 import { homedir } from "node:os";
 import { basename, isAbsolute, resolve, sep } from "node:path";
+import { isSecretBasename } from "@ocw/contracts";
 
-/** Basenames that are allowed even though they look like `.env*`. */
+// 07.17.1.1 (PD-09): the secret base-name rule (`.env*` but the templates, private keys, keychains, rc files) lives
+// once in `@ocw/contracts` (`isSecretBasename`), shared with the bot file exchange's deny list both ways.
+
+/**
+ * `.env` templates: a path named so is never a secret (checked first, as before 07.17.1.1), and a Glob/Grep pattern
+ * naming one is allowed. The same rule `isSecretBasename` applies.
+ */
 const ENV_TEMPLATE_ALLOW = /^\.env\.(example|sample|template|dist)$/i;
-
-const SECRET_BASENAME = [
-  /^\.env(\..+)?$/i, // .env, .env.local, .env.production …
-  /\.pem$/i,
-  /\.p12$/i,
-  /\.pfx$/i,
-  /\.key$/i,
-  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
-  /\.keychain(-db)?$/i,
-  /^\.netrc$/i,
-  /^\.npmrc$/i,
-  /^\.pypirc$/i,
-  /^credentials(\.json)?$/i,
-  /^\.credentials\.json$/i,
-  /^device-token$/i,
-];
 
 /** Directories (relative to $HOME) whose contents are always off-limits. */
 const SECRET_HOME_DIRS = [
@@ -58,7 +49,7 @@ export function isSecretPath(p: string, cwd: string, home: string = homedir()): 
   const abs = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
   const name = basename(abs);
   if (ENV_TEMPLATE_ALLOW.test(name)) return false;
-  if (SECRET_BASENAME.some((re) => re.test(name))) return true;
+  if (isSecretBasename(name)) return true;
   for (const dir of SECRET_HOME_DIRS) {
     const root = resolve(home, dir);
     if (abs === root || abs.startsWith(root + sep)) return true;

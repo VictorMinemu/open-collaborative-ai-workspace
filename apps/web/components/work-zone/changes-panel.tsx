@@ -10,8 +10,8 @@ import { cn, relativeTime } from "@/lib/utils";
 import { useDiff } from "@/lib/workzone-queries";
 
 const STATUS_LETTER: Record<DiffFile["status"], { letter: string; tone: string }> = {
-  added: { letter: "A", tone: "text-success" },
-  untracked: { letter: "U", tone: "text-success" },
+  added: { letter: "A", tone: "text-success-text" },
+  untracked: { letter: "U", tone: "text-success-text" },
   modified: { letter: "M", tone: "text-warning" },
   deleted: { letter: "D", tone: "text-destructive" },
   renamed: { letter: "R", tone: "text-primary" },
@@ -54,7 +54,8 @@ export function ChangesPanel({
         </span>
         {files.length > 0 ? (
           <span className="font-mono text-[12px]">
-            <span className="text-success">+{adds}</span> <span className="text-destructive">−{dels}</span>
+            <span className="text-success-text">+{adds}</span>{" "}
+            <span className="text-destructive">−{dels}</span>
           </span>
         ) : null}
         <Button
@@ -108,7 +109,7 @@ export function ChangesPanel({
                   >
                     <span className={cn("w-3 font-semibold", s.tone)}>{s.letter}</span>
                     <span className="min-w-0 flex-1 truncate">{f.path}</span>
-                    <span className="text-success">+{f.additions}</span>
+                    <span className="text-success-text">+{f.additions}</span>
                     <span className="text-destructive">−{f.deletions}</span>
                   </a>
                 </li>
@@ -284,7 +285,7 @@ function FileDiffView({ file }: { file: ParsedFile }) {
                       <span
                         className={cn(
                           "mr-2 select-none",
-                          l.kind === "add" && "text-success",
+                          l.kind === "add" && "text-success-text",
                           l.kind === "del" && "text-destructive",
                           l.kind === "ctx" && "text-transparent",
                         )}

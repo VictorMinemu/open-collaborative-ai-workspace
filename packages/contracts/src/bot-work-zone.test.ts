@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import { AgentCard } from "./agent-cards";
 import {
+  AgentChannelWorkSessionDownload,
+  AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionPrompt,
   AgentChannelWorkSessionPromptResponse,
   AgentChannelWorkSessionRead,
@@ -10,6 +12,8 @@ import {
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionStop,
   AgentChannelWorkSessionStopResponse,
+  AgentChannelWorkSessionUpload,
+  AgentChannelWorkSessionUploadResponse,
   BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_PROPOSED_SENTENCE,
   BOT_WORK_SESSION_SENTENCES,
@@ -32,6 +36,7 @@ import {
   workSessionStepLabel,
 } from "./bot-work-zone";
 import { RUNTIME_BYPASS_LITERALS, type WorkSessionStatus } from "./session-events";
+import { UpdateWorkZonePolicyRequest, WorkZonePolicyView } from "./work-zone-policy";
 
 const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f01";
 const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f02";
@@ -242,6 +247,20 @@ describe("start answers, refusal codes and their sentences (07.16 D-05, D-08)", 
       "not_your_session",
       "session_ended",
       "not_allowed",
+      // 07.17.1.1 (D-01 … D-13): appended, never reordered.
+      "attachment_not_found",
+      "path_not_allowed",
+      "file_exists",
+      "file_not_found",
+      "not_a_file",
+      "file_too_large",
+      "file_cap_reached",
+      "session_busy",
+      "session_not_running",
+      "runtime_too_old",
+      "storage_unavailable",
+      "transfer_failed",
+      "transfer_timeout",
     ]);
     expect([...BotProfileInactiveReason.options]).toEqual([
       "bot_disabled",
@@ -626,6 +645,49 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
     ).toBe(false);
   });
 
+  it("07.17.1.1 (D-07): the profile's Largest file is optional, null = the organization's, within 1 MiB … 1 GiB", () => {
+    const MiB = 1024 * 1024;
+    expect(BotWorkZoneProfileInput.parse(input)).toEqual(input);
+    expect("fileMaxBytes" in BotWorkZoneProfileInput.parse(input)).toBe(false);
+    expect(BotWorkZoneProfileInput.parse({ ...input, fileMaxBytes: 10485760 })).toEqual({
+      ...input,
+      fileMaxBytes: 10485760,
+    });
+    expect(BotWorkZoneProfileInput.parse({ ...input, fileMaxBytes: null })).toEqual({
+      ...input,
+      fileMaxBytes: null,
+    });
+    for (const bad of [1073741825, MiB - 1, 0, 1.5, "10"]) {
+      expect(BotWorkZoneProfileInput.safeParse({ ...input, fileMaxBytes: bad }).success, String(bad)).toBe(
+        false,
+      );
+    }
+    expect(BotWorkZoneProfile.parse({ ...profile, fileMaxBytes: 10485760 }).fileMaxBytes).toBe(10485760);
+    expect(BotWorkZoneProfile.parse(profile)).toEqual(profile);
+  });
+
+  it("07.17.1.1 (D-07): the view may carry the organization's and the server's limits", () => {
+    const none = {
+      profile: null,
+      status: { active: false, reason: null, sentence: null },
+      viewerCan: { edit: true, setOutsideContent: false },
+    };
+    const parsed = BotWorkZoneProfileView.parse(none);
+    expect(parsed).toEqual(none);
+    expect("limits" in parsed).toBe(false);
+    const withLimits = {
+      ...none,
+      limits: { organizationFileMaxBytes: 26214400, serverFileMaxBytes: 1073741824 },
+    };
+    expect(BotWorkZoneProfileView.parse(withLimits)).toEqual(withLimits);
+    expect(
+      BotWorkZoneProfileView.safeParse({
+        ...none,
+        limits: { organizationFileMaxBytes: 0, serverFileMaxBytes: 1 },
+      }).success,
+    ).toBe(false);
+  });
+
   it("one status sentence per inactive reason; it and the warning are short, without placeholders or links", () => {
     expect(Object.keys(BOT_PROFILE_STATUS_SENTENCES)).toEqual([...BotProfileInactiveReason.options]);
     for (const s of [...Object.values(BOT_PROFILE_STATUS_SENTENCES), OUTSIDE_CONTENT_WARNING]) {
@@ -792,5 +854,203 @@ describe("live card helpers (07.16 D-12, PD-12, ADR-0031)", () => {
       workSessionCardOf(live({ actions: [{ kind: "open", label: "Open", target: "/work-zone/new" }] })),
     ).toBeNull();
     expect(workSessionCardOf(live({ actions: [{ kind: "follow", label: "Follow" }] }))).toBeNull();
+  });
+});
+
+describe("upload and download bodies, answers and refusals (07.17.1.1 D-01, D-02, D-03, D-08, PD-04, PD-21, P6)", () => {
+  const ATTACHMENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f09";
+  const ids = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
+  const upload = { ...ids, attachmentId: ATTACHMENT, path: "docs/spec.pdf" };
+  const download = { ...ids, path: "README.md" };
+  const MiB = 1024 * 1024;
+
+  it("the upload body is ids and a repo-relative path, overwrite optional", () => {
+    expect(AgentChannelWorkSessionUpload.parse(upload)).toEqual(upload);
+    expect(AgentChannelWorkSessionUpload.parse({ ...upload, overwrite: true })).toEqual({
+      ...upload,
+      overwrite: true,
+    });
+  });
+
+  it("the upload body never names a device, a user, a conversation, a URL, an absolute path or bytes", () => {
+    for (const extra of [
+      { deviceId: DEVICE },
+      { userId: AGENT },
+      { conversationId: PROJECT },
+      { url: "https://example.test/f" },
+      { absolutePath: "/Users/ana/repo/docs/spec.pdf" },
+      { bytes: "aGVsbG8=" },
+    ]) {
+      expect(
+        AgentChannelWorkSessionUpload.safeParse({ ...upload, ...extra }).success,
+        Object.keys(extra)[0],
+      ).toBe(false);
+    }
+    const { attachmentId: _, ...noAttachment } = upload;
+    expect(AgentChannelWorkSessionUpload.safeParse(noAttachment).success).toBe(false);
+    expect(AgentChannelWorkSessionUpload.safeParse({ ...upload, path: "../x" }).success).toBe(false);
+    expect(AgentChannelWorkSessionUpload.safeParse({ ...upload, path: "/etc/passwd" }).success).toBe(false);
+  });
+
+  it("the download body is ids and a path, nothing else", () => {
+    expect(AgentChannelWorkSessionDownload.parse(download)).toEqual(download);
+    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, attachmentId: ATTACHMENT }).success).toBe(
+      false,
+    );
+    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, overwrite: true }).success).toBe(false);
+    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, deviceId: DEVICE }).success).toBe(false);
+    expect(AgentChannelWorkSessionDownload.safeParse({ ...download, path: "a\\b" }).success).toBe(false);
+  });
+
+  it("the answers: uploaded, downloaded, and a refusal naming the limit and the size", () => {
+    const uploaded = { kind: "uploaded", workSessionId: SESSION, path: "docs/spec.pdf", sizeBytes: 1234 };
+    const downloaded = {
+      kind: "downloaded",
+      workSessionId: SESSION,
+      attachmentId: ATTACHMENT,
+      name: "README.md",
+      sizeBytes: 2048,
+      contentType: "text/markdown",
+    };
+    const tooLarge = {
+      kind: "refused",
+      code: "file_too_large",
+      sentence: BOT_WORK_SESSION_SENTENCES.file_too_large,
+      limit: { bytes: 10 * MiB, source: "bot" },
+      sizeBytes: 12 * MiB,
+    };
+    expect(AgentChannelWorkSessionUploadResponse.parse(uploaded)).toEqual(uploaded);
+    expect(AgentChannelWorkSessionUploadResponse.parse(tooLarge)).toEqual(tooLarge);
+    expect(AgentChannelWorkSessionDownloadResponse.parse(downloaded)).toEqual(downloaded);
+    expect(AgentChannelWorkSessionDownloadResponse.parse(tooLarge)).toEqual(tooLarge);
+    expect(AgentChannelWorkSessionUploadResponse.safeParse(downloaded).success).toBe(false);
+    expect(AgentChannelWorkSessionDownloadResponse.safeParse(uploaded).success).toBe(false);
+    const wrongSource = { ...tooLarge, limit: { bytes: 10 * MiB, source: "user" } };
+    expect(AgentChannelWorkSessionUploadResponse.safeParse(wrongSource).success).toBe(false);
+    expect(AgentChannelWorkSessionDownloadResponse.safeParse(wrongSource).success).toBe(false);
+    expect(AgentChannelWorkSessionUploadResponse.safeParse({ ...uploaded, path: "/abs" }).success).toBe(
+      false,
+    );
+    expect(
+      AgentChannelWorkSessionDownloadResponse.safeParse({ ...downloaded, name: "x".repeat(256) }).success,
+    ).toBe(false);
+    // 07.16 answers and refusals keep parsing without the new optional fields.
+    const legacy = {
+      kind: "refused",
+      code: "session_ended",
+      sentence: BOT_WORK_SESSION_SENTENCES.session_ended,
+    };
+    expect(AgentChannelWorkSessionStopResponse.parse(legacy)).toEqual(legacy);
+  });
+
+  it("the 13 new codes have the hub's sentences, verbatim; the 19 07.16 sentences are unchanged", () => {
+    expect({
+      attachment_not_found: BOT_WORK_SESSION_SENTENCES.attachment_not_found,
+      path_not_allowed: BOT_WORK_SESSION_SENTENCES.path_not_allowed,
+      file_exists: BOT_WORK_SESSION_SENTENCES.file_exists,
+      file_not_found: BOT_WORK_SESSION_SENTENCES.file_not_found,
+      not_a_file: BOT_WORK_SESSION_SENTENCES.not_a_file,
+      file_too_large: BOT_WORK_SESSION_SENTENCES.file_too_large,
+      file_cap_reached: BOT_WORK_SESSION_SENTENCES.file_cap_reached,
+      session_busy: BOT_WORK_SESSION_SENTENCES.session_busy,
+      session_not_running: BOT_WORK_SESSION_SENTENCES.session_not_running,
+      runtime_too_old: BOT_WORK_SESSION_SENTENCES.runtime_too_old,
+      storage_unavailable: BOT_WORK_SESSION_SENTENCES.storage_unavailable,
+      transfer_failed: BOT_WORK_SESSION_SENTENCES.transfer_failed,
+      transfer_timeout: BOT_WORK_SESSION_SENTENCES.transfer_timeout,
+    }).toEqual({
+      attachment_not_found:
+        "That attachment is not one this turn can use. Use a file attached in this thread before the request.",
+      path_not_allowed:
+        "That path can't be used. Name a file inside the project, outside .git, .claude, .codex and .ocw-worktrees, and not a secrets file such as .env or a private key.",
+      file_exists:
+        "That file already exists in the session. Choose another path, or set overwrite to replace it.",
+      file_not_found: "There is no file at that path in the session's working tree.",
+      not_a_file: "That path is not a regular file. Name one file; folders and links can't be moved.",
+      file_too_large: "That file is larger than this bot may move.",
+      file_cap_reached:
+        "This turn has moved as many files as it may. Ask the person to send the request again.",
+      session_busy: "The session is working. Upload when its turn is done.",
+      session_not_running:
+        "The session isn't running on its device. Send it a prompt to resume it, then try again.",
+      runtime_too_old: "The device's runtime is too old to move files. Update it in Settings › Devices.",
+      storage_unavailable: "File storage is not set up on this server, so files can't be moved.",
+      transfer_failed: "The file could not be moved. Try again, or tell the person.",
+      transfer_timeout:
+        "The device did not finish moving the file in time. Try again, or try a smaller file.",
+    });
+    expect(BOT_WORK_SESSION_SENTENCES.not_in_turn).toBe("Work Zone sessions are not available on this turn.");
+    expect(BOT_WORK_SESSION_SENTENCES.not_allowed).toBe(
+      "The bot's sponsor is not allowed to do this in the Work Zone any more.",
+    );
+    expect(Object.keys(BOT_WORK_SESSION_SENTENCES).slice(0, 19)).toEqual([
+      "not_in_turn",
+      "cap_reached",
+      "profile_inactive",
+      "project_not_allowed",
+      "setting_not_allowed",
+      "mode_not_allowed",
+      "prompt_not_allowed",
+      "too_many_sessions",
+      "org_limit",
+      "prompt_rate",
+      "tree_busy",
+      "device_offline",
+      "runtime_unavailable",
+      "outside_content",
+      "outside_content_bypass",
+      "session_output",
+      "not_your_session",
+      "session_ended",
+      "not_allowed",
+    ]);
+  });
+});
+
+describe("the configurable file limit on the policy and the turn (07.17.1.1 D-07, PD-11, PD-21)", () => {
+  const policy = {
+    allowedPermissionModes: ["plan", "default", "acceptEdits", "auto"],
+    allowFullAccess: false,
+    allowedModels: { "claude-code": [], codex: [] },
+    maxEffort: { "claude-code": null, codex: null },
+    allowFastMode: false,
+    runtimeUpdates: "automatic",
+    botSessionsMax: 10,
+    updatedAt: null,
+    knownModels: { "claude-code": [], codex: [] },
+  };
+
+  it("the organization's Largest file a bot moves saves within 1 MiB … 1 GiB, whole bytes, optional", () => {
+    expect(UpdateWorkZonePolicyRequest.parse({ botFileMaxBytes: 41943040 })).toEqual({
+      botFileMaxBytes: 41943040,
+    });
+    expect(UpdateWorkZonePolicyRequest.parse({})).toEqual({});
+    for (const bad of [0, 1048575, 1073741825, 1.5]) {
+      expect(UpdateWorkZonePolicyRequest.safeParse({ botFileMaxBytes: bad }).success, String(bad)).toBe(
+        false,
+      );
+    }
+    expect(UpdateWorkZonePolicyRequest.safeParse({ botFileMaxBytes: 1048576 }).success).toBe(true);
+    expect(UpdateWorkZonePolicyRequest.safeParse({ botFileMaxBytes: 1073741824 }).success).toBe(true);
+  });
+
+  it("a 07.16 policy view parses unchanged; one with the organization's limit and the server's ceiling parses too", () => {
+    const legacy = WorkZonePolicyView.parse(policy);
+    expect(legacy).toEqual(policy);
+    expect("botFileMaxBytes" in legacy).toBe(false);
+    expect("serverFileMaxBytes" in legacy).toBe(false);
+    const full = { ...policy, botFileMaxBytes: 26214400, serverFileMaxBytes: 1073741824 };
+    expect(WorkZonePolicyView.parse(full)).toEqual(full);
+  });
+
+  it("the turn's offer carries the limit only when it offers the file tools; a 07.16 offer parses unchanged", () => {
+    const legacy = TurnWorkZone.parse(WORK_ZONE_FIXTURE);
+    expect(legacy).toEqual(WORK_ZONE_FIXTURE);
+    expect("files" in legacy).toBe(false);
+    const withFiles = { ...WORK_ZONE_FIXTURE, files: { bytes: 26214400, source: "organization" } };
+    expect(TurnWorkZone.parse(withFiles)).toEqual(withFiles);
+    expect(TurnWorkZone.safeParse({ ...withFiles, files: { bytes: 26214400, source: "user" } }).success).toBe(
+      false,
+    );
   });
 });

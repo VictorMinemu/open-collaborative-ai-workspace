@@ -9,7 +9,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import type { PermissionMode, RuntimeInfo, SessionEvent } from "@ocw/contracts";
+import { isSecretBasename, type PermissionMode, type RuntimeInfo, type SessionEvent } from "@ocw/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
 import { RuntimeError, type StartSessionOptions } from "../runtime.js";
@@ -940,6 +940,26 @@ describe("tool policy", () => {
     ["src/env.ts", false],
   ])("isSecretPath(%s) = %s", (p, expected) => {
     expect(isSecretPath(p, cwd, home)).toBe(expected);
+  });
+
+  it("07.17.1.1 (PD-09): the base-name rule is the shared contracts rule; the home folders still refuse", () => {
+    for (const name of [
+      ".env",
+      ".ENV.local",
+      ".env.example",
+      ".env.Sample",
+      "id_rsa.pub",
+      "login.keychain",
+      ".npmrc",
+      "credentials.json",
+      "device-token",
+      "notes.md",
+      "env.ts",
+    ]) {
+      expect(isSecretPath(`src/${name}`, cwd, home), name).toBe(isSecretBasename(name));
+    }
+    expect(isSecretPath("~/.ssh/config", cwd, home)).toBe(true);
+    expect(isSecretPath("/Users/alice/.gnupg/pubring.kbx", cwd, home)).toBe(true);
   });
 
   it.each([

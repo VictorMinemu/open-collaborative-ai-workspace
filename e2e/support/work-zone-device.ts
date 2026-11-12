@@ -20,6 +20,10 @@ import { API_URL } from "../tests/env";
 
 const RUNTIME_BIN = join(import.meta.dirname, "..", "..", "apps", "local-runtime", "bin", "ocw-runtime");
 
+/** The `README.md` every scratch repository is created with (07.17.1.1-14: a bot downloads it byte for byte). */
+export const scratchReadme = (projectName: string) =>
+  `# ${projectName}\n\nScratch repository for an end-to-end test.\n`;
+
 export interface FakeDeviceHandle {
   deviceId: string;
   projectId: string;
@@ -59,7 +63,7 @@ export async function startFakeDevice(
   const scratchRepo = (name: string) => {
     const dir = join(repoParent, name);
     mkdirSync(dir);
-    writeFileSync(join(dir, "README.md"), `# ${name}\n\nScratch repository for an end-to-end test.\n`);
+    writeFileSync(join(dir, "README.md"), scratchReadme(name));
     const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
     git("init", "-q", "-b", "main");
     git("add", "-A");

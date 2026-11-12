@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type Attachment,
   INLINE_IMAGE_TYPES,
@@ -44,6 +44,7 @@ export {
   createObjectStorage,
   type ObjectStorage,
   type ObjectStorageEnv,
+  ObjectTooLargeError,
   objectStorageConfigured,
   s3Client,
 } from "./storage";
@@ -342,29 +343,109 @@ export async function storeServerAttachment(
     bytes: Uint8Array;
   },
 ): Promise<AttachmentRow> {
-  const sniffed = await sniff(input.bytes.subarray(0, SNIFF_BYTES), "application/octet-stream");
-  const contentType = sniffed.ok ? sniffed.contentType : "application/octet-stream";
-  const [row] = await tx
-    .insert(attachments)
-    .values({
-      organizationId: tenantOf(tx).organizationId,
-      conversationId: input.conversationId,
-      uploaderId: input.uploaderAgentId,
-      filename: sanitizeFilename(input.name),
-      declaredType: contentType,
-      contentType,
-      sizeBytes: input.bytes.length,
-      sha256: createHash("sha256").update(input.bytes).digest("hex"),
-      eventId: input.eventId,
-    })
-    .returning();
-  if (!row) throw new Error("attachment insert returned no row");
+  const contentType = await sniffedType(input.bytes.subarray(0, SNIFF_BYTES));
+  const row = await recordServerAttachment(tx, {
+    id: randomUUID(),
+    conversationId: input.conversationId,
+    uploaderAgentId: input.uploaderAgentId,
+    eventId: input.eventId,
+    name: input.name,
+    sizeBytes: input.bytes.length,
+    sha256: createHash("sha256").update(input.bytes).digest("hex"),
+    contentType,
+  });
   await storage.put(
     attachmentKey(row.organizationId, row.conversationId, row.id, "original"),
     input.bytes,
     contentType,
   );
   return row;
+}
+
+/** The type stored for server-written bytes: sniffed from their head, never declared (T-04-04-02). */
+async function sniffedType(head: Uint8Array): Promise<string> {
+  const sniffed = await sniff(head, "application/octet-stream");
+  return sniffed.ok ? sniffed.contentType : "application/octet-stream";
+}
+
+/**
+ * The row half of `storeServerAttachment` (07.17.1.1 PD-17): a `pending` attachment of a bot turn, uploaded by the
+ * bot, under an id the caller chose (a transfer pre-allocates it), with the size, sha256 and sniffed type of bytes
+ * already in storage under that id. Inserted in the caller's tenant transaction; the name is sanitized here.
+ */
+export async function recordServerAttachment(
+  tx: Tx,
+  p: {
+    id: string;
+    conversationId: string;
+    uploaderAgentId: string;
+    eventId: string;
+    name: string;
+    sizeBytes: number;
+    sha256: string;
+    contentType: string;
+  },
+): Promise<AttachmentRow> {
+  const [row] = await tx
+    .insert(attachments)
+    .values({
+      id: p.id,
+      organizationId: tenantOf(tx).organizationId,
+      conversationId: p.conversationId,
+      uploaderId: p.uploaderAgentId,
+      filename: sanitizeFilename(p.name),
+      declaredType: p.contentType,
+      contentType: p.contentType,
+      sizeBytes: p.sizeBytes,
+      sha256: p.sha256,
+      eventId: p.eventId,
+    })
+    .returning();
+  if (!row) throw new Error("attachment insert returned no row");
+  return row;
+}
+
+/**
+ * The storage half of a file a device streams in for a bot turn (07.17.1.1 D-03, D-08, PD-05, PD-17): the body goes
+ * to the attachment's `original` key through `putStream` (multipart above one part, never held whole), and every byte
+ * is hashed (sha256) and counted on the way; the first `SNIFF_BYTES` pick the stored type (nothing declared is
+ * trusted; the bytes are never decoded or rendered). Past `maxBytes` it throws `ObjectTooLargeError` and nothing is
+ * stored. The caller compares `sizeBytes` with what it expected, then records the row (`recordServerAttachment`).
+ */
+export async function streamServerAttachment(
+  storage: ObjectStorage,
+  p: {
+    organizationId: string;
+    conversationId: string;
+    attachmentId: string;
+    body: AsyncIterable<Uint8Array>;
+    maxBytes: number;
+  },
+): Promise<{ sizeBytes: number; sha256: string; contentType: string }> {
+  const hash = createHash("sha256");
+  const head = new Uint8Array(SNIFF_BYTES);
+  let headBytes = 0;
+  const { bytes } = await storage.putStream(
+    attachmentKey(p.organizationId, p.conversationId, p.attachmentId, "original"),
+    p.body,
+    {
+      contentType: "application/octet-stream",
+      maxBytes: p.maxBytes,
+      onChunk: (chunk) => {
+        hash.update(chunk);
+        if (headBytes < SNIFF_BYTES) {
+          const take = Math.min(SNIFF_BYTES - headBytes, chunk.length);
+          head.set(chunk.subarray(0, take), headBytes);
+          headBytes += take;
+        }
+      },
+    },
+  );
+  return {
+    sizeBytes: bytes,
+    sha256: hash.digest("hex"),
+    contentType: await sniffedType(head.subarray(0, headBytes)),
+  };
 }
 
 /** How many files a turn has shared that no reply has linked yet (at most `MAX_ATTACHMENTS_PER_MESSAGE`). */

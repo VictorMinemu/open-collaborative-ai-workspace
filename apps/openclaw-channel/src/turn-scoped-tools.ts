@@ -40,11 +40,20 @@ export const WORK_SESSION_START_TOOL = "ocw_work_session_start";
 export const WORK_SESSION_PROMPT_TOOL = "ocw_work_session_prompt";
 export const WORK_SESSION_READ_TOOL = "ocw_work_session_read";
 export const WORK_SESSION_STOP_TOOL = "ocw_work_session_stop";
+/**
+ * 07.17.1.1 (D-01): move one file between the turn's thread and a session the bot started (`/work-sessions/upload`,
+ * `/work-sessions/download`). Offered with the four 07.16 tools, never in `GET /cell`. Same values as contracts
+ * `BUILTIN_TOOLS.workSessionUpload|workSessionDownload`.
+ */
+export const WORK_SESSION_UPLOAD_TOOL = "ocw_work_session_upload";
+export const WORK_SESSION_DOWNLOAD_TOOL = "ocw_work_session_download";
 export const WORK_SESSION_TOOL_NAMES = [
   WORK_SESSION_START_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_READ_TOOL,
   WORK_SESSION_STOP_TOOL,
+  WORK_SESSION_UPLOAD_TOOL,
+  WORK_SESSION_DOWNLOAD_TOOL,
 ] as const;
 export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
 /**

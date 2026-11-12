@@ -12,11 +12,13 @@ import { orgResource, type PermissionService } from "../organization";
 import { loadBotProfile, profileStatus } from "./bot-profile";
 import { loadControlsContext } from "./context";
 import { buildRuntimeControls } from "./controls";
+import { loadBotFileLimit } from "./policy";
 import { ACTIVE_STATES } from "./service";
 
 /**
- * Phase 07.16 (D-05, D-21, PD-17): whether one delivered turn of a bot is offered the four `ocw_work_session_*` tools,
- * and the Work Zone context it carries (`turn.workZone`). Decided at delivery, server-side; every work-session route
+ * Phase 07.16 (D-05, D-21, PD-17): whether one delivered turn of a bot is offered the six `ocw_work_session_*` tools
+ * (the four session tools, then upload and download since 07.17.1.1 D-01), and the Work Zone context it carries
+ * (`turn.workZone`). Decided at delivery, server-side; every work-session route
  * re-decides everything at call time (the live turn, the profile, the sponsor's rights), so this is what the model is
  * told, never what it is allowed.
  *
@@ -30,6 +32,9 @@ import { ACTIVE_STATES } from "./service";
  * - Lists are bounded (`turnProjects`, `turnSessions`) and carry repository names and ids only: never a team project
  *   name, a path or a URL. The bot's sessions are those it started from this conversation, as the turn's transaction
  *   can see them.
+ * - 07.17.1.1 (D-07, PD-11): with `fileCeilingBytes` (this server's `OCW_ATTACHMENT_MAX_BYTES`), `files` is the
+ *   per-file limit the upload and download routes apply (`loadBotFileLimit`, the computation they repeat at call time)
+ *   and the level that set it, so the bot knows it before trying. Without it, no `files`.
  */
 export async function workZoneOfferFor(
   tx: Tx,
@@ -40,6 +45,8 @@ export async function workZoneOfferFor(
     conversationId: string;
     /** The turn starts tainted (outside content, D-08): Full access only on an isolated server. */
     tainted?: boolean;
+    /** 07.17.1.1 (D-07): this server's ceiling for every bot file limit; given = `files` on the offer. */
+    fileCeilingBytes?: number;
   },
 ): Promise<TurnWorkZone | null> {
   const profile = await loadBotProfile(tx, p.agentId);
@@ -125,5 +132,8 @@ export async function workZoneOfferFor(
     maxMode,
     outsideContent: profile.actOnOutsideContent,
     sessions: sessions.map((s) => ({ id: s.id, status: s.status, projectName: s.projectName.slice(0, 200) })),
+    ...(p.fileCeilingBytes !== undefined
+      ? { files: await loadBotFileLimit(tx, profile, p.fileCeilingBytes) }
+      : {}),
   };
 }

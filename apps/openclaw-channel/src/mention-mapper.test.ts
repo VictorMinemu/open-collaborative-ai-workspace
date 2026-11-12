@@ -2047,6 +2047,53 @@ describe("the Work Zone (07.16 D-05, D-09, D-10, D-11, PD-16, PD-17): the wake-u
     expect(one?.models).toBe("Leave it out; the session uses the runtime's default.");
   });
 
+  it("07.17.1.1 (D-07, PD-11): with workZone.files the block adds the files line and names the two file tools", () => {
+    const FILE_TOOLS = ["ocw_work_session_upload", "ocw_work_session_download"];
+    const plain = workZoneOf(mapMention(mention({ turn: wzTurn() } as never), TOOL_BOT));
+    const m = mapMention(
+      mention({
+        turn: wzTurn({
+          tools: ["ocw_agent_card", ...SESSION_TOOLS, ...FILE_TOOLS],
+          workZone: workZone({ files: { bytes: 26214400, source: "organization" } }),
+        }),
+      } as never),
+      TOOL_BOT,
+    );
+    const block = workZoneOf(m);
+    expect(block?.payload).toEqual({
+      ...plain?.payload,
+      files:
+        "Move files with ocw_work_session_upload and ocw_work_session_download: up to 25 MB each (the " +
+        "organization's limit), 5 each way per turn, only in this conversation; uploads only while the session is idle.",
+      text:
+        "Start a session with ocw_work_session_start, send it more work with ocw_work_session_prompt, check it with " +
+        "ocw_work_session_read and stop it with ocw_work_session_stop. Put a file attached in this thread into it with " +
+        "ocw_work_session_upload and send one of its files back with ocw_work_session_download. You can only control " +
+        "sessions you started.",
+    });
+    // Each level names itself; the size label uses binary units.
+    for (const [limit, label] of [
+      [{ bytes: 10 * 1024 * 1024, source: "bot" }, "up to 10 MB each (this bot's limit)"],
+      [{ bytes: 1536 * 1024, source: "server" }, "up to 1.5 MB each (the server's limit)"],
+    ] as const) {
+      const payload = workZoneOf(
+        mapMention(mention({ turn: wzTurn({ workZone: workZone({ files: limit }) }) } as never), TOOL_BOT),
+      )?.payload;
+      expect(payload?.files).toContain(label);
+    }
+    // An unknown source reads as absent (the mirror's catch): the 07.16 block, byte for byte.
+    const unknown = workZoneOf(
+      mapMention(
+        mention({
+          turn: wzTurn({ workZone: workZone({ files: { bytes: 1024, source: "user" } }) }),
+        } as never),
+        TOOL_BOT,
+      ),
+    );
+    expect(unknown).toEqual(plain);
+    expect(plain?.payload).not.toHaveProperty("files");
+  });
+
   it("a turn without workZone maps exactly as before: no block, and nothing else changes", () => {
     const base = wzTurn();
     const { workZone: _wz, ...withoutWz } = base;

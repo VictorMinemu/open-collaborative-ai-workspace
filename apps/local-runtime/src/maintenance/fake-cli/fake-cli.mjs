@@ -15,9 +15,13 @@
 //   claude --version → "<v> (Claude Code)";  claude update
 //   codex --version  → "codex-cli <v>";       codex update
 //   npm install -g --prefix <p> <pkg>@<v>
+//   npm ci --prefix <p> …   (07.17.1 self-update: requires <p>/package.json and <p>/npm-shrinkwrap.json, writes a
+//                            stub @anthropic-ai/claude-agent-sdk under <p>/node_modules)
 // Control file `fake-update.json` in the install root: { next?, delayMs?, exitCode?, noise? } (all optional).
 // Report file `fake-update-env.json` in the install root: the NAMES (never values) of the received variables that
 // start with OCW_ or end with _API_KEY, and the first PATH entry.
+// For `npm ci` both files live in <p>'s parent (the staging directory's, so they survive its rename): control
+// `fake-update.json` ({ exitCode?, delayMs? }) and report `fake-npm-report.json` ({ argv, names, pathHead }).
 
 const fs = process.getBuiltinModule("node:fs");
 const path = process.getBuiltinModule("node:path");
@@ -195,7 +199,43 @@ async function update(me) {
   return 0;
 }
 
+const SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
+
+async function npmCi(args) {
+  // npm ci --prefix <p> --no-audit --no-fund --omit=optional --ignore-scripts
+  const at = args.indexOf("--prefix");
+  if (at === -1 || !args[at + 1]) {
+    process.stderr.write("npm error fake npm ci needs --prefix <p>\n");
+    return 1;
+  }
+  const prefix = path.resolve(args[at + 1]);
+  const parent = path.dirname(prefix);
+  const names = Object.keys(process.env)
+    .filter((k) => k.startsWith("OCW_") || k.endsWith("_API_KEY"))
+    .sort();
+  const pathHead = (process.env.PATH ?? "").split(path.delimiter)[0] ?? "";
+  writeJson(path.join(parent, "fake-npm-report.json"), { argv: args, names, pathHead });
+  const c = await control(parent);
+  if (typeof c.exitCode === "number" && c.exitCode !== 0) {
+    process.stderr.write(`npm error code EACCES\nnpm error path ${prefix}/node_modules\n`);
+    return c.exitCode;
+  }
+  // `npm ci` installs only what package.json and the lockfile beside it name.
+  for (const f of ["package.json", "npm-shrinkwrap.json"]) {
+    if (!fs.existsSync(path.join(prefix, f))) {
+      process.stderr.write(`npm error code EUSAGE\nnpm error fake npm ci: no ${f} in ${prefix}\n`);
+      return 1;
+    }
+  }
+  const sdk = path.join(prefix, "node_modules", SDK_PACKAGE);
+  writeJson(path.join(sdk, "package.json"), { name: SDK_PACKAGE, version: "0.3.282", main: "index.js" });
+  fs.writeFileSync(path.join(sdk, "index.js"), "module.exports = {};\n");
+  process.stdout.write("\nadded 1 package in 1s\n");
+  return 0;
+}
+
 async function npm(args) {
+  if (args[0] === "ci") return npmCi(args);
   // npm install -g --prefix <p> <pkg>@<v>
   const at = args.indexOf("--prefix");
   if (args[0] !== "install" || !args.includes("-g") || at === -1 || !args[at + 1]) {

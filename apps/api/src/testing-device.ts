@@ -1,4 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  RUNTIME_FILE_ROUTE,
+  RuntimeFilePutAnswer,
+  type RuntimeSelfStatus,
+  SessionFileReadPayload,
+  SessionFileWritePayload,
+  sessionFileAckError,
+} from "@ocw/contracts";
 import WebSocket from "ws";
 
 /**
@@ -13,6 +21,9 @@ export class FakeDevice {
   readonly frames: Frame[] = [];
   private cursor = 0;
   closed = false;
+  /** The API this link was opened against and the device JWT it used (null for a raw device token). */
+  baseUrl: string | null = null;
+  jwt: string | null = null;
   private constructor(readonly ws: WebSocket) {
     ws.on("message", (d) => this.frames.push(JSON.parse(d.toString()) as Frame));
     ws.on("close", () => {
@@ -25,7 +36,12 @@ export class FakeDevice {
       headers: { authorization: `Bearer ${token}` },
     });
     return new Promise((resolve, reject) => {
-      ws.once("open", () => resolve(new FakeDevice(ws)));
+      ws.once("open", () => {
+        const d = new FakeDevice(ws);
+        d.baseUrl = baseUrl;
+        d.jwt = token.includes(".") ? token : null;
+        resolve(d);
+      });
       ws.once("unexpected-response", (_req, res) => reject(new Error(`HTTP ${res.statusCode}`)));
       ws.once("error", reject);
     });
@@ -117,7 +133,7 @@ export class FakeDevice {
     return this.next(
       (f) => f.type === "command" && f.kind === kind && (!sessionId || f.sessionId === sessionId),
       timeoutMs,
-    ) as Promise<Frame & { id: string; payload: Record<string, unknown>; sessionId: string }>;
+    ) as Promise<Frame & { id: string; kind: string; payload: Record<string, unknown>; sessionId: string }>;
   }
 
   pending(kind: string) {
@@ -126,6 +142,62 @@ export class FakeDevice {
 
   ack(id: string, ok = true, error?: string) {
     this.send({ type: "ack", commandId: id, ...(ok ? { ok: true } : { ok: false, error }) });
+  }
+
+  /**
+   * 07.17.1.1 (D-08, PD-05): do what the daemon does with a `session.file.write`: GET the bytes from
+   * `RUNTIME_FILE_ROUTE/<command id>` under the device JWT, check their size and sha256 against the payload, and ack on
+   * the link (`expired` for a 410, `transfer_failed: HTTP <status>` for another refusal, `mismatch` when the bytes
+   * differ). With `ackAs` it acks that error without any request (e.g. an old daemon's `invalid command frame`).
+   * `baseUrl` and `jwt` default to the link's own. Returns the ack it sent.
+   *
+   * 07.17.1.1-08: a `session.file.read` PUTs `opts.body` (the session file's bytes; `too_large: <n>` without a request
+   * when they exceed the payload's `maxBytes`, as the daemon does) with its `content-length`, and acks ok only when the
+   * API answers `RuntimeFilePutAnswer` with exactly that size (`expired` for 410, `too_large` for 413).
+   */
+  async serveFileCommand(
+    cmd: { id: string; kind: string; payload: Record<string, unknown> },
+    opts: { baseUrl?: string; jwt?: string; ackAs?: string; body?: Uint8Array } = {},
+  ): Promise<{ ok: boolean; error: string | null }> {
+    const answer = (error: string | null) => {
+      this.ack(cmd.id, error === null, error ?? undefined);
+      return { ok: error === null, error };
+    };
+    if (opts.ackAs !== undefined) return answer(opts.ackAs);
+    const baseUrl = opts.baseUrl ?? this.baseUrl;
+    const jwt = opts.jwt ?? this.jwt;
+    if (!baseUrl || !jwt) throw new Error("serveFileCommand: no base URL or device JWT for this link");
+    if (cmd.kind === "session.file.read") {
+      const read = SessionFileReadPayload.parse(cmd.payload);
+      const body = opts.body;
+      if (!body) throw new Error("serveFileCommand: a session.file.read needs the file's bytes (opts.body)");
+      if (body.length > read.maxBytes) return answer(sessionFileAckError("too_large", String(body.length)));
+      const res = await fetch(`${baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${jwt}`, "content-type": "application/octet-stream" },
+        body,
+      });
+      if (res.status === 410) return answer(sessionFileAckError("expired"));
+      if (res.status === 413) return answer(sessionFileAckError("too_large"));
+      if (res.status !== 200) return answer(sessionFileAckError("transfer_failed", `HTTP ${res.status}`));
+      const put = RuntimeFilePutAnswer.safeParse(await res.json().catch(() => null));
+      if (!put.success || put.data.sizeBytes !== body.length)
+        return answer(sessionFileAckError("transfer_failed"));
+      return answer(null);
+    }
+    if (cmd.kind !== "session.file.write") throw new Error(`serveFileCommand: unsupported kind ${cmd.kind}`);
+    const payload = SessionFileWritePayload.parse(cmd.payload);
+    const res = await fetch(`${baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    });
+    if (res.status === 410) return answer(sessionFileAckError("expired"));
+    if (res.status !== 200) return answer(sessionFileAckError("transfer_failed", `HTTP ${res.status}`));
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length !== payload.sizeBytes || (payload.sha256 !== null && sha !== payload.sha256)) {
+      return answer(sessionFileAckError("mismatch"));
+    }
+    return answer(null);
   }
 
   /** Report what the device's runtimes offer (P-05); `isolatedServer` (07.16, D-19) is sent only when given. */
@@ -256,6 +328,27 @@ export function maintenanceStatus(over: Record<string, unknown> = {}): Record<st
     stale: false,
     lastRun: null,
     checkedAt: new Date().toISOString(),
+    ...over,
+  };
+}
+
+/**
+ * 07.17.1: the device's own OCW runtime as a supervised service reports it (`RuntimeSelfStatus`), with overrides.
+ * Defaults: 0.3.1 at build `1a2b3c4d5e6f`, supervised and able to update, idle, never checked.
+ */
+export function selfStatus(over: Partial<RuntimeSelfStatus> = {}): RuntimeSelfStatus {
+  return {
+    version: "0.3.1",
+    build: "1a2b3c4d5e6f",
+    supervised: true,
+    canUpdate: true,
+    reason: null,
+    servedVersion: null,
+    servedBuild: null,
+    state: "idle",
+    pendingSince: null,
+    lastRun: null,
+    checkedAt: null,
     ...over,
   };
 }

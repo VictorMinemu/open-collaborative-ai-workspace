@@ -35,6 +35,8 @@
   /* `text-destructive` (errors, destructive menu items): the destructive itself in light mode. */
   --destructive-text: oklch(0.577 0.245 27.325);
   --success: oklch(0.65 0.17 155);
+  /* `text-success-text` (small green text: counts, A/U letters): about 5.1:1 on white; the fill above stays as is. */
+  --success-text: oklch(0.52 0.14 155);
   --warning: oklch(0.77 0.16 70);
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.9 0.004 286.32);
@@ -83,6 +85,7 @@
   --destructive-foreground: oklch(0.985 0 0);
   --destructive-text: oklch(0.66 0.2 22);
   --success: oklch(0.72 0.16 155);
+  --success-text: var(--success);
   --warning: oklch(0.8 0.15 75);
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 13%);
@@ -133,6 +136,7 @@
   /* Same as primary: `text-destructive` uses the text tone, `bg-destructive` and tints the fill. */
   --text-color-destructive: var(--destructive-text);
   --color-success: var(--success);
+  --color-success-text: var(--success-text);
   --color-warning: var(--warning);
   --color-border: var(--border);
   --color-input: var(--input);

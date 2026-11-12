@@ -45,6 +45,7 @@ export * from "./tool-approvals";
 export * from "./watched-records";
 export * from "./work-projects";
 export * from "./work-session";
+export * from "./work-session-files";
 export * from "./work-zone-memory";
 export * from "./work-zone-policy";
 export * from "./work-zone-proposals";

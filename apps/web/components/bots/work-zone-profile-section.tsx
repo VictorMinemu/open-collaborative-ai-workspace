@@ -2,6 +2,7 @@
 
 import {
   type Agent,
+  BOT_FILE_LIMIT_SOURCE_LABELS,
   BOT_WORK_ZONE_LIMITS,
   type BotFastMode,
   type BotWorkZoneProfile,
@@ -10,7 +11,9 @@ import {
   DEFERRED_EFFORTS,
   type Device,
   EFFORT_LABELS,
+  effectiveBotFileMaxBytes,
   effortRank,
+  fileSizeLabel,
   minMode,
   OUTSIDE_CONTENT_WARNING,
   PERMISSION_MODE_RANK,
@@ -158,9 +161,19 @@ export function draftFromProfile(p: BotWorkZoneProfile): ProfileDraft {
   };
 }
 
+/**
+ * The form's first state for a view: the stored profile, or a new one on the first usable device. 07.17.1.1 (D-07,
+ * review WR-04): the Largest file is left out of the draft until the person edits it, so an unrelated save never sends
+ * it and the API keeps the stored value, even one above an organization limit lowered since.
+ */
+export function initialDraft(view: BotWorkZoneProfileView, devices: readonly Device[]): ProfileDraft | null {
+  return view.profile ? draftFromProfile(view.profile) : newDraft(devices);
+}
+
 /** The PUT body: every field, nothing else (the contract is strict). */
 export function toProfileInput(d: ProfileDraft): BotWorkZoneProfileInput {
   return {
+    ...(d.fileMaxBytes !== undefined ? { fileMaxBytes: d.fileMaxBytes } : {}),
     deviceId: d.deviceId,
     runtime: d.runtime,
     defaultModel: d.defaultModel,
@@ -399,6 +412,46 @@ export const LIMIT_FIELDS: ReadonlyArray<{
   },
 ];
 
+const MIB = 1024 * 1024;
+
+/** 07.17.1.1 (D-07, PD-20): the bot's Largest file, empty = the organization's, never above it. */
+export const FILE_LIMIT_COPY = {
+  label: "Largest file",
+  unit: "MB",
+  placeholder: (org: string) => `Same as the organization (${org})`,
+  hint: (org: string) => `At most ${org}, the organization's limit.`,
+  invalid: (n: number) => `Enter a whole number from 1 to ${n}, or leave it empty.`,
+  line: (limit: string, source: string) => `This bot moves files up to ${limit} (${source}).`,
+  above: (bot: string, org: string) =>
+    `This bot's ${bot} is above the organization's ${org}, so ${org} applies.`,
+} as const;
+
+/** The organization's value in whole MB: the field's maximum. */
+const orgFileMaxMb = (organizationBytes: number) => Math.max(1, Math.floor(organizationBytes / MIB));
+
+/** What the API would refuse: empty is fine (the organization's), else a whole MB from 1 to the organization's. */
+export function fileMaxError(value: string, organizationBytes: number): string | null {
+  const v = value.trim();
+  if (v === "") return null;
+  const max = orgFileMaxMb(organizationBytes);
+  if (!/^\d+$/.test(v)) return FILE_LIMIT_COPY.invalid(max);
+  const n = Number(v);
+  return n >= 1 && n <= max ? null : FILE_LIMIT_COPY.invalid(max);
+}
+
+/** The line under the limits: the limit that applies and the level that set it (PD-11, the contract's labels). */
+export function appliedFileLimitLine(
+  botBytes: number | null | undefined,
+  limits: NonNullable<BotWorkZoneProfileView["limits"]>,
+): string {
+  const limit = effectiveBotFileMaxBytes({
+    bot: botBytes,
+    organization: limits.organizationFileMaxBytes,
+    server: limits.serverFileMaxBytes,
+  });
+  return FILE_LIMIT_COPY.line(fileSizeLabel(limit.bytes), BOT_FILE_LIMIT_SOURCE_LABELS[limit.source]);
+}
+
 /** The form fields a refusal can name, one to one with the API's `details.field`. */
 const FIELDS = new Set<string>([
   "deviceId",
@@ -416,6 +469,7 @@ const FIELDS = new Set<string>([
   "maxConcurrent",
   "promptsPerHour",
   "wakesPerSessionDay",
+  "fileMaxBytes",
   "actOnOutsideContent",
 ]);
 
@@ -552,16 +606,24 @@ export function WorkZoneProfileEditor({
   agent: Agent;
   view: BotWorkZoneProfileView;
   devices: readonly Device[];
-  initial?: { errors?: Record<string, string>; removed?: string[] } | undefined;
+  initial?: { errors?: Record<string, string>; removed?: string[]; fileMax?: string } | undefined;
 }) {
   const id = useId();
   const projectsQ = useProjects();
   const save = useSaveBotWorkZoneProfile(agent.id);
   const remove = useRemoveBotWorkZoneProfile(agent.id);
   const usable = usableDevices(devices);
-  const [draft, setDraft] = useState<ProfileDraft | null>(() =>
-    view.profile ? draftFromProfile(view.profile) : newDraft(devices),
-  );
+  const [draft, setDraft] = useState<ProfileDraft | null>(() => initialDraft(view, devices));
+  // 07.17.1.1 (D-07): the Largest file's text in MB, so a value above the organization's stays visible with its error.
+  const [fileMax, setFileMax] = useState(() => {
+    if (initial?.fileMax !== undefined) return initial.fileMax;
+    const bytes = view.profile?.fileMaxBytes;
+    return bytes === null || bytes === undefined ? "" : String(Math.floor(bytes / MIB));
+  });
+  // Review WR-04: decided only once the person edited the field, as the API decides it only when the body sends it.
+  const [fileTouched, setFileTouched] = useState(initial?.fileMax !== undefined);
+  const fileInvalid =
+    view.limits && fileTouched ? fileMaxError(fileMax, view.limits.organizationFileMaxBytes) : null;
   const [errors, setErrors] = useState<Record<string, string>>(initial?.errors ?? {});
   const [removed, setRemoved] = useState<string[]>(initial?.removed ?? []);
   const [formError, setFormError] = useState<string | null>(null);
@@ -613,6 +675,14 @@ export function WorkZoneProfileEditor({
     setFormError(null);
   };
   const change = (patch: Partial<ProfileDraft>) => set({ ...draft, ...patch });
+  // Review WR-04: the bot's limit as it stands (an edit, else the stored one), and a note, not an error, when the
+  // stored one is above an organization limit lowered since (the lower one applies until someone changes it).
+  const fileBytes =
+    draft.fileMaxBytes !== undefined ? draft.fileMaxBytes : (view.profile?.fileMaxBytes ?? null);
+  const fileAbove =
+    view.limits && !fileTouched && fileBytes !== null && fileBytes > view.limits.organizationFileMaxBytes
+      ? FILE_LIMIT_COPY.above(fileSizeLabel(fileBytes), fileSizeLabel(view.limits.organizationFileMaxBytes))
+      : null;
 
   function pickDevice(deviceId: string) {
     const next = usable.find((d) => d.id === deviceId);
@@ -631,8 +701,16 @@ export function WorkZoneProfileEditor({
     change({ runtime });
   }
 
+  function changeFileMax(value: string) {
+    setFileMax(value);
+    setFileTouched(true);
+    if (!view.limits || fileMaxError(value, view.limits.organizationFileMaxBytes) !== null) return;
+    const v = value.trim();
+    change({ fileMaxBytes: v === "" ? null : Number(v) * MIB });
+  }
+
   function submit() {
-    if (!draft) return;
+    if (!draft || fileInvalid) return;
     if (draft.projectIds.length === 0) {
       setErrors({ projectIds: WORK_ZONE_COPY.pickProject });
       return;
@@ -861,7 +939,7 @@ export function WorkZoneProfileEditor({
       </Group>
 
       <Group legend="Limits">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {LIMIT_FIELDS.map((f) => (
             <LimitField
               key={f.key}
@@ -873,7 +951,25 @@ export function WorkZoneProfileEditor({
               onCommit={(n) => change({ [f.key]: n })}
             />
           ))}
+          <FileLimitField
+            id={`${id}-fileMax`}
+            value={fileMax}
+            limits={view.limits}
+            disabled={busy || !view.limits}
+            error={fileInvalid ?? errors.fileMaxBytes}
+            onChange={changeFileMax}
+          />
         </div>
+        {view.limits ? (
+          <p className="text-[13px] text-foreground leading-snug" data-testid="work-zone-file-limit">
+            {appliedFileLimitLine(fileBytes, view.limits)}
+          </p>
+        ) : null}
+        {fileAbove ? (
+          <p className="text-[13px] text-foreground leading-snug" data-testid="work-zone-file-limit-note">
+            {fileAbove}
+          </p>
+        ) : null}
       </Group>
 
       <Group legend="Outside content">
@@ -902,7 +998,7 @@ export function WorkZoneProfileEditor({
         {readOnly ? null : (
           <Button
             onClick={submit}
-            disabled={save.isPending}
+            disabled={save.isPending || !!fileInvalid}
             data-testid="work-zone-save"
             className="w-full max-md:h-11 sm:w-auto"
           >
@@ -1323,6 +1419,59 @@ function LimitField({
           if (next !== value) onCommit(next);
         }}
       />
+    </FormField>
+  );
+}
+
+/**
+ * The bot's "Largest file" (D-07, PD-11, PD-20), the `LimitField` look with the unit after the value: empty = the
+ * organization's limit (the placeholder says it), at most the organization's value. Without `limits` (an older API)
+ * it shows no hint and cannot be changed, since that API would not store it.
+ */
+function FileLimitField({
+  id,
+  value,
+  limits,
+  disabled,
+  error,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  limits: BotWorkZoneProfileView["limits"];
+  disabled: boolean;
+  error?: string | undefined;
+  onChange: (v: string) => void;
+}) {
+  const org = limits ? fileSizeLabel(limits.organizationFileMaxBytes) : null;
+  const hint = org ? FILE_LIMIT_COPY.hint(org) : undefined;
+  const described = [`${id}-unit`, describedBy(id, error, hint)].filter(Boolean).join(" ");
+  return (
+    <FormField id={id} label={FILE_LIMIT_COPY.label} error={error} hint={hint} className="content-start">
+      <div className="relative">
+        <Input
+          className="pr-10 tabular-nums placeholder:text-[13px] placeholder:text-muted-foreground max-md:h-11"
+          id={id}
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={limits ? orgFileMaxMb(limits.organizationFileMaxBytes) : undefined}
+          step={1}
+          value={value}
+          placeholder={org ? FILE_LIMIT_COPY.placeholder(org) : "Same as the organization"}
+          disabled={disabled}
+          aria-invalid={!!error}
+          aria-describedby={described}
+          data-testid="work-zone-file-max"
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <span
+          id={`${id}-unit`}
+          className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-foreground text-sm"
+        >
+          {FILE_LIMIT_COPY.unit}
+        </span>
+      </div>
     </FormField>
   );
 }

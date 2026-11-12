@@ -1,13 +1,18 @@
 import type { Readable } from "node:stream";
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutBucketCorsCommand,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { BOT_FILE_LIMITS } from "@ocw/contracts";
 import type { Env } from "../../config/env";
 import { MissingSecretError, type SecretStore } from "../../lib/secret-store";
 
@@ -46,10 +51,30 @@ export interface ObjectStorage {
   rangeGet(key: string, bytes: number): Promise<Uint8Array>;
   stream(key: string): Promise<Readable>;
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
+  /**
+   * 07.17.1.1 (D-08, PD-05): a body of unknown length, never held whole. Up to one part (`BOT_FILE_LIMITS.partBytes`)
+   * is one `PutObject`; anything larger is an S3 multipart upload in parts of that size, one part in memory at a time.
+   * Every byte is counted and handed to `onChunk` (hashing, sniffing); past `maxBytes` the write stops with
+   * `ObjectTooLargeError`. On any error the multipart upload is aborted (no object, no orphaned parts) and the error
+   * is rethrown.
+   */
+  putStream(
+    key: string,
+    body: AsyncIterable<Uint8Array>,
+    opts: { contentType: string; maxBytes: number; onChunk?: (chunk: Uint8Array) => void },
+  ): Promise<{ bytes: number }>;
   /** Deletes the keys; missing keys are not an error. */
   remove(keys: string[]): Promise<void>;
   /** Browser uploads and downloads from these origins only (PUT/GET, signed content-type, ETag exposed). */
   ensureBucketCors(origins: string[]): Promise<void>;
+}
+
+/** A streamed body grew past the `maxBytes` its writer allowed; nothing was stored. */
+export class ObjectTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`object larger than ${maxBytes} bytes`);
+    this.name = "ObjectTooLargeError";
+  }
 }
 
 /** The `Env` fields object storage reads (the object-store CLI builds exactly these, never the full API config). */
@@ -195,6 +220,92 @@ export function createObjectStorage(env: ObjectStorageEnv, secrets: SecretStore)
           ContentLength: body.length,
         }),
       );
+    },
+
+    async putStream(key, body, opts) {
+      const partBytes = BOT_FILE_LIMITS.partBytes;
+      // One part in memory, reused for every part (each send is awaited before the buffer is refilled). Never more
+      // than the bound: a body allowed fewer bytes than a part never allocates a whole part.
+      let buf: Buffer | null = null;
+      let filled = 0;
+      let total = 0;
+      let uploadId: string | undefined;
+      const parts: Array<{ ETag: string; PartNumber: number }> = [];
+
+      const sendPart = async (bytes: Buffer) => {
+        if (uploadId === undefined) {
+          const created = await s3.send(
+            new CreateMultipartUploadCommand({ Bucket, Key: key, ContentType: opts.contentType }),
+          );
+          if (!created.UploadId) throw new Error("the store returned no multipart upload id");
+          uploadId = created.UploadId;
+        }
+        const PartNumber = parts.length + 1;
+        const res = await s3.send(
+          new UploadPartCommand({
+            Bucket,
+            Key: key,
+            UploadId: uploadId,
+            PartNumber,
+            Body: bytes,
+            ContentLength: bytes.length,
+          }),
+        );
+        if (!res.ETag) throw new Error("the store returned no part ETag");
+        parts.push({ ETag: res.ETag, PartNumber });
+      };
+
+      try {
+        for await (const chunk of body) {
+          total += chunk.length;
+          if (total > opts.maxBytes) throw new ObjectTooLargeError(opts.maxBytes);
+          opts.onChunk?.(chunk);
+          buf ??= Buffer.allocUnsafe(Math.min(partBytes, opts.maxBytes));
+          let at = 0;
+          while (at < chunk.length) {
+            // A full part is sent only once more bytes arrive, so a body of exactly one part stays one PutObject.
+            if (filled === buf.length) {
+              await sendPart(buf);
+              filled = 0;
+            }
+            const take = Math.min(buf.length - filled, chunk.length - at);
+            buf.set(chunk.subarray(at, at + take), filled);
+            filled += take;
+            at += take;
+          }
+        }
+        const rest = buf ? buf.subarray(0, filled) : Buffer.alloc(0);
+        if (uploadId === undefined) {
+          await s3.send(
+            new PutObjectCommand({
+              Bucket,
+              Key: key,
+              Body: rest,
+              ContentType: opts.contentType,
+              ContentLength: rest.length,
+            }),
+          );
+          return { bytes: total };
+        }
+        if (rest.length > 0) await sendPart(rest);
+        await s3.send(
+          new CompleteMultipartUploadCommand({
+            Bucket,
+            Key: key,
+            UploadId: uploadId,
+            MultipartUpload: { Parts: parts },
+          }),
+        );
+        return { bytes: total };
+      } catch (err) {
+        if (uploadId !== undefined) {
+          // Best effort: the caller gets the original error, not the abort's.
+          await s3
+            .send(new AbortMultipartUploadCommand({ Bucket, Key: key, UploadId: uploadId }))
+            .catch(() => undefined);
+        }
+        throw err;
+      }
     },
 
     async remove(keys) {

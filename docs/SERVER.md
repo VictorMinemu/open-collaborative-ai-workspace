@@ -51,7 +51,8 @@ Options, as environment variables before `sh`:
 - `OCW_SERVER_URL=<url>`: download from another address for the same workspace (for example inside a container).
 - `OCW_INSTALL_ALLOW_HTTP=1`: allow plain `http://` to a host other than this machine. Only on a network you trust.
 
-**Upgrade** by running the same command again. It installs the version your workspace serves now and keeps the
+**Upgrade** with one click in Settings › Devices once the server runs v0.3.1 or later (see [Updates](#updates)), or
+by running the same command again. The command installs the version your workspace serves now and keeps the
 previous one. It never restarts a running service: when no session runs, run `ocw-runtime service restart` (a system
 unit: `sudo systemctl restart ocw-runtime.service`).
 
@@ -175,8 +176,64 @@ organization sets the level in Settings › Work Zone policy › Runtime updates
 `ocw-runtime updates notify|off|automatic`, or `OCW_RUNTIME_UPDATES` in `~/.ocw/service.env`. Details:
 [INSTALL.md](INSTALL.md#keep-claude-code-and-codex-up-to-date-on-devices).
 
-The runtime itself is updated by re-running the install command (see [Install](#install)). The doctor warns when the
-installed runtime differs from the one your workspace serves.
+The runtime itself updates from the browser (Phase 07.17.1, [ADR-0040](adr/0040-runtime-self-update.md)). In
+**Settings › Devices** › the server's card › **Runtime updates**, the **OCW runtime** row shows the installed version
+and build (`0.3.1 · 1a2b3c4d5e6f`) and the one your workspace serves. When they differ, press **Update**. The device
+owner and admins can do it. The organization's level applies here too:
+
+- *Automatic*: the server updates itself when the workspace serves another build, even an older one after a server
+  rollback.
+- *Notify only*: the row shows "{version} available" and **Update**.
+- *Off*: no automatic checks, and **Update** still works.
+
+What an update does:
+
+1. It downloads the runtime and its lockfile from your workspace only (the server URL the device is paired with). It
+   checks both SHA-256 hashes against the manifest.
+2. It installs the new version beside the running one, under `~/.ocw/runtime/versions/`, with the same fixed `npm ci`
+   as the install command.
+3. It waits until no session has a turn running on the server. Running turns are never cut. New prompts wait and say
+   "Restarting the OCW runtime on this device… your turn starts when it is back". If turns are still running after 30
+   minutes, it gives up without changing anything: the waiting prompts run ("The OCW runtime update did not run; your
+   turn continues") and the run reads as failed. Press **Update** again when they finish.
+4. It switches `~/.ocw/runtime/current` and exits, so systemd or launchd restarts it on the new version. Prompts that
+   were waiting run after the restart.
+
+The previous version stays on disk. History in the row shows each run (from → to builds, who started it), and the
+audit log records the request, the start and the result, never a path. A failure before the switch leaves the running
+version untouched.
+
+One click needs a real service (`ocw-runtime service install`, or `setup --service`). A runtime started by hand says
+"Run as a service to update from the browser; or re-run the install command". If `systemctl --user cat ocw-runtime`
+does not show `OCW_RUNTIME_HOST=service`, run `ocw-runtime service install` once.
+
+**The first update from v0.3.0 is still the install command.** A v0.3.0 runtime does not have the self-update code.
+Re-run the command from [Install](#install), then `ocw-runtime service restart` when no session runs. From then on,
+every update is one click (or none, at *Automatic*).
+
+**An http-only workspace** (no TLS, on a network you trust): downloads need `https://` except to this machine. Put
+`OCW_INSTALL_ALLOW_HTTP=1` in `~/.ocw/service.env` (see above) and run `ocw-runtime service restart`, as you did for
+the install command. Keep https wherever you can.
+
+**A new build that does not come back** (it crash-loops under the service manager): the doctor's `daemon` and
+`service` lines name it ("The runtime did not come back after updating to …"), and after three minutes offline the
+Runtime row in Settings › Devices says **Did not come back** instead of "Restarting…". Turn automatic updates off (this
+pauses the Claude Code and Codex updates too), point `current` back to the previous build and restart:
+
+```bash
+ocw-runtime updates off                                      # nothing installs it again while you look
+ls ~/.ocw/runtime/versions/                                  # the previous build's directory
+ln -sfn versions/<previous> ~/.ocw/runtime/current && ocw-runtime service restart
+```
+
+The previous build reports the run as failed ("came back on the previous version") and remembers the build that
+failed in `~/.ocw/runtime/self-update-failed.json`. *Automatic* never installs that build again; it updates by itself
+again as soon as your workspace serves another one. **Update** in Settings may still retry it. Re-running the install
+command installs what your workspace serves, so it helps only once the workspace serves a fixed build. When it does,
+`ocw-runtime updates automatic` turns the level back on. Under a custom `OCW_HOME`, use that directory in place of
+`~/.ocw`.
+
+The doctor still warns when the installed runtime differs from the one your workspace serves.
 
 ## Run it as a service
 
@@ -330,6 +387,8 @@ Other common cases:
   Linux, check lingering; on a Mac, automatic login.
 - **"This device is paired with <A>".** Revoke it in Settings › Devices on A, then run `setup --server <B>`.
 - **A session cannot start a runtime.** The doctor's `claude-code` and `codex` lines say what is missing.
+- **"The runtime did not come back after updating to …".** A new build crash-loops: see the way back in
+  [Updates](#updates).
 
 ## Uninstall
 

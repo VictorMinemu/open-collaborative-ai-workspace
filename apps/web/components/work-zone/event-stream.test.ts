@@ -61,4 +61,29 @@ describe("buildItems › runtime.update", () => {
       text: "Codex update failed · your turn runs on the installed version",
     });
   });
+
+  // 07.17.1 (PD-18): the hold is the OCW runtime's own restart, not the session's CLI.
+  it("says the OCW runtime is restarting when the hold is its own update", () => {
+    const [item] = buildItems(
+      live([{ type: "runtime.update", runtime: "codex", phase: "waiting", subject: "ocw-runtime" }]),
+    );
+    expect(item).toEqual({
+      kind: "system",
+      key: "e1",
+      at: AT,
+      text: "Restarting the OCW runtime on this device… your turn starts when it is back",
+      testId: "runtime-update-line",
+    });
+  });
+
+  it("review IN-04: takes the restart line back when the OCW runtime update did not run", () => {
+    const [item] = buildItems(
+      live([{ type: "runtime.update", runtime: "codex", phase: "failed", subject: "ocw-runtime" }]),
+    );
+    expect(item).toMatchObject({
+      kind: "system",
+      text: "The OCW runtime update did not run; your turn continues",
+      testId: "runtime-update-line",
+    });
+  });
 });

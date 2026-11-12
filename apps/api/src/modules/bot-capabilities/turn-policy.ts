@@ -1009,8 +1009,9 @@ export async function turnPolicy(
     attachments?: AttachmentRow[];
     /**
      * Phase 07.16 (D-05, D-21, PD-17): the Work Zone offer of this turn, computed by the caller (`workZoneOfferFor`;
-     * bot-capabilities never imports work-session). Present = the four `ocw_work_session_*` tools and `turn.workZone`,
-     * when four tool slots remain. Absent or null = the turn is exactly what it was before the phase (BWZ-06).
+     * bot-capabilities never imports work-session). Present = the six `ocw_work_session_*` tools (07.17.1.1 D-01) and
+     * `turn.workZone`, when six tool slots remain. Absent or null = the turn is exactly what it was before the phase
+     * (BWZ-06).
      */
     workZone?: TurnWorkZone | null;
     /**
@@ -1108,8 +1109,9 @@ export async function turnPolicy(
     computed.toolFlags[BUILTIN_TOOLS.attachmentRead] = ATTACHMENT_READ_FLAGS;
   }
 
-  // Phase 07.16 (D-05, PD-17): the four Work Zone session tools are turn-scoped, all or none: offered only with the
-  // caller's offer and room for the four. The routes re-decide every call (the live turn, the profile, the sponsor).
+  // Phase 07.16 (D-05, PD-17): the Work Zone session tools are turn-scoped, all or none: offered only with the caller's
+  // offer and room for all of them. 07.17.1.1 (D-01): six, the four session tools then upload and download, so the
+  // room counted is six slots. The routes re-decide every call (the live turn, the profile, the sponsor).
   // They replace the 07.5 proposal tools: offered both, the model kept proposing (a card the person had to start) and
   // told them it could not start sessions. The start route still falls back to a proposal after outside content.
   const proposalTools: readonly string[] = [BUILTIN_TOOLS.workZoneProjects, BUILTIN_TOOLS.startWorkZone];

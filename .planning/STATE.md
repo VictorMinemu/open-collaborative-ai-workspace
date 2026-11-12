@@ -1,18 +1,18 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 1
+current_phase: 07.17.1.1
 current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
-status: planning
+status: executing
 stopped_at: Phase 07.17 complete, ready to plan Phase 1
-last_updated: "2026-11-10T20:05:27.192Z"
-last_activity: 2026-11-10
+last_updated: "2026-11-11T21:46:41.077Z"
+last_activity: 2026-11-11
 last_activity_desc: Phase 07.17 complete, transitioned to Phase 1
-state_head: f0e7d86e58c2404ca6e1b0c8926dcaaf9803b824
+state_head: 2ce9ab421efcdc272e5a0c7f72f9cb01d3ca52ff
 progress:
   total_phases: 12
   completed_phases: 8
-  total_plans: 347
+  total_plans: 373
   completed_plans: 347
 ---
 
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-10-02)
 
 ## Current Position
 
-Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
+Phase: 07.17.1.1 — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-11 — Quick task 261111-hs9: bot MCP tools past the per-turn cap
+Status: Executing (wave 1 done: plans 01–03)
+Last activity: 2026-11-11 — Phase 07.17.1 wave 1 done; main (PR #71: quick tasks 261111-gyk, 261111-hs9) merged in
 
 Progress: [░░░░░░░░░░] 0%
 

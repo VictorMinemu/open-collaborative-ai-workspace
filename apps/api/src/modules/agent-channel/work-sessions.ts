@@ -10,10 +10,9 @@ import {
   type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
   BUILTIN_TOOLS,
-  WORK_SESSION_TOOL_FLAGS,
 } from "@ocw/contracts";
-import { agentToolCalls, agentTurns, conversations, type Tx } from "@ocw/db";
-import { and, eq } from "drizzle-orm";
+import { agentTurns, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
 import { createConversationAccess } from "../chat";
@@ -31,8 +30,14 @@ import {
 } from "../work-session";
 import { type CellPrincipal, cellOf } from "./auth";
 import { waitItemForTurn } from "./automation-items";
-import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
+import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn } from "./claim";
 import { conversationAudience } from "./memory-files";
+import {
+  type CallRecord,
+  createWorkSessionCalls,
+  judgedConversationId,
+  readOnly,
+} from "./work-session-calls";
 
 /**
  * Phase 07.16-15 (D-01 … D-08, D-12, D-14, D-15, D-20; PD-03, PD-09 … PD-12, PD-15, PD-21): a bot's own Work Zone
@@ -73,6 +78,9 @@ import { conversationAudience } from "./memory-files";
  * claim as a denied `agent_tool_calls` row (the turn is not counted) plus `bot.work_session_refused`; after it,
  * `bot.work_session_refused` or the tool's success (`bot.work_session_started|prompted|stopped`), all through the one
  * builder `auditBotWorkSession`. Ids, the mode, the model and the prompt's length only: never the prompt.
+ *
+ * 07.17.1.1-10 (PD-06): the claim, the refusal before it and the refusal audit (`createWorkSessionCalls`), with
+ * `CallRecord`, `readOnly` and `judgedConversationId`, live in `work-session-calls.ts`, shared with the file routes.
  */
 
 const tags = ["agent-channel"];
@@ -80,7 +88,6 @@ const bearer = [{ cellToken: [] as string[] }];
 const START = BUILTIN_TOOLS.workSessionStart;
 const PROMPT = BUILTIN_TOOLS.workSessionPrompt;
 const STOP = BUILTIN_TOOLS.workSessionStop;
-const READ = BUILTIN_TOOLS.workSessionRead;
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
 const UNKNOWN: unique symbol = Symbol("unknown_turn");
 const READABLE_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
@@ -90,22 +97,6 @@ const DONE = {
   [PROMPT]: { action: "bot.work_session_prompted", outcome: "prompted" },
   [STOP]: { action: "bot.work_session_stopped", outcome: "stopped" },
 } as const;
-
-type WorkSessionTool = typeof START | typeof PROMPT | typeof STOP;
-
-/** What a call's records name: the claim's target and metadata, and the ids of its audit row. */
-interface CallRecord {
-  tool: WorkSessionTool;
-  /** The project (start) or the session (prompt, stop) the call names. */
-  target: string;
-  /** The claim's audit metadata (ids and the prompt's length only). */
-  metadata: Record<string, unknown>;
-  sponsorUserId: string | null;
-  projectId: string | null;
-  deviceId: string | null;
-  workSessionId?: string;
-  promptChars?: number;
-}
 
 /** tx1's hand-over to the proposal fallback (D-18): nothing was written as the sponsor. */
 type Propose = { propose: { askerUserId: string; profile: BotProfileRow } };
@@ -137,34 +128,6 @@ function controlRecord(
   };
 }
 
-/**
- * WR-02 (D-20): whether the turn's successful `ocw_work_session_read` calls (its allowed `agent_tool_calls` rows) read
- * `workSessionId` and nothing else. False when it read none (the mark came from another turn).
- */
-async function readOnly(tx: Tx, eventId: string, workSessionId: string): Promise<boolean> {
-  const rows = await tx
-    .selectDistinct({ target: agentToolCalls.target })
-    .from(agentToolCalls)
-    .where(
-      and(
-        eq(agentToolCalls.eventId, eventId),
-        eq(agentToolCalls.tool, READ),
-        eq(agentToolCalls.decision, "allowed"),
-      ),
-    );
-  return rows.length > 0 && rows.every((r) => r.target === workSessionId);
-}
-
-/** The conversation whose readers decide a turn's audience: a thread is read through its channel or DM. */
-async function judgedConversationId(tx: Tx, conversationId: string): Promise<string> {
-  const [conv] = await tx
-    .select({ kind: conversations.kind, parent: conversations.parentConversationId })
-    .from(conversations)
-    .where(eq(conversations.id, conversationId))
-    .limit(1);
-  return conv?.kind === "thread" && conv.parent ? conv.parent : conversationId;
-}
-
 export function registerBotWorkSessionRoutes(
   scope: App,
   core: Core,
@@ -175,101 +138,7 @@ export function registerBotWorkSessionRoutes(
   const perms = createPermissionService(core);
   const access = createConversationAccess(core);
 
-  /** `bot.work_session_refused` for `call` (after the claim, or with the denied row of `refuseBeforeClaim`). */
-  async function auditRefusal(
-    tx: Tx,
-    p: {
-      cell: CellPrincipal;
-      turn: AgentTurnRow;
-      call: CallRecord;
-      answer: BotWorkSessionRefused;
-      proposalRefusal?: string;
-    },
-  ): Promise<BotWorkSessionRefused> {
-    const { call, answer } = p;
-    await auditBotWorkSession(tx, core, {
-      action: "bot.work_session_refused",
-      tool: call.tool,
-      turn: p.turn,
-      auditBase: cellAuditBase(p.cell),
-      outcome: answer.code,
-      sponsorUserId: call.sponsorUserId,
-      projectId: call.projectId,
-      deviceId: call.deviceId,
-      ...(call.workSessionId ? { workSessionId: call.workSessionId } : {}),
-      ...(call.promptChars !== undefined ? { promptChars: call.promptChars } : {}),
-      ...(answer.reason ? { reason: answer.reason } : {}),
-      ...(answer.field ? { field: answer.field } : {}),
-      ...(p.proposalRefusal ? { proposalRefusal: p.proposalRefusal } : {}),
-    });
-    return answer;
-  }
-
-  /**
-   * A refusal decided before the claim: a denied `agent_tool_calls` row (the turn is not counted) and
-   * `bot.work_session_refused`, then the fixed answer.
-   */
-  async function refuseBeforeClaim(
-    tx: Tx,
-    p: {
-      cell: CellPrincipal;
-      turn: AgentTurnRow;
-      call: CallRecord;
-      code: BotWorkSessionRefusal;
-      reason?: BotProfileInactiveReason;
-    },
-  ): Promise<BotWorkSessionRefused> {
-    const { cell, turn, call } = p;
-    await claimToolCall(tx, core, {
-      cell,
-      turn,
-      tool: call.tool,
-      flags: WORK_SESSION_TOOL_FLAGS[call.tool],
-      web: false,
-      sourceKind: "builtin",
-      sourceId: null,
-      target: call.target,
-      reason: p.code,
-      metadata: call.metadata,
-    });
-    return auditRefusal(tx, {
-      cell,
-      turn,
-      call,
-      answer: refusedAnswer(p.code, p.reason ? { reason: p.reason } : {}),
-    });
-  }
-
-  /** The claim of a call on the turn (the call counts), with the tool's options; refused → its audited answer. */
-  async function claim(
-    tx: Tx,
-    p: {
-      cell: CellPrincipal;
-      turn: AgentTurnRow;
-      call: CallRecord;
-      outsideContent?: boolean;
-      sessionOutputExempt?: boolean;
-    },
-  ): Promise<BotWorkSessionRefused | null> {
-    const { cell, turn, call } = p;
-    const claimed = await claimToolCall(tx, core, {
-      cell,
-      turn,
-      tool: call.tool,
-      flags: WORK_SESSION_TOOL_FLAGS[call.tool],
-      web: false,
-      sourceKind: "builtin",
-      sourceId: null,
-      target: call.target,
-      reason: null,
-      metadata: call.metadata,
-      ...(p.outsideContent ? { outsideContent: true } : {}),
-      ...(p.sessionOutputExempt ? { sessionOutputExempt: true } : {}),
-    });
-    if (claimed.allowed) return null;
-    const code: BotWorkSessionRefusal = claimed.reason === "tainted" ? "outside_content" : "cap_reached";
-    return auditRefusal(tx, { cell, turn, call, answer: refusedAnswer(code) });
-  }
+  const { auditRefusal, refuseBeforeClaim, claim } = createWorkSessionCalls(core);
 
   /** The audit of a prompt or stop answer from `bots`: its success action, or the refusal. */
   async function recordControl<A extends { kind: string }>(

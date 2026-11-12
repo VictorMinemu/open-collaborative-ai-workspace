@@ -123,6 +123,30 @@ interface LocalLink {
 
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
 const diffChannel = (requestId: string) => `ocw:diff:${requestId}`;
+/** 07.17.1.1 (PD-18): where the ack of a bot file transfer's command is published (the transfer id is the command id). */
+/** The Redis channel a file command's ack is published on (exported for tests). */
+export const fileAckChannel = (transferId: string) => `ocw:file:${transferId}`;
+const fileChannel = fileAckChannel;
+/** The two command kinds of a bot's file move: their ack goes to the waiting route, never to the session handler. */
+const FILE_COMMAND_KINDS: ReadonlySet<string> = new Set<CommandKind>([
+  "session.file.write",
+  "session.file.read",
+]);
+const isFileCommand = (row: Pick<DeviceCommandRow, "kind">) => FILE_COMMAND_KINDS.has(row.kind);
+
+/** The outcome of a file command as the waiting route reads it: the device's ack, or the hub's failure reason. */
+export interface FileCommandAck {
+  ok: boolean;
+  error: string | null;
+}
+
+/** A live subscription to one file command's ack (`DeviceHub.subscribeFileAck`, review WR-02). */
+export interface FileAckWaiter {
+  /** The ack, null on timeout or abort; releases the subscription. */
+  wait(timeoutMs: number): Promise<FileCommandAck | null>;
+  /** Drop the subscription without waiting (idempotent). */
+  release(): Promise<void>;
+}
 
 /** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
 type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string } | { op: "config" };
@@ -149,6 +173,11 @@ export interface DeviceHubOptions {
    * copy). Tests only; it is never read from the environment (07.11 PD-12).
    */
   runtimeManifest?: RuntimeCompatibilityManifest;
+  /**
+   * 07.17.1 (PD-15): the one dist store of the device module (`RuntimeDistStore`), the only reader of the build this
+   * workspace serves. Absent → `servedRuntime()` is null.
+   */
+  runtimeDist?: { served(): Promise<{ version: string; build: string } | null> };
 }
 
 /**
@@ -163,6 +192,9 @@ export function frameFits(serialized: string, limit: number): boolean {
 }
 
 type SendResult = "sent" | "closed" | "too_large";
+
+/** 07.17.1 PD-27: why `supersedeCommands` closed a command (a restarted daemon never got to run it). */
+export const COMMAND_SUPERSEDED_RESTART = "superseded: the device restarted";
 
 /**
  * Device Link hub: owns the live device sockets of this API instance, the persistent command queue
@@ -190,6 +222,14 @@ export class DeviceHub {
       realtime: opts.realtime,
       runtimePolicy: (tx) => this.runtimePolicy(tx),
     };
+  }
+
+  /**
+   * 07.17.1 (PD-05, PD-15): the build this workspace serves now (`{ version, build }`, build = 12 hex), read from the
+   * device module's one dist store; null when no verified bundle is served or no store was given.
+   */
+  async servedRuntime(): Promise<{ version: string; build: string } | null> {
+    return (await this.opts.runtimeDist?.served()) ?? null;
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {
@@ -231,6 +271,28 @@ export class DeviceHub {
     return row!.id;
   }
 
+  /**
+   * 07.17.1 PD-27: close commands of this device the daemon never acked, in the caller's transaction, so they are never
+   * redelivered: `failed` with `COMMAND_SUPERSEDED_RESTART`, and no `onCommandResult` (the caller already decided what
+   * replaces them, e.g. a prompt re-queued after a daemon restart). Acked or already closed commands are left alone.
+   * Returns the ids it closed.
+   */
+  async supersedeCommands(tx: Tx, deviceId: string, commandIds: readonly string[]): Promise<string[]> {
+    if (commandIds.length === 0) return [];
+    const rows = await tx
+      .update(deviceCommands)
+      .set({ status: "failed", error: COMMAND_SUPERSEDED_RESTART, ackedAt: sql`now()` })
+      .where(
+        and(
+          eq(deviceCommands.deviceId, deviceId),
+          inArray(deviceCommands.id, [...commandIds]),
+          inArray(deviceCommands.status, ["pending", "sent"]),
+        ),
+      )
+      .returning({ id: deviceCommands.id });
+    return rows.map((r) => r.id);
+  }
+
   /** Ask the instance holding the device socket (maybe this one) to send pending commands. */
   async requestFlush(deviceId: string): Promise<void> {
     if (this.links.has(deviceId)) return this.flush(deviceId, false);
@@ -264,6 +326,76 @@ export class DeviceHub {
     } finally {
       await (stop as (() => Promise<void>) | null)?.();
     }
+  }
+
+  /**
+   * 07.17.1.1 (PD-18, review WR-02): subscribe to the ack of the file command `transferId`, published by whichever
+   * instance received it (or by the hub when it could not deliver the command). Resolves only once the subscription is
+   * live, so the caller enqueues the command AFTER awaiting it and a device that answers at once is never missed. The
+   * first well-formed ack is kept until `wait` reads it. `wait` resolves it, null on timeout, at once once `signal`
+   * aborted, or at once when the subscription failed (the caller then reads the command row); the subscription is
+   * released after `wait` and on abort.
+   */
+  async subscribeFileAck(transferId: string, signal?: AbortSignal): Promise<FileAckWaiter> {
+    let got: FileCommandAck | null = null;
+    let settle: ((value: FileCommandAck | null) => void) | null = null;
+    let released = false;
+    const unsubscribe = signal?.aborted
+      ? null
+      : await this.opts.bus
+          .subscribe(fileChannel(transferId), (msg) => {
+            const parsed = parseFileAck(msg);
+            if (!parsed || got) return;
+            got = parsed;
+            settle?.(parsed);
+          })
+          .catch(() => null);
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await unsubscribe?.().catch(() => undefined);
+    };
+    const onAbort = () => {
+      settle?.(null);
+      void release();
+    };
+    if (signal?.aborted) void release();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    return {
+      wait: async (timeoutMs) => {
+        try {
+          if (got) return got;
+          if (released || !unsubscribe) return null;
+          return await new Promise<FileCommandAck | null>((resolve) => {
+            const timer = setTimeout(() => done(null), timeoutMs);
+            const done = (value: FileCommandAck | null) => {
+              clearTimeout(timer);
+              settle = null;
+              resolve(value);
+            };
+            settle = done;
+          });
+        } finally {
+          signal?.removeEventListener("abort", onAbort);
+          await release();
+        }
+      },
+      release,
+    };
+  }
+
+  /**
+   * `subscribeFileAck` then `wait` (07.17.1.1 PD-18): the timeout runs from the moment the subscription is live. The
+   * route subscribes before it enqueues (review WR-02); this one-call form is for callers that enqueue nothing after.
+   */
+  async waitForFileAck(
+    transferId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<FileCommandAck | null> {
+    if (signal?.aborted) return null;
+    const waiter = await this.subscribeFileAck(transferId, signal);
+    return waiter.wait(timeoutMs);
   }
 
   isConnectedHere(deviceId: string): boolean {
@@ -454,7 +586,15 @@ export class DeviceHub {
       },
     );
     // A repeated ack (redelivered command the daemon had already executed) changes nothing.
-    if (row && row.kind !== "runtime.update") await this.handler?.onCommandResult(device, row, ok, error);
+    if (!row || row.kind === "runtime.update") return;
+    // 07.17.1.1 (PD-18): a file command's ack goes to the route waiting for it; no session state changes with it.
+    if (isFileCommand(row)) return this.publishFileAck(row.id, { ok, error });
+    await this.handler?.onCommandResult(device, row, ok, error);
+  }
+
+  /** 07.17.1.1 (PD-18): the outcome of a file command, for `waitForFileAck` on any instance. */
+  private async publishFileAck(transferId: string, ack: FileCommandAck): Promise<void> {
+    await this.opts.bus.publish(fileChannel(transferId), JSON.stringify(ack));
   }
 
   async onDiffResult(device: DeviceRef, frame: DiffResultFrame): Promise<void> {
@@ -663,6 +803,10 @@ export class DeviceHub {
           );
           continue;
         }
+        if (isFileCommand(row)) {
+          await this.publishFileAck(row.id, { ok: false, error: row.error });
+          continue;
+        }
         await this.handler?.onCommandResult(device, row, false, row.error, "hub");
       } catch (err) {
         this.opts.log.error({ err, commandId: row.id }, "device command failure handling failed");
@@ -698,5 +842,16 @@ export class DeviceHub {
       },
     );
     if (changed) await this.handler?.onOffline(device);
+  }
+}
+
+/** A published file ack (07.17.1.1), or null for anything else on the channel. */
+function parseFileAck(msg: string): FileCommandAck | null {
+  try {
+    const v = JSON.parse(msg) as { ok?: unknown; error?: unknown };
+    if (typeof v.ok !== "boolean") return null;
+    return { ok: v.ok, error: typeof v.error === "string" ? v.error : null };
+  } catch {
+    return null;
   }
 }

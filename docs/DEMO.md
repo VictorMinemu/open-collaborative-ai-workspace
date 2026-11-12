@@ -832,6 +832,42 @@ in `.planning/phases/07.12-headless-work-zone-server/07.12-VALIDATION.md` › Ma
 6. **A safe doctor.** Paste the output of `ocw-runtime doctor` from the Linux VM into a draft issue: it shows no token,
    no service.env value and no absolute path outside the home.
 
+## Runtime self-update (Phase 07.17.1)
+
+Phase 07.17.1 (ADR-0040). A headless server's runtime updates itself from the workspace it is paired with, without SSH
+([SERVER.md › Updates](SERVER.md#updates)):
+
+- **One click.** Settings › Devices › the server's card › Runtime updates: the **OCW runtime** row shows "0.3.1 ·
+  <build>" and what the workspace serves. When they differ: "{version} available" and **Update** (device owner and
+  admins). Desktop devices show "Updates with the desktop app"; a server on an older runtime shows the install command
+  to run once.
+- **By itself.** At the organization's *Automatic* level the server updates when the workspace serves another build
+  (also an older one after a server rollback). *Notify only* shows Update; *Off* stops the checks and Update still
+  works.
+- **Never cuts a turn.** The new version is downloaded, checked (SHA-256) and installed beside the running one. Then
+  the update waits ("Waiting for sessions to finish") until no turn runs on the server, switches, and the service
+  manager restarts it. A prompt sent meanwhile says "Restarting the OCW runtime on this device… your turn starts when it
+  is back" and runs after the restart.
+- **Recorded.** History shows each run (Downloading… → Installing… → Restarting… → Succeeded or Failed, from → to
+  builds, By you or Automatic); the audit log has the request, start and result with the builds and no path.
+
+**Owner check** (never run by an agent: it restarts a real systemd service on a real server; record each result in
+`.planning/phases/07.17.1-runtime-self-update-from-the-browser-one-click-in-settings-d/07.17.1-VALIDATION.md` ›
+Manual-Only Verifications, where the full steps are):
+
+0. **Once from v0.3.0.** Deploy this build. On Server-1 re-run the install command from Settings › Devices › Add a
+   device › Server, then `ocw-runtime service restart` when no session runs (v0.3.0 has no self-update code).
+1. **Up to date.** The OCW runtime row shows "0.3.1 · <build>" and Up to date.
+2. **One click.** Make it behind (a later workspace build, or point `~/.ocw/runtime/current` at the previous
+   `versions/<build>` and restart). Press **Update** with no session running: Downloading… → Installing… →
+   Restarting…, back online within about 30 s, Up to date; History says Succeeded, By you.
+3. **A running turn.** Behind again, start a long Claude Code turn and press **Update**: the turn is not cut, the row
+   says Waiting for sessions to finish, a second member's prompt waits with the restart line and runs after it.
+4. **Audit and doctor.** Admin › Audit shows requested, started and finished with builds and no path;
+   `ocw-runtime doctor` is all ok and the runtime matches the server.
+5. **Levels.** At *Automatic* the server updates by itself (History: Automatic). At *Off* the row says "Automatic
+   checks are off. Update still works." and Update works. Set it back to Automatic.
+
 ## Automations and watched records (Phase 07.6)
 
 Phase 07.6 (ADR-0028, [self-hosting/automations.md](self-hosting/automations.md)). Bots act without being asked: on a
@@ -1097,6 +1133,62 @@ Verifications). On `https://ocw.autofy.ing`, with the headless server and the te
    not.
 8. **Audit.** The rows show ids and counts only:
    `select action, result, metadata from app.audit_events where action like 'automation.%' order by occurred_at desc limit 10;`
+
+## Bot file exchange with its Work Zone sessions (Phase 07.17.1.1)
+
+Phase 07.17.1.1 (ADR-0041). A bot with a Work Zone profile moves files between the thread and the session it started
+there:
+
+- **Upload.** `ocw_work_session_upload` copies an attachment of the thread into the bot's own session, at a
+  repo-relative path (`docs/notes.md`). The file shows in the session's changes like any new file. An existing file
+  is replaced only when the bot asks for it.
+- **Download.** `ocw_work_session_download` copies one file of the session back into the thread as an attachment of
+  the bot's reply. People open and download it like any other attachment.
+- **Where it works.** Only in the conversation where the bot started the session (elsewhere: "not your session").
+  Uploads only while the session is idle, with no prompt waiting or running (one writer per working tree). Downloads
+  also while it runs.
+- **The limits.** Settings › Work Zone policy › Bots › **Largest file a bot moves**: default 25 MB, at most the
+  server's `OCW_ATTACHMENT_MAX_BYTES`. The bot's sheet › Work Zone › Limits › **Largest file**: empty means the
+  organization's, never above it. The lower one applies, and a refusal names it: "That file is 40 MB. This bot moves
+  files up to 25 MB (the organization's limit)."
+- **What is refused, both ways.** Any path outside the project (absolute, `..`, symlinks out of the tree), `.git`,
+  `.ocw-worktrees`, `.claude`, `.codex`, `.mcp.json`, `.env` and `.env.*` (but `.env.example`), key and credential
+  files (`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, …), also under another spelling the disk would open the same
+  way (other letter cases, look-alike or invisible characters, Windows `:` streams and `~1` short names). Symlinks,
+  folders, files with a second hard link and other non-regular files are refused too.
+- **Budgets.** At most 5 files each way per turn, inside the turn's 8 tool calls. Each move counts as one prompt of
+  the profile's hourly prompt budget (30 by default), whatever its outcome.
+- **The device.** Bytes go over HTTPS between the device and its own workspace (`/api/v1/runtime/files/`, the
+  device's token), never over the Device Link. A device on an older runtime answers "update the runtime" (Settings ›
+  Devices › Update). Behind your own proxy or CDN, see
+  [reverse-proxy.md](self-hosting/reverse-proxy.md#bringing-your-own-reverse-proxy) (rule 5).
+- **Audit.** `bot.work_session_upload`, `bot.work_session_download` and `bot.work_session_refused` carry ids, the
+  size, the sha256 and the path's length, never a path, a file name or content.
+
+The automated tests use the real local-runtime daemon with a fake runtime and a fake cell (e2e) and a real OpenClaw
+cell (smoke).
+
+**Owner check** (never run by an agent: it needs a real model, the real cell and the real Work Zone server; record the
+result in
+`.planning/phases/07.17.1.1-bot-file-exchange-with-its-work-zone-sessions-upload-chat-at/07.17.1.1-VALIDATION.md` ›
+Manual-Only Verifications). On `https://ocw.autofy.ing`, with the headless server and the team bot of Phase 07.16, the
+server updated to this runtime (Settings › Devices › the server › Runtime updates › **Update**, Phase 07.17.1):
+
+1. **Upload.** In a thread where the bot runs a session, attach a small file and ask the bot to put it in the session
+   (for example at `docs/notes.md`). The bot says it did. **Open session** › Changes lists the file as new.
+2. **Download.** Ask for a file of the project back (`README.md`). The bot's reply carries it as an attachment.
+   Download it and open it: it is the project's file.
+3. **A big file.** Attach a 20 MB file and ask the bot to put it in the session, then to send it back. Both work
+   within the default 25 MB (a long tool call through the real cell).
+4. **The bot's limit.** The bot's sheet › Work Zone › Limits › **Largest file**: 1 MB, Save. Ask it to put a 2 MB file
+   in the session. The bot relays "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit)." Empty the
+   field and Save.
+   Then set the bot's **Largest file** to 20 MB and Save, lower the organization's **Largest file a bot moves** to
+   10 MB, and in the bot's sheet change only **Prompts per hour** and Save: it saves, and the Largest file line says
+   10 MB applies, with a note that the bot's 20 MB is above it. Put both limits back.
+5. **Secrets.** Ask the bot to download `.env` from the session. It is refused.
+6. **Audit.** The rows show ids, sizes and hashes only, never a path:
+   `select action, result, metadata from app.audit_events where action in ('bot.work_session_upload', 'bot.work_session_download', 'bot.work_session_refused') order by occurred_at desc limit 10;`
 
 ## Troubleshooting
 

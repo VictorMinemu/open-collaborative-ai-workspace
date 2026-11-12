@@ -1011,3 +1011,149 @@ describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
     expect(h.registryCalls).toHaveLength(1);
   });
 });
+
+describe("RuntimeMaintenance: exclusion with the OCW runtime's self-update (07.17.1, PD-09, E13)", () => {
+  const ROOT = "/scratch/home/.local/share/claude";
+  const realWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const COMMAND_ID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+
+  it("while the self-update holds the gates an automatic update starts no job; it runs once the hold ends", async () => {
+    const hold = { on: true };
+    const h = harness({ exclusive: () => hold.on });
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.runs).toEqual([]);
+    expect(h.heldLocks.size).toBe(0);
+    await h.advance(PENDING_POLL_MS * 3);
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.runs).toEqual([]);
+    expect(h.m.jobActive).toBe(false);
+    hold.on = false;
+    await h.advance(PENDING_POLL_MS);
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+  });
+
+  it("an accepted Update now for a CLI waits pending while the self-update holds the gates (no drain, no run)", async () => {
+    const hold = { on: true };
+    const h = harness({ exclusive: () => hold.on, drainPollMs: 5 });
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(await h.m.requestUpdate("claude-code", "manual", COMMAND_ID)).toEqual({ accepted: true });
+    await flush();
+    await h.advance(PENDING_POLL_MS * 2);
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.runs).toEqual([]);
+    expect(h.runFrames).toEqual([]);
+    expect(h.heldLocks.size).toBe(0);
+    hold.on = false;
+    await h.advance(PENDING_POLL_MS);
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.runFrames.map((f) => [f.phase, f.commandId])).toEqual([
+      ["started", COMMAND_ID],
+      ["finished", COMMAND_ID],
+    ]);
+  });
+
+  it("the hold that starts while a CLI update takes its install lock: the lock goes back, no gate closes, it stays pending", async () => {
+    const hold = { on: false };
+    let releaseAcquire: () => void = () => undefined;
+    const acquired: string[] = [];
+    const released: string[] = [];
+    const h = harness({
+      exclusive: () => hold.on,
+      locks: {
+        acquire: async (root) => {
+          await new Promise<void>((r) => {
+            releaseAcquire = r;
+          });
+          acquired.push(root);
+          return {
+            release: async () => {
+              released.push(root);
+            },
+            recordInstaller: async () => undefined,
+          };
+        },
+      },
+    });
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    // The lock attempt is in flight; the self-update closes every gate meanwhile.
+    hold.on = true;
+    releaseAcquire();
+    await flush();
+    expect(acquired).toEqual([ROOT]);
+    expect(released).toEqual([ROOT]);
+    expect(h.runs).toEqual([]);
+    expect(h.gate.isOpen).toBe(true);
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.m.jobActive).toBe(false);
+  });
+
+  it("exclusive false: 07.11 behaves as before", async () => {
+    const h = harness({ exclusive: () => false });
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+  });
+
+  it("jobActive is true exactly while a CLI update is draining, queued or running", async () => {
+    const h = harness({ drainPollMs: 5 });
+    expect(h.m.jobActive).toBe(false);
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+
+    // queued: another daemon holds the install lock.
+    h.heldLocks.add(ROOT);
+    expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({ accepted: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("queued");
+    expect(h.m.jobActive).toBe(true);
+    h.heldLocks.delete(ROOT);
+
+    // draining: the lock is free, a turn still runs.
+    h.adapter.turns = 1;
+    await h.advance(LOCK_RETRY_MS);
+    expect(claudeStatus(h).state).toBe("draining");
+    expect(h.m.jobActive).toBe(true);
+
+    // running: the installer has not returned yet.
+    let finish: () => void = () => undefined;
+    h.setRunResult(
+      (opts) =>
+        new Promise<RunResult>((resolve) => {
+          finish = () =>
+            resolve({ outcome: "succeeded", fromVersion: "2.1.290", toVersion: opts.candidate, output: "" });
+        }),
+    );
+    h.adapter.turns = 0;
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.m.jobActive).toBe(true);
+    finish();
+    await flush();
+    expect(claudeStatus(h).state).toBe("idle");
+    expect(h.m.jobActive).toBe(false);
+  });
+
+  it("a pending automatic update waiting for an idle moment is not active", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.m.jobActive).toBe(false);
+  });
+});

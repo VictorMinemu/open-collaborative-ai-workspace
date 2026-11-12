@@ -1116,6 +1116,89 @@ Plans:
 
 - [x] 07.17-19-PLAN.md — Wave 7: Phase gate: every CI workflow green, README/DEMO/STATUS, CODEOWNERS and guard, signed VALIDATION
 
+### Phase 07.17.1: Runtime self-update from the browser: one click in Settings › Devices updates a headless server's OCW runtime to the version the workspace serves (bundle verified, idle gate, service restart) (INSERTED)
+
+**Goal:** In Settings › Devices a headless server's OCW Local Runtime updates to the build its workspace serves with one
+click (owner or admin, `device.maintain`), and by itself at the device's effective 07.11 level (`off` keeps the click),
+never cutting a running turn, verifying every download (bundle and lockfile against the manifest) and restarting through
+systemd or launchd; a failure keeps the running version and the doctor names an update that did not come back.
+**Requirements**: RSU-01, RSU-02, RSU-03, RSU-04, RSU-05, RSU-06, RSU-07, RSU-08
+**Depends on:** Phase 07.17
+**ADR:** 0040
+**Plans:** 11/11 plans executed
+
+Plans:
+**Wave 1**
+
+- [x] 07.17.1-01-PLAN.md — Wave 1: Contracts (`RuntimeUpdateTarget`, builds, strict `self`, `served`, refusals) and the phase hub (plan map, PD-01…PD-27, edges E1–E30)
+- [x] 07.17.1-02-PLAN.md — Wave 1: ADR-0040, AGENTS.md row, runtime version 0.3.1 and the release tag check
+- [x] 07.17.1-03-PLAN.md — Wave 1: API distribution: `GET /api/v1/runtime/npm-shrinkwrap.json`, `runtimeExternalFiles`, one shared dist store, `servedRuntime()`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 07.17.1-04-PLAN.md — Wave 2: The one migration (`ocw-runtime` in the CHECK, `from_build` / `to_build`, `HEAD_ONLY`)
+- [x] 07.17.1-05-PLAN.md — Wave 2: Daemon prepare and switch (verified download, fixed `npm ci`, staging, atomic `current`, marker), fake npm, harness
+- [x] 07.17.1-06-PLAN.md — Wave 2: Web: the Runtime row in Settings › Devices (every view, own test ids) and the held-turn line
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 07.17.1-07-PLAN.md — Wave 3: Supervision (D-12), running build, boot reconcile and prune, doctor findings
+- [x] 07.17.1-08-PLAN.md — Wave 3: The self-update job: one idle decision across runtimes, exclusion with 07.11, levels and cadence
+- [x] 07.17.1-09-PLAN.md — Wave 3: The API route and DTO (preconditions, audit with builds, abandoned runs, held prompts survive the restart): the phase's API end to end
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 07.17.1-10-PLAN.md — Wave 4: Daemon wiring (command, snapshot `self`, boot frames, exit 75, CLI hook): the phase's device end to end
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 07.17.1-11-PLAN.md — Wave 5: Phase gate: e2e views with axe, docs and v0.3.1 notes, CI evidence, the owner's Server-1 UAT (blocking)
+
+### Phase 07.17.1.1: Bot file exchange with its Work Zone sessions: upload chat attachments into the session's working tree and download session files back to the chat as attachments (INSERTED)
+
+**Goal:** A bot that started a Work Zone session moves files between that session and the conversation it started it
+from: it uploads an attachment of the thread into the session's working tree and downloads a file of the session back to
+the conversation as an attachment people open and download, each bounded by a per-file limit the organization and the
+bot's profile configure (the lower wins), decided server-side, audited, and never sending an absolute path.
+
+- **Tools:** `ocw_work_session_upload` and `ocw_work_session_download`, offered with the four 07.16 tools, all or none.
+- **Transport:** commands carry no bytes; files stream over `/api/v1/runtime/files/:transferId` with the device token.
+- **Rules:** origin conversation only; uploads only while the session is idle; one deny list (`.git`, `.claude`,
+  `.codex`, `.mcp.json`, `.ocw-worktrees`, secrets) both ways; 5 files per turn each way; the hourly prompt budget.
+
+**Requirements**: BWF-01, BWF-02, BWF-03, BWF-04, BWF-05, BWF-06, BWF-07, BWF-08
+**Depends on:** Phase 07.17.1 + PR #71 merged into main
+**ADR:** 0041
+**Success Criteria** (what must be TRUE):
+
+  1. A bot uploads a thread attachment into the session it started and the file shows in the session's changes; a
+     file outside the turn's reach, above the limit or at a denied path never moves
+  2. A bot downloads a session file; its reply carries it and people download it
+  3. "Largest file a bot moves" (organization) and "Largest file" (bot) are configurable; the lower wins and refusals
+     name it
+  4. Integration tests (containment, transport, caps, taint, tenant isolation) and an e2e spec pass on desktop and
+     mobile; ADR-0041 records the decisions
+
+**Plans:** 15/15 plans executed
+
+Plans:
+
+- [x] 07.17.1.1-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, path rule, deny list, limits, device commands) + the phase hub
+- [x] 07.17.1.1-02-PLAN.md — Wave 1: ADR-0041 and the AGENTS.md row
+- [x] 07.17.1.1-03-PLAN.md — Wave 2: The migration (limit columns, transfer ledger, hourly load)
+- [x] 07.17.1.1-04-PLAN.md — Wave 2: The daemon (containment, `session.file.read|write`, transfer requests, bounded diff frame)
+- [x] 07.17.1.1-05-PLAN.md — Wave 2: The plugin (two tools, guard sets, Work Zone block line, real-cell smoke)
+- [x] 07.17.1.1-06-PLAN.md — Wave 3: The limits in the API (policy and profile, `loadBotFileLimit`)
+- [x] 07.17.1.1-07-PLAN.md — Wave 3: Transfer read side (device JWT auth, ledger primitives, `GET /api/v1/runtime/files/:transferId`)
+- [x] 07.17.1.1-08-PLAN.md — Wave 4: Transfer write side (multipart storage, `PUT …/:transferId`, pre-claim refusals)
+- [x] 07.17.1.1-09-PLAN.md — Wave 4: Web: "Largest file a bot moves" and the profile's "Largest file"
+- [x] 07.17.1.1-10-PLAN.md — Wave 4: The offer of six tools with the file limit; shared route helpers
+- [x] 07.17.1.1-11-PLAN.md — Wave 5: The work-session file service (prepare, wait, finish, caps, audit, injectable deadline)
+- [x] 07.17.1.1-12-PLAN.md — Wave 6: The upload route (the phase's API end to end, upload) and its own refusals
+- [x] 07.17.1.1-13-PLAN.md — Wave 7: The download route and the refusal matrix both tools share
+- [x] 07.17.1.1-14-PLAN.md — Wave 8: The browser journey e2e (upload, download, limit refusal; desktop and mobile)
+- [x] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
+
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
 **Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and

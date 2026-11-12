@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DEFAULT_WORK_ZONE_POLICY } from "@ocw/contracts";
+import { BOT_FILE_LIMITS, DEFAULT_WORK_ZONE_POLICY } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -13,7 +13,7 @@ import {
   pairDevice,
   startSession,
 } from "../../testing-workzone";
-import { knownModels, loadWorkZonePolicy } from "./policy";
+import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy, serverFileMaxBytes } from "./policy";
 
 /**
  * Organization Work Zone policy (Phase 03.2 Plan 04 Task 1, D-02, D-11, P-08): admin-only, audited with the
@@ -31,6 +31,10 @@ let deviceId: string;
 let projectId: string;
 let orgId: string;
 let sessionId: string;
+
+const MIB = 1024 * 1024;
+/** 07.17.1.1 (D-07): this stack's `OCW_ATTACHMENT_MAX_BYTES`, the ceiling of the organization's bot file limit. */
+const SERVER_MAX = 50 * MIB;
 
 type Option = { available: boolean; reason: string | null; detail: string | null };
 type Controls = {
@@ -57,7 +61,7 @@ async function put(body: Record<string, unknown>, as: TestClient = admin) {
 }
 
 beforeAll(async () => {
-  stack = await startTestStack();
+  stack = await startTestStack({ env: { OCW_ATTACHMENT_MAX_BYTES: String(SERVER_MAX) } });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   admin = new TestClient(stack.baseUrl);
@@ -227,7 +231,13 @@ describe("Work Zone policy (D-02, D-11)", () => {
       loadWorkZonePolicy(tx),
     );
     // 07.16 (D-15): the org cap on bot sessions is a new optional field; absent row = 10.
-    expect(policyB).toEqual({ ...DEFAULT_WORK_ZONE_POLICY, botSessionsMax: 10, updatedAt: null });
+    expect(policyB).toEqual({
+      ...DEFAULT_WORK_ZONE_POLICY,
+      botSessionsMax: 10,
+      // 07.17.1.1 (D-07): the organization's bot file limit is a new optional field; absent row = 25 MiB.
+      botFileMaxBytes: 25 * 1024 * 1024,
+      updatedAt: null,
+    });
     // Org A's device catalogs never show up in org B's known models.
     expect(await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => knownModels(tx))).toEqual({
       "claude-code": [],
@@ -439,5 +449,121 @@ describe("07.16: the organization's cap on bot Work Zone sessions (D-15, PD-22)"
     );
     expect(row.rows[0].bot_sessions_max).toBe(0);
     expect((await put({ botSessionsMax: 10 })).body!.botSessionsMax).toBe(10);
+  });
+});
+
+describe("07.17.1.1: the largest file a bot moves (D-07, PD-11)", () => {
+  const fileAudits = async () =>
+    (
+      await su.query(
+        `select metadata from app.audit_events where action = 'work_zone_policy.updated' and organization_id = $1
+           and metadata->'changed' @> '["botFileMaxBytes"]'::jsonb order by occurred_at`,
+        [orgId],
+      )
+    ).rows;
+  const stored = async (org = orgId) =>
+    Number(
+      (
+        await su.query("select bot_file_max_bytes from app.work_zone_policies where organization_id = $1", [
+          org,
+        ])
+      ).rows[0]?.bot_file_max_bytes,
+    );
+  const errorOf = (res: { body: Record<string, unknown> | null }) =>
+    (res.body?.error as { message?: string; details?: { field?: string } } | undefined) ?? {};
+
+  it("an organization that never saved it reads 25 MiB, with the server's ceiling in the view", async () => {
+    expect(BOT_FILE_LIMITS.defaultMaxBytes).toBe(26214400);
+    expect(serverFileMaxBytes(stack.env)).toBe(SERVER_MAX);
+    const res = await admin.request("GET", "/api/v1/work-zone-policy");
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ botFileMaxBytes: 26214400, serverFileMaxBytes: SERVER_MAX });
+
+    // No row at all reads the same default.
+    const org = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Delta', $2)", [
+      org,
+      `delta-${org}`,
+    ]);
+    const fresh = await stack.built.core.db.withTenant({ organizationId: org, userId: null }, (tx) =>
+      loadWorkZonePolicy(tx),
+    );
+    expect(fresh.botFileMaxBytes).toBe(26214400);
+  });
+
+  it("an admin saves 40 MiB: answered, read back, stored and audited once with the changed key", async () => {
+    const res = await put({ botFileMaxBytes: 40 * MIB });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ botFileMaxBytes: 41943040, serverFileMaxBytes: SERVER_MAX });
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      botFileMaxBytes: 41943040,
+    });
+    expect(await stored()).toBe(41943040);
+    const audits = await fileAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata.changed).toEqual(["botFileMaxBytes"]);
+
+    // The same body again changes nothing and audits nothing.
+    expect((await put({ botFileMaxBytes: 40 * MIB })).status).toBe(200);
+    expect(await fileAudits()).toHaveLength(1);
+  });
+
+  it("a value above the server's ceiling is refused with the field and the ceiling; nothing is written", async () => {
+    const res = await put({ botFileMaxBytes: SERVER_MAX + 1 });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(errorCode(res)).toBe("invalid_work_zone_policy");
+    expect(errorOf(res).details?.field).toBe("botFileMaxBytes");
+    expect(errorOf(res).message).toContain("50 MB");
+    // Not even another key of the same body.
+    const mixed = await put({ botFileMaxBytes: SERVER_MAX + 1, allowFastMode: false });
+    expect(mixed.status).toBe(400);
+    expect(await stored()).toBe(41943040);
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      allowFastMode: true,
+    });
+    expect(await fileAudits()).toHaveLength(1);
+  });
+
+  it("a value below 1 MiB is refused by the contract", async () => {
+    const res = await put({ botFileMaxBytes: MIB - 1 });
+    expect(res.status).toBe(400);
+    expect(errorCode(res)).toBe("validation_error");
+    expect(await stored()).toBe(41943040);
+  });
+
+  it("a member without work_zone.manage cannot change it (403)", async () => {
+    expect((await put({ botFileMaxBytes: 2 * MIB }, dana)).status).toBe(403);
+    expect(await stored()).toBe(41943040);
+    expect(await fileAudits()).toHaveLength(1);
+  });
+
+  it("organization B's admin sets its own; organization A still reads 40 MiB", async () => {
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Epsilon', $2)", [
+      orgB,
+      `epsilon-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Eps', $2)", [
+      userB,
+      `${userB}@eps.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eps', 'admin')",
+      [orgB, userB],
+    );
+    const { db } = stack.built.core;
+    const b = { organizationId: orgB, userId: userB };
+    // B starts from the default, never A's 40 MiB.
+    expect((await db.withTenant(b, (tx) => loadWorkZonePolicy(tx))).botFileMaxBytes).toBe(26214400);
+    const saved = await db.withTenant(b, (tx) =>
+      saveWorkZonePolicy(tx, { botFileMaxBytes: 10 * MIB }, userB, { serverFileMaxBytes: SERVER_MAX }),
+    );
+    expect(saved.changed).toEqual(["botFileMaxBytes"]);
+    expect(await stored(orgB)).toBe(10 * MIB);
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      botFileMaxBytes: 41943040,
+    });
+    expect(await stored()).toBe(41943040);
   });
 });

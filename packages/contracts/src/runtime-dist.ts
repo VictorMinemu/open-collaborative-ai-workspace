@@ -21,6 +21,11 @@ export const RUNTIME_ROUTES = {
   bundle: "/api/v1/runtime/bundle",
   bundleSha256: "/api/v1/runtime/bundle.sha256",
   version: "/api/v1/runtime/version",
+  /**
+   * 07.17.1 (D-03, PD-16): the served bundle's `RUNTIME_EXTERNAL_LOCK_FILE`, read by the daemon's self-update (the
+   * lockfile is otherwise only inside `install.sh`'s heredoc). Same rate limit and verification as the bundle.
+   */
+  externalLock: "/api/v1/runtime/npm-shrinkwrap.json",
 } as const;
 
 /** The one command a server owner pastes (Settings › Devices › Add a device › Server, D-01). */
@@ -113,3 +118,62 @@ export const RuntimeDistManifest = z.strictObject({
   builtAt: IsoDateTime,
 });
 export type RuntimeDistManifest = z.infer<typeof RuntimeDistManifest>;
+
+/** The manifest's shape with every unknown key dropped (top level, `source`, each pin and bundled package). */
+const ServedRuntimeDistManifestShape = RuntimeDistManifest.extend({
+  external: z.array(NpmPackagePin.strip()),
+  bundled: z.array(BundledPackage.strip()),
+  source: RuntimeDistManifest.shape.source.strip(),
+}).strip();
+
+/**
+ * 07.17.1 review WR-04: how a daemon reads the manifest its workspace serves. Keys a later release adds (a signature,
+ * a minimum daemon version) are dropped instead of refused, so an older daemon keeps updating with one click; every
+ * field the daemon uses is still checked exactly as `RuntimeDistManifest` checks it (the result is parsed by it). The
+ * API's own dist store keeps the strict `RuntimeDistManifest`.
+ */
+export function parseServedRuntimeManifest(json: unknown): z.ZodSafeParseResult<RuntimeDistManifest> {
+  const shape = ServedRuntimeDistManifestShape.safeParse(json);
+  // A value the tolerant shape refuses fails the strict schema too, which then names the field.
+  return RuntimeDistManifest.safeParse(shape.success ? shape.data : json);
+}
+
+/**
+ * 07.17.1 (D-03, PD-16): the two npm files installed beside a bundle, from its manifest and its
+ * `RUNTIME_EXTERNAL_LOCK_FILE`. Written the same way by `install.sh` (rendered by the API) and by the daemon's
+ * self-update, so both lay out byte-identical files.
+ *
+ * Checks the lockfile's structure: lockfile v3, rooted at `RUNTIME_EXTERNAL_LOCK_ROOT` with exactly the manifest's
+ * pins (same names, versions and order); throws `Error("the external lockfile is not rooted at the manifest's pins")`
+ * otherwise, including for text that is not JSON. Returns `lockText` unchanged and the `package.json` text `npm ci`
+ * needs beside it, with its trailing newline.
+ *
+ * It never hashes: callers check `sha256(lockText) === m.externalLockSha256` first (contracts import no Node
+ * built-in, the web bundles this package).
+ */
+export function runtimeExternalFiles(
+  m: RuntimeDistManifest,
+  lockText: string,
+): { lock: string; packageJson: string } {
+  const refused = () => new Error("the external lockfile is not rooted at the manifest's pins");
+  let lock: {
+    lockfileVersion?: unknown;
+    packages?: Record<string, { name?: unknown; dependencies?: unknown }>;
+  };
+  try {
+    lock = JSON.parse(lockText);
+  } catch {
+    throw refused();
+  }
+  const root = lock?.packages?.[""];
+  const pins = Object.fromEntries(m.external.map((p) => [p.name, p.version]));
+  if (
+    lock?.lockfileVersion !== 3 ||
+    root?.name !== RUNTIME_EXTERNAL_LOCK_ROOT ||
+    JSON.stringify(root.dependencies) !== JSON.stringify(pins)
+  ) {
+    throw refused();
+  }
+  const packageJson = `${JSON.stringify({ name: RUNTIME_EXTERNAL_LOCK_ROOT, private: true, dependencies: pins }, null, 2)}\n`;
+  return { lock: lockText, packageJson };
+}

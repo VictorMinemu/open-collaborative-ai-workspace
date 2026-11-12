@@ -16,33 +16,49 @@
 // device's level comes from runtime.json or `OCW_RUNTIME_UPDATES`. Snapshots go out only while connected, run frames
 // through the offline log. Maintenance runs only when the daemon drives its real adapters, or in fake-CLI mode with a
 // scratch `HOME`, or when a test passes `DaemonOptions.maintenance`: a test or demo daemon never touches a real CLI.
+//
+// Runtime self-update (07.17.1, ADR-0040, D-03, D-04, D-05, D-07, PD-09, PD-12, PD-18, PD-19): a `SelfUpdate` exists only
+// where `RuntimeMaintenance` does and `cli.ts run` passed `exitForUpdate`. The `ocw-runtime` command reads only
+// `runtime`; the new build comes from `config.serverUrl`. Every `runtime.maintenance` frame then carries `self`; the
+// boot reconcile's frames go first after `hello`; a held turn is told the OCW runtime is restarting; and once the
+// switch is done the daemon's stop is a hand-over: the link closes first, nothing reopens a gate, no run frame goes out.
 
 import { realpathSync } from "node:fs";
 import { arch, homedir, platform, userInfo } from "node:os";
 import {
   ApprovalResolvePayload,
   type CommandFrame,
+  DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
   type DeviceHostKind,
   type DeviceToServerFrame,
   DiffRequestPayload,
+  type DiffResultFrame,
+  OCW_RUNTIME_TARGET,
   type PermissionMode,
   PromptPayload,
   RUNTIME_BYPASS_LITERALS,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
+  RUNTIME_FILE_ROUTE,
   RuntimeCatalog,
+  RuntimeFilePutAnswer,
   type RuntimeId,
   type RuntimeInfo,
+  type RuntimeMaintenanceFrame,
   RuntimeUpdatePayload,
   type RuntimeUpdatesLevel,
   type RuntimeUpdatesLevelSource,
   type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
+  SessionFileReadPayload,
+  SessionFileWritePayload,
   SessionStartPayload,
   SessionTitlePayload,
   stripImageData,
   TITLE_TIMEOUT_MS,
+  transferDeadlineMs,
 } from "@ocw/contracts";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
@@ -65,6 +81,7 @@ import {
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
+import { boundDiffFrame } from "./diff-frame.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
@@ -74,8 +91,20 @@ import {
   type RuntimeMaintenanceOptions,
   type UpdateRequestAnswer,
 } from "./maintenance/maintenance.js";
+import { defaultLockDir } from "./maintenance/runner.js";
+import { removeSelfUpdateMarker } from "./maintenance/self-update.js";
+import {
+  clearStaging,
+  pruneRuntimeVersions,
+  readFailedBuild,
+  reconcileSelfUpdate,
+  type SelfUpdateBoot,
+} from "./maintenance/self-update-boot.js";
+import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-job.js";
+import { isSupervised, runningBuild } from "./maintenance/supervision.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
+import { openSessionFileForRead, SessionFileError, writeSessionFile } from "./session-files.js";
 import { runTitle } from "./title.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -96,6 +125,29 @@ export function toDeviceTokenUrl(serverUrl: string): string {
   return u.toString();
 }
 
+/** A transfer id as the server mints it (a command id: a uuid in production); anything else is never fetched. */
+const TRANSFER_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * 07.17.1.1 (D-08, PD-05, P3): `{serverUrl}/api/v1/runtime/files/<transfer id>`, the only URL a file command ever
+ * fetches. Built from the daemon's own server URL (keeping its path prefix, like `toDeviceTokenUrl`) and the command
+ * id; never from a payload value.
+ */
+export function toRuntimeFileUrl(serverUrl: string, transferId: string): string {
+  if (!TRANSFER_ID.test(transferId)) throw new Error("invalid transfer id");
+  const u = new URL(serverUrl);
+  u.pathname = `${u.pathname.replace(/\/$/, "")}${RUNTIME_FILE_ROUTE}/${encodeURIComponent(transferId)}`;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+/**
+ * 07.17.1.1 (PD-05): the waits before retrying a transfer the server answered 503 (its stream counter was full and the
+ * transfer stays pending); after the last one a 503 is `transfer_failed`.
+ */
+export const FILE_TRANSFER_RETRY_DELAYS_MS: readonly number[] = [1_000, 3_000];
+
 /** The server refused the device token (revoked or unknown device); retried with the link's backoff. */
 export class DeviceTokenRejectedError extends Error {
   constructor(readonly status: number) {
@@ -114,6 +166,8 @@ export const FULL_ACCESS_OFF_MESSAGE =
 export const INVALID_PAYLOAD_MESSAGE = "invalid payload";
 /** 07.11 (PD-19): a daemon that does not maintain its CLIs (test runtimes, fake mode without a scratch HOME). */
 export const RUNTIME_UPDATES_UNAVAILABLE_MESSAGE = "runtime updates are not available on this device";
+/** 07.17.1 (PD-26): the ack of an `ocw-runtime` update on a daemon that cannot update itself. */
+export const SELF_UPDATE_UNAVAILABLE_MESSAGE = "runtime self-update is not available on this device";
 
 /** The daemon's Full access gate, shared with every adapter it builds (read on every call). */
 interface FullAccessGate {
@@ -143,6 +197,20 @@ export interface DaemonOptions {
    * with `userHome` (a scratch home) and usually `which`, a registry URL in `env` and short timers.
    */
   maintenance?: Partial<RuntimeMaintenanceOptions>;
+  /**
+   * 07.17.1 (D-05, PD-08): the only way the daemon restarts itself after a self-update switched `current`: stop
+   * cleanly, then exit with `code` (75) so the service manager starts the new build. `cli.ts run` passes it; without it
+   * no `SelfUpdate` exists and an `ocw-runtime` update is refused with `SELF_UPDATE_UNAVAILABLE_MESSAGE`.
+   */
+  exitForUpdate?: (code: number) => Promise<void>;
+  /**
+   * Tests only (07.17.1, PD-19): overrides for the `SelfUpdate` (the stub's URL, the running build, supervision, the
+   * fake npm through `prepare`, short polls). The exit, the lock directory and the scratch-home rule always come from
+   * the daemon and its maintenance scope.
+   */
+  selfUpdate?: Partial<SelfUpdateOptions>;
+  /** Tests only (07.17.1.1): the waits before retrying a 503 transfer (default `FILE_TRANSFER_RETRY_DELAYS_MS`). */
+  fileRetryDelaysMs?: readonly number[];
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -208,6 +276,27 @@ function realpathOr(p: string): string {
   }
 }
 
+/** 07.17.1.1: a file command payload the contract refuses: its path → `invalid_path`, anything else → `transfer_failed`. */
+function payloadRefusal(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>): SessionFileError {
+  return new SessionFileError(issues.some((i) => i.path[0] === "path") ? "invalid_path" : "transfer_failed");
+}
+
+/** Waits `ms`; false when `signal` aborted first (the transfer's deadline passed). */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** What `reloadConfig` answers (control socket): the levels it now enforces, never a value it was sent. */
 export type ReloadConfigResult = {
   fullAccessOptIn: boolean;
@@ -234,16 +323,32 @@ export class Daemon {
   private maintenance: RuntimeMaintenance | null = null;
   /** 07.11 (PD-07): per runtime, the sessions told `runtime.update` `waiting` during the current update. */
   private readonly heldSessions = new Map<RuntimeId, Set<string>>();
+  /** 07.17.1: the OCW runtime's own update; null unless maintenance runs here and `exitForUpdate` was given. */
+  private selfUpdate: SelfUpdate | null = null;
+  /** 07.17.1 (PD-12): the run a self-update restart carried over, reported once in the handshake. */
+  private boot: { report: SelfUpdateBoot; running: { version: string; sha256: string } | null } | null = null;
+  /** 07.17.1 (PD-18): sessions told the OCW runtime is restarting during the current hold (once each), and their runtime. */
+  private readonly selfHeldSessions = new Map<string, RuntimeId>();
+  /** `stop()` began: a hold that ends now is the daemon going away, not an update that did not run (review IN-04). */
+  private stopping = false;
+  /** Snapshots with `self` go out in the order their status was read. */
+  private snapshotChain: Promise<void> = Promise.resolve();
   private readonly sessions = new Map<string, ActiveSession>();
   /** Roots per session survive session end so late events are still contained. */
   private readonly rootsBySession = new Map<string, string[]>();
   private readonly seqBySession = new Map<string, number>();
   private readonly processedCommands = new Set<string>();
+  /** Review CR-03: file commands running now, by id (= transfer id); a redelivered copy is not run or answered. */
+  private readonly fileInFlight = new Set<string>();
+  /** Review CR-03: finished file commands' outcomes (bounded like `processedCommands`), answered again on redelivery. */
+  private readonly fileOutcomes = new Map<string, { error: string | undefined }>();
   /**
    * Per-session order for `session.configure` and `prompt` (D-14): a prompt queued right after a settings change
    * reaches the runtime only once the change was handed over. Other commands stay immediate.
    */
   private readonly sessionChains = new Map<string, Promise<void>>();
+  /** 07.17.1.1 (D-13): sessions whose turn runs now (`trackTurn`); a file write into them is refused `busy`. */
+  private readonly turnsRunning = new Set<string>();
   private detectCache: { at: number; value: RuntimeInfo[] } | null = null;
   private started = false;
   /** The current device JWT (never logged). */
@@ -313,10 +418,108 @@ export class Daemon {
       log.warn("This device is marked as an isolated server", { source: daemon.isolated.source });
     await daemon.registry.load();
     const scope = maintenanceScope(opts, env, fake && opts.runtimes === undefined);
-    if (scope) daemon.maintenance = daemon.buildMaintenance(scope);
-    else if (fake)
+    if (scope) {
+      daemon.maintenance = daemon.buildMaintenance(scope);
+      if (opts.exitForUpdate) await daemon.buildSelfUpdate(daemon.maintenance, scope, opts.exitForUpdate);
+    } else if (fake)
       log.info("runtime updates are off: fake runtime without OCW_RUNTIME_FAKE_CLI=1 and a scratch HOME");
     return daemon;
+  }
+
+  /**
+   * 07.17.1 (D-05, D-07, PD-09, PD-12, PD-19): the running build (hashed once), supervision, the boot reconcile of a
+   * run the last restart carried over and the staging left by an interrupted prepare, then the `SelfUpdate` on the
+   * same gates. The lock directory is the maintenance scope's (`defaultLockDir(scope.userHome)`), never the OS user's
+   * home from a test.
+   */
+  private async buildSelfUpdate(
+    maintenance: RuntimeMaintenance,
+    scope: MaintenanceScope,
+    exit: (code: number) => Promise<void>,
+  ): Promise<void> {
+    const over = this.opts.selfUpdate ?? {};
+    const argv1 = process.argv[1];
+    const running =
+      over.running !== undefined
+        ? over.running
+        : await runningBuild({ argv1, ocwHome: this.home, version: RUNTIME_VERSION });
+    const supervision =
+      over.supervision ??
+      (await isSupervised({ env: this.env, platform: process.platform, argv1, ocwHome: this.home }));
+    const report = await reconcileSelfUpdate({ ocwHome: this.home, running });
+    await clearStaging(this.home).catch(() => 0);
+    // Review CR-01: a build that came back on the previous version (this boot, or an earlier one) never runs again
+    // automatically while the workspace serves it.
+    const failedBuild = await readFailedBuild(this.home);
+    const selfUpdate = new SelfUpdate({
+      ocwHome: this.home,
+      serverUrl: this.config.serverUrl,
+      env: this.env,
+      running,
+      supervision,
+      failedBuild,
+      gates: this.gates,
+      activeTurns: (r) => this.runtimes.get(r)?.activeTurns() ?? 0,
+      cliBusy: () => maintenance.jobActive,
+      level: () => maintenance.effectiveLevel,
+      sendRun: (frame) => this.send(frame),
+      publish: () => this.onSelfUpdateChange(),
+      log: this.log,
+      ...over,
+      exit,
+      requireScratchHome: scope.requireScratchHome,
+      lockDir: this.opts.maintenance?.lockDir ?? defaultLockDir(scope.userHome),
+    });
+    this.selfUpdate = selfUpdate;
+    if (report) {
+      this.boot = { report, running };
+      selfUpdate.adoptBoot(report);
+      this.log.info("runtime self-update: reporting the run the restart carried over", {
+        outcome: report.outcome,
+      });
+    }
+  }
+
+  /**
+   * The self-update's status changed: a fresh snapshot (while connected). A hold that ended without the restart (the
+   * update failed, was cancelled or gave up waiting) tells each session it held that the update did not run, so its
+   * "Restarting…" line is taken back (review IN-04); on a daemon stop nothing is said (the next daemon runs the turn).
+   */
+  private onSelfUpdateChange(): void {
+    const su = this.selfUpdate;
+    if (!su) return;
+    if (!su.holding && this.selfHeldSessions.size > 0) {
+      const held = [...this.selfHeldSessions];
+      this.selfHeldSessions.clear();
+      if (!this.stopping) {
+        for (const [sessionId, runtime] of held) {
+          this.forwardEvent(sessionId, {
+            type: "runtime.update",
+            runtime,
+            phase: "failed",
+            subject: OCW_RUNTIME_TARGET,
+          });
+        }
+      }
+    }
+    const m = this.maintenance;
+    if (!m || !this.isConnected) return;
+    const self = su.status();
+    this.snapshotChain = this.snapshotChain
+      .then(async () => {
+        const frame = await m.snapshot();
+        if (this.isConnected) this.send({ ...frame, self });
+      })
+      .catch((err: unknown) =>
+        this.log.warn("runtime self status snapshot failed", {
+          error: sanitizeString(errorMessage(err), []),
+        }),
+      );
+  }
+
+  /** Every `runtime.maintenance` frame carries `self` exactly when a SelfUpdate exists. */
+  private withSelf(frame: RuntimeMaintenanceFrame): RuntimeMaintenanceFrame {
+    return this.selfUpdate ? { ...frame, self: this.selfUpdate.status() } : frame;
   }
 
   private buildMaintenance(scope: MaintenanceScope): RuntimeMaintenance {
@@ -338,8 +541,22 @@ export class Daemon {
         return this.detectRuntimes();
       },
       // PD-03: a snapshot only while connected (the handshake carries one on every connect); runs never get lost.
+      // 07.17.1: with a SelfUpdate it carries `self` and keeps its place behind the self-update's own snapshots.
       sendSnapshot: (frame) => {
-        if (this.isConnected) this.send(frame);
+        if (!this.selfUpdate) {
+          if (this.isConnected) this.send(frame);
+          return;
+        }
+        // Review IN-06: one failed send never breaks the chain for the snapshots after it, nor `stop()`'s await.
+        this.snapshotChain = this.snapshotChain
+          .then(() => {
+            if (this.isConnected) this.send(this.withSelf(frame));
+          })
+          .catch((err: unknown) =>
+            this.log.warn("runtime maintenance snapshot failed", {
+              error: sanitizeString(errorMessage(err), []),
+            }),
+          );
       },
       sendRun: (frame) => this.send(frame),
       notifySession: (runtime, phase, version) => this.notifyHeldSessions(runtime, phase, version),
@@ -347,6 +564,8 @@ export class Daemon {
         this.detectCache = null;
         if (this.isConnected) this.send(await this.capabilitiesFrame());
       },
+      // 07.17.1 (PD-09): no CLI job starts while the OCW runtime's self-update holds the gates.
+      exclusive: () => this.selfUpdate?.holding ?? false,
       ...this.opts.maintenance,
       userHome: scope.userHome,
       requireScratchHome: scope.requireScratchHome,
@@ -400,14 +619,36 @@ export class Daemon {
     this.link.start();
     this.log.info("connecting to server", { serverUrl: this.config.serverUrl });
     this.maintenance?.start({ paired: true });
+    this.selfUpdate?.start();
   }
 
-  /** Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest. */
+  /**
+   * Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest; 07.17.1 (PD-10): the
+   * self-update then checks what the workspace serves (nothing at `off`).
+   */
   private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
-    if (frame.type === "runtime.config") this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
+    if (frame.type !== "runtime.config") return;
+    this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
+    void this.selfUpdate?.onConfig();
   }
 
+  /**
+   * Stops the daemon. 07.17.1 (E29): the SelfUpdate stops first; a run not yet switched is cancelled there (gates
+   * reopen, `finished failed`). Once it switched (the exit hand-over, gates still held) the link closes right after the
+   * last snapshot went out: no ack, run frame or session event from the teardown reaches the server, and nothing
+   * reopens a gate on an open socket. The next daemon reports the run from the marker.
+   *
+   * Review WR-01: every gate is sealed first, so nothing held (by the self-update or a 07.11 CLI update) or newly
+   * arriving starts a turn in a daemon that is stopping; the server re-queues those prompts after the restart (PD-27).
+   */
   async stop(): Promise<void> {
+    this.stopping = true;
+    for (const gate of this.gates.values()) gate.seal();
+    await this.selfUpdate?.stop();
+    if (this.selfUpdate?.holding) {
+      await this.snapshotChain;
+      await this.link?.stop();
+    }
     this.maintenance?.stop();
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
@@ -544,28 +785,58 @@ export class Daemon {
   }
 
   private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
-    return [
-      {
-        type: "hello",
-        protocolVersion: DEVICE_LINK_PROTOCOL_VERSION,
-        device: {
-          name: deviceName(this.config),
-          platform: platform(),
-          arch: arch(),
-          daemonVersion: DAEMON_VERSION,
-          ...(this.hostKind ? { host: this.hostKind } : {}),
-        },
-        runtimes: await this.detectRuntimes(),
-        sessions: [...this.sessions.keys()],
-        // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
-        fullAccessOptIn: this.gate.optIn,
-        // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
-        isolatedServer: this.reportedIsolated,
+    const hello: DeviceToServerFrame = {
+      type: "hello",
+      protocolVersion: DEVICE_LINK_PROTOCOL_VERSION,
+      device: {
+        name: deviceName(this.config),
+        platform: platform(),
+        arch: arch(),
+        daemonVersion: DAEMON_VERSION,
+        ...(this.hostKind ? { host: this.hostKind } : {}),
       },
+      runtimes: await this.detectRuntimes(),
+      sessions: [...this.sessions.keys()],
+      // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
+      fullAccessOptIn: this.gate.optIn,
+      // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
+      isolatedServer: this.reportedIsolated,
+    };
+    const frames: DeviceToServerFrame[] = [
+      hello,
+      // 07.17.1 (PD-12): the run the last restart carried over, right after hello, until it went out once.
+      ...(this.boot ? this.boot.report.frames : []),
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
-      ...(this.maintenance ? [await this.maintenance.snapshot()] : []),
+      ...(this.maintenance ? [this.withSelf(await this.maintenance.snapshot())] : []),
     ];
+    // The link writes these frames right after this resolves; once they went out on an open socket, the marker goes.
+    if (this.boot) setImmediate(() => void this.afterBootReported());
+    return frames;
+  }
+
+  /**
+   * 07.17.1 (PD-12): the boot frames were written on an open socket: the marker is removed and `versions/` pruned
+   * (keeping the running build and the one the run came from), once. Still disconnected: the next handshake sends
+   * them again.
+   */
+  private async afterBootReported(): Promise<void> {
+    const boot = this.boot;
+    if (!boot || !this.isConnected) return;
+    this.boot = null;
+    try {
+      await removeSelfUpdateMarker(this.home);
+      if (boot.running) {
+        await pruneRuntimeVersions({
+          ocwHome: this.home,
+          keep: [boot.running.sha256.slice(0, 12), boot.report.marker.from.sha256.slice(0, 12)],
+        });
+      }
+    } catch (err) {
+      this.log.warn("runtime self-update: cleanup after the restart failed", {
+        error: sanitizeString(errorMessage(err), [this.home]),
+      });
+    }
   }
 
   private async capabilitiesFrame(): Promise<DeviceToServerFrame> {
@@ -605,11 +876,32 @@ export class Daemon {
     const out: SessionEvent =
       event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
     this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
+    this.trackTurn(sessionId, event);
     // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
     if (event.type === "prompt.completed" || event.type === "session.state") {
       const runtime = this.sessions.get(sessionId)?.runtime.id;
       if (runtime) this.maintenance?.onRuntimeActivity(runtime);
     }
+  }
+
+  /**
+   * 07.17.1.1 (D-13, PD-08): whether a turn of the session runs, from the events it forwards: `prompt.started` (or a
+   * `running` / `waiting_approval` state) begins one; `prompt.completed`, or any other state, ends it. A file write is
+   * refused `busy` meanwhile, the second line behind the API's own check.
+   */
+  private trackTurn(sessionId: string, event: SessionEvent): void {
+    if (event.type === "prompt.started") this.turnsRunning.add(sessionId);
+    else if (event.type === "prompt.completed") this.turnsRunning.delete(sessionId);
+    else if (event.type === "session.state") {
+      if (event.status === "running" || event.status === "waiting_approval") this.turnsRunning.add(sessionId);
+      else this.turnsRunning.delete(sessionId);
+    }
+  }
+
+  /** A session left this device (stopped, completed, failed or never started): its turn is forgotten too. */
+  private endSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    this.turnsRunning.delete(sessionId);
   }
 
   /**
@@ -624,6 +916,19 @@ export class Daemon {
   }
 
   private tellWaiting(runtime: RuntimeId, sessionId: string): void {
+    // 07.17.1 (PD-18): the OCW runtime's own restart holds this turn; told once per hold, never `done` (the next
+    // daemon does not know the holds; the server runs the held prompt after the restart, PD-27).
+    if (this.selfUpdate?.holding) {
+      if (this.selfHeldSessions.has(sessionId)) return;
+      this.selfHeldSessions.set(sessionId, runtime);
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase: "waiting",
+        subject: OCW_RUNTIME_TARGET,
+      });
+      return;
+    }
     let held = this.heldSessions.get(runtime);
     if (!held) {
       held = new Set();
@@ -663,17 +968,54 @@ export class Daemon {
     }
   }
 
+  /** Review CR-03: the finished outcome of a file command (`undefined` error = ok), answered again on redelivery. */
+  private rememberFileOutcome(commandId: string, error: string | undefined): void {
+    this.fileOutcomes.set(commandId, { error });
+    if (this.fileOutcomes.size > MAX_REMEMBERED_COMMANDS) {
+      const first = this.fileOutcomes.keys().next().value;
+      if (first !== undefined) this.fileOutcomes.delete(first);
+    }
+  }
+
+  /**
+   * Review CR-03: a file command is keyed by its id (= the transfer id). A copy redelivered while the first still runs
+   * is not answered (the running one acks with its real outcome); a copy of a finished one gets that outcome again.
+   * Never a blind `ok`: the API would report and audit a file that may never have landed.
+   */
+  private async handleFileCommand(cmd: CommandFrame): Promise<void> {
+    if (this.fileInFlight.has(cmd.id)) return;
+    const done = this.fileOutcomes.get(cmd.id);
+    if (done) {
+      this.ack(cmd.id, done.error, this.rootsBySession.get(cmd.sessionId) ?? []);
+      return;
+    }
+    this.fileInFlight.add(cmd.id);
+    try {
+      // 07.17.1.1 (D-13, principle 4): a write is handed over between turns, never beside a prompt or configure.
+      if (cmd.kind === "session.file.write")
+        await this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
+      else await this.execute(cmd);
+    } finally {
+      this.fileInFlight.delete(cmd.id);
+    }
+  }
+
   async handleCommand(cmd: CommandFrame): Promise<void> {
+    if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+      return this.handleFileCommand(cmd);
+    }
     if (this.processedCommands.has(cmd.id)) {
       this.ack(cmd.id); // replayed command; already executed
       return;
     }
     this.remember(cmd.id);
-    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") return this.execute(cmd);
+    if (cmd.kind !== "prompt" && cmd.kind !== "session.configure") {
+      return this.execute(cmd);
+    }
     return this.inSessionOrder(cmd.sessionId, () => this.execute(cmd));
   }
 
-  /** Runs `fn` after every earlier configure / prompt of this session (D-14 order). */
+  /** Runs `fn` after every earlier configure / prompt / file write of this session (D-14 order; writes since 07.17.1.1). */
   private inSessionOrder<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.sessionChains.get(sessionId) ?? Promise.resolve();
     const run = prev.then(fn);
@@ -829,12 +1171,21 @@ export class Daemon {
           const s = this.sessions.get(cmd.sessionId);
           if (s) {
             await s.runtime.stop(cmd.sessionId);
-            this.sessions.delete(cmd.sessionId);
+            this.endSession(cmd.sessionId);
           }
           break;
         }
         case "diff.request":
           await this.sendDiff(cmd);
+          break;
+        // 07.17.1.1 (D-03, D-08): never in session order and never gated, like diff.request: a running turn does not
+        // delay it (a file being written may be read half-done, PD-08).
+        case "session.file.read":
+          await this.readSessionFile(cmd);
+          break;
+        // 07.17.1.1 (D-02, D-13): in session order (handleCommand), only while no turn runs; not gated (no CLI call).
+        case "session.file.write":
+          await this.writeSessionFileFromServer(cmd);
           break;
         case "session.configure":
           await this.admit(this.sessions.get(cmd.sessionId)?.runtime.id, cmd.sessionId, () =>
@@ -853,8 +1204,19 @@ export class Daemon {
           await this.requestRuntimeUpdate(cmd);
           break;
       }
+      if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+        this.rememberFileOutcome(cmd.id, undefined);
+      }
       this.ack(cmd.id);
     } catch (err) {
+      if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
+        // 07.17.1.1 (P1): a code and at most a size; the log line carries the command id and the code only.
+        const e = err instanceof SessionFileError ? err : new SessionFileError("transfer_failed");
+        this.rememberFileOutcome(cmd.id, e.message);
+        this.log.warn("session file command failed", { kind: cmd.kind, commandId: cmd.id, code: e.code });
+        this.ack(cmd.id, e.message, this.rootsBySession.get(cmd.sessionId) ?? roots);
+        return;
+      }
       const message = errorMessage(err);
       this.log.warn("command failed", {
         kind: cmd.kind,
@@ -877,8 +1239,18 @@ export class Daemon {
   private async requestRuntimeUpdate(cmd: CommandFrame): Promise<void> {
     const payload = RuntimeUpdatePayload.safeParse(cmd.payload);
     if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const runtime = payload.data.runtime;
+    // 07.17.1 (D-05, PD-11, E17): the device re-decides; a command it already ran (before the restart too) runs nothing.
+    if (runtime === OCW_RUNTIME_TARGET) {
+      const su = this.selfUpdate;
+      if (!su) throw new Error(SELF_UPDATE_UNAVAILABLE_MESSAGE);
+      if (su.isKnownCommand(cmd.id)) return;
+      const answer = await su.request("manual", cmd.id);
+      if (!answer.accepted) throw new Error(answer.reason);
+      return;
+    }
     if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
-    const answer = await this.maintenance.requestUpdate(payload.data.runtime, "manual", cmd.id);
+    const answer = await this.maintenance.requestUpdate(runtime, "manual", cmd.id);
     if (!answer.accepted) throw new Error(answer.reason);
   }
 
@@ -982,12 +1354,12 @@ export class Daemon {
         (event) => {
           this.forwardEvent(cmd.sessionId, event);
           if (event.type === "session.state" && (event.status === "failed" || event.status === "completed")) {
-            this.sessions.delete(cmd.sessionId);
+            this.endSession(cmd.sessionId);
           }
         },
       );
     } catch (err) {
-      this.sessions.delete(cmd.sessionId);
+      this.endSession(cmd.sessionId);
       throw err;
     }
   }
@@ -1054,20 +1426,155 @@ export class Daemon {
       unifiedPatch(cwd),
       repoInfo(cwd),
     ]);
-    this.send(
-      sanitizeValue(
-        {
-          type: "diff.result",
-          requestId: cmd.id,
-          files,
-          patch,
-          truncated,
-          branch: info.branch,
-          headSha: info.headSha,
-        },
-        roots,
-      ),
+    const frame: DiffResultFrame = {
+      type: "diff.result",
+      requestId: cmd.id,
+      files,
+      patch,
+      truncated,
+      branch: info.branch,
+      headSha: info.headSha,
+    };
+    // 07.17.1.1 (D-14, PD-19): bounded after sanitising, so the frame never exceeds the API's inbound limit.
+    this.send(boundDiffFrame(sanitizeValue(frame, roots), DEVICE_LINK_MAX_DEVICE_FRAME_BYTES));
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Session files (07.17.1.1, D-02 … D-04, D-08, D-13, PD-05, PD-10, PD-18)
+
+  /**
+   * `session.file.read`: one contained regular file of an active session, at most `maxBytes` (else `too_large: <size>`
+   * before any request), `PUT` to the server's transfer route as exactly its bytes with `content-length`.
+   */
+  private async readSessionFile(cmd: CommandFrame): Promise<void> {
+    const payload = SessionFileReadPayload.safeParse(cmd.payload);
+    if (!payload.success) throw payloadRefusal(payload.error.issues);
+    const active = this.sessions.get(cmd.sessionId);
+    if (!active) throw new SessionFileError("not_running");
+    const { handle, size } = await openSessionFileForRead(
+      active.cwd,
+      payload.data.path,
+      payload.data.maxBytes,
     );
+    const streams: Array<{ destroy(): void }> = [];
+    try {
+      const res = await this.transfer(cmd.id, size, () => {
+        // A fresh stream per attempt, from byte 0 (positional reads), never past the size checked above.
+        let body: Uint8Array | AsyncIterable<Uint8Array> = new Uint8Array(0);
+        if (size > 0) {
+          const stream = handle.createReadStream({ start: 0, end: size - 1, autoClose: false });
+          streams.push(stream);
+          body = stream;
+        }
+        return {
+          method: "PUT",
+          headers: { "content-type": "application/octet-stream", "content-length": String(size) },
+          body,
+        };
+      });
+      const answer = RuntimeFilePutAnswer.safeParse(await res.json().catch(() => null));
+      if (!answer.success || answer.data.sizeBytes !== size) throw new SessionFileError("transfer_failed");
+    } finally {
+      for (const s of streams) s.destroy();
+      await handle.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * `session.file.write`: one file into an active session whose turn is not running (`busy` otherwise, before any
+   * request). Every path, target and free-space check runs first; only then the bytes are fetched (`GET`, the body
+   * read lazily by `writeSessionFile`) and land after their size and sha256 matched the payload's.
+   */
+  private async writeSessionFileFromServer(cmd: CommandFrame): Promise<void> {
+    const payload = SessionFileWritePayload.safeParse(cmd.payload);
+    if (!payload.success) throw payloadRefusal(payload.error.issues);
+    const active = this.sessions.get(cmd.sessionId);
+    if (!active) throw new SessionFileError("not_running");
+    if (this.turnsRunning.has(cmd.sessionId)) throw new SessionFileError("busy");
+    const p = payload.data;
+    // Review WR-01: the server names how long the file may still land; past that it has told the bot the move timed out.
+    let landBy: number | null = null;
+    const fetchBody = async function* (this: Daemon): AsyncGenerator<Uint8Array> {
+      const res = await this.transfer(cmd.id, p.sizeBytes, () => ({
+        method: "GET",
+        headers: { accept: "application/octet-stream" },
+      }));
+      const within = res.headers.get(RUNTIME_FILE_LAND_WITHIN_HEADER);
+      if (within !== null && /^\d{1,10}$/.test(within)) landBy = Date.now() + Number(within);
+      if (!res.body) return;
+      for await (const chunk of res.body) yield chunk;
+    };
+    await writeSessionFile(active.cwd, p.path, {
+      transferId: cmd.id,
+      sizeBytes: p.sizeBytes,
+      sha256: p.sha256,
+      overwrite: p.overwrite,
+      body: fetchBody.call(this),
+      landBy: () => landBy,
+    });
+  }
+
+  /**
+   * One transfer request to `toRuntimeFileUrl(serverUrl, transferId)` under the device JWT, bounded by
+   * `transferDeadlineMs(bytes)`, redirects refused (P3). A 401 is retried once with a fresh JWT; a 503 (the server's
+   * stream counter was full, the transfer stays pending) after each `FILE_TRANSFER_RETRY_DELAYS_MS`; 410 → `expired`,
+   * 413 → `too_large`, anything else → `transfer_failed`. Answers the 200 response (its body unread).
+   */
+  private async transfer(
+    transferId: string,
+    bytes: number,
+    init: () => {
+      method: "GET" | "PUT";
+      headers: Record<string, string>;
+      body?: Uint8Array | AsyncIterable<Uint8Array>;
+    },
+  ): Promise<Response> {
+    let url: string;
+    try {
+      url = toRuntimeFileUrl(this.config.serverUrl, transferId);
+    } catch {
+      throw new SessionFileError("transfer_failed");
+    }
+    const signal = AbortSignal.timeout(transferDeadlineMs(bytes));
+    const delays = this.opts.fileRetryDelaysMs ?? FILE_TRANSFER_RETRY_DELAYS_MS;
+    let refreshed = false;
+    let busy = 0;
+    for (;;) {
+      let token: string;
+      try {
+        token = await this.getAccessToken(refreshed);
+      } catch {
+        throw new SessionFileError("transfer_failed");
+      }
+      const req = init();
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: req.method,
+          headers: { ...req.headers, Authorization: `Bearer ${token}` },
+          ...(req.body !== undefined ? { body: req.body, duplex: "half" } : {}),
+          redirect: "error",
+          signal,
+        } as RequestInit);
+      } catch {
+        throw new SessionFileError("transfer_failed");
+      }
+      if (res.status === 200) return res;
+      await res.body?.cancel().catch(() => undefined);
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        continue;
+      }
+      const delay = delays[busy];
+      if (res.status === 503 && delay !== undefined) {
+        busy++;
+        if (!(await sleepUnlessAborted(delay, signal))) throw new SessionFileError("transfer_failed");
+        continue;
+      }
+      if (res.status === 410) throw new SessionFileError("expired");
+      if (res.status === 413) throw new SessionFileError("too_large");
+      throw new SessionFileError("transfer_failed");
+    }
   }
 
   // -------------------------------------------------------------------------------------------

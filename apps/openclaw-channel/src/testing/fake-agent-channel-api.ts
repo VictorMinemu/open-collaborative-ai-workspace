@@ -98,8 +98,11 @@
  *                                          FAKE_WORK_SESSION in billing-api, card FAKE_WORK_SESSION_CARD (the model and
  *                                          mode asked, else none and `default`). POST /agent-channel/v1/work-sessions/{prompt,read,stop} likewise
  *                                          (`prompts`, `reads`, `stops`; default: queued at position 1, an empty read of the
- *                                          session at cursor 0, stopped). All four: 400 for any key beyond the contract's (a device, a user, an audience,
- *                                          a worktree), 404 `unknown_turn` for a turn ended with `endTurn`. The
+ *                                          session at cursor 0, stopped). 07.17.1.1: POST /agent-channel/v1/work-sessions/{upload,download}
+ *                                          likewise (`uploads`, `downloads`; knobs `answers.upload` / `answers.download`;
+ *                                          default: `uploaded` at the asked path, 1 536 bytes, and `downloaded` as
+ *                                          FAKE_DOWNLOADED_ATTACHMENT, README.md, 64 bytes, text/markdown). All six: 400 for any key beyond the contract's (a device, a user, an audience,
+ *                                          a worktree, a URL), 404 `unknown_turn` for a turn ended with `endTurn`. The
  *                                          `workSessions.status` knob makes every route answer that status with an error
  *                                          body carrying FAKE_ERROR_CANARY. POST /__test/work-sessions {answers?, status?}
  *                                          replaces the knobs ({} resets them; the records stay)
@@ -393,7 +396,7 @@ export type FakeAttachments = {
   noTrigger?: boolean;
 };
 /** 07.16: a bot's Work Zone session routes (`/work-sessions/<route>`). */
-export type FakeWorkSessionRoute = "start" | "prompt" | "read" | "stop";
+export type FakeWorkSessionRoute = "start" | "prompt" | "read" | "stop" | "upload" | "download";
 /** 07.16: the bot Work Zone session routes' records and knobs (`POST /__test/work-sessions` replaces the knobs). */
 export type FakeWorkSessions = {
   /** Every POST /work-sessions/start body, in order (refused ones included). */
@@ -404,6 +407,10 @@ export type FakeWorkSessions = {
   reads: Array<Record<string, unknown>>;
   /** Every POST /work-sessions/stop body, in order. */
   stops: Array<Record<string, unknown>>;
+  /** 07.17.1.1: every POST /work-sessions/upload body, in order. */
+  uploads: Array<Record<string, unknown>>;
+  /** 07.17.1.1: every POST /work-sessions/download body, in order. */
+  downloads: Array<Record<string, unknown>>;
   /** What each route answers instead of its default. */
   answers: Partial<Record<FakeWorkSessionRoute, unknown>>;
   /** When set, every route answers this HTTP status with an error body (FAKE_ERROR_CANARY). */
@@ -413,6 +420,8 @@ export type FakeWorkSessions = {
 export const FAKE_WORK_SESSION = "0199a6f0-0000-7000-8000-00000000e5f1";
 /** The live card message every default `started` answer names (fixed, so a smoke's wake-up can reply to it). */
 export const FAKE_WORK_SESSION_CARD = "0199a6f0-0000-7000-8000-00000000d0f6";
+/** 07.17.1.1: the attachment every default `downloaded` answer names. */
+export const FAKE_DOWNLOADED_ATTACHMENT = "0199a6f0-0000-7000-8000-00000000f0d1";
 /** The keys each body may carry (contracts `AgentChannelWorkSession*`, strict objects) and the ones it needs. */
 const WORK_SESSION_BODIES: Record<
   FakeWorkSessionRoute,
@@ -435,12 +444,19 @@ const WORK_SESSION_BODIES: Record<
   prompt: { keys: ["eventId", "agentId", "workSessionId", "prompt"], required: ["workSessionId", "prompt"] },
   read: { keys: ["eventId", "agentId", "workSessionId", "cursor"], required: ["workSessionId"] },
   stop: { keys: ["eventId", "agentId", "workSessionId"], required: ["workSessionId"] },
+  upload: {
+    keys: ["eventId", "agentId", "workSessionId", "attachmentId", "path", "overwrite"],
+    required: ["workSessionId", "attachmentId", "path"],
+  },
+  download: { keys: ["eventId", "agentId", "workSessionId", "path"], required: ["workSessionId", "path"] },
 };
 const fakeWorkSessions = (): FakeWorkSessions => ({
   starts: [],
   prompts: [],
   reads: [],
   stops: [],
+  uploads: [],
+  downloads: [],
   answers: {},
 });
 /** The record list of each route. */
@@ -449,6 +465,8 @@ const WORK_SESSION_RECORDS = {
   prompt: "prompts",
   read: "reads",
   stop: "stops",
+  upload: "uploads",
+  download: "downloads",
 } as const satisfies Record<FakeWorkSessionRoute, keyof FakeWorkSessions>;
 /** A route's default answer (the real API's shapes, ids from the body). */
 function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string, unknown>): unknown {
@@ -496,6 +514,17 @@ function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string,
       };
     case "stop":
       return { kind: "stopped", workSessionId: body.workSessionId };
+    case "upload":
+      return { kind: "uploaded", workSessionId: body.workSessionId, path: body.path, sizeBytes: 1536 };
+    case "download":
+      return {
+        kind: "downloaded",
+        workSessionId: body.workSessionId,
+        attachmentId: FAKE_DOWNLOADED_ATTACHMENT,
+        name: "README.md",
+        sizeBytes: 64,
+        contentType: "text/markdown",
+      };
   }
 }
 /** 07.17: the open route's knobs (`POST /__test/conversations` replaces them). */
@@ -1416,9 +1445,9 @@ export async function startFakeAgentChannelApi(
         const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
         return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
       }
-      const workSessionRoute = /^\/work-sessions\/(start|prompt|read|stop)$/u.exec(route)?.[1] as
-        | FakeWorkSessionRoute
-        | undefined;
+      const workSessionRoute = /^\/work-sessions\/(start|prompt|read|stop|upload|download)$/u.exec(
+        route,
+      )?.[1] as FakeWorkSessionRoute | undefined;
       if (req.method === "POST" && workSessionRoute) {
         // 07.16 (PD-09): only the turn's ids and the tool's own fields; the real API derives everything else.
         const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;

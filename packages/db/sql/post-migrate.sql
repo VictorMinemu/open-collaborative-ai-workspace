@@ -715,6 +715,9 @@ $fn$;
 -- project's own tree (`worktree = false`). `p_states` are the API's active states (`ACTIVE_STATES`, one copy).
 -- It bypasses RLS and backs every cap, so it fails closed (07.16 code review WR-10): without a tenant setting it
 -- raises instead of counting zero and letting every cap pass.
+-- Phase 07.17.1.1 (D-06, PD-12): each file transfer the API enqueued for the bot (a `bot_work_session_files` row) is one
+-- unit of the same hourly prompt budget, whatever its outcome, so `bot_prompts_hour` counts the bot's prompts and its
+-- ledger rows of the last hour (a failed move is never a free retry).
 CREATE OR REPLACE FUNCTION app.bot_work_session_load(p_agent uuid, p_project uuid, p_states text[])
 RETURNS TABLE (bot_active integer, org_active integer, bot_prompts_hour integer, tree_busy boolean)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
@@ -730,7 +733,9 @@ BEGIN
     (SELECT count(*)::int FROM app.work_sessions ws
       WHERE ws.organization_id = v_org AND ws.started_by_agent_id IS NOT NULL AND ws.status = ANY (p_states)),
     (SELECT count(*)::int FROM app.work_prompts wp
-      WHERE wp.organization_id = v_org AND wp.author_agent_id = p_agent AND wp.created_at > now() - interval '1 hour'),
+      WHERE wp.organization_id = v_org AND wp.author_agent_id = p_agent AND wp.created_at > now() - interval '1 hour')
+    + (SELECT count(*)::int FROM app.bot_work_session_files f
+      WHERE f.organization_id = v_org AND f.agent_id = p_agent AND f.created_at > now() - interval '1 hour'),
     EXISTS (SELECT 1 FROM app.work_sessions ws
       WHERE ws.organization_id = v_org AND ws.project_id = p_project AND NOT ws.worktree
         AND ws.status = ANY (p_states));

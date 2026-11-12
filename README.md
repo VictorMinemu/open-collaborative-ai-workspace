@@ -167,7 +167,9 @@ The Work Zone runs Claude Code or Codex on a machine you choose, under your own 
   3. Run `ocw-runtime setup --project ~/src/your-repo --service user`.
   4. Approve the pairing link it prints.
 
-  Then share the server with people or teams. Details: [`docs/SERVER.md`](docs/SERVER.md).
+  Then share the server with people or teams. Later updates of the server's runtime are one click in **Settings ›
+  Devices** (or automatic). The first update from v0.3.0 is the install command once. Details:
+  [`docs/SERVER.md`](docs/SERVER.md).
 
 ### 8. Operate it
 

@@ -1785,6 +1785,98 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
   });
 });
 
+describe("bot Work Zone file tools (07.17.1.1 D-01, D-02, D-10, D-11, PD-13): self-validated, counted, the route decides taint and session output", () => {
+  const WS = "0199a6f0-0000-7000-8000-00000000e501";
+  const FILE_CALLS: Record<string, Record<string, unknown>> = {
+    ocw_work_session_upload: {
+      workSessionId: WS,
+      attachmentId: "0199a6f0-0000-7000-8000-00000000f001",
+      path: "docs/spec.pdf",
+    },
+    ocw_work_session_download: { workSessionId: WS, path: "README.md" },
+  };
+  const FILE_TOOLS = Object.keys(FILE_CALLS);
+  const fileTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["web_search", "ocw_memory_save", "ocw_work_session_read", ...FILE_TOOLS],
+      // The turn sends no flags for them: the static ones (side-effecting, trusted output) apply.
+      toolFlags: { web_search: WEB, ocw_memory_save: MEMORY },
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = fileTurn(), tainted = false) =>
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: t, tainted });
+
+  it("never go to /tool-calls and count against the turn's cap", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    for (const [tool, params] of Object.entries(FILE_CALLS)) {
+      expect(await g.beforeToolCall(call(tool, params), ctx()), tool).toBeUndefined();
+    }
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(FILE_TOOLS.length);
+  });
+
+  it("on a tainted turn the call still reaches its route (the profile's actOnOutsideContent decides there)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, fileTurn(), true);
+    for (const [tool, params] of Object.entries(FILE_CALLS)) {
+      expect(await g.beforeToolCall(call(tool, params), ctx()), tool).toBeUndefined();
+    }
+    // The memory write keeps its local block.
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
+      "read-only after untrusted content",
+    );
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("after a session read the call still reaches its route (the one-read-session rule is the route's)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    const t = g.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    t.sessionOutputRead = true;
+    for (const [tool, params] of Object.entries(FILE_CALLS)) {
+      expect(await g.beforeToolCall(call(tool, params), ctx()), tool).toBeUndefined();
+    }
+    expect(await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx())).toMatchObject({
+      block: true,
+    });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("an approval flag on the turn never makes them approvable: no arguments leave the cell", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const flags = { untrustedOutput: false, sideEffecting: true, approval: "always" as const };
+    begin(g, fileTurn({ toolFlags: Object.fromEntries(FILE_TOOLS.map((t) => [t, flags])) }));
+    for (const [tool, params] of Object.entries(FILE_CALLS)) {
+      expect(await g.beforeToolCall(call(tool, params), ctx()), tool).toBeUndefined();
+    }
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("the ninth call of a turn is refused locally, as for every counted tool", async () => {
+    const fake = fakeClient();
+    for (const tool of FILE_TOOLS) {
+      const g = createToolGuard({ client: () => fake.client });
+      begin(g, fileTurn({ maxToolCalls: 8 }));
+      for (let i = 0; i < 8; i++) {
+        expect(
+          await g.beforeToolCall(call(tool, FILE_CALLS[tool]), ctx()),
+          `${tool} #${i + 1}`,
+        ).toBeUndefined();
+      }
+      expect((await g.beforeToolCall(call(tool, FILE_CALLS[tool]), ctx()))?.blockReason).toBe(
+        `Tool ${tool} blocked: the turn reached its limit of 8 tool calls.`,
+      );
+    }
+    expect(fake.requests).toHaveLength(0);
+  });
+});
+
 describe("ocw_conversation_open (07.17 D-02, D-05, PD-07, PD-10): self-validated, static flags, the route decides taint", () => {
   const OPEN = "ocw_conversation_open";
   const SIDE = { untrustedOutput: false, sideEffecting: true };

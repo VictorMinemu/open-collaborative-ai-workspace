@@ -154,6 +154,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
     runtime: RuntimeId,
     phase: z.enum(["waiting", "done", "failed"]),
     version: z.string().max(64).optional(),
+    /**
+     * Phase 07.17.1 (PD-18): present when the hold is the OCW runtime's own restart; `runtime` stays the held
+     * session's runtime. Old webs ignore it.
+     */
+    subject: z.literal("ocw-runtime").optional(),
   }),
   /** Unknown runtime event, forwarded as-is (sanitized). The runtime's own type travels as `rawType`. */
   ev("runtime.raw", { rawType: z.string().max(200), data: z.unknown() }),

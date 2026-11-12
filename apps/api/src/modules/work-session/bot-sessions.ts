@@ -137,6 +137,8 @@ export type BotWorkSessionAuditAction =
   | "bot.work_session_proposed"
   | "bot.work_session_prompted"
   | "bot.work_session_stopped"
+  | "bot.work_session_upload"
+  | "bot.work_session_download"
   | "bot.work_session_refused";
 
 /**
@@ -146,6 +148,8 @@ export type BotWorkSessionAuditAction =
  * 07.16-19 (D-08, PD-15): every row of a turn that read outside content says `outsideContent: true`, whatever the
  * outcome; a start that became a proposal (`bot.work_session_proposed`) names the approval, a refused fallback the
  * proposal's own refusal code (`proposalRefusal`).
+ * 07.17.1.1 (D-05, PD-16): a file move (`bot.work_session_upload|download`, or its refusal) adds the attachment's id,
+ * the bytes, their sha256, the direction and the path's length in characters. Never the path or a file name.
  */
 export async function auditBotWorkSession(
   tx: Tx,
@@ -154,7 +158,14 @@ export async function auditBotWorkSession(
     action: BotWorkSessionAuditAction;
     turn: AgentTurnRow;
     auditBase: { clientKind: string; sessionId: string };
-    outcome: "started" | "proposed" | "prompted" | "stopped" | BotWorkSessionRefusal;
+    outcome:
+      | "started"
+      | "proposed"
+      | "prompted"
+      | "stopped"
+      | "uploaded"
+      | "downloaded"
+      | BotWorkSessionRefusal;
     /** The tool refused (refusals only: a success is told apart by its action). */
     tool?: string;
     sponsorUserId: string | null;
@@ -170,6 +181,18 @@ export async function auditBotWorkSession(
     approvalId?: string;
     /** Why that proposal could not be made (a `WorkZoneProposalRefusal` code). */
     proposalRefusal?: string;
+    /** 07.17.1.1: the attachment moved (the chat file uploaded, or the one a download created). */
+    attachmentId?: string | null;
+    /** 07.17.1.1: the bytes moved (or the size refused by `file_too_large`). */
+    bytes?: number | null;
+    /** 07.17.1.1: the lowercase hex sha256 of the bytes moved. */
+    sha256?: string | null;
+    /** 07.17.1.1: `to_device` (upload) or `from_device` (download). */
+    direction?: "to_device" | "from_device";
+    /** 07.17.1.1: the repo-relative path's length in characters; the path itself is never recorded (P1). */
+    pathLength?: number;
+    /** 07.17.1.1: whose per-file limit applied (`file_too_large`). */
+    limitSource?: "bot" | "organization" | "server";
   },
 ): Promise<void> {
   const ok = p.action !== "bot.work_session_refused";
@@ -201,6 +224,12 @@ export async function auditBotWorkSession(
       ...(p.turn.tainted ? { outsideContent: true } : {}),
       ...(p.approvalId ? { approvalId: p.approvalId } : {}),
       ...(p.proposalRefusal ? { proposalRefusal: p.proposalRefusal } : {}),
+      ...(p.attachmentId ? { attachmentId: p.attachmentId } : {}),
+      ...(p.bytes !== undefined && p.bytes !== null ? { bytes: p.bytes } : {}),
+      ...(p.sha256 ? { sha256: p.sha256 } : {}),
+      ...(p.direction ? { direction: p.direction } : {}),
+      ...(p.pathLength !== undefined ? { pathLength: p.pathLength } : {}),
+      ...(p.limitSource ? { limitSource: p.limitSource } : {}),
     },
   });
 }
@@ -353,8 +382,9 @@ function settingsOf(profile: BotProfileRow, input: AgentChannelWorkSessionStart)
 /**
  * The caps' counts (`app.bot_work_session_load`, SECURITY DEFINER): the sponsor's transaction hides other people's
  * sessions behind the audience backstop, but every cap counts the whole organization. Numbers and one flag only.
+ * 07.17.1.1 (PD-12): `botPromptsHour` also counts the bot's file moves of the hour (`bot-files.ts`, module-internal).
  */
-async function botSessionLoad(
+export async function botSessionLoad(
   tx: Tx,
   agentId: string,
   projectId: string,
@@ -378,8 +408,9 @@ async function botSessionLoad(
 /**
  * The bot's own lock (PD-10): its starts and its prompts are serialised, so the hour's prompt count (and the start's
  * session count) is exact under concurrency. Always taken before any session row lock and before the org's lock.
+ * 07.17.1.1 (PD-12): its file moves take it too (`bot-files.ts`, module-internal; not exported from `index.ts`).
  */
-async function lockBot(tx: Tx, agentId: string): Promise<void> {
+export async function lockBot(tx: Tx, agentId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${agentId}`}, 0))`);
 }
 

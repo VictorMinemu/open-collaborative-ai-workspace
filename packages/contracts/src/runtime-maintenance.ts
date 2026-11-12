@@ -8,6 +8,10 @@ import { RuntimeId } from "./session-events";
  * the update levels and their intersection (D-02, D-10), the compatibility manifest (D-04), the install-method, state
  * and run vocabularies (D-01, D-05, D-08), the maintenance status and history DTOs (D-06) and `scrubHostPaths`.
  *
+ * Phase 07.17.1 (runtime self-update, RSU-01…RSU-08) adds the OCW runtime itself as a maintenance target: `RuntimeId`
+ * stays the session runtime id (Claude Code, Codex) and never grows; `RuntimeUpdateTarget` is maintenance-only and
+ * widens just the command payload, the run frame, the history DTO, the route params and the history query (PD-04).
+ *
  * Imports only `zod`, `./common`, `./session-events` and `./runtime-controls/index`; `device.ts` and `device-link.ts`
  * import this module, never the reverse. No field here can carry an absolute host path (AGENTS principle 7).
  */
@@ -254,6 +258,8 @@ export const InstallMethod = z.enum([
   "windows",
   "unknown",
   "not_installed",
+  /** 07.17.1: the OCW runtime itself, installed from its workspace; only on `ocw-runtime` runs, never resolved for a CLI. */
+  "ocw_bundle",
 ]);
 export type InstallMethod = z.infer<typeof InstallMethod>;
 
@@ -363,6 +369,120 @@ export const RuntimeLastRun = z.object({
 });
 export type RuntimeLastRun = z.infer<typeof RuntimeLastRun>;
 
+// ---- 07.17.1 (runtime self-update, RSU-01…RSU-08) ----
+
+/**
+ * What a maintenance command, run or history row is about: one of the two runtime CLIs or the OCW runtime itself
+ * (PD-04). Never a session runtime, which stays `RuntimeId`.
+ */
+export const RuntimeUpdateTarget = z.enum(["claude-code", "codex", "ocw-runtime"]);
+export type RuntimeUpdateTarget = z.infer<typeof RuntimeUpdateTarget>;
+
+/** The maintenance target that is the device's own OCW runtime. */
+export const OCW_RUNTIME_TARGET = "ocw-runtime" as const;
+
+/** How people read each maintenance target (history rows, toasts, API messages). */
+export const RUNTIME_UPDATE_TARGET_LABEL: Readonly<Record<RuntimeUpdateTarget, string>> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  "ocw-runtime": "OCW runtime",
+};
+
+/**
+ * A runtime build: the first 12 hex of the bundle's sha256, which is also the `versions/<sha12>` directory name on the
+ * device (PD-05). "Update available" is build inequality, so a server rollback is followed too (D-11).
+ */
+export const RuntimeBuild = z.string().regex(/^[0-9a-f]{12}$/);
+export type RuntimeBuild = z.infer<typeof RuntimeBuild>;
+
+/** The build of a bundle whose sha256 (64 lower-case hex) is given. */
+export function runtimeBuildOf(sha256: string): string {
+  return sha256.slice(0, 12);
+}
+
+/** The runtime a workspace serves now (`GET /api/v1/runtime/version`), as the API reports it. */
+export const RuntimeServedBuild = z.object({ version: RuntimeVersion, build: RuntimeBuild });
+export type RuntimeServedBuild = z.infer<typeof RuntimeServedBuild>;
+
+/**
+ * Where the OCW runtime's own update stands on the device: `downloading` and `installing` prepare the new version
+ * outside the gate, `waiting` holds new turns until every running one ends (D-04), `restarting` has switched and exits.
+ */
+export const RuntimeSelfUpdateState = z.enum(["idle", "downloading", "installing", "waiting", "restarting"]);
+export type RuntimeSelfUpdateState = z.infer<typeof RuntimeSelfUpdateState>;
+
+/** Why the device cannot update its own runtime from the browser (D-05, PD-11). */
+export const RuntimeSelfBlock = z.enum(["not_installed", "not_supervised", "node_too_old"]);
+export type RuntimeSelfBlock = z.infer<typeof RuntimeSelfBlock>;
+
+/**
+ * What people read for each block (D-05 verbatim for `not_supervised`). The daemon answers these when it re-decides a
+ * request; the API answers them as 409 messages and the web shows them as the row's note.
+ */
+export const RUNTIME_SELF_BLOCK_SENTENCES: Readonly<Record<RuntimeSelfBlock, string>> = {
+  not_installed:
+    "This runtime was not installed with the install command. Re-run it from Settings › Devices › Add a device › Server to update from the browser.",
+  not_supervised: "Run as a service to update from the browser; or re-run the install command",
+  node_too_old:
+    "This server's Node is older than the new runtime needs. Upgrade Node, then re-run the install command.",
+};
+
+/** Why the API refuses an OCW runtime update request (409 codes, PD-13). */
+export const RuntimeSelfUpdateRefusal = z.enum([
+  "not_a_service",
+  "self_update_unsupported",
+  "not_supervised",
+  "not_installed",
+  "node_too_old",
+  "runtime_not_served",
+  "already_current",
+]);
+export type RuntimeSelfUpdateRefusal = z.infer<typeof RuntimeSelfUpdateRefusal>;
+
+/**
+ * The 409 message for each refusal: the API answers them and the web shows them in the refusal toast. The three block
+ * codes reuse `RUNTIME_SELF_BLOCK_SENTENCES`, so the API and the device say the same words.
+ */
+export const RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES: Readonly<Record<RuntimeSelfUpdateRefusal, string>> = {
+  not_a_service: "This device updates with the desktop app.",
+  self_update_unsupported:
+    "This runtime is too old to update from the browser. Re-run the install command once to turn on one-click updates.",
+  not_supervised: RUNTIME_SELF_BLOCK_SENTENCES.not_supervised,
+  not_installed: RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
+  node_too_old: RUNTIME_SELF_BLOCK_SENTENCES.node_too_old,
+  runtime_not_served: "This workspace serves no runtime to update to.",
+  already_current: "This device already runs the runtime your workspace serves.",
+};
+
+/** The last finished self-update the device remembers, with both builds. */
+export const RuntimeSelfLastRun = RuntimeLastRun.extend({
+  fromBuild: RuntimeBuild.nullable(),
+  toBuild: RuntimeBuild.nullable(),
+});
+export type RuntimeSelfLastRun = z.infer<typeof RuntimeSelfLastRun>;
+
+/**
+ * The device's own OCW runtime as it reports it (RSU-01, D-08). `build` is the RUNNING file's, null in a checkout or
+ * the desktop app; `served*` are the device's last check of its workspace, null at `off`. Strict: versions, builds,
+ * enums and ISO times only, so no field can carry a path (PD-25).
+ */
+export const RuntimeSelfStatus = z
+  .object({
+    version: RuntimeVersion,
+    build: RuntimeBuild.nullable(),
+    supervised: z.boolean(),
+    canUpdate: z.boolean(),
+    reason: RuntimeSelfBlock.nullable(),
+    servedVersion: RuntimeVersion.nullable(),
+    servedBuild: RuntimeBuild.nullable(),
+    state: RuntimeSelfUpdateState,
+    pendingSince: IsoDateTime.nullable(),
+    lastRun: RuntimeSelfLastRun.nullable(),
+    checkedAt: IsoDateTime.nullable(),
+  })
+  .strict();
+export type RuntimeSelfStatus = z.infer<typeof RuntimeSelfStatus>;
+
 /**
  * One runtime's maintenance status as the device reports it (RTU-01): installed version, how it was installed,
  * whether the device can update it and the exact command, the channel's latest, both compatibilities and where an
@@ -404,6 +524,10 @@ export const DeviceRuntimeMaintenance = z.object({
   effectiveLevel: RuntimeUpdatesLevel,
   orgLevel: RuntimeUpdatesLevel,
   reportedAt: IsoDateTime,
+  /** 07.17.1: the device's own runtime as it reported it; absent for daemons older than 07.17.1. */
+  self: RuntimeSelfStatus.optional(),
+  /** 07.17.1 (PD-15): what the workspace serves now, filled by the API; null when it serves no bundle. */
+  served: RuntimeServedBuild.nullable().optional(),
 });
 export type DeviceRuntimeMaintenance = z.infer<typeof DeviceRuntimeMaintenance>;
 
@@ -415,16 +539,17 @@ export const DeviceRuntimeCompatibility = z.object({
 export type DeviceRuntimeCompatibility = z.infer<typeof DeviceRuntimeCompatibility>;
 
 /**
- * Payload of the `runtime.update` command: the runtime id and nothing else (D-05). The server can never express a
- * command, a prefix or a version; the device picks all of them from its fixed table.
+ * Payload of the `runtime.update` command: the maintenance target and nothing else (D-05; 07.17.1 P1). The server can
+ * never express a command, a prefix, a URL, a host, a path or a version; the device picks all of them from its fixed
+ * table, or from its own paired server for the OCW runtime.
  */
-export const RuntimeUpdatePayload = z.object({ runtime: RuntimeId }).strict();
+export const RuntimeUpdatePayload = z.object({ runtime: RuntimeUpdateTarget }).strict();
 export type RuntimeUpdatePayload = z.infer<typeof RuntimeUpdatePayload>;
 
 /** One row of a device's update history (PD-04), as owners and admins see it. Output and error carry no path. */
 export const RuntimeUpdateRun = z.object({
   id: Id,
-  runtime: RuntimeId,
+  runtime: RuntimeUpdateTarget,
   trigger: RuntimeUpdateTrigger,
   state: RuntimeUpdateRunState,
   /** The member who pressed "Update now"; null for automatic and local runs. */
@@ -439,6 +564,9 @@ export const RuntimeUpdateRun = z.object({
   requestedAt: IsoDateTime.nullable(),
   startedAt: IsoDateTime.nullable(),
   finishedAt: IsoDateTime.nullable(),
+  /** 07.17.1: the OCW runtime's builds before and after; absent from older APIs and on CLI rows. */
+  fromBuild: RuntimeBuild.nullable().optional(),
+  toBuild: RuntimeBuild.nullable().optional(),
 });
 export type RuntimeUpdateRun = z.infer<typeof RuntimeUpdateRun>;
 
@@ -447,11 +575,11 @@ export const RuntimeUpdateRunList = z.object({ runs: z.array(RuntimeUpdateRun).m
 export type RuntimeUpdateRunList = z.infer<typeof RuntimeUpdateRunList>;
 
 /** `POST /api/v1/devices/:id/runtimes/:runtime/update` params. */
-export const RuntimeUpdateParams = z.object({ id: Id, runtime: RuntimeId });
+export const RuntimeUpdateParams = z.object({ id: Id, runtime: RuntimeUpdateTarget });
 export type RuntimeUpdateParams = z.infer<typeof RuntimeUpdateParams>;
 
 /** `GET /api/v1/devices/:id/runtime-updates?runtime=` query. */
-export const RuntimeUpdateHistoryQuery = z.object({ runtime: RuntimeId.optional() });
+export const RuntimeUpdateHistoryQuery = z.object({ runtime: RuntimeUpdateTarget.optional() });
 export type RuntimeUpdateHistoryQuery = z.infer<typeof RuntimeUpdateHistoryQuery>;
 
 /** "Update now" response: the `requested` history row. */

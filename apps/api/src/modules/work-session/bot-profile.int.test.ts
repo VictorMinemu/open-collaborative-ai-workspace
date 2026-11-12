@@ -23,6 +23,7 @@ import {
 } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
 import { botLayerForSession, loadBotProfile, profileStatus } from "./bot-profile";
+import { loadBotFileLimit } from "./policy";
 
 /**
  * Phase 07.16-07 (D-01 … D-04, D-08, D-14 … D-16, D-22; PD-04 … PD-06, PD-21): a bot's Work Zone profile and the
@@ -218,6 +219,11 @@ describe("tracer: Sam saves Scout's profile, consents on his MacBook and sees it
       profile: null,
       status: { active: false, reason: null, sentence: null },
       viewerCan: { edit: true, setOutsideContent: false },
+      // 07.17.1.1 (D-07): what a new profile's "Largest file" needs, before any save.
+      limits: {
+        organizationFileMaxBytes: 26214400,
+        serverFileMaxBytes: stack.env.OCW_ATTACHMENT_MAX_BYTES,
+      },
     });
   });
 
@@ -1025,5 +1031,106 @@ describe("the bot's caps (PD-05)", () => {
     } finally {
       await putPolicy({ botSessionsMax: 10 });
     }
+  });
+});
+
+describe("07.17.1.1: the bot's largest file, never above the organization's (D-07, PD-11, PD-21, E7)", () => {
+  const MIB = 1024 * 1024;
+  const storedFileMax = async (agentId: string) =>
+    (await su.query("select file_max_bytes from app.bot_work_zone_profiles where agent_id = $1", [agentId]))
+      .rows[0]?.file_max_bytes as string | number | null | undefined;
+  /** `loadBotFileLimit` for the bot's stored profile (or none), in a system transaction of the organization. */
+  const limitOf = (agentId: string | null, serverMaxBytes: number) =>
+    stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) =>
+      loadBotFileLimit(tx, agentId ? await loadBotProfile(tx, agentId) : null, serverMaxBytes),
+    );
+
+  it("10 MiB is stored and read back with the organization's and the server's limits; null is the organization's", async () => {
+    const view = await createBotProfile(sam, scoutId, body({ fileMaxBytes: 10 * MIB }));
+    expect(view.profile!.fileMaxBytes).toBe(10485760);
+    expect(view.limits).toEqual({
+      organizationFileMaxBytes: 26214400,
+      serverFileMaxBytes: stack.env.OCW_ATTACHMENT_MAX_BYTES,
+    });
+    expect((await getProfile(sam, scoutId)).profile!.fileMaxBytes).toBe(10485760);
+    expect(Number(await storedFileMax(scoutId))).toBe(10485760);
+
+    expect(
+      (await createBotProfile(sam, scoutId, body({ fileMaxBytes: null }))).profile!.fileMaxBytes,
+    ).toBeNull();
+    expect(await storedFileMax(scoutId)).toBeNull();
+    await createBotProfile(sam, scoutId, body({ fileMaxBytes: 10 * MIB }));
+  });
+
+  it("above the organization's limit is refused with the field and the organization's limit; nothing is stored", async () => {
+    const res = await put(sam, scoutId, body({ fileMaxBytes: 30 * MIB }));
+    expect(refusal(res)).toEqual({ status: 400, code: "invalid_work_zone_profile", field: "fileMaxBytes" });
+    expect((res.body?.error as Json | undefined)?.message).toBe("At most 25 MB, the organization's limit.");
+    expect(Number(await storedFileMax(scoutId))).toBe(10485760);
+  });
+
+  it("a 07.16 body (no fileMaxBytes) keeps the stored value", async () => {
+    const view = await createBotProfile(sam, scoutId, body());
+    expect(view.profile!.fileMaxBytes).toBe(10485760);
+    expect(Number(await storedFileMax(scoutId))).toBe(10485760);
+  });
+
+  it("a limit change is a normal save (the saver is the sponsor); a flag-only admin save keeps the sponsor", async () => {
+    expect(
+      (await createBotProfile(lena, atlasId, serverBody({ fileMaxBytes: 10 * MIB }))).profile,
+    ).toMatchObject({
+      sponsor: { id: lenaId },
+      fileMaxBytes: 10485760,
+    });
+    // 07.16 rule unchanged: the admin only turns the flag on (the limit is kept, absent from the body).
+    const flag = await createBotProfile(victor, atlasId, serverBody({ actOnOutsideContent: true }));
+    expect(flag.profile).toMatchObject({
+      actOnOutsideContent: true,
+      sponsor: { id: lenaId },
+      fileMaxBytes: 10485760,
+    });
+    // The flag and the limit together are not a flag-only save: the admin becomes the sponsor.
+    const both = await createBotProfile(
+      victor,
+      atlasId,
+      serverBody({ actOnOutsideContent: false, fileMaxBytes: 5 * MIB }),
+    );
+    expect(both.profile).toMatchObject({
+      actOnOutsideContent: false,
+      sponsor: { id: victorId },
+      fileMaxBytes: 5242880,
+    });
+    // Only the limit, by another manager: a normal save, Noa becomes the sponsor.
+    const limit = await createBotProfile(noa, atlasId, serverBody({ fileMaxBytes: 2 * MIB }));
+    expect(limit.profile).toMatchObject({ sponsor: { id: noaId }, fileMaxBytes: 2097152 });
+    const saved = await audits("bot.work_zone_profile_saved");
+    expect(saved.at(-1)).toMatchObject({
+      actor_id: noaId,
+      metadata: { agentId: atlasId, sponsorUserId: noaId },
+    });
+  });
+
+  it("loadBotFileLimit: the lowest of the bot's, the organization's and the server's, named; a lowered organization wins at once", async () => {
+    expect(await limitOf(scoutId, 1024 * MIB)).toEqual({ bytes: 10 * MIB, source: "bot" });
+    expect(await limitOf(scoutId, 5 * MIB)).toEqual({ bytes: 5 * MIB, source: "server" });
+    expect(await limitOf(null, 1024 * MIB)).toEqual({ bytes: 25 * MIB, source: "organization" });
+    await putPolicy({ botFileMaxBytes: 5 * MIB });
+    try {
+      expect(await limitOf(scoutId, 1024 * MIB)).toEqual({ bytes: 5 * MIB, source: "organization" });
+      expect(Number(await storedFileMax(scoutId))).toBe(10485760);
+      expect(await limitOf(null, 1024 * MIB)).toEqual({ bytes: 5 * MIB, source: "organization" });
+      const view = await getProfile(sam, scoutId);
+      expect(view.profile!.fileMaxBytes).toBe(10485760);
+      expect(view.limits?.organizationFileMaxBytes).toBe(5 * MIB);
+      // An older client's save (no key) still works and keeps the stored value: the lower limit applies per call.
+      expect((await createBotProfile(sam, scoutId, body())).profile!.fileMaxBytes).toBe(10485760);
+      // Sending the value again is a new choice, decided against the organization's new limit.
+      const res = await put(sam, scoutId, body({ fileMaxBytes: 10 * MIB }));
+      expect(refusal(res)).toEqual({ status: 400, code: "invalid_work_zone_profile", field: "fileMaxBytes" });
+      expect((res.body?.error as Json | undefined)?.message).toBe("At most 5 MB, the organization's limit.");
+    } finally {
+      await putPolicy({ botFileMaxBytes: 25 * MIB });
+    }
+    expect(await limitOf(scoutId, 1024 * MIB)).toEqual({ bytes: 10 * MIB, source: "bot" });
   });
 });

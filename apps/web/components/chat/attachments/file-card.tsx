@@ -102,7 +102,7 @@ export function FileCard({ attachment }: { attachment: Attachment }) {
         aria-label={`Download ${attachment.filename}`}
         title="Download"
         rel="noopener"
-        className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground max-md:size-11 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
       >
         <Download className="size-4" />
       </a>

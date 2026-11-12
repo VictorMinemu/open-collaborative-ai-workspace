@@ -474,9 +474,9 @@ export const TurnContext = z.object({
   /** Phase 07.15 (D-05, D-17): characters all reads of this turn may return together; absent on older payloads. */
   maxAttachmentChars: z.number().int().optional(),
   /**
-   * Phase 07.16 (D-05, PD-17): present only on turns of a bot whose Work Zone profile is active (offered with the four
-   * `WORK_SESSION_TOOL_NAMES`): the runtime, device, projects, options and the bot's own sessions. Absent on older
-   * payloads and for every bot without a profile (BWZ-06).
+   * Phase 07.16 (D-05, PD-17): present only on turns of a bot whose Work Zone profile is active (offered with the
+   * `WORK_SESSION_TOOL_NAMES`, six since 07.17.1.1): the runtime, device, projects, options, the bot's own sessions and
+   * the file limit. Absent on older payloads and for every bot without a profile (BWZ-06).
    */
   workZone: TurnWorkZone.optional(),
 });
@@ -570,6 +570,17 @@ export const BUILTIN_TOOLS = {
   workSessionRead: "ocw_work_session_read",
   workSessionStop: "ocw_work_session_stop",
   /**
+   * 07.17.1.1 (D-01, D-02, ADR-0041): upload one attachment of the turn's thread into a session this bot started, as a
+   * repo-relative path, through `POST /work-sessions/upload`. Turn-scoped (never in `GET /cell`), offered with the four
+   * 07.16 tools all-or-none, self-validated in the cell, never approvable (not in `APPROVABLE_BUILTINS`).
+   */
+  workSessionUpload: "ocw_work_session_upload",
+  /**
+   * 07.17.1.1 (D-01, D-03): download one file of a session this bot started back to the conversation as a pending
+   * attachment the bot's reply links, through `POST /work-sessions/download`. Same offer and gates as the upload.
+   */
+  workSessionDownload: "ocw_work_session_download",
+  /**
    * 07.17 (D-02, PD-07, ADR-0039): a fan-out automation's run turn opens one conversation per new item (a thread in
    * the automation's channel, or a card on its board) through `POST /conversations/open`, which decides the target,
    * the run, the caps and the dedupe from the stored turn and audits each call. Offered only on run turns of fan-out
@@ -579,25 +590,49 @@ export const BUILTIN_TOOLS = {
   conversationOpen: "ocw_conversation_open",
 } as const;
 
-/** 07.16 (D-05): the four Work Zone session tools, offered together (PD-17). */
+/**
+ * 07.17.1.1 (D-01, PD-26): the two file tools, declared apart (the file routes and their tests name them on their own)
+ * and closing `WORK_SESSION_TOOL_NAMES`.
+ */
+export const WORK_SESSION_FILE_TOOL_NAMES = [
+  BUILTIN_TOOLS.workSessionUpload,
+  BUILTIN_TOOLS.workSessionDownload,
+] as const;
+export type WorkSessionFileToolName = (typeof WORK_SESSION_FILE_TOOL_NAMES)[number];
+
+/**
+ * 07.17.1.1 (D-02, D-03, D-10): both write somewhere (the session's tree, the conversation), so side-effecting; the
+ * answer is the platform's own ids and the name the bot asked for, never the file's content.
+ */
+export const WORK_SESSION_FILE_TOOL_FLAGS: Readonly<Record<WorkSessionFileToolName, TurnToolFlags>> = {
+  ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
+};
+
+/**
+ * 07.16 (D-05): the Work Zone session tools, offered together (PD-17). 07.17.1.1 (D-01): six, all or none: the four
+ * session tools, then upload and download.
+ */
 export const WORK_SESSION_TOOL_NAMES = [
   BUILTIN_TOOLS.workSessionStart,
   BUILTIN_TOOLS.workSessionPrompt,
   BUILTIN_TOOLS.workSessionRead,
   BUILTIN_TOOLS.workSessionStop,
+  ...WORK_SESSION_FILE_TOOL_NAMES,
 ] as const;
 export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
 
 /**
  * 07.16 (D-05, D-20): start, prompt and stop act on a device; a read returns the runtime's own work product, which the
  * API scopes through `agent_turns.session_output_read` (D-20) rather than the general taint, so it is not
- * `untrustedOutput`.
+ * `untrustedOutput`. 07.17.1.1 (D-01): with the two file tools' flags.
  */
 export const WORK_SESSION_TOOL_FLAGS: Readonly<Record<WorkSessionToolName, TurnToolFlags>> = {
   ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
   ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
   ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+  ...WORK_SESSION_FILE_TOOL_FLAGS,
 };
 
 /**

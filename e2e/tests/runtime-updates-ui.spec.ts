@@ -1,4 +1,17 @@
-import { type APIRequestContext, type BrowserContext, expect, type Page, test } from "@playwright/test";
+import {
+  type APIRequestContext,
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  type TestInfo,
+  test,
+} from "@playwright/test";
+import type { DeviceList } from "../../packages/contracts/src/device.ts";
+import {
+  RUNTIME_SELF_BLOCK_SENTENCES,
+  RuntimeSelfStatus,
+} from "../../packages/contracts/src/runtime-maintenance.ts";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { expectNoSidewaysScroll, expectTouchTargets, unnamedControls } from "../support/layout";
@@ -24,6 +37,10 @@ import { ADMIN, shot } from "./env";
  *   is no runtime updates block, and the new-session dialog keeps the runtime usable with the warning;
  * - an admin (D-02): Settings › Work Zone policy › Runtime updates, saved with the existing Save;
  * - a held turn (D-03): a prompt sent while Claude Code updates shows "Updating Claude Code…", then the new version.
+ * - the OCW runtime row (07.17.1-11, D-01, D-04, PD-17): the checkout device's real row (`unmanaged`: not installed
+ *   with the install command), then the service views `behind` and `waiting` through a devices response the test
+ *   patches for the owner's device only (`page.route`, the real API answers). Update is never clicked there: no device
+ *   would answer; the click is proven by 07.17.1-09/10 and the owner's Server-1 check. Members never see the row.
  * Every state passes axe (no serious issue), names every control, never scrolls sideways and keeps 44 px targets below
  * 768, on both projects (1440 and 390) and in light and dark; screenshots go to OCW_E2E_SCREENSHOT_DIR.
  */
@@ -65,6 +82,26 @@ async function checkState(page: Page, selector: string, touchRoot: string = sele
     expect.soft(await unnamedControls(page), `${selector} (${scheme}): unnamed controls`).toEqual([]);
     await expectNoSidewaysScroll(page, `${selector} (${scheme})`);
     await expectTouchTargets(page, touchRoot);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+}
+
+/** The OCW runtime's own row in a device's Runtime updates block (07.17.1, PD-17). */
+const SELF_ROW = '[data-testid="runtime-self-row"][data-runtime="ocw-runtime"]';
+
+/**
+ * One view of the OCW runtime row: the state's rules in light and dark (`checkState`: axe, names, no sideways scroll
+ * at 390, touch targets), then a screenshot of the block per theme attached to the run (PD-17).
+ */
+async function checkSelfView(page: Page, block: Locator, view: string, info: TestInfo) {
+  await block.scrollIntoViewIfNeeded();
+  await checkState(page, '[data-testid="runtime-updates"]');
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await info.attach(`runtime-self-${view}-${tagOf(info.project.name)}-${scheme}`, {
+      body: await block.screenshot({ animations: "disabled" }),
+      contentType: "image/png",
+    });
   }
   await page.emulateMedia({ colorScheme: "light" });
 }
@@ -179,8 +216,18 @@ test("the owner sees Claude Code behind, presses Update now, watches it update a
       );
       await expect(block).toContainText("New versions are reported; install them with Update now.");
 
-      await block.scrollIntoViewIfNeeded();
-      await checkState(page, '[data-testid="runtime-updates"]');
+      // ---- 07.17.1 (D-01): the checkout's own runtime, not installed with the install command: no Update
+      const self = block.locator(SELF_ROW);
+      await expect(self).toHaveCount(1, { timeout: 15_000 });
+      await expect(block.getByTestId("runtime-self-row")).toHaveCount(1);
+      await expect(self).toHaveAttribute("data-view", "unmanaged");
+      await expect(self.getByTestId("runtime-self-version")).toHaveText(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
+      await expect(self.getByTestId("runtime-self-note")).toHaveText(
+        RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
+      );
+      await expect(self.getByTestId("runtime-self-update-now")).toHaveCount(0);
+
+      await checkSelfView(page, block, "unmanaged", info);
       await bothThemes(page, `devices-runtime-updates-${tag}`);
 
       // ---- Update now (D-05): updating, then up to date on the new version
@@ -261,6 +308,7 @@ test("a member sees the compatibility flag on a shared device with an old Claude
       await expect(card.getByTestId("runtime-compat-flag")).toHaveCount(1);
       await expect(card.getByTestId("runtime-updates")).toHaveCount(0);
       await expect(card.getByTestId("runtime-update-now")).toHaveCount(0);
+      await expect(card.getByTestId("runtime-self-row")).toHaveCount(0);
       await card.scrollIntoViewIfNeeded();
       await checkState(page, '[data-testid="device-card"]');
       await bothThemes(page, `devices-member-flag-${tag}`);
@@ -286,6 +334,88 @@ test("a member sees the compatibility flag on a shared device with an old Claude
         '[data-testid="new-session-dialog"] [role="radiogroup"][aria-label="Agent"]',
       );
       await bothThemes(page, `new-session-unsupported-${tag}`);
+    },
+  );
+});
+
+test("the OCW runtime row for a service server: behind, then waiting", async ({ browser }, info) => {
+  test.setTimeout(240_000);
+  const tag = tagOf(info.project.name);
+  const admin = await apiAs(ADMIN);
+  const name = `E2E Self ${tag} ${Date.now().toString(36)}`;
+  await withDevice(
+    admin,
+    name,
+    {
+      orgLevel: "notify",
+      // Nothing newer for the CLIs: only the OCW runtime row has something to say.
+      registry: { claude: "2.1.300", codex: "0.165.0" },
+      installed: { claude: "2.1.300", codex: "0.165.0" },
+    },
+    async ({ device, contexts }) => {
+      await reported(admin, device, "2.1.300");
+
+      // The device runs from the checkout. The API's answer is patched for this device only, as a supervised server at
+      // 0.3.1 whose workspace serves 0.3.2 (a full strict status, PD-25); every other device and route is untouched.
+      let state: "idle" | "waiting" = "idle";
+      const since = new Date().toISOString();
+      const selfStatus = () =>
+        RuntimeSelfStatus.parse({
+          version: "0.3.1",
+          build: "1a2b3c4d5e6f",
+          supervised: true,
+          canUpdate: true,
+          reason: null,
+          servedVersion: "0.3.2",
+          servedBuild: "abcdef012345",
+          state,
+          pendingSince: state === "waiting" ? since : null,
+          lastRun: null,
+          checkedAt: since,
+        });
+      const owner = await openAs(browser, ADMIN, info.project.name);
+      contexts.push(owner.context);
+      const page = owner.page;
+      await page.route("**/api/v1/devices", async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const res = await route.fetch();
+        const json = (await res.json()) as DeviceList;
+        for (const d of json.devices) {
+          if (d.id !== device.deviceId || !d.runtimeMaintenance) continue;
+          d.hostKind = "service";
+          d.runtimeMaintenance.served = { version: "0.3.2", build: "abcdef012345" };
+          d.runtimeMaintenance.self = selfStatus();
+        }
+        await route.fulfill({ response: res, json });
+      });
+
+      await page.goto(`${BASE_URL}/settings/devices`);
+      const card = page.getByTestId("device-card").filter({ hasText: name });
+      const block = card.getByTestId("runtime-updates");
+      const self = block.locator(SELF_ROW);
+
+      // ---- behind: the served build, the pill and one enabled Update (D-01)
+      await expect(self).toHaveAttribute("data-view", "behind", { timeout: 15_000 });
+      await expect(self.getByTestId("runtime-self-version")).toHaveText("0.3.1 · 1a2b3c4d5e6f");
+      await expect(self.getByTestId("runtime-self-status")).toHaveText("0.3.2 available");
+      await expect(self.getByTestId("runtime-self-served")).toHaveText(
+        "Your workspace serves 0.3.2 · abcdef012345",
+      );
+      const update = self.getByTestId("runtime-self-update-now");
+      await expect(update).toBeVisible();
+      await expect(update).toBeEnabled();
+      await expect(update).toHaveAccessibleName("Update the OCW runtime");
+      await checkSelfView(page, block, "behind", info);
+
+      // ---- waiting (D-04): a turn runs on the server; the row says so and offers no enabled Update
+      state = "waiting";
+      await page.reload();
+      await expect(self).toHaveAttribute("data-state", "waiting", { timeout: 15_000 });
+      await expect(self).toHaveAttribute("data-view", "busy");
+      await expect(self.getByTestId("runtime-self-status")).toHaveText("Waiting for sessions to finish");
+      await expect(self.locator('[data-testid="runtime-self-update-now"]:enabled')).toHaveCount(0);
+      await expect(self.getByRole("button", { name: "Update the OCW runtime" })).toHaveCount(0);
+      await checkSelfView(page, block, "waiting", info);
     },
   );
 });

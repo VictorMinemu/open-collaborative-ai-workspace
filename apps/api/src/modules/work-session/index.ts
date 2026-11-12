@@ -11,11 +11,13 @@ import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
+import { type BotFiles, createBotFiles } from "./bot-files";
 import { registerBotProfileRoutes } from "./bot-profile";
 import { type BotReadParams, readBotWorkSession } from "./bot-read";
 import { type BotSessions, createBotSessions } from "./bot-sessions";
 import { sessionFacts } from "./facts";
-import { loadWorkZonePolicy } from "./policy";
+import { registerFileTransferRoutes } from "./file-transfer-routes";
+import { loadWorkZonePolicy, serverFileMaxBytes } from "./policy";
 import { registerProjectRoutes } from "./projects";
 import {
   listProposableProjects,
@@ -37,6 +39,14 @@ import { withoutViewerFields } from "./viewer-fields";
 
 // 07.16-20 (PD-12, PD-16): the wake handler refreshes the live card with the start's own composer.
 export { composeWorkSessionCard } from "./bot-card";
+// 07.17.1.1-11 (PD-06, PD-16): the file routes' service types (the service itself is `WorkSessionModule.botFiles`).
+export type {
+  BotFileAuditFacts,
+  BotFileFinished,
+  BotFilePrepared,
+  BotFiles,
+  BotFileUploadParams,
+} from "./bot-files";
 // 07.16-11 (PD-17): delivery asks whether a bot's turn is offered the Work Zone tools, and with which context.
 export { workZoneOfferFor } from "./bot-offer";
 // 07.16-07 (PD-04 … PD-06): the start route, the arbiter, the offer and the web read a bot's profile status.
@@ -113,6 +123,12 @@ export interface WorkSessionModule extends ApiModule {
    * the sponsor's tenant transaction, after the Agent Channel route found the session and claimed the call.
    */
   botRead(tx: Tx, p: BotReadParams): Promise<BotWorkSessionReadModel>;
+  /**
+   * 07.17.1.1-11 (D-02 … D-07, D-13): one file move between a bot's conversation and its own session. The Agent
+   * Channel's file routes call `limitFor`, `prepare*` and `finish` inside their transactions and `deadlineFor` and
+   * `waitForAck` between them (PD-06, PD-18).
+   */
+  botFiles: BotFiles;
 }
 
 /**
@@ -127,6 +143,13 @@ export function createWorkSessionModule(
     storage?: ObjectStorage | null;
     /** 07.5-08: the approve-and-apply primitive, where the `work_zone.start` kind is registered. */
     approvals?: ApprovalService | null;
+    /**
+     * 07.17.1.1 (PD-18), test hook: the bot file transfer deadline for a size. Absent in production
+     * (`transferDeadlineMs`); a test stack sets it through `botFileDeadlineMs`, never through the environment.
+     */
+    botFileDeadlineMs?: (bytes: number) => number;
+    /** 07.17.1.1 review WR-01, test hook: a shorter idle cut for a transfer stream (`BOT_FILE_LIMITS.transferIdleMs`). */
+    botFileTransferIdleMs?: number;
   } = {},
 ): WorkSessionModule {
   const perms = createPermissionService(core);
@@ -227,6 +250,16 @@ export function createWorkSessionModule(
     start,
     controller: { core, svc: service, startDeps: { core, perms, svc: service, hub } },
   });
+  // 07.17.1.1-11 (PD-06 … PD-18): a bot's file moves, decided for its sponsor and bounded by the server's ceiling.
+  const botFiles = createBotFiles({
+    core,
+    hub,
+    svc: service,
+    perms,
+    storage: deps.storage ?? null,
+    serverMaxBytes: serverFileMaxBytes(core.env),
+    ...(deps.botFileDeadlineMs ? { deadlineMs: deps.botFileDeadlineMs } : {}),
+  });
 
   return {
     name: "work-session",
@@ -235,11 +268,17 @@ export function createWorkSessionModule(
       registerProjectRoutes(app, core, perms);
       // 07.16 (D-01 … D-03): a bot's Work Zone profile and the per-bot device consent; changes sweep the device.
       registerBotProfileRoutes(app, core, perms, service);
+      // 07.17.1.1 (D-08, PD-05): the device side of a bot's file move, `GET /api/v1/runtime/files/:transferId`.
+      registerFileTransferRoutes(app, core, {
+        storage: deps.storage ?? null,
+        ...(deps.botFileTransferIdleMs ? { idleMs: deps.botFileTransferIdleMs } : {}),
+      });
     },
     start,
     proposals,
     bots,
     botRead: (tx, p) => readBotWorkSession(tx, { core, perms }, p),
+    botFiles,
     // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
     close: () => service.close(),
   };

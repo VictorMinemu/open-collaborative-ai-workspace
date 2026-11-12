@@ -5,6 +5,8 @@ import {
   ATTACHMENT_READ_TIMEOUT_MS,
   createAgentChannelClient,
   isRetryableStatus,
+  WORK_SESSION_FILE_REQUEST_TIMEOUT_MS,
+  WORK_SESSION_REQUEST_TIMEOUT_MS,
 } from "./api-client.js";
 import { chunkText } from "./bridge.js";
 
@@ -718,6 +720,152 @@ describe("attachmentRead's budget (07.15 IN-05)", () => {
       await client.attachmentRead(body).catch(() => undefined);
       expect(calls).toHaveLength(1);
       expect(timeout).toHaveBeenCalledWith(ATTACHMENT_READ_TIMEOUT_MS);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+});
+
+describe("bot Work Zone file calls (07.17.1.1 D-01, PD-18): one attempt, the transfer's budget", () => {
+  const EVENT = "00000000-0000-7000-8000-000000000001";
+  const AGENT = "00000000-0000-7000-8000-000000000002";
+  const WS = "00000000-0000-7000-8000-000000000003";
+  const ATTACHMENT = "00000000-0000-7000-8000-000000000004";
+
+  it("the file budget is the transfer cap plus 15 s; the four 07.16 calls keep 30 s", () => {
+    expect(WORK_SESSION_FILE_REQUEST_TIMEOUT_MS).toBe(615_000);
+    expect(WORK_SESSION_REQUEST_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it("workSessionUpload posts the body to /work-sessions/upload once, with the file budget, and parses the answer", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const { fetchImpl, calls } = scriptedFetch([
+        {
+          status: 200,
+          body: { kind: "uploaded", workSessionId: WS, path: "docs/spec.pdf", sizeBytes: 1536 },
+        },
+      ]);
+      const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      const body = {
+        eventId: EVENT,
+        agentId: AGENT,
+        workSessionId: WS,
+        attachmentId: ATTACHMENT,
+        path: "docs/spec.pdf",
+      };
+      await expect(client.workSessionUpload(body)).resolves.toEqual({
+        kind: "uploaded",
+        workSessionId: WS,
+        path: "docs/spec.pdf",
+        sizeBytes: 1536,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe("http://api/agent-channel/v1/work-sessions/upload");
+      expect(calls[0]?.init.method).toBe("POST");
+      expect(JSON.parse(String(calls[0]?.init.body))).toEqual(body);
+      expect(timeout).toHaveBeenCalledWith(WORK_SESSION_FILE_REQUEST_TIMEOUT_MS);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("a 5xx is never retried (a second attempt could move the file twice)", async () => {
+    const { fetchImpl, calls } = scriptedFetch([{ status: 503 }, { status: 200, body: {} }]);
+    const client = createAgentChannelClient({
+      apiUrl: "http://api",
+      token: () => "t",
+      fetch: fetchImpl,
+      backoff: { baseMs: 1, maxMs: 2 },
+    });
+    const body = {
+      eventId: EVENT,
+      agentId: AGENT,
+      workSessionId: WS,
+      attachmentId: ATTACHMENT,
+      path: "a.txt",
+    };
+    await expect(client.workSessionUpload(body)).rejects.toBeInstanceOf(AgentChannelHttpError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("workSessionDownload posts the body to /work-sessions/download once, with the file budget, and parses the answer", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const answer = {
+        kind: "downloaded",
+        workSessionId: WS,
+        attachmentId: ATTACHMENT,
+        name: "README.md",
+        sizeBytes: 64,
+        contentType: "text/markdown",
+      };
+      const { fetchImpl, calls } = scriptedFetch([
+        { status: 200, body: answer },
+        { status: 200, body: answer },
+      ]);
+      const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      const body = { eventId: EVENT, agentId: AGENT, workSessionId: WS, path: "README.md" };
+      await expect(client.workSessionDownload(body)).resolves.toEqual(answer);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe("http://api/agent-channel/v1/work-sessions/download");
+      expect(JSON.parse(String(calls[0]?.init.body))).toEqual(body);
+      expect(timeout).toHaveBeenCalledWith(WORK_SESSION_FILE_REQUEST_TIMEOUT_MS);
+      // A refusal with the limit keeps it (the renderer composes nothing the API already said).
+      const refused = scriptedFetch([
+        {
+          status: 200,
+          body: {
+            kind: "refused",
+            code: "file_too_large",
+            sentence: "That file is 12 MB. This bot moves files up to 10 MB (this bot's limit).",
+            limit: { bytes: 10 * 1024 * 1024, source: "bot" },
+            sizeBytes: 12 * 1024 * 1024,
+          },
+        },
+      ]);
+      const c2 = createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "t",
+        fetch: refused.fetchImpl,
+      });
+      await expect(c2.workSessionDownload(body)).resolves.toMatchObject({
+        kind: "refused",
+        limit: { bytes: 10 * 1024 * 1024, source: "bot" },
+        sizeBytes: 12 * 1024 * 1024,
+      });
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("a 5xx on a download is never retried", async () => {
+    const { fetchImpl, calls } = scriptedFetch([{ status: 502 }, { status: 200, body: {} }]);
+    const client = createAgentChannelClient({
+      apiUrl: "http://api",
+      token: () => "t",
+      fetch: fetchImpl,
+      backoff: { baseMs: 1, maxMs: 2 },
+    });
+    await expect(
+      client.workSessionDownload({ eventId: EVENT, agentId: AGENT, workSessionId: WS, path: "a.txt" }),
+    ).rejects.toBeInstanceOf(AgentChannelHttpError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("workSessionPrompt still waits WORK_SESSION_REQUEST_TIMEOUT_MS", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const { fetchImpl } = scriptedFetch([
+        {
+          status: 200,
+          body: { kind: "queued", workSessionId: WS, promptId: ATTACHMENT, position: 1, status: "queued" },
+        },
+      ]);
+      const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      await client.workSessionPrompt({ eventId: EVENT, agentId: AGENT, workSessionId: WS, prompt: "next" });
+      expect(timeout).toHaveBeenCalledWith(WORK_SESSION_REQUEST_TIMEOUT_MS);
+      expect(timeout).not.toHaveBeenCalledWith(WORK_SESSION_FILE_REQUEST_TIMEOUT_MS);
     } finally {
       timeout.mockRestore();
     }

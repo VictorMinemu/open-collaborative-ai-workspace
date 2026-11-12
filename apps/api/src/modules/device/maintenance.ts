@@ -3,10 +3,16 @@ import {
   EventTypes,
   IdParams,
   InstallMethod,
+  OCW_RUNTIME_TARGET,
   RequestRuntimeUpdateResponse,
+  RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES,
+  RUNTIME_UPDATE_TARGET_LABEL,
+  RuntimeBuild,
   type RuntimeId,
   type RuntimeMaintenanceFrame,
   type RuntimeMaintenanceStatus,
+  type RuntimeSelfUpdateRefusal,
+  type RuntimeServedBuild,
   RuntimeUpdateHistoryQuery,
   RuntimeUpdateParams,
   type RuntimeUpdatePayload,
@@ -14,11 +20,12 @@ import {
   type RuntimeUpdateRunFrame,
   RuntimeUpdateRunList,
   type RuntimeUpdatesLevel,
+  type RuntimeUpdateTarget,
   RuntimeVersion,
   scrubHostPaths,
 } from "@ocw/contracts";
 import { type deviceCommands, deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
-import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, notFound } from "../../lib/errors";
@@ -62,10 +69,12 @@ export const RUNTIME_UPDATE_REQUEST_TTL_MS = 60 * 60_000;
 export const RUNTIME_UPDATE_RUN_ABANDON_MS = 30 * 60_000;
 export const RUN_INTERRUPTED = "interrupted: the device never reported how this update ended";
 const REQUESTED_UQ = "device_runtime_updates_requested_uq";
-const RUNTIME_LABEL: Readonly<Record<RuntimeId, string>> = { "claude-code": "Claude Code", codex: "Codex" };
 
-/** The stored snapshot: the device's report plus whether it had the org level when it sent it (D-10). */
-const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true }).extend({
+/**
+ * The stored snapshot: the device's report (07.17.1: with its own runtime's `self` when it sent one) plus whether it
+ * had the org level when it sent it (D-10). `served` is never stored: the API fills it on every read (PD-15).
+ */
+const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true, served: true }).extend({
   orgLevelReceived: z.boolean(),
 });
 type StoredMaintenance = z.infer<typeof StoredMaintenance>;
@@ -76,10 +85,14 @@ export function storedMaintenance(value: unknown): StoredMaintenance | null {
   return parsed.success ? parsed.data : null;
 }
 
-/** `Device.runtimeMaintenance` for a `device.maintain` holder: the snapshot plus the org level the API applies. */
+/**
+ * `Device.runtimeMaintenance` for a `device.maintain` holder: the snapshot plus the org level the API applies and
+ * (07.17.1, PD-15) the build the workspace serves now (null when it serves none).
+ */
 export function toDeviceRuntimeMaintenance(
   stored: StoredMaintenance,
   orgLevel: RuntimeUpdatesLevel,
+  served: RuntimeServedBuild | null,
 ): DeviceRuntimeMaintenance {
   return {
     runtimes: stored.runtimes,
@@ -88,6 +101,8 @@ export function toDeviceRuntimeMaintenance(
     effectiveLevel: stored.effectiveLevel,
     orgLevel,
     reportedAt: stored.reportedAt,
+    ...(stored.self ? { self: stored.self } : {}),
+    served,
   };
 }
 
@@ -102,6 +117,10 @@ function scrubDeep<T>(value: T): T {
 }
 
 const versionOrNull = (v: string | null) => (v !== null && RuntimeVersion.safeParse(v).success ? v : null);
+const buildOrNull = (v: string | null) => (v !== null && RuntimeBuild.safeParse(v).success ? v : null);
+const isSelfRun = (row: { runtime: RuntimeUpdateTarget }) => row.runtime === OCW_RUNTIME_TARGET;
+/** 07.17.1 PD-14: the device's own runtime is not busy with an update (idle, or a daemon that reports no `self`). */
+const selfIdle = (self: StoredMaintenance["self"]) => !self || self.state === "idle";
 const isoOrNull = (v: string | null) => (v ? new Date(v).toISOString() : null);
 
 /** One history row as owners and admins read it (`RuntimeUpdateRun`), the requester named from the directory. */
@@ -127,6 +146,8 @@ export function toRuntimeUpdateRun(
     requestedAt: isoOrNull(row.requestedAt),
     startedAt: isoOrNull(row.startedAt),
     finishedAt: isoOrNull(row.finishedAt),
+    // 07.17.1: the OCW runtime's builds; CLI rows keep their 07.11 shape.
+    ...(isSelfRun(row) ? { fromBuild: buildOrNull(row.fromBuild), toBuild: buildOrNull(row.toBuild) } : {}),
   };
 }
 
@@ -169,7 +190,10 @@ async function auditDevice(
   });
 }
 
-/** Run metadata: versions, outcome, trigger and method; never output, error text or a path. */
+/**
+ * Run metadata: versions, outcome, trigger and method (07.17.1: and both builds on `ocw-runtime` runs, so CLI rows
+ * keep their 07.11 keys); never output, error text or a path.
+ */
 const runMetadata = (row: RunRow) => ({
   runtime: row.runtime,
   from: row.fromVersion,
@@ -178,6 +202,7 @@ const runMetadata = (row: RunRow) => ({
   outcome: row.state === "started" ? null : row.state,
   trigger: row.trigger,
   method: row.method,
+  ...(isSelfRun(row) ? { fromBuild: row.fromBuild, toBuild: row.toBuild } : {}),
 });
 
 async function auditRun(
@@ -240,6 +265,8 @@ export async function onRuntimeMaintenance(
     effectiveLevel: frame.effectiveLevel,
     orgLevelReceived: frame.orgLevelReceived,
     reportedAt: new Date().toISOString(),
+    // 07.17.1 (PD-04): the device's own runtime, kept for the DTO and the update route's preconditions (PD-13).
+    ...(frame.self ? { self: scrubDeep(frame.self) } : {}),
   };
   await tx
     .update(devices)
@@ -276,22 +303,41 @@ export async function onRuntimeMaintenance(
       source: frame.localLevelSource,
     });
   }
-  await closeAbandonedRuns(tx, deps, device);
+  // 07.17.1 PD-14: an OCW runtime run stays open while the device reports it is still busy with it (`waiting` for
+  // sessions to finish can outlast the abandon time); idle, or a daemon without `self`, can no longer be running it.
+  await closeAbandonedRuns(tx, deps, device, { cli: true, self: selfIdle(next.self) });
   await pingOrg(tx, deps, device, locked.status);
 }
 
 /**
  * 07.11 review ME-04: this device's runs `started` more than `RUNTIME_UPDATE_RUN_ABANDON_MS` ago and never finished
- * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. Checked at every
- * snapshot (the handshake carries one on every connect).
+ * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. CLI runs are checked
+ * at every snapshot (the handshake carries one on every connect); `ocw-runtime` runs (07.17.1 PD-14) at a snapshot
+ * whose `self` is idle, only (review WR-06: the history read shows them interrupted without writing,
+ * `selfRunReadsInterrupted`). Returns how many it closed.
  */
-async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceRef): Promise<void> {
+async function closeAbandonedRuns(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  targets: { cli: boolean; self: boolean },
+): Promise<number> {
+  if (!targets.cli && !targets.self) return 0;
+  const target =
+    targets.cli && targets.self
+      ? []
+      : [
+          targets.self
+            ? eq(deviceRuntimeUpdates.runtime, OCW_RUNTIME_TARGET)
+            : ne(deviceRuntimeUpdates.runtime, OCW_RUNTIME_TARGET),
+        ];
   const closed = await tx
     .update(deviceRuntimeUpdates)
     .set({ state: "failed", error: RUN_INTERRUPTED, finishedAt: sql`now()` })
     .where(
       and(
         eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+        ...target,
         eq(deviceRuntimeUpdates.state, "started"),
         lt(
           deviceRuntimeUpdates.startedAt,
@@ -311,10 +357,36 @@ async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceR
       "error",
     );
   }
+  return closed.length;
+}
+
+/**
+ * 07.17.1 PD-14, review WR-06: how the history READS an `ocw-runtime` run the device never closed. Started more than
+ * `RUNTIME_UPDATE_RUN_ABANDON_MS` ago, on a device not seen for that long (offline, `lastSeenAt` past the window) or
+ * whose stored `self` is idle, it reads as failed `RUN_INTERRUPTED`. A pure view: nothing is written or audited, so a
+ * device that was merely offline for a moment and then finishes the run leaves one honest trail.
+ */
+function selfRunReadsInterrupted(device: {
+  status: string;
+  lastSeenAt: string | null;
+  runtimeMaintenance: unknown;
+}): (row: RunRow) => RunRow {
+  const cutoff = Date.now() - RUNTIME_UPDATE_RUN_ABANDON_MS;
+  const gone =
+    device.status !== "online" && (device.lastSeenAt === null || Date.parse(device.lastSeenAt) < cutoff);
+  const idle = selfIdle(storedMaintenance(device.runtimeMaintenance)?.self);
+  return (row) =>
+    isSelfRun(row) &&
+    row.state === "started" &&
+    row.startedAt !== null &&
+    Date.parse(row.startedAt) < cutoff &&
+    (gone || idle)
+      ? { ...row, state: "failed", error: RUN_INTERRUPTED }
+      : row;
 }
 
 /** PD-04: this device's "Update now" requests the device never answered within the hour become `expired`. */
-async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Promise<void> {
+async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeUpdateTarget): Promise<void> {
   await tx
     .update(deviceRuntimeUpdates)
     .set({ state: "expired", finishedAt: sql`now()` })
@@ -331,11 +403,23 @@ async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Pr
     );
 }
 
+/**
+ * 07.17.1 (PD-14): the builds an `ocw-runtime` run frame reports, only those it carries (a frame without them never
+ * erases the builds the request recorded); a CLI frame has none.
+ */
+function frameBuilds(frame: RuntimeUpdateRunFrame): { fromBuild?: string | null; toBuild?: string | null } {
+  if (!isSelfRun(frame)) return {};
+  return {
+    ...(frame.fromBuild !== undefined ? { fromBuild: frame.fromBuild } : {}),
+    ...(frame.toBuild !== undefined ? { toBuild: frame.toBuild } : {}),
+  };
+}
+
 const byRunId = (device: DeviceRef, runId: string) =>
   and(eq(deviceRuntimeUpdates.deviceId, device.deviceId), eq(deviceRuntimeUpdates.runId, runId));
 
 /** The `requested` row of this device's "Update now" command `commandId` for `runtime`, not adopted yet. */
-const requestedBy = (device: DeviceRef, runtime: RuntimeId, commandId: string) =>
+const requestedBy = (device: DeviceRef, runtime: RuntimeUpdateTarget, commandId: string) =>
   and(
     eq(deviceRuntimeUpdates.deviceId, device.deviceId),
     eq(deviceRuntimeUpdates.commandId, commandId),
@@ -362,6 +446,7 @@ async function runStarted(
     toVersion: frame.toVersion,
     candidate: frame.candidate,
     method: frame.method,
+    ...frameBuilds(frame),
     startedAt: frame.at,
   };
   let row: RunRow | undefined;
@@ -426,6 +511,7 @@ async function runFinished(
     toVersion: frame.toVersion,
     candidate: frame.candidate,
     method: frame.method,
+    ...frameBuilds(frame),
     output: frame.output === undefined ? null : scrubHostPaths(frame.output).slice(0, 4096),
     error: null,
     finishedAt: frame.at,
@@ -580,16 +666,25 @@ function pgError(err: unknown): { code?: string; constraint?: string } {
   return e?.cause?.code ? e.cause : (e ?? {});
 }
 
-const updatePending = () =>
-  conflict("An update of this CLI is already waiting for the device", "update_pending");
+const updatePending = (runtime: RuntimeUpdateTarget) =>
+  conflict(
+    runtime === OCW_RUNTIME_TARGET
+      ? "An update of the OCW runtime is already waiting for the device"
+      : "An update of this CLI is already waiting for the device",
+    "update_pending",
+  );
+
+/** 07.17.1 (PD-13): an OCW runtime update the API refuses, with the contracts' sentence. */
+const selfRefusal = (code: RuntimeSelfUpdateRefusal) =>
+  conflict(RUNTIME_SELF_UPDATE_REFUSAL_SENTENCES[code], code);
 
 function manualUpdateMessage(runtime: RuntimeId, status: RuntimeMaintenanceStatus): string {
   const how = status.updateCommand
     ? ` Run \`${status.updateCommand}\` on the device.`
     : " Update it on the device.";
   return status.reason === "needs_admin"
-    ? `${RUNTIME_LABEL[runtime]} on this device needs administrator rights to update.${how}`
-    : `${RUNTIME_LABEL[runtime]} on this device was installed in a way OCW can't update.${how}`;
+    ? `${RUNTIME_UPDATE_TARGET_LABEL[runtime]} on this device needs administrator rights to update.${how}`
+    : `${RUNTIME_UPDATE_TARGET_LABEL[runtime]} on this device was installed in a way OCW can't update.${how}`;
 }
 
 /**
@@ -637,19 +732,25 @@ export function registerDeviceMaintenanceRoutes(
         const row = await maintainable(req, tx, req.params.id, false);
         // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
         await expireRequests(tx, row.id);
+        // 07.17.1 PD-14, review WR-06: an OCW runtime update that never reported back READS as failed (interrupted)
+        // once the device has been gone for the abandon time, or its stored `self` is idle. Nothing is written or
+        // audited here: the device's own idle snapshot closes the row (`onRuntimeMaintenance`, under the device lock),
+        // and its real outcome, when it comes back, is the run's only finished audit.
+        const interruptedRead = selfRunReadsInterrupted(row);
+        const runtime = req.query.runtime;
         const rows = await tx
           .select()
           .from(deviceRuntimeUpdates)
           .where(
             and(
               eq(deviceRuntimeUpdates.deviceId, row.id),
-              ...(req.query.runtime ? [eq(deviceRuntimeUpdates.runtime, req.query.runtime)] : []),
+              ...(runtime ? [eq(deviceRuntimeUpdates.runtime, runtime)] : []),
             ),
           )
           .orderBy(desc(deviceRuntimeUpdates.createdAt), desc(deviceRuntimeUpdates.id))
           .limit(50);
         const names = await memberDirectory(tx);
-        return { runs: rows.map((r) => toRuntimeUpdateRun(r, names)) };
+        return { runs: rows.map((r) => toRuntimeUpdateRun(interruptedRead(r), names)) };
       }),
   );
 
@@ -667,12 +768,47 @@ export function registerDeviceMaintenanceRoutes(
         if (row.status !== "online") {
           throw conflict("This device is offline. Update it once it is connected", "device_offline");
         }
-        if ((await hub.runtimePolicy(tx)) === "off") {
-          throw conflict("Runtime updates are off for this organization", "runtime_updates_off");
-        }
-        const status = storedMaintenance(row.runtimeMaintenance)?.runtimes.find((s) => s.runtime === runtime);
-        if (status && !status.canUpdate && (status.reason === "manual" || status.reason === "needs_admin")) {
-          throw conflict(manualUpdateMessage(runtime, status), "manual_update");
+        const stored = storedMaintenance(row.runtimeMaintenance);
+        /** The `requested` row's own columns and the request's audit metadata, per target. */
+        let request: { values: Partial<RunRow>; metadata: Record<string, unknown> };
+        if (runtime === OCW_RUNTIME_TARGET) {
+          // 07.17.1 PD-13, in order. The org level is not checked: `off` stops automatic checks only (D-09).
+          if (row.hostKind !== "service") throw selfRefusal("not_a_service");
+          const self = stored?.self;
+          if (!self) throw selfRefusal("self_update_unsupported");
+          if (self.reason) throw selfRefusal(self.reason);
+          const served = await hub.servedRuntime();
+          if (!served) throw selfRefusal("runtime_not_served");
+          if (served.build === self.build) throw selfRefusal("already_current");
+          request = {
+            values: {
+              fromVersion: self.version,
+              toVersion: served.version,
+              candidate: served.version,
+              fromBuild: self.build,
+              toBuild: served.build,
+            },
+            metadata: {
+              runtime,
+              from: self.version,
+              to: served.version,
+              fromBuild: self.build,
+              toBuild: served.build,
+            },
+          };
+        } else {
+          if ((await hub.runtimePolicy(tx)) === "off") {
+            throw conflict("Runtime updates are off for this organization", "runtime_updates_off");
+          }
+          const status = stored?.runtimes.find((s) => s.runtime === runtime);
+          if (
+            status &&
+            !status.canUpdate &&
+            (status.reason === "manual" || status.reason === "needs_admin")
+          ) {
+            throw conflict(manualUpdateMessage(runtime, status), "manual_update");
+          }
+          request = { values: {}, metadata: { runtime } };
         }
         const mine = and(
           eq(deviceRuntimeUpdates.deviceId, row.id),
@@ -686,9 +822,10 @@ export function registerDeviceMaintenanceRoutes(
           .from(deviceRuntimeUpdates)
           .where(mine)
           .limit(1);
-        if (waiting) throw updatePending();
+        if (waiting) throw updatePending(runtime);
 
-        // D-05: the command names the runtime and nothing else; the device picks the method and the version.
+        // D-05, P1: the command names the target and nothing else; the device picks the method and the version (the
+        // OCW runtime: from its own paired server).
         const payload: RuntimeUpdatePayload = { runtime };
         const commandId = await hub.enqueue(tx, {
           deviceId: row.id,
@@ -709,11 +846,12 @@ export function registerDeviceMaintenanceRoutes(
               requestedBy: auth.userId,
               state: "requested",
               requestedAt: sql`now()`,
+              ...request.values,
             })
             .returning();
         } catch (err) {
           // The device row lock serializes requests; the partial unique index is the backstop (T-07.11-06-06).
-          if (pgError(err).constraint === REQUESTED_UQ) throw updatePending();
+          if (pgError(err).constraint === REQUESTED_UQ) throw updatePending(runtime);
           throw err;
         }
         await core.audit.record(tx, {
@@ -721,7 +859,7 @@ export function registerDeviceMaintenanceRoutes(
           resourceType: "device",
           resourceId: row.id,
           deviceId: row.id,
-          metadata: { runtime },
+          metadata: request.metadata,
         });
         return { run: toRuntimeUpdateRun(run!, await memberDirectory(tx)) };
       }),

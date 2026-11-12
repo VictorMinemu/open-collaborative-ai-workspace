@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
 import {
   compatibilityOf,
   RUNTIME_COMPATIBILITY_MANIFEST,
@@ -37,6 +38,7 @@ import { findExecutable } from "./exec-path.js";
 import { isGitRepo } from "./git.js";
 import { installedBundlePath, type RuntimeInstallInfo, readInstallInfo } from "./install-info.js";
 import { errorMessage } from "./logger.js";
+import { readSelfUpdateMarker, type SelfUpdateMarker } from "./maintenance/self-update.js";
 import { contain, redact } from "./sanitize.js";
 import type { ServiceEnvSummary, ServiceStatus } from "./service/types.js";
 
@@ -163,6 +165,13 @@ export interface DoctorDeps {
   now: () => Date;
   /** The 07.11 compatibility manifest used when no daemon reports one (default: the bundled copy). */
   compatibility?: () => RuntimeCompatibilityManifest;
+  /**
+   * 07.17.1 (D-07, PD-20): the self-update run marker (`<home>/runtime/self-update.json`), or null. It outlives the
+   * daemon's exit; a marker while no daemon runs is an update that did not come back.
+   */
+  selfUpdateMarker: () => Promise<SelfUpdateMarker | null>;
+  /** Review IN-02: this runtime's `OCW_HOME` (default `~/.ocw`), so the way back names the right directory. */
+  ocwHome?: () => string;
 }
 
 // ---------------------------------------------------------------- the checks
@@ -246,6 +255,7 @@ interface Context {
   runtime: (id: RuntimeId) => Promise<RuntimeInfo>;
   compatibility: (id: RuntimeId, info: RuntimeInfo) => Promise<RuntimeCompatibility>;
   signIn: () => Promise<SignInAccount>;
+  selfUpdateMarker: () => Promise<SelfUpdateMarker | null>;
 }
 
 function createContext(deps: DoctorDeps): Context {
@@ -290,6 +300,7 @@ function createContext(deps: DoctorDeps): Context {
     runtime,
     compatibility,
     signIn,
+    selfUpdateMarker: once(deps.selfUpdateMarker),
   };
 }
 
@@ -317,6 +328,24 @@ function checkNode(ctx: Context): Finding {
     );
   }
   return ok(`Node ${version}`);
+}
+
+/**
+ * 07.17.1 (PD-20): an update left its marker and no daemon answers: the new version did not come back. Names the
+ * version and build it switched to and the way back (paths `~`-relative to this runtime's `OCW_HOME`, the previous
+ * build's directory name). Review CR-01 / IN-02: `updates off` first, so nothing installs the broken build again while
+ * the owner looks; the install command installs what the workspace serves, so it helps only once that is fixed.
+ */
+async function stuckUpdate(ctx: Context): Promise<Finding | null> {
+  const marker = await ctx.selfUpdateMarker().catch(() => null);
+  if (!marker) return null;
+  const home = ctx.deps.homeDir();
+  const ocw = displayPath(ctx.deps.ocwHome?.() ?? join(home, ".ocw"), home);
+  return fail(
+    `The runtime did not come back after updating to ${marker.to.version} (${short(marker.to.sha256)})`,
+    `Run \`ocw-runtime updates off\`, then point ${ocw}/runtime/current back to versions/${short(marker.from.sha256)} ` +
+      "and run `ocw-runtime service restart`; re-running the install command helps only once the workspace serves a fixed build",
+  );
 }
 
 async function checkRuntime(ctx: Context): Promise<Finding> {
@@ -349,9 +378,13 @@ async function checkRuntime(ctx: Context): Promise<Finding> {
     );
   }
   if (served.sha256 !== installedSha) {
+    // 07.17.1 (PD-20): an installed service updates itself from the browser.
+    const svc = await ctx.service().catch(() => null);
     return warn(
       `${installed} differs from the server's ${served.version} (${short(served.sha256)})`,
-      "re-run the install command from Settings › Devices, then `ocw-runtime service restart` when no session runs",
+      svc?.installed
+        ? "Update it from Settings › Devices (Runtime › Update), or re-run the install command"
+        : "re-run the install command from Settings › Devices, then `ocw-runtime service restart` when no session runs",
     );
   }
   return ok(`${installed} matches the server`);
@@ -432,6 +465,8 @@ async function checkServer(ctx: Context): Promise<Finding> {
 async function checkDaemon(ctx: Context): Promise<Finding> {
   const status = await ctx.daemon();
   if (!status) {
+    const stuck = await stuckUpdate(ctx);
+    if (stuck) return stuck;
     const svc = await ctx.service().catch(() => null);
     if (svc?.installed) {
       return fail(
@@ -479,6 +514,10 @@ async function checkService(ctx: Context): Promise<Finding> {
       `The ${label} is not installed`,
       "`ocw-runtime service install` so the runtime starts at boot and restarts on failure",
     );
+  }
+  if (s.active !== true && !(await ctx.daemon().catch(() => null))) {
+    const stuck = await stuckUpdate(ctx);
+    if (stuck) return stuck;
   }
   if (s.nodePathExists === false) {
     return fail(
@@ -867,6 +906,8 @@ export function createDoctorDeps(
     updatesLevel: async () => resolveRuntimeUpdates(await config(), env),
     homeDir: () => homedir(),
     now: () => new Date(),
+    selfUpdateMarker: () => readSelfUpdateMarker(home),
+    ocwHome: () => home,
   };
   return { ...base, ...probes };
 }

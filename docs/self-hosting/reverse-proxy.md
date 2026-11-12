@@ -15,8 +15,8 @@ The configuration is `infra/caddy/Caddyfile` and `infra/caddy/compose.yaml`. The
 `node scripts/gate/proxy-check.mjs --up` tests it end to end. It boots a throwaway stack and enables the proxy, then
 checks from outside the compose network that TLS is verified, that the WebSocket upgrades and delivers frames, and
 that presigned PUT and GET work while tampered or unsigned URLs get 403. It also checks that a forged
-`X-Forwarded-For` is ignored, that session cookies are `Secure`, that `/agent-channel/*` returns 404 and that the API
-and web ports are on loopback only.
+`X-Forwarded-For` is ignored, that session cookies are `Secure`, that `/agent-channel/*` returns 404, that a 30 MiB
+body on `/api/v1/runtime/files/` reaches the API uncut and that the API and web ports are on loopback only.
 
 ## A public domain (one command)
 
@@ -130,14 +130,40 @@ nginx, Traefik, HAProxy, a cloud load balancer and others all work if they follo
    `location /s3/ { proxy_pass http://garage:3900/; }` or Traefik `StripPrefix` would. In nginx use
    `proxy_set_header Host $http_host;` and `proxy_pass http://garage:3900;` with no URI part. Do not buffer or limit
    upload bodies below `OCW_ATTACHMENT_MAX_BYTES`.
-5. **Overwrite `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`**, never append to what the client sent
+5. **Do not limit or buffer request bodies on `/api/v1/runtime/files/`** below `OCW_ATTACHMENT_MAX_BYTES`. A Work Zone
+   device sends the files a bot downloads from its session there (`PUT`, streamed, with a `content-length`, up to the
+   organization's "Largest file a bot moves"), and fetches the files a bot uploads (`GET`). A proxy that caps the body
+   answers 413 and the bot gets "transfer failed"; one that buffers the whole body holds every file in memory or on
+   disk first. Caddy (the `proxy` profile) streams request bodies and sets no limit by default. nginx limits bodies
+   to 1 MB unless told otherwise:
+
+   ```nginx
+   location /api/v1/runtime/files/ {
+       client_max_body_size    0;      # or at least OCW_ATTACHMENT_MAX_BYTES
+       proxy_request_buffering off;    # stream the body to the API as it arrives
+       proxy_buffering         off;    # stream the file a device downloads
+       proxy_read_timeout      600s;   # a transfer may take up to 10 minutes
+       proxy_send_timeout      600s;
+       proxy_pass              http://api:4000;
+   }
+   ```
+
+   The API ends a transfer stream itself at the transfer's deadline (at most 10 minutes) or after 30 s without a
+   byte, so a proxy timeout of at least 60 s between bytes is enough; a longer one never keeps a stalled transfer
+   alive.
+
+   **CDNs cap request bodies too** (Cloudflare's free and pro plans at 100 MB, business at 200 MB), whatever the
+   proxy behind them allows. Keep the organization's limit (Settings › Work Zone policy › Bots › Largest file a bot
+   moves) below your CDN's cap, or let devices reach the workspace without the CDN. The release gate checks the
+   `proxy` profile with a 30 MiB `PUT` on this path (`scripts/gate/proxy-check.mjs`).
+6. **Overwrite `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`**, never append to what the client sent
    (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
-6. **Block `/agent-channel/`** with a 404. It is the OpenClaw cell's API and must stay on the internal network.
-7. **Set `OCW_TRUST_PROXY`** to the number of proxies in front of the API (`1` for one), or better, to their
+7. **Block `/agent-channel/`** with a 404. It is the OpenClaw cell's API and must stay on the internal network.
+8. **Set `OCW_TRUST_PROXY`** to the number of proxies in front of the API (`1` for one), or better, to their
    addresses or CIDRs as a comma-separated list (`10.0.0.5` or `10.0.0.0/29`). With a list, a forwarded header is
    only believed when it comes from one of those addresses. Keep the api port off any network your clients can
    reach.
-8. **Serve HTTPS**. Plain HTTP public URLs give non-`Secure` cookies and `ws://` sockets.
+9. **Serve HTTPS**. Plain HTTP public URLs give non-`Secure` cookies and `ws://` sockets.
 
 To keep Caddy and put another front end on the same host in front of it (a tunnel, a load-balancer agent), add
 `infra/caddy/compose.loopback.yaml` to `COMPOSE_FILE`, e.g. `COMPOSE_FILE=compose.yaml:infra/caddy/compose.loopback.yaml`.

@@ -25,7 +25,7 @@ import { type ApiModule, type App, authOf, type Core, tenant } from "../../core"
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
-import { linkTurnAttachments } from "../artifact";
+import { linkTurnAttachments, type ObjectStorage } from "../artifact";
 import type { AutomationFanOut, AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
@@ -67,6 +67,7 @@ import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
+import { registerBotWorkSessionFileRoutes } from "./work-session-files";
 import { registerWorkSessionReadRoute } from "./work-session-read";
 import { registerWorkSessionWakes } from "./work-session-wakes";
 import { registerBotWorkSessionRoutes } from "./work-sessions";
@@ -171,7 +172,12 @@ export function createAgentChannelModule(
      * A bot's own Work Zone sessions (07.16-15, PD-03): the work-session module, whose `bots` start sessions in the bot's
      * sponsor's name; absent = the `/work-sessions/*` routes are not served.
      */
-    workSession?: Pick<WorkSessionModule, "bots" | "botRead"> | null;
+    workSession?: Pick<WorkSessionModule, "bots" | "botRead" | "botFiles"> | null;
+    /**
+     * Attachment object storage (07.17.1.1 review IN-04): the artifact module's one instance, the same the bytes go
+     * through; absent or null = the file moves answer `storage_unavailable`.
+     */
+    storage?: ObjectStorage | null;
     /**
      * Natural-language automations (07.6-12): the automation module's proposal entry point; absent = the
      * `/automations/propose` route is not served.
@@ -595,6 +601,8 @@ export function createAgentChannelModule(
           if (opts.workSession) {
             // 07.16-19 (D-18): a tainted start without the profile's flag becomes a Work Zone proposal.
             registerBotWorkSessionRoutes(scope, core, opts.workSession, opts.workZone ?? null);
+            // 07.17.1.1-12 (D-01, PD-06): the bot moves a thread attachment into the session it started there (13: back).
+            registerBotWorkSessionFileRoutes(scope, core, opts.workSession, opts.storage ?? null);
             // 07.16-17 (PD-14, D-20): what the bot's own session did, bounded and redacted; the read marks the turn.
             registerWorkSessionReadRoute(scope, core, opts.workSession);
           }

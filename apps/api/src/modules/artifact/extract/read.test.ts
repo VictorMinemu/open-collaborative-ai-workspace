@@ -68,6 +68,7 @@ function memoryStorage(
     presignGet: unused("presignGet"),
     head: unused("head"),
     put: unused("put"),
+    putStream: unused("putStream"),
     remove: unused("remove"),
     ensureBucketCors: unused("ensureBucketCors"),
     async rangeGet(key, bytes) {

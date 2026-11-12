@@ -1,4 +1,11 @@
-import type { Device, RuntimeMaintenanceStatus, RuntimeUpdateRun } from "@ocw/contracts";
+import {
+  type Device,
+  type DeviceRuntimeMaintenance,
+  RUNTIME_SELF_BLOCK_SENTENCES,
+  type RuntimeMaintenanceStatus,
+  type RuntimeSelfStatus,
+  type RuntimeUpdateRun,
+} from "@ocw/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,7 +17,11 @@ import {
   lastRunText,
   RunList,
   runTrigger,
+  runtimeHistoryTitle,
+  runtimeSelfView,
   runtimeUpdateStatus,
+  SELF_NOT_BACK_AFTER_MS,
+  selfTrackInterval,
 } from "./runtime-updates";
 import { RuntimeUpdatesField } from "./work-zone-policy-settings";
 
@@ -386,5 +397,358 @@ describe("compatibility flags and the policy select", () => {
     expect(html).toContain('data-testid="policy-runtime-updates"');
     expect(html).toContain("Devices report new versions; the device owner or an admin presses Update now.");
     expect(html).toContain("A device owner can lower this on the device");
+  });
+});
+
+/** The 07.11 rows' markup, recorded from the 07.11 code before the Runtime row existed (07.17.1-06). */
+const cliRows = (html: string) => html.match(/<li data-testid="runtime-update-row"[\s\S]*?<\/li>/g) ?? [];
+
+describe("the 07.11 rows", () => {
+  it("render the same markup as before the Runtime row", () => {
+    const rows = cliRows(render(<DeviceRuntimeUpdates device={device()} />));
+    expect(rows).toHaveLength(2);
+    expect(rows.join("\n")).toMatchSnapshot();
+  });
+
+  it("render the same markup on a service device that shows the Runtime row", () => {
+    const html = render(<DeviceRuntimeUpdates device={service()} />);
+    expect(html).toContain('data-testid="runtime-self-row"');
+    expect(cliRows(html).join("\n")).toBe(
+      cliRows(render(<DeviceRuntimeUpdates device={device()} />)).join("\n"),
+    );
+  });
+});
+
+// ---- 07.17.1-06 (D-01, D-04, D-05, D-07, D-10, PD-17): the OCW runtime's own row ----
+
+const INSTALLED = "1a2b3c4d5e6f";
+const SERVED = "abcdef012345";
+
+function self(over: Partial<RuntimeSelfStatus> = {}): RuntimeSelfStatus {
+  return {
+    version: "0.3.1",
+    build: INSTALLED,
+    supervised: true,
+    canUpdate: true,
+    reason: null,
+    servedVersion: "0.3.2",
+    servedBuild: SERVED,
+    state: "idle",
+    pendingSince: null,
+    lastRun: null,
+    checkedAt: ago(5 * MIN),
+    ...over,
+  };
+}
+
+/** A headless server whose runtime is behind what the workspace serves, unless told otherwise. */
+function service(
+  s: Partial<RuntimeSelfStatus> | null = {},
+  over: Partial<Device> = {},
+  m: Partial<DeviceRuntimeMaintenance> = {},
+): Device {
+  const d = device({ hostKind: "service", daemonVersion: "0.3.1", ...over });
+  const { self: _s, ...rest } = d.runtimeMaintenance!;
+  d.runtimeMaintenance = {
+    ...rest,
+    ...(s ? { self: self(s) } : {}),
+    served: { version: "0.3.2", build: SERVED },
+    ...m,
+  };
+  return d;
+}
+
+const failedRun = {
+  runId: "01a11635-d6e7-7c87-9f17-0000000000f9",
+  outcome: "failed" as const,
+  at: ago(10 * MIN),
+  fromVersion: "0.3.1",
+  toVersion: null,
+  fromBuild: INSTALLED,
+  toBuild: null,
+};
+
+/** The Runtime row's own markup (the first item of the list). */
+const selfRow = (html: string) => html.match(/<li data-testid="runtime-self-row"[\s\S]*?<\/li>/)?.[0] ?? "";
+/** The Update button's opening tag, or "" when there is none. */
+const updateButton = (html: string) =>
+  html.match(/<button[^>]*data-testid="runtime-self-update-now"[^>]*>/)?.[0] ?? "";
+/** The disabled attribute (not the `disabled:` class variants). */
+const DISABLED = /\sdisabled=""/;
+
+describe("runtimeSelfView", () => {
+  it("compares the installed build with the served one", () => {
+    expect(runtimeSelfView(service())).toEqual({
+      kind: "behind",
+      installed: `0.3.1 · ${INSTALLED}`,
+      served: `0.3.2 · ${SERVED}`,
+      servedVersion: "0.3.2",
+      canPress: true,
+    });
+    expect(runtimeSelfView(service({ build: SERVED, version: "0.3.2" }))).toMatchObject({
+      kind: "current",
+      installed: `0.3.2 · ${SERVED}`,
+    });
+  });
+
+  it.each<[RuntimeSelfStatus["state"], string]>([
+    ["downloading", "Downloading…"],
+    ["installing", "Installing…"],
+    ["waiting", "Waiting for sessions to finish"],
+    ["restarting", "Restarting…"],
+  ])("%s is busy: %s", (state, label) => {
+    expect(runtimeSelfView(service({ state }))).toMatchObject({ kind: "busy", label });
+  });
+
+  it("keeps a retry after a failed run, says why a blocked device can't update, and when nothing is served", () => {
+    expect(runtimeSelfView(service({ lastRun: failedRun }))).toMatchObject({
+      kind: "failed",
+      canPress: true,
+    });
+    expect(runtimeSelfView(service({ reason: "not_supervised", canUpdate: false }))).toMatchObject({
+      kind: "blocked",
+      note: RUNTIME_SELF_BLOCK_SENTENCES.not_supervised,
+    });
+    expect(runtimeSelfView(service({}, {}, { served: null }))).toMatchObject({ kind: "not_served" });
+  });
+});
+
+describe("review WR-03: a runtime that did not come back after updating", () => {
+  const gone = (state: RuntimeSelfStatus["state"], seenAgoMs: number) =>
+    service({ state }, { status: "offline", lastSeenAt: ago(seenAgoMs) });
+
+  it("offline past SELF_NOT_BACK_AFTER_MS while busy: not_back with the time it was last seen, no longer busy", () => {
+    expect(SELF_NOT_BACK_AFTER_MS).toBe(3 * MIN);
+    for (const state of ["restarting", "waiting", "downloading", "installing"] as const) {
+      expect(runtimeSelfView(gone(state, 5 * MIN), NOW)).toEqual({
+        kind: "not_back",
+        installed: `0.3.1 · ${INSTALLED}`,
+        since: ago(5 * MIN),
+      });
+    }
+    const unknown = service({ state: "restarting" }, { status: "offline", lastSeenAt: null });
+    expect(runtimeSelfView(unknown, NOW)).toMatchObject({ kind: "not_back", since: null });
+  });
+
+  it("a restart in its first minutes, or an online device, is still busy", () => {
+    expect(runtimeSelfView(gone("restarting", 30_000), NOW)).toMatchObject({ kind: "busy" });
+    expect(runtimeSelfView(service({ state: "restarting" }, { lastSeenAt: ago(HOUR) }), NOW)).toMatchObject({
+      kind: "busy",
+    });
+    expect(runtimeSelfView(service({}, { status: "offline", lastSeenAt: ago(HOUR) }), NOW)).toMatchObject({
+      kind: "behind",
+    });
+  });
+
+  it("renders a warning without a spinner, the next step and the install command", () => {
+    const row = selfRow(render(<DeviceRuntimeUpdates device={gone("restarting", 5 * MIN)} now={NOW} />));
+    expect(row).toContain('data-view="not_back"');
+    expect(row).not.toContain("animate-spin");
+    expect(row).not.toContain("Restarting…");
+    expect(row).toMatch(/data-testid="runtime-self-status"[^>]*>Did not come back</);
+    expect(row).toContain("did not come back after updating");
+    expect(row).toContain("ocw-runtime doctor");
+    expect(row).toContain("ocw-runtime updates off");
+    expect(row).toContain('data-testid="runtime-self-install-command"');
+    expect(row).toContain("The device was last seen 5 minutes ago");
+    expect(updateButton(row)).toBe("");
+    expect(row).toContain('data-testid="runtime-self-history"');
+  });
+});
+
+describe("review IN-10: following a clicked run backs off", () => {
+  it("polls every 2 s for the first minute, then every 15 s", () => {
+    expect(selfTrackInterval(0)).toBe(2_000);
+    expect(selfTrackInterval(59_000)).toBe(2_000);
+    expect(selfTrackInterval(60_000)).toBe(15_000);
+    expect(selfTrackInterval(3 * HOUR)).toBe(15_000);
+  });
+});
+
+describe("RuntimeSelfRow", () => {
+  it("shows installed vs served, the available version and one Update and History on a server that is behind", () => {
+    const html = render(<DeviceRuntimeUpdates device={service()} />);
+    const row = selfRow(html);
+    expect(row).toContain('data-runtime="ocw-runtime"');
+    expect(row).toContain('data-view="behind"');
+    expect(row).toMatch(/data-testid="runtime-self-version"[^>]*>0\.3\.1 · 1a2b3c4d5e6f</);
+    expect(row).toMatch(
+      /data-testid="runtime-self-served"[^>]*>Your workspace serves 0\.3\.2 · abcdef012345</,
+    );
+    expect(row).toMatch(/data-testid="runtime-self-status"[^>]*>0\.3\.2 available</);
+    expect(updateButton(row)).toContain('aria-label="Update the OCW runtime"');
+    expect(updateButton(row)).not.toMatch(DISABLED);
+    expect(row).toMatch(
+      /data-testid="runtime-self-history"[^>]*aria-label="OCW runtime update history"|aria-label="OCW runtime update history"[^>]*data-testid="runtime-self-history"/,
+    );
+  });
+
+  it("is the first item of the list, which names every runtime on the device", () => {
+    const html = render(<DeviceRuntimeUpdates device={service()} />);
+    expect(html).toContain('aria-label="Runtimes on this device"');
+    expect(html).not.toContain("Coding agents on this device");
+    const list = html.slice(html.indexOf('aria-label="Runtimes on this device"'));
+    expect(list.indexOf('data-testid="runtime-self-row"')).toBeLessThan(
+      list.indexOf('data-testid="runtime-update-row"'),
+    );
+    expect(count(html, 'data-testid="runtime-self-row"')).toBe(1);
+  });
+
+  it("says what the device's level means for the runtime", () => {
+    const at = (effectiveLevel: "automatic" | "notify" | "off") =>
+      selfRow(render(<DeviceRuntimeUpdates device={service({}, {}, { effectiveLevel })} />));
+    expect(at("automatic")).toContain("Updates by itself when no session runs");
+    expect(at("off")).toContain("Automatic checks are off. Update still works.");
+    expect(at("notify")).not.toContain("Updates by itself");
+    expect(at("notify")).not.toContain("Automatic checks are off");
+  });
+
+  it("offers no enabled Update when up to date, blocked or busy, and keeps it after a failure", () => {
+    const row = (s: Partial<RuntimeSelfStatus>) =>
+      selfRow(render(<DeviceRuntimeUpdates device={service(s)} />));
+    const current = row({ build: SERVED, version: "0.3.2" });
+    expect(current).toMatch(/data-testid="runtime-self-status"[^>]*>Up to date</);
+    expect(updateButton(current)).toBe("");
+    const blocked = row({ reason: "not_supervised", canUpdate: false });
+    expect(blocked).toContain(RUNTIME_SELF_BLOCK_SENTENCES.not_supervised);
+    expect(blocked).toContain('data-testid="runtime-self-note"');
+    expect(updateButton(blocked)).toBe("");
+    for (const state of ["downloading", "installing", "waiting", "restarting"] as const) {
+      const busy = row({ state });
+      const button = updateButton(busy);
+      expect(button === "" || DISABLED.test(button)).toBe(true);
+      expect(busy).toContain("animate-spin");
+    }
+    const failed = row({ lastRun: failedRun });
+    expect(failed).toMatch(/data-testid="runtime-self-status"[^>]*>Update failed</);
+    expect(updateButton(failed)).not.toMatch(DISABLED);
+  });
+
+  it("offers no Update to a viewer without device.maintain", () => {
+    const row = selfRow(
+      render(<DeviceRuntimeUpdates device={service({}, { viewerCan: ["device.update"] })} />),
+    );
+    expect(row).toContain('data-view="behind"');
+    expect(updateButton(row)).toBe("");
+    expect(row).not.toContain('data-testid="runtime-self-history"');
+  });
+
+  it("uses no faded text: no opacity utility and no alpha text colour in any view", () => {
+    for (const d of [
+      service(),
+      service({ build: SERVED }),
+      service({ state: "waiting" }),
+      service({ lastRun: failedRun }),
+      service({ reason: "node_too_old" }),
+    ]) {
+      const classes = [
+        ...selfRow(render(<DeviceRuntimeUpdates device={d} />)).matchAll(/class="([^"]*)"/g),
+      ].map((c) => c[1] ?? "");
+      expect(classes.length).toBeGreaterThan(0);
+      for (const c of classes) expect(c).not.toMatch(/(^|\s)opacity-|text-muted-foreground\//);
+    }
+  });
+});
+
+describe("the OCW runtime's history", () => {
+  it("lists a run with both builds", () => {
+    const html = render(
+      <RunList
+        history={{
+          data: [
+            {
+              id: "01a11635-d6e7-7c87-9f17-0000000000fa",
+              runtime: "ocw-runtime",
+              trigger: "manual",
+              state: "succeeded",
+              requestedBy: { id: OWNER, name: "Owen" },
+              fromVersion: "0.3.1",
+              toVersion: "0.3.2",
+              fromBuild: INSTALLED,
+              toBuild: SERVED,
+              candidate: "0.3.2",
+              method: "ocw_bundle",
+              output: null,
+              error: null,
+              requestedAt: ago(HOUR),
+              startedAt: ago(HOUR),
+              finishedAt: ago(HOUR - MIN),
+            },
+          ],
+          isPending: false,
+          isError: false,
+          isFetching: false,
+          refetch: () => undefined,
+        }}
+      />,
+    );
+    expect(html).toContain("OCW runtime");
+    expect(html).toContain(`0.3.1 · ${INSTALLED} → 0.3.2 · ${SERVED}`);
+  });
+
+  it("titles the sheet with the target's label", () => {
+    expect(runtimeHistoryTitle("ocw-runtime")).toBe("OCW runtime · newest first");
+    expect(runtimeHistoryTitle("codex")).toBe("Codex · newest first");
+    expect(runtimeHistoryTitle(undefined)).toBe("All coding agents · newest first");
+  });
+});
+
+describe("devices one click can't update", () => {
+  it("a desktop device updates with the desktop app, with or without a report", () => {
+    const bare = service(null, { hostKind: "desktop", daemonVersion: "0.3.0" });
+    expect(runtimeSelfView(bare)).toEqual({ kind: "desktop", installed: "0.3.0" });
+    expect(runtimeSelfView(service({ build: null }, { hostKind: "desktop" }))).toEqual({
+      kind: "desktop",
+      installed: "0.3.1",
+    });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={bare} />));
+    expect(row).toContain('data-view="desktop"');
+    expect(row).toMatch(/data-testid="runtime-self-version"[^>]*>0\.3\.0</);
+    expect(row).toMatch(/data-testid="runtime-self-note"[^>]*>Updates with the desktop app</);
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+    expect(row).not.toContain('data-testid="runtime-self-history"');
+  });
+
+  it("an older server daemon asks for one more install command run, with the command", () => {
+    const d = service(null, { daemonVersion: "0.2.9" });
+    expect(runtimeSelfView(d)).toEqual({ kind: "legacy", installed: "0.2.9" });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={d} />));
+    expect(row).toContain('data-view="legacy"');
+    expect(row).toContain("Re-run the install command once to turn on one-click updates.");
+    expect(row).toMatch(
+      /data-testid="runtime-self-install-command"[\s\S]*curl -fsSL http:\/\/localhost:4000\/api\/v1\/runtime\/install\.sh \| sh/,
+    );
+    // The long command wraps on a phone instead of scrolling sideways.
+    expect(row).toContain("whitespace-pre-wrap");
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+  });
+
+  it("a runtime of unknown kind not installed with the command says so; one that reports nothing has no row", () => {
+    const d = service({ reason: "not_installed", build: null, canUpdate: false }, { hostKind: null });
+    expect(runtimeSelfView(d)).toEqual({
+      kind: "unmanaged",
+      installed: "0.3.1",
+      note: RUNTIME_SELF_BLOCK_SENTENCES.not_installed,
+    });
+    const row = selfRow(render(<DeviceRuntimeUpdates device={d} />));
+    expect(row).toContain('data-view="unmanaged"');
+    expect(row).toContain(RUNTIME_SELF_BLOCK_SENTENCES.not_installed);
+    expect(row).not.toContain('data-testid="runtime-self-update-now"');
+    const none = service(null, { hostKind: null });
+    expect(runtimeSelfView(none)).toEqual({ kind: "hidden" });
+    const html = render(<DeviceRuntimeUpdates device={none} />);
+    expect(html).not.toContain('data-testid="runtime-self-row"');
+    expect(count(html, 'data-testid="runtime-update-row"')).toBe(2);
+  });
+
+  it("uses no faded text in these views either", () => {
+    for (const d of [
+      service(null, { hostKind: "desktop", daemonVersion: "0.3.0" }),
+      service(null),
+      service({ reason: "not_installed" }, { hostKind: null }),
+    ]) {
+      for (const c of selfRow(render(<DeviceRuntimeUpdates device={d} />)).matchAll(/class="([^"]*)"/g))
+        expect(c[1]).not.toMatch(/(^|\s)opacity-|text-muted-foreground\//);
+    }
   });
 });

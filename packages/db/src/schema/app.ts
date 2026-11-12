@@ -1493,10 +1493,19 @@ export const workZonePolicies = appSchema.table(
      * sessions (the admin's kill switch).
      */
     botSessionsMax: integer("bot_sessions_max").notNull().default(10),
+    /**
+     * Phase 07.17.1.1 (D-07): the largest file a bot moves into or out of its Work Zone sessions, 1 MiB … 1 GiB (25 MiB
+     * by default). Never above `OCW_ATTACHMENT_MAX_BYTES`, which only the API knows and enforces.
+     */
+    botFileMaxBytes: bigint("bot_file_max_bytes", { mode: "number" }).notNull().default(26214400),
   },
   (t) => [
     check("work_zone_policies_runtime_updates_ck", sql`${t.runtimeUpdates} in ('automatic','notify','off')`),
     check("work_zone_policies_bot_sessions_max_ck", sql`${t.botSessionsMax} between 0 and 1000`),
+    check(
+      "work_zone_policies_bot_file_max_bytes_ck",
+      sql`${t.botFileMaxBytes} between 1048576 and 1073741824`,
+    ),
   ],
 );
 
@@ -1887,6 +1896,11 @@ export const botWorkZoneProfiles = appSchema.table(
     maxConcurrent: smallint("max_concurrent").notNull().default(2),
     promptsPerHour: smallint("prompts_per_hour").notNull().default(30),
     wakesPerSessionDay: smallint("wakes_per_session_day").notNull().default(20),
+    /**
+     * Phase 07.17.1.1 (D-07): this bot's largest file, 1 MiB … 1 GiB; null = the organization's value. The lowest of
+     * the bot's, the organization's and the server's applies.
+     */
+    fileMaxBytes: bigint("file_max_bytes", { mode: "number" }),
     actOnOutsideContent: boolean("act_on_outside_content").notNull().default(false),
     actOnOutsideContentBy: uuid("act_on_outside_content_by"),
     actOnOutsideContentAt: ts("act_on_outside_content_at"),
@@ -1919,6 +1933,10 @@ export const botWorkZoneProfiles = appSchema.table(
     check("bot_work_zone_profiles_max_concurrent_ck", sql`${t.maxConcurrent} between 1 and 10`),
     check("bot_work_zone_profiles_prompts_per_hour_ck", sql`${t.promptsPerHour} between 1 and 120`),
     check("bot_work_zone_profiles_wakes_per_session_day_ck", sql`${t.wakesPerSessionDay} between 0 and 100`),
+    check(
+      "bot_work_zone_profiles_file_max_bytes_ck",
+      sql`${t.fileMaxBytes} is null or ${t.fileMaxBytes} between 1048576 and 1073741824`,
+    ),
   ],
 );
 
@@ -2048,6 +2066,69 @@ export const botWorkSessions = appSchema.table(
 );
 
 /**
+ * Phase 07.17.1.1 (D-05, D-06, D-08; ADR-0041): one row per file transfer the API enqueued between a bot and a session it
+ * started, either way (`to_device` = an attachment written into the session's tree, `from_device` = a session file
+ * stored as a new attachment of the turn). The id IS the device command's id (no default: the API sets it), which the
+ * daemon's one `GET` / `PUT /runtime/files/<id>` names. Every row counts as one unit of the bot's hourly prompt budget,
+ * whatever its outcome (`app.bot_work_session_load`), and (event, direction) bounds the moves per turn. `attachment_id`
+ * is the source attachment of an upload, or the pre-allocated id of a download's attachment. No column ever holds a
+ * path, a file name or content (only `path_length`, P1): the path travels only in the command's own payload. Deleting the
+ * session deletes its rows; tenant isolation comes from post-migrate.
+ */
+export const botWorkSessionFiles = appSchema.table(
+  "bot_work_session_files",
+  {
+    id: uuid("id").primaryKey(),
+    organizationId: orgId(),
+    workSessionId: uuid("work_session_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    /** The bot turn that asked for the move. */
+    eventId: uuid("event_id").notNull(),
+    deviceId: uuid("device_id").notNull(),
+    /** The turn's conversation (the session's origin conversation, PD-14). */
+    conversationId: uuid("conversation_id").notNull(),
+    direction: text("direction", { enum: ["to_device", "from_device"] }).notNull(),
+    attachmentId: uuid("attachment_id").notNull(),
+    /** The limit that applied when the move was enqueued, and whose limit it was. */
+    maxBytes: bigint("max_bytes", { mode: "number" }).notNull(),
+    limitSource: text("limit_source", { enum: ["bot", "organization", "server"] }).notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    /** Lowercase hex sha256 of the bytes moved, once known. */
+    sha256: text("sha256"),
+    /** The length of the repo-relative path in characters; the path itself is never stored here. */
+    pathLength: smallint("path_length").notNull(),
+    status: text("status", { enum: ["pending", "streaming", "streamed", "done", "failed"] })
+      .notNull()
+      .default("pending"),
+    /** A `SessionFileFailure` code (or `timeout`) of a failed move; never a path or file content. */
+    failure: text("failure"),
+    expiresAt: ts("expires_at").notNull(),
+    createdAt: createdAt(),
+    completedAt: ts("completed_at"),
+  },
+  (t) => [
+    foreignKey({
+      name: "bot_work_session_files_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("cascade"),
+    index("bot_work_session_files_agent_idx").on(t.organizationId, t.agentId, t.createdAt),
+    index("bot_work_session_files_turn_idx").on(t.organizationId, t.eventId, t.direction),
+    check("bot_work_session_files_direction_ck", sql`${t.direction} in ('to_device','from_device')`),
+    check(
+      "bot_work_session_files_status_ck",
+      sql`${t.status} in ('pending','streaming','streamed','done','failed')`,
+    ),
+    check("bot_work_session_files_limit_source_ck", sql`${t.limitSource} in ('bot','organization','server')`),
+    check("bot_work_session_files_sha256_ck", sql`${t.sha256} is null or ${t.sha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "bot_work_session_files_sizes_ck",
+      sql`${t.maxBytes} > 0 and (${t.sizeBytes} is null or ${t.sizeBytes} >= 0) and ${t.pathLength} between 1 and 1024`,
+    ),
+  ],
+);
+
+/**
  * Server → device command queue (Device Link). At-least-once: every command not yet acked is redelivered,
  * in order, when the device reconnects; the daemon treats a repeated id as done.
  */
@@ -2071,6 +2152,9 @@ export const deviceCommands = appSchema.table(
         "session.configure",
         "session.title",
         "runtime.update",
+        // 07.17.1.1 (D-04): type-level only, like the kinds above (the column has no check constraint).
+        "session.file.write",
+        "session.file.read",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
@@ -2097,7 +2181,8 @@ export const deviceRuntimeUpdates = appSchema.table(
     id: id(),
     organizationId: orgId(),
     deviceId: uuid("device_id").notNull(),
-    runtime: text("runtime", { enum: ["claude-code", "codex"] }).notNull(),
+    /** The maintenance target: a CLI the daemon drives, or the OCW runtime itself (07.17.1, ADR-0040). */
+    runtime: text("runtime", { enum: ["claude-code", "codex", "ocw-runtime"] }).notNull(),
     /** Device-generated run id; null while only requested. */
     runId: uuid("run_id"),
     /** The `runtime.update` command of an "Update now" request. */
@@ -2120,6 +2205,10 @@ export const deviceRuntimeUpdates = appSchema.table(
     toVersion: text("to_version"),
     candidate: text("candidate"),
     method: text("method"),
+    /** 07.17.1: the 12-hex build an `ocw-runtime` run started from (never a full sha256); null for CLI runs. */
+    fromBuild: text("from_build"),
+    /** 07.17.1: the 12-hex build an `ocw-runtime` run targets (the build the workspace serves); null for CLI runs. */
+    toBuild: text("to_build"),
     output: text("output"),
     error: text("error"),
     requestedAt: ts("requested_at"),
@@ -2139,7 +2228,11 @@ export const deviceRuntimeUpdates = appSchema.table(
       .on(t.organizationId, t.deviceId, t.runtime)
       .where(sql`state = 'requested'`),
     index("device_runtime_updates_device_idx").on(t.organizationId, t.deviceId, t.createdAt),
-    check("device_runtime_updates_runtime_ck", sql`${t.runtime} in ('claude-code','codex')`),
+    check("device_runtime_updates_runtime_ck", sql`${t.runtime} in ('claude-code','codex','ocw-runtime')`),
+    check(
+      "device_runtime_updates_build_ck",
+      sql`(${t.fromBuild} is null or ${t.fromBuild} ~ '^[0-9a-f]{12}$') and (${t.toBuild} is null or ${t.toBuild} ~ '^[0-9a-f]{12}$')`,
+    ),
     check("device_runtime_updates_trigger_ck", sql`${t.trigger} in ('automatic','manual','local')`),
     check(
       "device_runtime_updates_state_ck",
