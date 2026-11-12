@@ -19,6 +19,8 @@ import {
   type ShellSpecInput,
   STAGING_DIR,
   shellSpec,
+  TOOLS_DIR,
+  TOOLS_SITE,
   volumeSpec,
 } from "./spec";
 
@@ -89,13 +91,14 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     });
   });
 
-  it("sets exactly HOME, the package paths and the egress proxy (no OCW_ variable, no token, no secret)", () => {
+  it("sets exactly HOME, the toolkit and package paths and the egress proxy (no OCW_ variable, no token, no secret)", () => {
     // 07.8-17: package bins come after the system paths; curl, pip and npm use the proxy by default (WINDOWS #253).
+    // 07.17.1.1.1 (D-03, PD-05): the document toolkit sits after the system paths and before approved packages.
     expect(shellSpec(base).Env).toEqual([
       "HOME=/workspace",
-      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin",
       "NODE_PATH=/opt/ocw-packages/node_modules",
-      "PYTHONPATH=/opt/ocw-packages/python",
+      "PYTHONPATH=/opt/ocw-tools/venv/lib/python3.11/site-packages:/opt/ocw-packages/python",
       "HTTP_PROXY=http://sandbox-egress:3128",
       "HTTPS_PROXY=http://sandbox-egress:3128",
       "http_proxy=http://sandbox-egress:3128",
@@ -105,6 +108,22 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     ]);
     expect(shellSpec(base).Env).toEqual([...SHELL_ENV]);
     for (const line of SHELL_ENV) expect(line).not.toMatch(/OCW_|TOKEN|SECRET|PASSWORD|@/i);
+  });
+
+  it("puts the toolkit after the system paths and before approved packages, never the venv's own bin (07.17.1.1.1)", () => {
+    expect(TOOLS_DIR).toBe("/opt/ocw-tools");
+    expect(TOOLS_SITE).toBe("/opt/ocw-tools/venv/lib/python3.11/site-packages");
+    const value = (name: string) => {
+      const line = SHELL_ENV.find((l) => l.startsWith(`${name}=`));
+      expect(line).toBeDefined();
+      return (line ?? "").slice(name.length + 1).split(":");
+    };
+    const path = value("PATH");
+    expect(path.indexOf("/opt/ocw-tools/bin")).toBe(path.indexOf("/bin") + 1);
+    expect(path.indexOf("/opt/ocw-packages/bin")).toBe(path.indexOf("/opt/ocw-tools/bin") + 1);
+    const pythonPath = value("PYTHONPATH");
+    expect(pythonPath).toEqual([TOOLS_SITE, `${PACKAGES_DIR}/python`]);
+    for (const line of SHELL_ENV) expect(line).not.toContain("/opt/ocw-tools/venv/bin");
   });
 
   it("clamps limits over HARD_MAX and nonsense values to a safe range", () => {
@@ -218,6 +237,8 @@ describe("the files helper keeps only the workspace (07.8-17)", () => {
       { Type: "volume", Source: base.volume, Target: "/workspace", ReadOnly: false },
     ]);
     expect(spec.HostConfig.NetworkMode).toBe("none");
+    // The same environment as the shell (it reuses shellSpec), the toolkit paths included (07.17.1.1.1).
+    expect(spec.Env).toEqual([...SHELL_ENV]);
   });
 });
 
