@@ -838,6 +838,50 @@ describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
     expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
     expect(seen.at(-1)?.body.text).toBe(`Done: ${TURN_DONE} @ana`);
   });
+
+  it("07.17.1.1-10: ocw_work_session_upload and _download post only their own keys to /work-sessions/upload|download", async () => {
+    const ATTACHMENT = "00000000-0000-4000-8000-0000000000b1";
+    answers["/agent-channel/v1/work-sessions/upload"] = [
+      404,
+      { error: { code: "attachment_not_found", message: "x" } },
+    ];
+    answers["/agent-channel/v1/work-sessions/download"] = [
+      404,
+      { error: { code: "session_not_found", message: "x" } },
+    ];
+    const m = atlasTurn({
+      turn: { tools: [...WORK_SESSION_TOOLS, "ocw_work_session_upload", "ocw_work_session_download"] },
+    });
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(m, [
+      {
+        tool: "ocw_work_session_upload",
+        args: { workSessionId: WS, attachmentId: ATTACHMENT, path: " docs/spec.md ", overwrite: true, url: "x" },
+      },
+      { tool: "ocw_work_session_download", args: { workSessionId: WS, path: "notes/out.md", name: "x" } },
+    ]);
+    expect(lines).toEqual([
+      "Tool ocw_work_session_upload: refused (attachment_not_found)",
+      "Tool ocw_work_session_download: refused (session_not_found)",
+    ]);
+    expect(seen.slice(from)).toEqual([
+      {
+        path: "/agent-channel/v1/work-sessions/upload",
+        body: {
+          eventId: m.eventId,
+          agentId: m.agent.id,
+          workSessionId: WS,
+          attachmentId: ATTACHMENT,
+          path: "docs/spec.md",
+          overwrite: true,
+        },
+      },
+      {
+        path: "/agent-channel/v1/work-sessions/download",
+        body: { eventId: m.eventId, agentId: m.agent.id, workSessionId: WS, path: "notes/out.md" },
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------- 07.17-18: fan-out runs, item turns, card wakes (PD-22)

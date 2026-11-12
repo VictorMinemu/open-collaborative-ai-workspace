@@ -732,7 +732,7 @@ describe("bot Work Zone tools and turn offer (07.16 D-05, PD-09, PD-17)", () => 
     sessions: [{ id: ID2, status: "running", projectName: "billing-api" }],
   };
 
-  it("the four names are built-ins with the hub's flags", () => {
+  it("the six names are built-ins with the hub's flags (07.17.1.1 D-01: the four, then upload and download)", () => {
     expect(BUILTIN_TOOLS.workSessionStart).toBe("ocw_work_session_start");
     expect(BUILTIN_TOOLS.workSessionPrompt).toBe("ocw_work_session_prompt");
     expect(BUILTIN_TOOLS.workSessionRead).toBe("ocw_work_session_read");
@@ -742,12 +742,16 @@ describe("bot Work Zone tools and turn offer (07.16 D-05, PD-09, PD-17)", () => 
       "ocw_work_session_prompt",
       "ocw_work_session_read",
       "ocw_work_session_stop",
+      "ocw_work_session_upload",
+      "ocw_work_session_download",
     ]);
     expect(WORK_SESSION_TOOL_FLAGS).toEqual({
       ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
       ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
       ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
       ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
     });
   });
 
@@ -820,8 +824,13 @@ describe("the two Work Zone file tools (07.17.1.1 D-01, PD-04, PD-26)", () => {
       ocw_work_session_upload: { untrustedOutput: false, sideEffecting: true },
       ocw_work_session_download: { untrustedOutput: false, sideEffecting: true },
     });
-    // 07.17.1.1-10 extends the offer to six; until then the 07.16 set is unchanged.
-    expect(WORK_SESSION_TOOL_NAMES).toHaveLength(4);
+    // 07.17.1.1-10: the offer is six, all or none; the file tools close the list with their flags.
+    expect(WORK_SESSION_TOOL_NAMES).toHaveLength(6);
+    expect(WORK_SESSION_TOOL_NAMES.slice(-2)).toEqual([...WORK_SESSION_FILE_TOOL_NAMES]);
+    expect(Object.keys(WORK_SESSION_TOOL_FLAGS)).toHaveLength(6);
+    for (const name of WORK_SESSION_FILE_TOOL_NAMES) {
+      expect(WORK_SESSION_TOOL_FLAGS[name]).toEqual(WORK_SESSION_FILE_TOOL_FLAGS[name]);
+    }
   });
 
   it("are never approvable and never a dangerous name, on either host", () => {

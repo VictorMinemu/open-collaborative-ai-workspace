@@ -31,13 +31,18 @@ import { conversationAudience } from "./memory-files";
 import { buildMentionEvents } from "./mentions";
 
 /**
- * Phase 07.16-11 (D-05, D-21, PD-17; BWZ-02, BWZ-06): which turns are offered the four `ocw_work_session_*` tools and
+ * Phase 07.16-11 (D-05, D-21, PD-17; BWZ-02, BWZ-06): which turns are offered the `ocw_work_session_*` tools and
  * the Work Zone context. Decided server-side at delivery: a bot whose profile is active, an asker who passes the Work
- * Zone module gate, a person's delivery (never an automation run or a consult hop), and room for four tools. A bot
+ * Zone module gate, a person's delivery (never an automation run or a consult hop), and room for the tools. A bot
  * without a profile gets the turn it got before the phase. Real PostgreSQL + Redis.
+ *
+ * 07.17.1.1-10 (D-01, D-07): the set is six (the four, then upload and download), all or none, and the offer carries
+ * the per-file limit those two apply (`workZone.files`). This suite's server ceiling is 100 MiB, so the organization's
+ * 25 MiB default is the limit that applies until the bot's profile sets a lower one.
  */
 
 const CELL_TOKEN = "ocw-test-cell-token-work-session-offer-0123456789";
+const MIB = 1024 * 1024;
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -130,7 +135,7 @@ async function expectNoOffer(ev: Json) {
   for (const name of WORK_SESSION_TOOL_NAMES) expect(tools).not.toContain(name);
 }
 
-/** The four tools with their flags on the turn and in its ledger row; returns the parsed Work Zone context. */
+/** The six tools with their flags on the turn and in its ledger row; returns the parsed Work Zone context. */
 async function expectOffer(ev: Json): Promise<TurnWorkZone> {
   for (const name of WORK_SESSION_TOOL_NAMES) {
     expect(ev.turn.tools).toContain(name);
@@ -165,7 +170,14 @@ const profile = (over: Partial<BotWorkZoneProfileInput> = {}): BotWorkZoneProfil
 });
 
 beforeAll(async () => {
-  stack = await startTestStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock" } });
+  stack = await startTestStack({
+    env: {
+      OCW_CELL_TOKEN: CELL_TOKEN,
+      OCW_MODEL_PROVIDER: "mock",
+      // Above the organization's 25 MiB default, so the turn's file limit names the organization (D-07).
+      OCW_ATTACHMENT_MAX_BYTES: String(100 * MIB),
+    },
+  });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
@@ -223,8 +235,8 @@ afterAll(async () => {
   await stack?.stop();
 });
 
-describe("tracer: a channel mention of a team bot with an active profile carries the four tools and its Work Zone", () => {
-  it("before the device's consent the mention carries none of the four tools and no workZone", async () => {
+describe("tracer: a channel mention of a team bot with an active profile carries the six tools and its Work Zone", () => {
+  it("before the device's consent the mention carries none of the six tools and no workZone", async () => {
     await createBotProfile(victor, atlasId, profile());
     await expectNoOffer(await mentionTurn(atlasId));
   });
@@ -255,6 +267,22 @@ describe("tracer: a channel mention of a team bot with an active profile carries
     expect(ev.turn.tools).not.toContain("ocw_work_zone_projects");
     // Repo-relative data only: no absolute path, no URL.
     expect(JSON.stringify(wz)).not.toMatch(/https?:\/\/|\/Users\/|\/home\//u);
+    // 07.17.1.1 (D-07): the file tools' limit, the organization's default below this server's ceiling.
+    expect(wz.files).toEqual({ bytes: 25 * MIB, source: "organization" });
+  });
+
+  it("07.17.1.1 (D-07): after the bot's profile saves 10 MiB, the next turn's limit is this bot's", async () => {
+    await createBotProfile(victor, atlasId, profile({ fileMaxBytes: 10 * MIB }));
+    try {
+      const wz = await expectOffer(await mentionTurn(atlasId));
+      expect(wz.files).toEqual({ bytes: 10 * MIB, source: "bot" });
+    } finally {
+      await createBotProfile(victor, atlasId, profile({ fileMaxBytes: null }));
+    }
+    expect((await expectOffer(await mentionTurn(atlasId))).files).toEqual({
+      bytes: 25 * MIB,
+      source: "organization",
+    });
   });
 });
 
@@ -573,8 +601,8 @@ describe("organization B never influences an organization-A turn", () => {
   });
 });
 
-describe("the four tools need four free slots (TURN_TOOLS_MAX)", () => {
-  it("TURN_TOOLS_MAX - 3 tools besides the proposal tools: none of the four (the proposals stay); one fewer: all four, replacing them", async () => {
+describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
+  it("TURN_TOOLS_MAX - 5 tools besides the proposal tools: none of the six (the proposals stay); one fewer: all six, replacing them", async () => {
     const base = (await mentionTurn(atlasId)).turn.tools.length - WORK_SESSION_TOOL_NAMES.length;
     const serverMcp = randomUUID();
     await su.query(
@@ -583,7 +611,7 @@ describe("the four tools need four free slots (TURN_TOOLS_MAX)", () => {
       [serverMcp, orgId],
     );
     const names = Array.from(
-      { length: TURN_TOOLS_MAX - 3 - base },
+      { length: TURN_TOOLS_MAX - 5 - base },
       (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
     );
     for (const name of names) {
@@ -601,8 +629,8 @@ describe("the four tools need four free slots (TURN_TOOLS_MAX)", () => {
     try {
       await grant(names);
       const full = await mentionTurn(atlasId);
-      // No room for the four: the turn keeps the two proposal tools, so the bot can still propose.
-      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX - 1);
+      // No room for the six: the turn keeps the two proposal tools, so the bot can still propose.
+      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX - 3);
       expect(full.turn.tools).toContain("ocw_start_work_zone");
       await expectNoOffer(full);
 
