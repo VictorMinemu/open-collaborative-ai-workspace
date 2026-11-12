@@ -2794,7 +2794,7 @@ describe("memory files mirror parity (07.2-07: plugin ↔ packages/contracts mem
     "a /b.md",
     "a\u0000.md",
     "a\n.md",
-    "a‮b.md",
+    "a\u202Eb.md",
     "a/b:c.md",
     "a/<b>.md",
     `${"s".repeat(62)}.md`,
