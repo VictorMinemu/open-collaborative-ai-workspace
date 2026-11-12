@@ -165,7 +165,8 @@ export async function resolveSessionPath(
     target = stored;
   }
   const relReal = toPosix(relative(realRoot, target));
-  if (relReal.startsWith("..") || workSessionFilePathRefusal(relReal) !== null) {
+  // Review IN-05: only `..` itself or a `../` prefix leaves the root; `..notes.md` is an ordinary name.
+  if (relReal === ".." || relReal.startsWith("../") || workSessionFilePathRefusal(relReal) !== null) {
     throw new SessionFileError("path_not_allowed");
   }
   return { root: realRoot, parent, target, relReal };

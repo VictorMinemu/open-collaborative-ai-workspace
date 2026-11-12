@@ -172,6 +172,14 @@ describe("resolveSessionPath (PD-10)", () => {
     expect(await codeOf(resolveSessionPath(root, "g/config", { create: false }))).toBe("path_not_allowed");
   });
 
+  it("a name that only starts with two dots is an ordinary file, never a traversal (review IN-05)", async () => {
+    writeFileSync(join(root, "..notes.md"), "dots");
+    mkdirSync(join(root, "..cache"));
+    writeFileSync(join(root, "..cache", "a.md"), "x");
+    expect((await resolveSessionPath(root, "..notes.md", { create: false })).relReal).toBe("..notes.md");
+    expect((await resolveSessionPath(root, "..cache/a.md", { create: false })).relReal).toBe("..cache/a.md");
+  });
+
   it("a directory symlink that stays inside the tree resolves to its real place", async () => {
     symlinkSync(join(root, "docs"), join(root, "d"));
     const r = await resolveSessionPath(root, "d/a.md", { create: false });
