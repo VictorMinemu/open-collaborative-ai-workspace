@@ -3,7 +3,7 @@
 xlsx/xlsm are read with openpyxl (`read_only=True, data_only=True`; defusedxml installed) in a child interpreter.
 Legacy .xls and OpenDocument sheets go through LibreOffice to .xlsx first, which keeps the sheet order and names
 (xlrd was dropped for its license); LibreOffice's UTF-8 CSV export of every sheet is the fallback. An OOXML part
-that declares a DTD or an entity is refused before any parser sees it (OOXML never needs one).
+that declares a DTD or an entity is refused before any parser sees it (OOXML never needs one; containers.py).
 """
 
 import csv
@@ -19,19 +19,15 @@ from . import bounds, containers, office
 # LibreOffice's CSV filter: comma, double quote, UTF-8 (76), from line 1, …, every sheet (-1) (PD-11, Pitfall 4).
 CSV_FILTER = "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1"
 XLSX_FILTER = "xlsx:Calc MS Excel 2007 XML"
-DTD_SCAN_BYTES = 64 * 1024
 
 
 def refuse_dtd(path):
-    """Raise when any XML part of an OOXML zip declares a DTD or an entity (billion laughs, XXE)."""
-    with zipfile.ZipFile(path) as z:
-        for info in z.infolist():
-            if not info.filename.endswith((".xml", ".rels", ".vml")):
-                continue
-            with z.open(info) as f:
-                start = f.read(DTD_SCAN_BYTES)
-            if b"<!DOCTYPE" in start or b"<!ENTITY" in start:
-                raise ValueError(f"{info.filename} declares XML entities or a DTD (refused)")
+    """Raise when any part of an OOXML zip declares a DTD or an entity (billion laughs, XXE), whatever its name, its
+    encoding or where in the part it sits (07.17.1.1.1 review WR-03; containers.refuse_dtd)."""
+    try:
+        containers.refuse_dtd_path(path)
+    except containers.DtdRefused as exc:
+        raise ValueError(str(exc)) from None
 
 
 def cell(value):

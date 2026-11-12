@@ -737,6 +737,47 @@ class Hostile(Base):
             shutil.rmtree(f"{WS}/bomb-pack", ignore_errors=True)
             shutil.rmtree(f"{WS}/extracted/bomb-pack", ignore_errors=True)
 
+    def test_a_dtd_in_any_ooxml_part_is_refused_however_it_is_hidden(self):
+        """07.17.1.1.1 review WR-03: a DTD or entity declaration is refused in every part of an OOXML file, whatever its
+        name, its encoding or how far into the part it sits (a 64 KiB byte scan of `.xml` parts missed all three)."""
+        import zipfile
+
+        dtd = '<!DOCTYPE x [<!ENTITY a "b">]><x>&a;</x>'
+        parts = {
+            "customXml/item1.dat": f'<?xml version="1.0" encoding="UTF-8"?>{dtd}'.encode(),
+            "docProps/padded.xml": (
+                f'<?xml version="1.0" encoding="UTF-8"?>\n<!--{"x" * 70_000}-->\n{dtd}'.encode()
+            ),
+            "docProps/utf16.xml": f'<?xml version="1.0" encoding="UTF-16"?>{dtd}'.encode("utf-16"),
+            "docProps/utf32.xml": f'<?xml version="1.0" encoding="UTF-32"?>{dtd}'.encode("utf-32"),
+        }
+        made = []
+        try:
+            for name in ("slides.pptx", "plan.docx", "ventas.xlsx"):
+                for member, data in parts.items():
+                    path = f"{WS}/dtd-{len(made)}-{name}"
+                    shutil.copyfile(f"{FX}/{name}", path)
+                    with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as z:
+                        z.writestr(member, data)
+                    made.append(path)
+                    with self.subTest(name=name, member=member):
+                        rc, _out, err = cli(os.path.basename(path), timeout=120)
+                        self.assertEqual(rc, 7, err)
+                        assert_reason(self, err, "declares XML entities or a DTD")
+            # Without a hidden declaration the same files still read: a media part is not XML, and slides.pptx carries
+            # python-pptx's printerSettings1.bin, a binary blob that embeds a plist with a doctype (never parsed).
+            for name in ("slides.pptx", "plan.docx", "ventas.xlsx"):
+                path = f"{WS}/clean-{name}"
+                shutil.copyfile(f"{FX}/{name}", path)
+                with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as z:
+                    z.writestr("media/photo.bin", bytes(range(256)) * 64)
+                made.append(path)
+                rc, _out, err = cli(os.path.basename(path), timeout=120)
+                self.assertEqual(rc, 0, (name, err))
+        finally:
+            for path in made:
+                os.unlink(path)
+
     def test_an_unknown_binary_is_unsupported(self):
         rc, _out, err = cli("fx/blob.bin")
         self.assertEqual(rc, 3)
