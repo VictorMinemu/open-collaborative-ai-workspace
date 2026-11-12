@@ -501,7 +501,12 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
       await fail(failure);
       return { answer: refusedAnswer(code), audit };
     }
-    if (row.status === "streamed" && typeof path === "string") {
+    // 07.17.1.1-12: an upload's GET records `streamed` after its response finished, outside the request, so the
+    // device's ok (sent once it checked every byte's size and sha256 against the payload) can arrive first. A row the
+    // device claimed (`streaming`) is then done; a row it never fetched (`pending`) is not. A download's PUT records
+    // `streamed` before it answers the device, so only `streamed` counts there.
+    const moved = row.status === "streamed" || (row.direction === "to_device" && row.status === "streaming");
+    if (moved && typeof path === "string") {
       if (row.direction === "to_device") {
         await markTransfer(tx, row.id, { status: "done", completedAt: new Date().toISOString() });
         core.log.debug({ transferId: row.id, code: "uploaded" }, "bot file move finished");
