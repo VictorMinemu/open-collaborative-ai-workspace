@@ -144,6 +144,8 @@ jobs:
       # Bot sandboxes (07.8-24): the broker and the three images it runs, as the `sandbox` compose profile builds them.
       - run: docker build -f infra/sandbox/sandboxd/Dockerfile -t ocw-sandboxd:ci .
       - run: docker build -t ocw-sandbox-sbx:ci infra/sandbox/sbx
+      # The document toolkit's image tests (07.17.1.1.1, D-07): hardened like a bot's shell, no network, size gate.
+      - run: sh infra/sandbox/test/run-sbx-image-tests.sh ocw-sandbox-sbx:ci
       - run: docker build -t ocw-sandbox-brw:ci infra/sandbox/browser
       - run: docker build -f infra/sandbox/egress/Dockerfile -t ocw-sandbox-egress:ci .
 
