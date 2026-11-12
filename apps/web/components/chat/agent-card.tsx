@@ -29,6 +29,7 @@ import {
   KeyRound,
   Laptop,
   LayoutGrid,
+  ListChecks,
   Lock,
   LockKeyhole,
   LogIn,
@@ -110,6 +111,8 @@ const KIND: Record<AgentCardKind, { label: string; icon: ComponentType<{ classNa
   generic: { label: "Card", icon: LayoutGrid },
   // Phase 07.8 (UI-SPEC R1, Surface 2): the platform-owned sign-in card (body: `SignInCardBody`, 07.8-26).
   browser: { label: "Sign-in", icon: LogIn },
+  // Phase 07.17.1.1.2 (D-05): the platform-owned task card (its body arrives with 07.17.1.1.2-10).
+  task: { label: "Task", icon: ListChecks },
 };
 
 /** Status pill colours: text at AA contrast on its tint in light and dark. */

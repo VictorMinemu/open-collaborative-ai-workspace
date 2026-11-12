@@ -1958,8 +1958,11 @@ export const AGENT_POSTABLE_CARD_KINDS = [
   "pr",
   "generic",
 ] as const;
-/** Every kind (contracts parity); `browser` (Phase 07.8 sign-in card) is platform-owned, never posted by an agent. */
-export const AGENT_CARD_KINDS = [...AGENT_POSTABLE_CARD_KINDS, "browser"] as const;
+/**
+ * Every kind (contracts parity); `browser` (Phase 07.8 sign-in card) and `task` (Phase 07.17.1.1.2 task card) are
+ * platform-owned, never posted by an agent.
+ */
+export const AGENT_CARD_KINDS = [...AGENT_POSTABLE_CARD_KINDS, "browser", "task"] as const;
 export const AGENT_CARD_STATUSES = [
   "info",
   "pending",

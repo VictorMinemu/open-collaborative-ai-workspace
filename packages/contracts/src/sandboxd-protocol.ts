@@ -305,6 +305,20 @@ export const SandboxdEvent = z.discriminatedUnion("type", [
     host: z.string().min(1).max(260).optional(),
     download: SandboxdDownloadRef.optional(),
   }),
+  /**
+   * Phase 07.17.1.1.2 (D-03, PD-13): a background command the API saw as `running` (sandboxd answered `running` for it)
+   * ended: it exited, was killed or timed out. Emitted once per command. Ids and numbers only, never argv, a path or
+   * output (T-07.8-09-04); a lost command (a new boot id) is the API's own conclusion, never an event.
+   */
+  z.object({
+    ...EventBase,
+    type: z.literal("process"),
+    target: SandboxdTarget,
+    processId: SandboxProcessId,
+    status: z.enum(["exited", "killed", "timed_out"]),
+    exitCode: z.number().int().nullable(),
+    durationMs: z.number().int().nonnegative(),
+  }),
 ]);
 export type SandboxdEvent = z.infer<typeof SandboxdEvent>;
 

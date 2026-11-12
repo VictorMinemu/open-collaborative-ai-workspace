@@ -47,6 +47,11 @@ import {
  */
 
 export type CardRow = typeof messageCards.$inferSelect;
+/**
+ * The kinds the `message_cards.kind` column stores. 07.17.1.1.2-01 adds `task` to `AgentCardKind` before
+ * 07.17.1.1.2-03 widens the column and its CHECK; until then the database refuses a `task` row on its own.
+ */
+type StoredCardKind = (typeof messageCards.$inferInsert)["kind"];
 
 /** Kinds a card may live in: wherever an agent may post (P-10). */
 const CARD_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
@@ -255,9 +260,10 @@ export async function insertCard(
     platformOwned?: boolean;
   },
 ): Promise<AgentCard> {
-  // A sign-in card is the platform's alone (07.8-21, UI-SPEC R1): never stored as an agent's own card.
-  if (a.input.kind === "browser" && a.platformOwned !== true) {
-    throw new Error("a browser card is platform-owned");
+  // A sign-in card (07.8-21, UI-SPEC R1) and a task card (07.17.1.1.2 D-05) are the platform's alone: never stored as
+  // an agent's own card.
+  if ((a.input.kind === "browser" || a.input.kind === "task") && a.platformOwned !== true) {
+    throw new Error(`a ${a.input.kind} card is platform-owned`);
   }
   const [row] = await tx
     .insert(messageCards)
@@ -266,7 +272,7 @@ export async function insertCard(
       organizationId: a.message.organizationId,
       conversationId: a.message.conversationId,
       agentId: a.agentId,
-      kind: a.input.kind,
+      kind: a.input.kind as StoredCardKind,
       title: a.input.title,
       fields: a.input.fields,
       status: a.input.status,

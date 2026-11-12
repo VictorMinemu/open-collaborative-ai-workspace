@@ -302,3 +302,165 @@ export const TurnTask = z.object({
   finishedProcesses: z.array(TaskProcessFact).max(BOT_TASK_LIMITS.finishedProcessesMax),
 });
 export type TurnTask = z.infer<typeof TurnTask>;
+
+// ---------------------------------------------------------------- the task card (D-05, PD-11, PD-12)
+
+/**
+ * `AgentCard.task`: the platform-owned task card's link to its task, composed by the server from the task row for
+ * every reader (never by the bot): status, outcome, the turn budget, the times, who it runs for and what it waits for.
+ * No viewer field (realtime events carry the link to every reader); `viewerCan.stop` is per reader.
+ */
+export const AgentCardTaskLink = z.object({
+  taskId: Id,
+  status: BotTaskStatus,
+  outcome: BotTaskOutcome.nullable(),
+  turnsUsed: z.number().int().nonnegative(),
+  maxTurns: z.number().int().positive(),
+  startedAt: IsoDateTime,
+  deadlineAt: IsoDateTime,
+  finishedAt: IsoDateTime.nullable(),
+  requesterId: Id,
+  requesterName: z.string().max(200),
+  waiting: BotTaskWaitKind.nullable(),
+});
+export type AgentCardTaskLink = z.infer<typeof AgentCardTaskLink>;
+
+/** `POST /api/v1/bot-tasks/:id/stop`: idempotent; the task's status after the call. */
+export const BotTaskStopResponse = z.object({ ok: z.literal(true), status: BotTaskStatus });
+export type BotTaskStopResponse = z.infer<typeof BotTaskStopResponse>;
+
+/** The task card's pill words (at most `AGENT_CARD_STATUS_LABEL_MAX`, 24 characters). */
+export const TASK_STATUS_LABELS = {
+  running: "Working",
+  waiting: "Waiting",
+  done: "Done",
+  blocked: "Blocked",
+  failed: "Failed",
+  stopped: "Stopped",
+} as const;
+
+/** The pill word of a task: a failed task the bot finished `blocked`, or that made no progress, reads "Blocked". */
+export function taskStatusLabel(status: BotTaskStatus, outcome: BotTaskOutcome | null): string {
+  if (status === "failed") {
+    return outcome === "blocked" || outcome === "no_progress"
+      ? TASK_STATUS_LABELS.blocked
+      : TASK_STATUS_LABELS.failed;
+  }
+  return TASK_STATUS_LABELS[status];
+}
+
+/**
+ * The card's generic status (an `AgentCardStatus`): `running` and `waiting` are both `running`, so the card never
+ * flaps between turns and its followers hear only the end.
+ */
+export function taskCardStatus(status: BotTaskStatus): "running" | "succeeded" | "failed" | "cancelled" {
+  switch (status) {
+    case "running":
+    case "waiting":
+      return "running";
+    case "done":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "stopped":
+      return "cancelled";
+  }
+}
+
+/** The labels of the card's two fields (the bot's last progress note and next step). */
+export const TASK_CARD_FIELD_LABELS = { progress: "Progress", next: "Next step" } as const;
+
+// ---------------------------------------------------------------- cadence and sentences (D-04, D-11, D-12, PD-18)
+
+/**
+ * Whether a platform-delivered task turn's text stays unposted (D-11): fewer than `progressEveryTurns` turns and less
+ * than `progressEveryMinutes` minutes since the last visible post.
+ */
+export function taskQuiet(p: {
+  turnsUsed: number;
+  lastPostTurn: number;
+  lastPostAt: Date;
+  now: Date;
+}): boolean {
+  return (
+    p.turnsUsed - p.lastPostTurn < BOT_TASK_LIMITS.progressEveryTurns &&
+    p.now.getTime() - p.lastPostAt.getTime() < BOT_TASK_LIMITS.progressEveryMinutes * 60_000
+  );
+}
+
+/** `message.text` of an `agent.task.v1` turn: a fixed server sentence, never bot text (P4). */
+export function taskContinueSentence(reason: BotTaskWakeReason, turn: number, max: number): string {
+  const counted = `(turn ${turn} of ${max}).`;
+  switch (reason) {
+    case "continue":
+      return `Continue your task ${counted}`;
+    case "timer":
+      return `The wait you asked for is over. Continue your task ${counted}`;
+    case "process":
+      return `A background command of your task ended. Continue your task ${counted}`;
+    case "nudge":
+      return `Your last turn ended without ocw_task_continue or ocw_task_finish. Continue the task or finish it ${counted}`;
+  }
+}
+
+/**
+ * The message the platform posts as the bot when a task ends without the bot saying so (after `@<handle> ` of the
+ * person it runs for, PD-18); null = no message, a card notice only.
+ */
+export function taskStopSentence(
+  outcome: BotTaskOutcome,
+  p: { maxTurns: number; maxHours: number },
+): string | null {
+  switch (outcome) {
+    case "budget_turns":
+      return `I stopped this task after ${p.maxTurns} turns, the limit for one task. The card shows where it got to.`;
+    case "budget_time":
+      return `I stopped this task after ${p.maxHours} h, the limit for one task. The card shows where it got to.`;
+    case "daily_limit":
+      return "I stopped this task: I reached my turn limit for today. The card shows where it got to.";
+    case "policy_off":
+      return "I stopped this task: long tasks were turned off for me.";
+    case "no_progress":
+      return "I stopped this task: two turns in a row ended without progress. The card shows where it got to.";
+    case "blocked":
+      return "I need you to go on with this task. See my last message.";
+    default:
+      return null;
+  }
+}
+
+/** Longest card notice (`AGENT_CARD_NOTICE_MAX`). */
+const TASK_NOTICE_MAX = 200;
+const STOPPED_BY = { prefix: "Stopped by ", suffix: "." } as const;
+
+/** The task card's notice for how it ended (≤ 200 characters); null for `done` and `blocked` (the bot said so). */
+export function taskStopNotice(
+  outcome: BotTaskOutcome,
+  p: { maxTurns: number; maxHours: number; byName?: string | null },
+): string | null {
+  switch (outcome) {
+    case "budget_turns":
+      return `Stopped: it used its ${p.maxTurns} turns.`;
+    case "budget_time":
+      return `Stopped: it ran for ${p.maxHours} h.`;
+    case "daily_limit":
+      return "Stopped: the bot's daily limit was reached.";
+    case "policy_off":
+      return "Stopped: long tasks were turned off.";
+    case "access_lost":
+      return "Stopped: the person it runs for can no longer read this conversation.";
+    case "bot_unavailable":
+      return "Stopped: the bot is not available here any more.";
+    case "stopped_by_person": {
+      const room = TASK_NOTICE_MAX - STOPPED_BY.prefix.length - STOPPED_BY.suffix.length;
+      const name = (p.byName ?? "").trim().slice(0, room).trim();
+      return name ? `${STOPPED_BY.prefix}${name}${STOPPED_BY.suffix}` : "Stopped.";
+    }
+    case "no_progress":
+      return "Stopped: two turns in a row ended without progress.";
+    case "error":
+      return "Stopped after an error.";
+    default:
+      return null;
+  }
+}
