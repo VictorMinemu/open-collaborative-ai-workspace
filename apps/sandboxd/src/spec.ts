@@ -200,15 +200,26 @@ export function egressHostsCurrent(extraHosts: unknown, address: string | null):
 }
 
 /**
- * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): package bins after the system paths (a package never
- * shadows a system command), Node and Python find approved packages, and every tool uses the egress proxy by default.
- * Constants only: nothing here comes from a request, and no secret is ever set.
+ * The document toolkit baked into the `sbx` image (07.17.1.1.1, D-03, PD-05; ADR-0043): it comes after the system paths
+ * and before approved packages, in PATH and in PYTHONPATH. `bin` holds curated links only (e.g. `pdfplumber`), never
+ * the venv's own `bin` (it has `python`, which would shadow bookworm's missing one).
+ */
+export const TOOLS_DIR = "/opt/ocw-tools";
+/** The toolkit venv's site-packages (Python 3.11, the image's interpreter), first on the shell's PYTHONPATH. */
+export const TOOLS_SITE = `${TOOLS_DIR}/venv/lib/python3.11/site-packages`;
+
+/**
+ * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): the toolkit (07.17.1.1.1) and then package bins after
+ * the system paths (neither ever shadows a system command), Node and Python find the toolkit and approved packages (a
+ * toolkit module wins over an approved package of the same name), and every tool uses the egress proxy by default.
+ * Constants only: nothing here comes from a request, and no secret is ever set. Package runs (`runEnv`) never see the
+ * toolkit.
  */
 export const SHELL_ENV: readonly string[] = [
   `HOME=${WORKSPACE}`,
-  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PACKAGES_DIR}/bin`,
+  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${TOOLS_DIR}/bin:${PACKAGES_DIR}/bin`,
   `NODE_PATH=${PACKAGES_DIR}/node_modules`,
-  `PYTHONPATH=${PACKAGES_DIR}/python`,
+  `PYTHONPATH=${TOOLS_SITE}:${PACKAGES_DIR}/python`,
   ...PROXY_ENV,
 ];
 

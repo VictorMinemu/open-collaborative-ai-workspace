@@ -56,11 +56,12 @@ COPY --chmod=0755 ocw-run /usr/local/bin/ocw-run
 COPY --chmod=0755 ocw-files /usr/local/bin/ocw-files
 
 # sandboxd sets the whole environment of every container it creates (spec.ts SHELL_ENV); this default only keeps a
-# hand-run container in the same order: approved package bins after the system paths, never before them.
+# hand-run container in the same order: the document toolkit (07.17.1.1.1, D-03) and then approved package bins after
+# the system paths, never before them; Python finds the toolkit's venv before approved packages.
 ENV HOME=/workspace \
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin \
     NODE_PATH=/opt/ocw-packages/node_modules \
-    PYTHONPATH=/opt/ocw-packages/python
+    PYTHONPATH=/opt/ocw-tools/venv/lib/python3.11/site-packages:/opt/ocw-packages/python
 WORKDIR /workspace
 USER 10001:10001
 # sandboxd always sets Cmd and Init (docker-init as PID 1); this default only keeps the container idle.
