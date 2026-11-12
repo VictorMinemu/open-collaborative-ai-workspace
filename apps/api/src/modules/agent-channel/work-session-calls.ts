@@ -44,6 +44,10 @@ export interface CallRecord {
   deviceId: string | null;
   workSessionId?: string;
   promptChars?: number;
+  /** 07.17.1.1 (PD-16): the chat attachment an upload names (its refusal audit names it too). */
+  attachmentId?: string;
+  /** 07.17.1.1 (PD-16): the repo-relative path's length of a file move; the path itself is never recorded (P1). */
+  pathLength?: number;
 }
 
 /**
@@ -102,6 +106,12 @@ export function createWorkSessionCalls(core: Core) {
       ...(answer.reason ? { reason: answer.reason } : {}),
       ...(answer.field ? { field: answer.field } : {}),
       ...(p.proposalRefusal ? { proposalRefusal: p.proposalRefusal } : {}),
+      // 07.17.1.1 (PD-16): a file move's refusal names the attachment, the path's length and, for `file_too_large`,
+      // the size and whose limit applied. Absent for the 07.16 tools.
+      ...(call.attachmentId ? { attachmentId: call.attachmentId } : {}),
+      ...(call.pathLength !== undefined ? { pathLength: call.pathLength } : {}),
+      ...(answer.sizeBytes !== undefined ? { bytes: answer.sizeBytes } : {}),
+      ...(answer.limit ? { limitSource: answer.limit.source } : {}),
     });
     return answer;
   }
@@ -118,6 +128,8 @@ export function createWorkSessionCalls(core: Core) {
       call: CallRecord;
       code: BotWorkSessionRefusal;
       reason?: BotProfileInactiveReason;
+      /** 07.17.1.1: the full answer when it carries more than the code's sentence (`file_too_large`'s limit). */
+      answer?: BotWorkSessionRefused;
     },
   ): Promise<BotWorkSessionRefused> {
     const { cell, turn, call } = p;
@@ -137,7 +149,7 @@ export function createWorkSessionCalls(core: Core) {
       cell,
       turn,
       call,
-      answer: refusedAnswer(p.code, p.reason ? { reason: p.reason } : {}),
+      answer: p.answer ?? refusedAnswer(p.code, p.reason ? { reason: p.reason } : {}),
     });
   }
 
