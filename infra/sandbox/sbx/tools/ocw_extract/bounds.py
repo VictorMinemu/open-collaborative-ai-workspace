@@ -22,6 +22,8 @@ CHILD_MAX_FILE_BYTES = 512 * 1024 * 1024
 
 # OCR and rasterization (PD-07, Pitfall 6).
 OCR_MIN_PAGE_CHARS = 25
+# In auto mode a non-empty text layer is replaced by OCR only when OCR finds at least this many more characters.
+OCR_GAIN_MIN_CHARS = 10
 OCR_PAGES_PER_CALL = 50
 RASTER_DPI = 300
 RASTER_SCALE_TO = 3500

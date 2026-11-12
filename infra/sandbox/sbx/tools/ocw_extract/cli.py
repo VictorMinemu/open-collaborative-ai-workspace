@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 
-from . import bounds, detect, pdf, runner
+from . import bounds, detect, images, office, pdf, runner, sheets, text
 
 DESCRIPTION = """\
 Print the text of a file in your workspace as UTF-8: PDFs, scanned PDFs and images (OCR in Spanish and English),
@@ -34,9 +34,20 @@ class Options:
         self.batch = batch
 
 
+# Families whose output is page- or slide-numbered, so --pages applies.
+PAGED = ("pdf", "slides")
+
+
 def handlers():
     """Family → extractor `fn(path, type_name, opts) -> Doc`."""
-    return {"pdf": pdf.extract}
+    return {
+        "pdf": pdf.extract,
+        "writer": office.extract_writer,
+        "slides": office.extract_slides,
+        "sheets": sheets.extract,
+        "text": text.extract,
+        "image": images.extract,
+    }
 
 
 def supported_types():
@@ -126,9 +137,12 @@ def write_file(path, data):
 def extract_file(path, opts):
     """Detect and extract one file (the caller holds a scratch directory)."""
     type_name, _mime = detect.detect(path, opts.steps)
-    handler = handlers().get(detect.family(type_name))
+    fam = detect.family(type_name)
+    handler = handlers().get(fam)
     if handler is None:
-        raise bounds.UnsupportedError(f"{os.path.basename(path)} ({type_name}) is not supported yet; see --types")
+        raise bounds.UnsupportedError(f"{os.path.basename(path)} ({type_name}) is not supported; see --types")
+    if opts.pages and fam not in PAGED and not (fam == "writer" and opts.ocr == "always"):
+        raise bounds.UsageError("--pages works for PDFs, presentations and documents with --ocr always")
     return handler(path, type_name, opts)
 
 
