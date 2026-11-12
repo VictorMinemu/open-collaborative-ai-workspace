@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import type { CellSnapshot } from "./agent-channel-protocol.js";
-import type { OpenClawPort } from "./bridge.js";
+import type { OpenClawPort, TurnRun } from "./bridge.js";
 import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
 import {
   agentStateDirFor,
@@ -10,7 +10,7 @@ import {
   planReconcile,
   type ReconcilePlan,
 } from "./reconciler.js";
-import { type ToolGuard, toolGuard } from "./tool-guard.js";
+import { type TaskTurnOutcome, type ToolGuard, toolGuard } from "./tool-guard.js";
 
 /**
  * OpenClaw tracks async work with AsyncLocalStorage scopes. Our account loop inherits the scope it was
@@ -111,10 +111,13 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
    * one session must never overlap (the event stream processes events concurrently).
    */
   const lanes = new Map<string, Promise<void>>();
-  function inLane(key: string, run: () => Promise<void>): Promise<void> {
+  function inLane<T>(key: string, run: () => Promise<T>): Promise<T> {
     const previous = lanes.get(key) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(run);
-    const settled = next.catch(() => undefined);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
     lanes.set(key, settled);
     void settled.then(() => {
       if (lanes.get(key) === settled) lanes.delete(key);
@@ -225,7 +228,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
     sessionKey: string,
     deliver: (text: string) => Promise<void>,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<TurnRun> {
     const cfg = runtime.config.current();
 
     const ingress = await runtime.channel.inbound.ingress.resolveStable({
@@ -353,6 +356,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       },
       signal,
     );
+    let task: TaskTurnOutcome | null = null;
     try {
       await runDetached(() =>
         runtime.channel.inbound.dispatch({
@@ -382,8 +386,13 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         }),
       );
     } finally {
+      // 07.17.1.1.2 (PD-17): what the turn's task calls achieved, read before the turn ends (only this turn's, never a
+      // later one of the same session).
+      const ended = guard.activeTurn(sessionKey);
+      task = ended?.eventId === m.eventId ? { ...ended.task } : null;
       guard.endTurn(sessionKey);
     }
+    return { task };
   }
 
   return port;

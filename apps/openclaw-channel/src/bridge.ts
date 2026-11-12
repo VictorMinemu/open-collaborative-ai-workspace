@@ -10,6 +10,8 @@ import {
   type AgentConsultReplyEvent as AgentConsultReplyEventType,
   AgentMentionEvent,
   type AgentMentionEvent as AgentMentionEventType,
+  AgentTaskEvent,
+  type AgentTaskEvent as AgentTaskEventType,
   AgentWorkSessionEvent,
   type AgentWorkSessionEvent as AgentWorkSessionEventType,
   type CellAgent,
@@ -32,13 +34,21 @@ import {
   mapCardAction,
   mapConsultReply,
   mapMention,
+  mapTaskEvent,
   mapWorkSessionEvent,
   replyIdempotencyKey,
 } from "./mention-mapper.js";
 import type { PluginInstaller } from "./plugin-installer.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
-import { CONSULT_TOOL_NAME } from "./turn-scoped-tools.js";
+import type { TaskTurnOutcome } from "./tool-guard.js";
+import { CONSULT_TOOL_NAME, TASK_CONTINUE_TOOL, TASK_TOOL_NAMES } from "./turn-scoped-tools.js";
+
+/**
+ * What a run reports back besides its replies (07.17.1.1.2 PD-17): the outcome of the turn's task calls, read from the
+ * gate's active turn when the run ended (null when the turn made none, or the run lost its turn).
+ */
+export type TurnRun = { task: TaskTurnOutcome | null };
 
 /**
  * Everything the bridge needs from OpenClaw. The real implementation (openclaw-port.ts) wraps the
@@ -47,13 +57,14 @@ import { CONSULT_TOOL_NAME } from "./turn-scoped-tools.js";
 export type OpenClawPort = {
   /**
    * Runs one agent turn for the mention. `deliver` is called for every visible reply payload, in
-   * order. Resolves when the turn is finished.
+   * order. Resolves when the turn is finished, with the turn's task outcome (07.17.1.1.2; an older port resolves
+   * with nothing, which reads as no task call).
    */
   dispatchMention(
     mention: MappedMention,
     deliver: (text: string) => Promise<void>,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): Promise<TurnRun | undefined>;
   /**
    * Reconciles OpenClaw agents + providers with the snapshot; returns per-agent provisioning results.
    * `readySubscriptions`: subscription ids signed in inside this cell right now.
@@ -85,7 +96,7 @@ export type BridgeOptions = {
 
 /**
  * What `runTurn` reads from any delivered turn event (mention, card action, automation run, consult reply, work session
- * wake-up).
+ * wake-up, automation item, task turn).
  */
 type ChainFacts = {
   eventId: string;
@@ -103,7 +114,9 @@ const TURN_EVENT_TYPES: ReadonlySet<string> = new Set([
   AgentChannelEventTypes.consultReply,
   AgentChannelEventTypes.workSession,
   AgentChannelEventTypes.automationItem,
+  AgentChannelEventTypes.task,
 ]);
+const TASK_TOOLS: ReadonlySet<string> = new Set(TASK_TOOL_NAMES);
 
 const readableId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
 
@@ -317,16 +330,31 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   /**
-   * 07.7 (D-04, P-09): a turn that can belong to a consult chain: it was offered `ocw_consult_agent` (it may open a
-   * hop), it answers a question (`origin`), or it is a consult reply. Only these report `POST /turns/:eventId/done`;
-   * every other turn sends nothing, as before. Read from the event itself (the mapping's `turn` is the event's), so a
-   * turn the bridge skips before mapping is judged the same way (CR-C-03).
+   * The next turn of the bot's own task (07.17.1.1.2 D-02, PD-16): a turn like a mention of the bot on its task card,
+   * in the card's thread, in reply to the card message, keyed `evt:<eventId>`, with the task in the "Your task" block. A
+   * quiet continuation posts nothing; a silent one that continued or finished is not a failure (runTurn).
    */
-  function mayBelongToChain(event: ChainFacts): boolean {
+  async function handleTask(event: AgentTaskEventType): Promise<void> {
+    await runTurn(event, "task turn", (agent) => mapTaskEvent(event, agent));
+  }
+
+  /**
+   * Which turns report `POST /turns/:eventId/done` (every other turn sends nothing, as before). Read from the event
+   * itself (the mapping's `turn` is the event's), so a turn the bridge skips before mapping is judged the same way
+   * (CR-C-03):
+   *   - 07.7 (D-04, P-09): a turn that can belong to a consult chain: it was offered `ocw_consult_agent` (it may open a
+   *     hop), it answers a question (`origin`), or it is a consult reply;
+   *   - 07.17.1.1.2 (PD-06, PD-17): a turn offered a task tool (it may start, continue or finish the bot's task) and
+   *     every `agent.task.v1`: the API delivers the task's next turn only after this one reported done.
+   */
+  function reportsDone(event: ChainFacts): boolean {
+    const tools = event.turn?.tools ?? [];
     return (
-      (event.turn?.tools ?? []).includes(CONSULT_TOOL_NAME) ||
+      tools.includes(CONSULT_TOOL_NAME) ||
       event.origin !== undefined ||
-      event.type === AgentChannelEventTypes.consultReply
+      event.type === AgentChannelEventTypes.consultReply ||
+      tools.some((t) => TASK_TOOLS.has(t)) ||
+      event.type === AgentChannelEventTypes.task
     );
   }
 
@@ -351,7 +379,7 @@ export function createBridge(opts: BridgeOptions) {
    * replays the event and decides.
    */
   async function reportSkipped(event: ChainFacts, label: string): Promise<void> {
-    if (opts.signal.aborted || !mayBelongToChain(event)) return;
+    if (opts.signal.aborted || !reportsDone(event)) return;
     await reportDone(event, event.agent.id, label, false);
   }
 
@@ -382,7 +410,12 @@ export function createBridge(opts: BridgeOptions) {
       return;
     }
     const mention = map(agent);
-    const chainTurn = mayBelongToChain(event);
+    const doneTurn = reportsDone(event);
+    // 07.17.1.1.2 (PD-10, PD-17): a turn of the bot's own task (it carries the task and may continue it) holds its text
+    // until the run ends, so a continue answered `quiet: true` drops it; every other turn posts as it is delivered.
+    const holdsText = mention.turn.task !== undefined && mention.allowedTools.includes(TASK_CONTINUE_TOOL);
+    // The turn continued or finished its task: silence is its answer, never a failure to retry (T-07.17.1.1.2-05-03).
+    let taskAnswered = false;
     let index = 0;
     const post = async (text: string) => {
       for (const chunk of chunkText(text, maxReplyChars)) {
@@ -406,7 +439,8 @@ export function createBridge(opts: BridgeOptions) {
       // swaps plugin instances: retry while nothing has been delivered yet.
       for (let attempt = 1; ; attempt++) {
         try {
-          await opts.port.dispatchMention(
+          const held: string[] = [];
+          const run = await opts.port.dispatchMention(
             mention,
             async (text) => {
               if (isOpenClawAuthFailure(text)) {
@@ -416,14 +450,29 @@ export function createBridge(opts: BridgeOptions) {
                 );
               }
               if (isOpenClawGenericFailure(text)) throw new Error("OpenClaw reported a failed turn");
-              if (text.trim()) await post(text);
+              if (!text.trim()) return;
+              if (holdsText) held.push(text);
+              else await post(text);
             },
             opts.signal,
           );
+          const task = run?.task ?? null;
+          if (task?.quiet) {
+            // Ids and counts only: the dropped text never reaches the logs.
+            if (held.length > 0) {
+              log.info?.(
+                `${label} ${event.eventId}: quiet task turn, ${held.length} reply part(s) not posted`,
+              );
+            }
+          } else {
+            for (const text of held) await post(text);
+          }
+          taskAnswered = task !== null && (task.continued || task.finished);
           // OpenClaw can end a turn without delivering anything and without throwing (e.g. "Embedded
           // agent failed before reply"): treat silence as a failed attempt so it is retried and, if it
-          // keeps failing, the asker gets a visible notice instead of nothing.
-          if (index === 0) throw new Error("the agent produced no visible reply");
+          // keeps failing, the asker gets a visible notice instead of nothing. A turn that continued or
+          // finished its task (07.17.1.1.2 D-14) may end silently: the task card shows it.
+          if (index === 0 && !taskAnswered) throw new Error("the agent produced no visible reply");
           break;
         } catch (error) {
           if (index > 0 || opts.signal.aborted || attempt >= dispatchAttempts) throw error;
@@ -457,8 +506,11 @@ export function createBridge(opts: BridgeOptions) {
       }
     } finally {
       // 07.7 (D-04): a dispatched chain turn tells the API it ended, after its last post (stopping: nothing is sent,
-      // the successor replays the event and reports it).
-      if (chainTurn && !opts.signal.aborted) await reportDone(event, mention.ocwAgentId, label, index > 0);
+      // the successor replays the event and reports it). 07.17.1.1.2 (PD-17): so does every task turn; one that
+      // continued or finished its task replied, even when it posted nothing.
+      if (doneTurn && !opts.signal.aborted) {
+        await reportDone(event, mention.ocwAgentId, label, index > 0 || taskAnswered);
+      }
       await stopTyping();
     }
   }
@@ -544,6 +596,20 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         await handleAutomationItem(parsed.data);
+        return;
+      }
+      case AgentChannelEventTypes.task: {
+        // agent.task.v1 (07.17.1.1.2): untrusted until parsed; the warning names the seq and the field path only
+        // (never a goal, a note or a name). An older plugin never reaches here: it skips the unknown type (E25).
+        const parsed = AgentTaskEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          await skipInvalid(frame);
+          return;
+        }
+        await handleTask(parsed.data);
         return;
       }
       case AgentChannelEventTypes.configChanged:
@@ -637,6 +703,7 @@ export function createBridge(opts: BridgeOptions) {
     handleAutomationRun,
     handleConsultReply,
     handleWorkSession,
+    handleTask,
     agents,
     snapshot: () => lastSnapshot,
   };

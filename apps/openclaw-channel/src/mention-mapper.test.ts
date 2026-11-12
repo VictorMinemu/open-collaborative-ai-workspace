@@ -2383,7 +2383,10 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
       expect(buildPersonaPrompt(BOT, { tasks })).toBe(
         [...BASE_THREAD, "", paragraph, ...INSTRUCTIONS].join("\n"),
       );
-      const bare = buildPersonaPrompt({ displayName: "Gertru", handle: "gertru", instructions: "" }, { tasks });
+      const bare = buildPersonaPrompt(
+        { displayName: "Gertru", handle: "gertru", instructions: "" },
+        { tasks },
+      );
       expect(bare.endsWith(`\n\n${paragraph}`)).toBe(true);
       expect(bare.split(paragraph)).toHaveLength(2);
     }
@@ -2435,7 +2438,13 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     const fresh = taskBlock(
       TurnContext.parse(
         turnWith([], {
-          task: task({ status: "running", progress: null, nextStep: null, waiting: null, finishedProcesses: [] }),
+          task: task({
+            status: "running",
+            progress: null,
+            nextStep: null,
+            waiting: null,
+            finishedProcesses: [],
+          }),
         }),
       ).task as NonNullable<TurnContext["task"]>,
       { control: false },
