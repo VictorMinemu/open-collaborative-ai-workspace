@@ -1201,14 +1201,49 @@ Plans:
 
 ### Phase 07.17.1.1.2: Long-running bot tasks: a bot keeps working across turns on its own (bounded, visible, stoppable) and is woken when its sandbox processes finish (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 07.17.1.1
-**Plans:** 0 plans
+**Goal:** A bot takes on a request that needs many turns and keeps working on it by itself until it is done, without a
+person re-prompting: it starts a task, the platform delivers its next turn in the same thread, it is woken when its long
+sandbox processes or its Work Zone sessions finish (or after a timer), it reports progress on a live task card people
+can stop, and budgets (turns, hours, running tasks, the daily limit) stop it so it never runs away. No more "no tengo
+ejecución en segundo plano".
+
+- **Tools:** `ocw_task_start`, `ocw_task_continue`, `ocw_task_finish` (not side-effecting, outside the 8 calls).
+- **Scheduling:** the API only (`bot_task.continue`, derived event ids, the turn-done release, a minute tick); OpenClaw
+  cron and heartbeat stay off; every turn re-decided as the person who asked, taint sticky, no browser.
+- **Visible and bounded:** a platform task card with Stop; one progress message per 5 turns or 10 minutes; Settings ›
+  Bot policy "Long tasks" (40 turns, 8 h, 10 running by default); AI chats out.
+
+**Requirements**: BTASK-01, BTASK-02, BTASK-03, BTASK-04, BTASK-05, BTASK-06, BTASK-07, BTASK-08, BTASK-09, BTASK-10, BTASK-11
+**Depends on:** Phase 07.17.1.1; runs after Phase 07.17.1.1.1 on the same branch (`feat/0.3.2-bot-files-and-long-tasks`)
+**ADR:** 0042
+**Success Criteria** (what must be TRUE):
+
+  1. Asked for a job that needs many turns, a bot starts a task and keeps working in the thread by itself until it
+     finishes or is blocked; nobody re-prompts it and it never claims background work it has not scheduled
+  2. Its long sandbox commands and its Work Zone sessions wake it when they finish; it can wait on a timer
+  3. A live task card shows the goal, status, turns used of max, elapsed time and the last progress; the person it runs
+     for, the thread's moderators and the bot's managers can Stop it, and stopping is immediate
+  4. Budgets stop a task with one message mentioning the person; Settings › Bot policy has "Long tasks" and its limits;
+     the bot's capabilities show it
+  5. Integration tests (single delivery, budgets, safety, tenant isolation), the cell smoke and an e2e spec pass on
+     desktop and mobile; ADR-0042 records the decisions
+
+**Plans:** 12 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.17.1.1.2 to break down)
+- [ ] 07.17.1.1.2-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, bodies, `TurnTask`, `agent.task.v1`, task card, sandboxd `process` event) + the phase hub
+- [ ] 07.17.1.1.2-02-PLAN.md — Wave 1: ADR-0042, the AGENTS.md row in place, the BTASK requirements
+- [ ] 07.17.1.1.2-03-PLAN.md — Wave 1: The migration (`bot_tasks`, `bot_task_processes`, `task_id` columns, policy limits, card kind, tick lister, two queues)
+- [ ] 07.17.1.1.2-04-PLAN.md — Wave 2: Policy and capability ("Allow long tasks", limits, `loadTaskPolicy`, Settings and the capabilities row)
+- [ ] 07.17.1.1.2-05-PLAN.md — Wave 2: The plugin (three tools, gate, bridge quiet/done, "Your task" block, persona paragraph, real-cell smoke)
+- [ ] 07.17.1.1.2-06-PLAN.md — Wave 3: The offer (`taskOfferFor`, the `task` trigger, task tools, `turn.task`, ledger link)
+- [ ] 07.17.1.1.2-07-PLAN.md — Wave 4: The cell routes and Stop (state machine, card, org cap, audit; the phase's API end to end, start)
+- [ ] 07.17.1.1.2-08-PLAN.md — Wave 5: The continuation (three transactions, turn-done hook, tick, budgets, nudge, safety; API end to end, continuation)
+- [ ] 07.17.1.1.2-09-PLAN.md — Wave 5: The card's task link, `viewerCan.stop` and the web task card with Stop
+- [ ] 07.17.1.1.2-10-PLAN.md — Wave 6: Wake sources (sandboxd `process` event → task; Work Zone wakes as task turns)
+- [ ] 07.17.1.1.2-11-PLAN.md — Wave 7: The browser journey e2e (fake cell task tools; desktop and mobile, axe)
+- [ ] 07.17.1.1.2-12-PLAN.md — Wave 8: Docs and v0.3.2 notes, guard (Semgrep rule, CODEOWNERS), security walk, phase gate and owner UAT
 
 ### Phase 07.17.1.1.1: Sandbox document toolkit: bots read PDFs (incl. scanned, OCR), images, Office files and archives with tools baked into the sbx image (INSERTED)
 
