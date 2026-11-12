@@ -974,3 +974,27 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.idle_agent_chains(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.idle_agent_chains(integer, timestamptz) TO ocw_app;
+
+-- Phase 07.17.1.1.2 (D-02, D-12, PD-06, PD-09; ADR-0042): the pre-tenant read of the `bot_task.tick` job (one global
+-- cron, every minute, UTC). Same shape as the chain listers above: active long tasks the tick must look at, across
+-- organizations by design, ids and organization ids only (never a goal, progress, a wait reference or a person): a
+-- waiting task whose wake is more than 60 s overdue (its job was lost), a running task unchanged for 30 minutes (its
+-- turn was lost), a task past its deadline, and a task whose bot is disabled or archived (soft-deleted). Oldest wake (or
+-- change) first. The tick re-reads every task by id inside its organization's own withTenant() transaction, where RLS
+-- applies again, and decides there under the task's row lock.
+CREATE OR REPLACE FUNCTION app.due_bot_tasks(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT t.id, t.organization_id FROM app.bot_tasks t
+  JOIN app.agents a ON a.organization_id = t.organization_id AND a.id = t.agent_id
+  WHERE t.status IN ('running', 'waiting')
+    AND ((t.status = 'waiting' AND t.wake_at <= p_now - interval '60 seconds')
+      OR (t.status = 'running' AND t.updated_at <= p_now - interval '30 minutes')
+      OR t.deadline_at <= p_now
+      OR a.status = 'disabled'
+      OR a.deleted_at IS NOT NULL)
+  ORDER BY coalesce(t.wake_at, t.updated_at), t.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_bot_tasks(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_bot_tasks(integer, timestamptz) TO ocw_app;

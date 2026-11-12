@@ -372,3 +372,195 @@ describe("bot task isolation as ocw_app (07.17.1.1.2, D-01, E22)", () => {
     }
   });
 });
+
+describe("bot task checks and the organization's limits (07.17.1.1.2, D-04, PD-05, PD-09)", () => {
+  const done = () => ({ status: "done", outcome: "done", finished_at: new Date().toISOString() });
+
+  it("refuses every malformed task, each by its named check", async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      // Shaped like a finished task, so only the status itself is wrong.
+      [{ ...done(), status: "paused" }, "bot_tasks_status_ck"],
+      [{ ...done(), outcome: "gave_up" }, "bot_tasks_outcome_ck"],
+      // A finished task always has an outcome; an active one never has.
+      [{ ...done(), outcome: null }, "bot_tasks_outcome_ck"],
+      [{ outcome: "done" }, "bot_tasks_outcome_ck"],
+      [{ wait_kind: "sleep" }, "bot_tasks_wait_kind_ck"],
+      [{ goal: "g".repeat(201) }, "bot_tasks_goal_ck"],
+      [{ goal: "" }, "bot_tasks_goal_ck"],
+      [{ progress: "p".repeat(501) }, "bot_tasks_progress_ck"],
+      [{ next_step: "n".repeat(501) }, "bot_tasks_next_step_ck"],
+      [{ ...done(), summary: "s".repeat(1001) }, "bot_tasks_summary_ck"],
+      [{ max_turns: 0 }, "bot_tasks_max_turns_ck"],
+      [{ max_turns: 201 }, "bot_tasks_max_turns_ck"],
+      [{ turns_used: -1 }, "bot_tasks_turns_used_ck"],
+      [{ wait_seq: -1 }, "bot_tasks_wait_seq_ck"],
+      [{ last_post_turn: -1 }, "bot_tasks_last_post_turn_ck"],
+      [{ wait_ref: "r".repeat(65) }, "bot_tasks_wait_ref_ck"],
+      [{ finished_at: new Date().toISOString() }, "bot_tasks_finished_at_ck"],
+      [{ ...done(), finished_at: null }, "bot_tasks_finished_at_ck"],
+    ];
+    for (const [cols, constraint] of cases) {
+      await refused(task(A, cols), { constraint });
+    }
+    // The bounds themselves are accepted.
+    await task(A, {
+      goal: "g".repeat(200),
+      progress: "p".repeat(500),
+      next_step: "n".repeat(500),
+      max_turns: 200,
+      wait_ref: "r".repeat(64),
+      status: "waiting",
+      wait_kind: "process",
+      wake_at: new Date().toISOString(),
+    });
+    await task(A, { ...done(), summary: "s".repeat(1000), max_turns: 1 });
+    for (const status of ["failed", "stopped"]) {
+      await task(A, { status, outcome: "error", finished_at: new Date().toISOString() });
+    }
+    for (const wait_kind of ["turn", "timer", "process", "session", "nudge"]) {
+      await task(A, { status: "waiting", wait_kind });
+    }
+  });
+
+  it("refuses an unknown process status, an empty or long process id and a negative duration", async () => {
+    const t = await task(A);
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ status: "zombie" }, "bot_task_processes_status_ck"],
+      [{ process_id: "" }, "bot_task_processes_process_id_ck"],
+      [{ process_id: "x".repeat(65) }, "bot_task_processes_process_id_ck"],
+      [{ duration_ms: -1 }, "bot_task_processes_duration_ms_ck"],
+    ];
+    for (const [cols, constraint] of cases) {
+      await refused(processRow(A, t, cols), { constraint });
+    }
+    for (const status of ["running", "exited", "killed", "timed_out", "lost"]) {
+      await processRow(A, t, { status });
+    }
+    const fresh = await processRow(A, t);
+    const row = await db.query(
+      "select status, exit_code, duration_ms, ended_at, reported_at from app.bot_task_processes where id = $1",
+      [fresh],
+    );
+    expect(row.rows).toEqual([
+      { status: "running", exit_code: null, duration_ms: null, ended_at: null, reported_at: null },
+    ]);
+  });
+
+  it("a fresh policy reads 40 turns, 8 hours and 10 running tasks; each limit holds its range by its named check", async () => {
+    await db.query("insert into app.bot_policies (organization_id) values ($1)", [A.id]);
+    const row = await db.query(
+      "select task_max_turns, task_max_hours, max_running_tasks from app.bot_policies where organization_id = $1",
+      [A.id],
+    );
+    expect(row.rows).toEqual([{ task_max_turns: 40, task_max_hours: 8, max_running_tasks: 10 }]);
+    const set = (col: string, v: number) =>
+      db.query(`update app.bot_policies set ${col} = $2 where organization_id = $1`, [A.id, v]);
+    const bad: Array<[string, number, string]> = [
+      ["task_max_turns", 0, "bot_policies_task_max_turns_check"],
+      ["task_max_turns", 201, "bot_policies_task_max_turns_check"],
+      ["task_max_hours", 0, "bot_policies_task_max_hours_check"],
+      ["task_max_hours", 25, "bot_policies_task_max_hours_check"],
+      ["max_running_tasks", -1, "bot_policies_max_running_tasks_check"],
+      ["max_running_tasks", 101, "bot_policies_max_running_tasks_check"],
+    ];
+    for (const [col, v, constraint] of bad) {
+      await refused(set(col, v), { constraint });
+    }
+    const good: Array<[string, number]> = [
+      ["task_max_turns", 1],
+      ["task_max_turns", 200],
+      ["task_max_hours", 1],
+      ["task_max_hours", 24],
+      ["max_running_tasks", 0],
+      ["max_running_tasks", 100],
+    ];
+    for (const [col, v] of good) {
+      expect((await set(col, v)).rowCount, `${col} ${v}`).toBe(1);
+    }
+    await expect(
+      db.query("update app.bot_policies set task_max_turns = null where organization_id = $1", [A.id]),
+    ).rejects.toMatchObject({ code: "23502" });
+  });
+});
+
+describe("the tick's lister app.due_bot_tasks (07.17.1.1.2, PD-06, PD-09)", () => {
+  const MIN = 60_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const due: Record<string, string> = {};
+  const notDue: Record<string, string> = {};
+
+  beforeAll(async () => {
+    // Across both organizations, each condition alone.
+    due.waitingPastWake = await task(A, { status: "waiting", wait_kind: "timer", wake_at: ago(2 * MIN) });
+    due.runningLost = await task(B, { updated_at: ago(31 * MIN) });
+    due.pastDeadline = await task(B, {
+      status: "waiting",
+      wait_kind: "turn",
+      wake_at: ago(-10 * MIN),
+      deadline_at: ago(MIN),
+    });
+    const disabled = await bot(A.id, "disabled");
+    await db.query("update app.agents set status = 'disabled' where id = $1", [disabled]);
+    due.disabledBot = await task({ ...A, agent: disabled });
+    const archived = await bot(B.id, "archived");
+    await db.query("update app.agents set deleted_at = now() where id = $1", [archived]);
+    due.archivedBot = await task({ ...B, agent: archived }, { status: "waiting", wait_kind: "turn" });
+    // Not yet due: a wake inside the 60 s grace, a turn still fresh; and no finished task, whatever its times or bot.
+    notDue.waitingJustDue = await task(A, { status: "waiting", wait_kind: "timer", wake_at: ago(10_000) });
+    notDue.runningFresh = await task(A, { updated_at: ago(5 * MIN) });
+    const finished: Record<string, Record<string, unknown>> = {
+      done: { status: "done", outcome: "done" },
+      failed: { status: "failed", outcome: "error" },
+      stopped: { status: "stopped", outcome: "stopped_by_person" },
+    };
+    for (const [name, cols] of Object.entries(finished)) {
+      notDue[name] = await task(
+        { ...A, agent: disabled },
+        {
+          ...cols,
+          finished_at: ago(MIN),
+          wake_at: ago(60 * MIN),
+          updated_at: ago(60 * MIN),
+          deadline_at: ago(MIN),
+        },
+      );
+    }
+  });
+
+  it("lists, as ocw_app with no tenant, the due tasks of every organization by id and organization only", async () => {
+    const res = await app.query("select * from app.due_bot_tasks($1, now())", [1000]);
+    expect(res.fields.map((f) => f.name)).toEqual(["id", "organization_id"]);
+    const listed = new Map(res.rows.map((r) => [r.id as string, r.organization_id as string]));
+    for (const [name, id] of Object.entries(due)) expect(listed.has(id), `${name} listed`).toBe(true);
+    for (const [name, id] of Object.entries(notDue)) expect(listed.has(id), `${name} not listed`).toBe(false);
+    expect(listed.get(due.waitingPastWake)).toBe(A.id);
+    expect(listed.get(due.runningLost)).toBe(B.id);
+    // The app role still reads no task row itself without a tenant.
+    expect((await app.query("select count(*)::int as n from app.bot_tasks")).rows[0].n).toBe(0);
+  });
+
+  it("honours the limit (at least one row)", async () => {
+    expect((await app.query("select * from app.due_bot_tasks(1, now())")).rows).toHaveLength(1);
+    expect((await app.query("select * from app.due_bot_tasks(0, now())")).rows).toHaveLength(1);
+  });
+
+  it("is SECURITY DEFINER with a fixed search_path, executable by ocw_app only", async () => {
+    const fn = await db.query(
+      "select p.prosecdef, p.proconfig from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'app' and p.proname = 'due_bot_tasks'",
+    );
+    expect(fn.rows).toEqual([{ prosecdef: true, proconfig: ["search_path=pg_catalog, pg_temp"] }]);
+    const priv = await db.query(
+      "select has_function_privilege('ocw_app', 'app.due_bot_tasks(integer, timestamptz)', 'EXECUTE') as app, has_function_privilege('ocw_auth', 'app.due_bot_tasks(integer, timestamptz)', 'EXECUTE') as auth",
+    );
+    expect(priv.rows).toEqual([{ app: true, auth: false }]);
+    const other = new pg.Client({ connectionString: tdb.authUrl });
+    await other.connect();
+    try {
+      await expect(other.query("select * from app.due_bot_tasks(10, now())")).rejects.toMatchObject({
+        code: "42501",
+      });
+    } finally {
+      await other.end();
+    }
+  });
+});
