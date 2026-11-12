@@ -1761,7 +1761,7 @@ describe("the turn's attachments (07.15 D-02, D-04, PD-10, E2): one block, metad
             `${ZIP} · bundle.zip · other · 512 bytes · message msg-2 · ${TURN_ATTACHMENT_NOTES.cannotReadImport}`,
           ],
           more: "2 more files earlier in this conversation are not listed.",
-          text: "Read one with ocw_attachment_read; copy one into your sandbox with ocw_sandbox_import.",
+          text: "Read one with ocw_attachment_read; copy one into your sandbox with ocw_sandbox_import and read it there with ocw-extract.",
         },
       },
     ]);
@@ -1779,7 +1779,7 @@ describe("the turn's attachments (07.15 D-02, D-04, PD-10, E2): one block, metad
       BOT,
     );
     expect(block(importOnly)[0]?.payload).toMatchObject({
-      text: "Copy one into your sandbox with ocw_sandbox_import.",
+      text: "Copy one into your sandbox with ocw_sandbox_import and read it there with ocw-extract.",
     });
     const neither = mapMention(mention({ turn: attachTurn({ tools: [] }) } as never), BOT);
     expect(block(neither)[0]?.payload).toMatchObject({
