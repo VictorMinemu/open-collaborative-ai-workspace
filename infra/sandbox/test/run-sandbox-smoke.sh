@@ -1163,13 +1163,14 @@ note_answer() {
   if [ "$n" -gt 16384 ]; then DOCS_OVER="${DOCS_OVER} ${n}"; fi
 }
 
-# run_long <org> <agent> <argv json> <deadline s>: exec with the 25 s yield and the 600 s command budget; a command still
-# running is polled every 5 s until it exits or the deadline passes (then it is killed and the call fails). Succeeds
-# when the command exited, whatever its code; the final answer is in $WORK/body.json.
+# run_long <org> <agent> <argv json> <deadline s> [timeoutMs]: exec with the 25 s yield and the 600 s command budget (or
+# timeoutMs: the API sends 120000 when the bot names no timeoutSeconds); a command still running is polled every 5 s
+# until it exits or the deadline passes (then it is killed and the call fails). Succeeds when the command exited,
+# whatever its code; the final answer is in $WORK/body.json.
 run_long() {
-  local org="$1" agent="$2" argv="$3" deadline="$4" t0 pid status
+  local org="$1" agent="$2" argv="$3" deadline="$4" timeout_ms="${5:-600000}" t0 pid status
   t0=$(date +%s)
-  status="$(api POST /v1/sandboxes/exec "$(exec_json "$org" "$agent" "$argv" 600000 25000)")"
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$org" "$agent" "$argv" "$timeout_ms" 25000)")"
   [ "$status" = 200 ] || return 1
   note_answer
   pid="$(jfield "$WORK/body.json" processId)"
@@ -1374,6 +1375,15 @@ section_docs() {
   # ---------------------------------------------------------------- batch: chunks, resume, originals untouched (D-04)
 
   sha_before="$(download_sha "$DO" "$DA" fx/text.pdf || true)"
+  # The bot's default path (07.17.1.1.1 review CR-01): no timeoutSeconds means the API's 120 s. The batch refuses it at
+  # once with a usage error naming the way out (never killed by ocw-run's timeout, 137); the reruns below take the
+  # documented path, background with timeoutSeconds 600.
+  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx"]' 150 120000 && [ "$(exit_code)" = 2 ] &&
+    jfield "$WORK/body.json" stderr | grep -q "timeoutSeconds 600"; then
+    ok "docs: ocw-extract --batch under the default 120 s exec timeout → exit 2 naming timeoutSeconds 600 (never 137)"
+  else
+    docs_fail "batch under the default 120 s timeout"
+  fi
   if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx","--budget","1"]' 120 && [ "$(exit_code)" = 75 ]; then
     ok "docs: ocw-extract --batch with --budget 1 → exit 75 (run again)"
   else
@@ -1389,7 +1399,7 @@ section_docs() {
     [ "$code" = 75 ] || break
   done
   if [ "$code" = 0 ]; then
-    ok "docs: batch reruns with the default budget → exit 0 after ${runs} run(s), $(($(date +%s) - t)) s"
+    ok "docs: batch reruns (background, timeoutSeconds 600) → exit 0 after ${runs} run(s), $(($(date +%s) - t)) s"
   else
     docs_fail "batch reruns (run ${runs}, exit ${code:-none})"
   fi

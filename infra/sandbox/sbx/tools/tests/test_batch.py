@@ -163,6 +163,78 @@ class Folder(Base):
             assert_reason(self, err, "--budget")
 
 
+OCW_RUN = "/usr/local/bin/ocw-run"
+
+
+def via_ocw_run(seconds, *args, timeout=700):
+    """Run ocw-extract exactly as sandboxd runs a bot's argv: `ocw-run <id> <timeoutSeconds> -- argv`."""
+    import subprocess
+
+    from test_ocw_extract import BOT_ENV, EXTRACT
+
+    proc = subprocess.run(
+        [OCW_RUN, f"t{os.getpid()}x{seconds}", str(seconds), "--", EXTRACT, *args],
+        capture_output=True,
+        timeout=timeout,
+        cwd=WS,
+        env=BOT_ENV,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
+
+
+class ExecDeadline(Base):
+    """07.17.1.1.1 review CR-01: the batch sizes its budget from the exec timeout `ocw-run` really gives it."""
+
+    def test_ocw_run_exports_the_deadline_to_the_command(self):
+        import subprocess
+
+        proc = subprocess.run(
+            [OCW_RUN, f"t{os.getpid()}env", "77", "--", "sh", "-c", 'printf %s "$OCW_EXEC_DEADLINE_S"'],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, b"77")
+
+    def test_the_budget_follows_the_deadline(self):
+        from ocw_extract import bounds
+
+        self.assertEqual(bounds.batch_budget(450, None), 450)
+        self.assertEqual(bounds.batch_budget(450, 600), 450)
+        self.assertEqual(bounds.batch_budget(470, 600), 470)
+        self.assertEqual(bounds.batch_budget(450, 300), 300 - bounds.BATCH_END_MARGIN_S)
+        self.assertEqual(bounds.batch_budget(450, 260), bounds.BATCH_MIN_BUDGET_S)
+        for deadline in (120, 259, 1):
+            with self.subTest(deadline=deadline), self.assertRaises(bounds.UsageError) as ctx:
+                bounds.batch_budget(450, deadline)
+            self.assertIn("timeoutSeconds 600", ctx.exception.reason)
+            self.assertIn("background true", ctx.exception.reason)
+        self.assertEqual(bounds.exec_deadline({"OCW_EXEC_DEADLINE_S": "600"}), 600)
+        for bad in ({}, {"OCW_EXEC_DEADLINE_S": ""}, {"OCW_EXEC_DEADLINE_S": "x"}, {"OCW_EXEC_DEADLINE_S": "-5"}):
+            self.assertIsNone(bounds.exec_deadline(bad), bad)
+
+    def test_the_bots_default_120_s_is_a_clear_usage_error_never_a_kill(self):
+        out_root = fresh(f"{WS}/extracted/deadline-default")
+        src = copy_fixtures(f"{WS}/deadline-default", ["text.pdf"])
+        started = time.monotonic()
+        rc, _out, err = via_ocw_run(120, "--batch", src)
+        self.assertEqual(rc, 2, err)  # never 137 (SIGKILL by ocw-run's timeout)
+        self.assertLess(time.monotonic() - started, 30)
+        assert_reason(self, err, "timeoutSeconds 600", "background true")
+        self.assertFalse(os.path.exists(f"{out_root}/_index.tsv"))
+
+    def test_the_documented_600_s_runs_the_batch_to_the_end(self):
+        src = copy_fixtures(f"{WS}/deadline-600", ["text.pdf", "latin1.csv"])
+        out_root = fresh(f"{WS}/extracted/deadline-600")
+        rc, out, err = via_ocw_run(600, "--batch", src)
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(text(out).splitlines()[0], SUMMARY)
+        _header, rows = index(out_root)
+        self.assertEqual({r["status"] for r in rows.values()}, {"done"})
+
+
 class Resume(Base):
     def test_budget_1_exits_75_and_reruns_finish_without_rework(self):
         src = copy_fixtures(f"{WS}/resume", ["text.pdf", "scan.pdf", "plan.docx", "latin1.csv"])

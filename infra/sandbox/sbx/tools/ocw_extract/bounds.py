@@ -69,6 +69,14 @@ STEP_TIMEOUT_MAX_S = max(STEP_TIMEOUTS.values())
 # A batch run plus its longest step always ends before `ocw-run` kills it (PD-08).
 assert BATCH_MAX_BUDGET_S + STEP_TIMEOUT_MAX_S <= EXEC_TIMEOUT_MAX_S, "batch budget + longest step exceed 600 s"
 
+# The exec timeout this command really got (07.17.1.1.1 review CR-01): `ocw-run` exports it. A batch keeps its longest
+# step plus 10 s between the end of its budget and that deadline, and refuses to start when what is left is shorter
+# than one longest step plus 10 s (the API's default 120 s is: the bot is told to pass timeoutSeconds 600).
+EXEC_DEADLINE_ENV = "OCW_EXEC_DEADLINE_S"
+BATCH_END_MARGIN_S = STEP_TIMEOUT_MAX_S + 10
+BATCH_MIN_BUDGET_S = STEP_TIMEOUT_MAX_S + 10
+assert BATCH_MAX_BUDGET_S + BATCH_END_MARGIN_S <= EXEC_TIMEOUT_MAX_S, "the batch margin does not fit 600 s"
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_UNSUPPORTED = 3
@@ -173,6 +181,28 @@ def parse_budget(value):
     if n < 1 or n > BATCH_MAX_BUDGET_S:
         raise UsageError(f"--budget must be between 1 and {BATCH_MAX_BUDGET_S} seconds (got {n})")
     return n
+
+
+def exec_deadline(environ):
+    """The exec timeout `ocw-run` exported (whole seconds), or None outside it (a hand run, the image tests)."""
+    value = str(environ.get(EXEC_DEADLINE_ENV, "") or "")
+    if not value.isdigit() or int(value) < 1:
+        return None
+    return int(value)
+
+
+def batch_budget(requested, deadline):
+    """The budget of one batch chunk: the one asked for, cut so that the chunk ends BATCH_END_MARGIN_S before the exec
+    deadline; a deadline that leaves less than BATCH_MIN_BUDGET_S is a usage error naming the way out."""
+    if deadline is None:
+        return requested
+    budget = min(requested, deadline - BATCH_END_MARGIN_S)
+    if budget < BATCH_MIN_BUDGET_S:
+        raise UsageError(
+            f"--batch needs a longer command timeout than this one ({deadline} s): run it with background true and "
+            f"timeoutSeconds 600, and run it again while it exits {EXIT_MORE}"
+        )
+    return budget
 
 
 def head(body, max_chars, max_bytes):

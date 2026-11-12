@@ -17,7 +17,8 @@ Print the text of a file in your workspace as UTF-8: PDFs, scanned PDFs and imag
 Word, Excel, PowerPoint and OpenDocument files, CSV/JSON/XML/HTML, e-mails and archives (listing).
 Output on stdout is capped (--max-chars, at most 15000 characters); use -o FILE for the whole text, or --pages.
 --batch reads a whole folder or archive into a .txt mirror under /workspace/extracted/<name> with an index
-(_index.tsv), in chunks: exit 75 means more to do, so run the same command again until it exits 0."""
+(_index.tsv), in chunks: exit 75 means more to do, so run the same command again until it exits 0. Run --batch
+with a command timeout of 600 s (in the background); a shorter timeout is refused before any work starts."""
 
 EPILOG = """\
 exit codes: 0 ok, 2 usage, 3 unsupported type, 4 not found or outside /workspace, 5 encrypted (password needed),
@@ -174,6 +175,8 @@ def single(args):
 
 def batch(args):
     budget = bounds.parse_budget(args.budget) if args.budget is not None else bounds.BATCH_DEFAULT_BUDGET_S
+    # The chunk ends before the exec timeout `ocw-run` exported (07.17.1.1.1 review CR-01), or refuses to start.
+    budget = bounds.batch_budget(budget, bounds.exec_deadline(os.environ))
     return batching.run_batch(args.batch, out=args.out, budget=budget, ocr=args.ocr, lang=args.lang)
 
 

@@ -381,13 +381,16 @@ const PATH_PARAM = { type: "string", maxLength: SANDBOX_LIMITS.pathMaxChars, des
 /**
  * The document toolkit baked into `sbx` (07.17.1.1.1 D-06, PD-17, ADR-0043), told where the bot already reads about
  * its sandbox so it never tries `pip install` or `apt-get` (the egress refuses both). Keep it in step with
- * `ocw-extract --help` (`infra/sandbox/sbx/tools/ocw_extract/cli.py`): the flags and exit 75 are the CLI's own.
+ * `ocw-extract --help` (`infra/sandbox/sbx/tools/ocw_extract/cli.py`): the flags and exit 75 are the CLI's own. A
+ * batch sizes its chunk from the exec timeout and refuses the 120 s default (07.17.1.1.1 review CR-01), hence the
+ * explicit `background true and timeoutSeconds 600`.
  */
 export const DOCUMENT_TOOLS_HELP =
   "Your sandbox already has document tools, so nothing needs installing: ocw-extract <file> prints the text of a " +
   "PDF (scanned pages are OCR'd in Spanish and English), an image, a Word, Excel, PowerPoint or OpenDocument file, " +
   "an e-mail or an archive; add --pages 2-5, or -o out.txt for a long file. ocw-extract --batch <folder> reads many " +
-  "files into /workspace/extracted: run it in the background and run it again while it exits 75. Also there: " +
+  "files into /workspace/extracted: run it with background true and timeoutSeconds 600, and run it again while it " +
+  "exits 75. Also there: " +
   "pdftotext, tesseract, soffice, 7zz, and python3 with pandas, openpyxl, pdfplumber and python-docx.";
 
 const SANDBOX_SPECS = [
