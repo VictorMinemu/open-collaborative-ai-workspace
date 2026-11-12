@@ -517,6 +517,47 @@ class Images(Base):
         for kind in ("png", "webp", "tiff", "avif", "heic"):
             self.assertIn(kind, text(out).split())
 
+    def test_an_image_over_the_pixel_cap_is_refused_before_it_is_decoded(self):
+        """07.17.1.1.1 review WR-02: Pillow's own bomb error fires only above twice MAX_IMAGE_PIXELS; the cap is the
+        documented 128 MP, so a 130 MP image is refused (exit 6), never decoded."""
+        from PIL import Image
+
+        path = f"{WS}/wide.png"
+        Image.new("1", (13_000, 10_000), 1).save(path, "PNG")
+        try:
+            rc, _out, err = cli("wide.png", "--ocr", "always")
+            self.assertEqual(rc, 6, err)
+            assert_reason(self, err, "128000000 pixels")
+        finally:
+            os.unlink(path)
+
+    def test_a_multi_page_tiff_is_checked_frame_by_frame(self):
+        """A small first frame no longer hides a huge second one from the pixel cap (exiftool reads IFD0 only), and
+        every frame within the cap is OCR'd."""
+        import make_fixtures
+        from PIL import Image
+
+        huge = f"{WS}/pages-huge.tiff"
+        small = make_fixtures.text_image(["Primera hoja del fax"], (1400, 240), 48)
+        small.save(huge, "TIFF", save_all=True, append_images=[Image.new("1", (12_000, 11_000), 1)],
+                   compression="tiff_deflate")
+        both = f"{WS}/pages.tiff"
+        second = make_fixtures.text_image(["Segunda hoja del fax"], (1400, 240), 48)
+        small.save(both, "TIFF", save_all=True, append_images=[second], compression="tiff_deflate")
+        try:
+            rc, _out, err = cli("pages-huge.tiff")
+            self.assertEqual(rc, 6, err)
+            assert_reason(self, err, "frame 2", "128000000 pixels")
+            rc, out, err = cli("pages.tiff")
+            self.assertEqual(rc, 0, err)
+            result = fold(text(out))
+            self.assertIn("primera hoja", result)
+            self.assertIn("segunda hoja", result)
+            self.assertIn("--- frame 2 ---", result)
+        finally:
+            for path in (huge, both):
+                os.unlink(path)
+
     def test_a_tiny_image_gets_metadata_only_in_auto_mode(self):
         rc, out, err = cli("fx/tiny.png")
         self.assertEqual(rc, 0, err)

@@ -29,6 +29,8 @@ RASTER_DPI = 300
 RASTER_SCALE_TO = 3500
 IMAGE_OCR_MIN_SIDE = 200
 IMAGE_MAX_PIXELS = 128_000_000
+# Frames of one image file (a multi-page TIFF) checked and OCR'd per call, like PDF pages (07.17.1.1.1 review WR-02).
+IMAGE_MAX_FRAMES = OCR_PAGES_PER_CALL
 OCR_LANGS = ("spa", "eng", "spa+eng", "eng+spa")
 DEFAULT_LANG = "spa+eng"
 
