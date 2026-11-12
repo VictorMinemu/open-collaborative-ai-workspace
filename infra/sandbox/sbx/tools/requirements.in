@@ -10,12 +10,14 @@
 # Removed from D-03 (D-09): extract-msg (GPL, and a GPL/LGPL tree of about eight more pins; Debian `msgconvert` plus
 # the stdlib `email` parser read .msg), odfpy (sdist only, refused by `--only-binary :all:`; LibreOffice reads ODF),
 # chardet (charset-normalizer covers it and is already a pdfminer.six dependency), PyMuPDF (AGPL/commercial).
-pypdf
+# held back by the 14-day rule on 2026-11-12 (7.0.0 uploaded 2026-11-06, 7.0.1 on 2026-11-10)
+pypdf<7.0.0
 pdfplumber
 python-docx
 openpyxl
 python-pptx
-pandas
+# held back by the 14-day rule on 2026-11-12 (3.1.1 uploaded 2026-11-04)
+pandas<3.1.1
 xlrd
 Pillow
 pytesseract
@@ -23,3 +25,8 @@ charset-normalizer
 beautifulsoup4
 lxml
 defusedxml
+# Dependencies listed only to hold them back by the 14-day rule on 2026-11-12 (pdfplumber needs pypdfium2, pandas
+# needs python-dateutil): pypdfium2 5.15.0 uploaded 2026-11-06 (5.15.1 yanked, 5.15.2 on 2026-11-09), python-dateutil
+# 4.0.0 uploaded 2026-11-01. Drop a line once its newer version passes the rule.
+pypdfium2<5.15.0
+python-dateutil<4.0.0

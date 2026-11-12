@@ -71,7 +71,7 @@
   },
   {
     "name": "pandas",
-    "version": "3.1.1",
+    "version": "3.1.0",
     "license": "BSD-3-Clause",
     "source": "pypi",
     "repo": "https://github.com/pandas-dev/pandas"
@@ -106,15 +106,15 @@
   },
   {
     "name": "pypdf",
-    "version": "7.0.1",
+    "version": "6.21.4",
     "license": "BSD-3-Clause",
     "source": "pypi",
     "repo": "https://github.com/py-pdf/pypdf"
   },
   {
     "name": "pypdfium2",
-    "version": "5.15.2",
-    "license": "Apache-2.0 AND BSD-3-Clause AND CC-BY-4.0 AND BSD-2-Clause AND MIT AND Apache-2.0 WITH LLVM-exception AND Zlib AND IJG AND libpng-2.0 AND libtiff AND Unicode-3.0 AND MIT-Modern-Variant AND (FTL OR GPL-2.0-or-later) AND LicenseRef-AGG-2.3",
+    "version": "5.14.0",
+    "license": "Apache-2.0 AND BSD-3-Clause AND CC-BY-4.0 AND BSD-2-Clause AND MIT AND Apache-2.0 WITH LLVM-exception AND Zlib AND IJG AND libpng-2.0 AND Unicode-3.0 AND FTL AND LicenseRef-AGG-2.3",
     "source": "pypi",
     "repo": "https://github.com/pypdfium2-team/pypdfium2"
   },
@@ -127,8 +127,8 @@
   },
   {
     "name": "python-dateutil",
-    "version": "4.0.0",
-    "license": "BSD-3-Clause",
+    "version": "3.0.0",
+    "license": "Apache-2.0 AND BSD-3-Clause",
     "source": "pypi",
     "repo": "https://github.com/dateutil/dateutil"
   },
@@ -145,6 +145,13 @@
     "license": "MIT",
     "source": "pypi",
     "repo": "https://github.com/scanny/python-pptx"
+  },
+  {
+    "name": "six",
+    "version": "1.17.0",
+    "license": "MIT",
+    "source": "pypi",
+    "repo": "https://github.com/benjaminp/six"
   },
   {
     "name": "soupsieve",
