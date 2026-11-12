@@ -161,6 +161,46 @@ describe("effectiveCapabilities", () => {
   });
 });
 
+describe("effectiveCapabilities: Long tasks (07.17.1.1.2 D-04)", () => {
+  it("all on → effective with no reason", () => {
+    expect(view("team").longTasks).toEqual({ enabled: true, effective: true, reason: null });
+    expect(view("personal").longTasks).toEqual({ enabled: true, effective: true, reason: null });
+  });
+
+  it("the organization switch off → org_policy; the personal one off → personal_policy for a personal bot only", () => {
+    const orgOff = policy({ longTasks: { orgWide: false, personal: true } });
+    expect(view("team", { policy: orgOff }).longTasks).toEqual({
+      enabled: true,
+      effective: false,
+      reason: "org_policy",
+    });
+    const personalOff = policy({ longTasks: { orgWide: true, personal: false } });
+    expect(view("personal", { policy: personalOff }).longTasks).toEqual({
+      enabled: true,
+      effective: false,
+      reason: "personal_policy",
+    });
+    expect(view("team", { policy: personalOff }).longTasks).toEqual({
+      enabled: true,
+      effective: true,
+      reason: null,
+    });
+  });
+
+  it("needs nothing configured and no per-person permission: never not_configured nor denied_for_you", () => {
+    expect(view("team", { configured: false, human: { internet: false } }).longTasks).toEqual({
+      enabled: true,
+      effective: true,
+      reason: null,
+    });
+    expect(view("team", { caps: { longTasks: false } }).longTasks).toEqual({
+      enabled: false,
+      effective: false,
+      reason: null,
+    });
+  });
+});
+
 describe("taskPolicyFor: may this bot run long tasks (07.17.1.1.2 D-04, E11)", () => {
   const limits = { maxTurns: 40, maxHours: 8, maxRunning: 10 };
 

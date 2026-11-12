@@ -131,6 +131,9 @@ export function effectiveCapabilities(input: {
       replyAll,
       policyReason(scope, policy, "replyModeAll") ?? (scope === "personal" ? "dm_only" : null),
     ),
+    // 07.17.1.1.2 (D-04): the same rule as `taskPolicyFor`. Nothing to configure and no per-person permission, so
+    // neither `not_configured` nor `denied_for_you` applies.
+    longTasks: result(caps.longTasks, policyReason(scope, policy, "longTasks")),
   };
 }
 

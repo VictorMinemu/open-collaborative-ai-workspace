@@ -881,6 +881,83 @@ describe("long tasks policy (07.17.1.1.2 D-04, E11, E22)", () => {
     expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(true);
   });
 
+  it("the bot's view: a stored bot without the key reads Long tasks on and effective", async () => {
+    const stored = (await su.query("select capabilities from app.agents where id = $1", [teamBotId])).rows[0]
+      .capabilities as Json;
+    expect(stored).not.toHaveProperty("longTasks");
+    const v = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+    expect(v.capabilities.longTasks).toBe(true);
+    expect(v.effective.longTasks).toEqual({ enabled: true, effective: true, reason: null });
+  });
+
+  it("PATCH longTasks is saved and audited like internet; others are refused like internet (403 / 404)", async () => {
+    const audited = async () =>
+      (await audits("agent.capabilities_updated")).filter((r) => r.resource_id === samBotId);
+    const before = (await audited()).length;
+    const v = await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: false }));
+    expect(v.capabilities.longTasks).toBe(false);
+    expect(v.effective.longTasks).toEqual({ enabled: false, effective: false, reason: null });
+    const row = (await su.query("select capabilities from app.agents where id = $1", [samBotId])).rows[0];
+    expect(row.capabilities).toMatchObject({ longTasks: false });
+    const rows = await audited();
+    expect(rows).toHaveLength(before + 1);
+    expect(rows.at(-1)!.user_id).toBe(samId);
+    expect(rows.at(-1)!.metadata.changed).toEqual(["longTasks"]);
+    expect(await taskPolicyOf(samBotId)).toMatchObject({ enabled: false, reason: null });
+    expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(false);
+
+    // A no-op PATCH neither audits nor changes anything.
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: false }));
+    expect(await audited()).toHaveLength(before + 1);
+
+    expect(
+      (await sam.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { longTasks: false })).status,
+    ).toBe(403);
+    expect(
+      (await admin.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: true })).status,
+    ).toBe(404);
+    const { db } = stack.built.core;
+    expect(
+      await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => findBot(tx, samBotId)),
+    ).toBeNull();
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: true }));
+  });
+
+  it("with the organization switch off, the toggle is answered as internet's under org_policy", async () => {
+    await ok(admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { longTasks: false }));
+    const internetBefore = (await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`)))
+      .capabilities.internet as boolean;
+    const denied = { orgWide: false, personal: true };
+    await ok(putPolicy({ capabilities: { longTasks: denied, internet: denied } }));
+    try {
+      const off = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+      expect(off.effective.longTasks).toEqual({ enabled: false, effective: false, reason: "org_policy" });
+      const patched = await admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+        longTasks: true,
+      });
+      const internet = await admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+        internet: !internetBefore,
+      });
+      // Both switches under org_policy: stored, and never effective while the organization says no.
+      expect([patched.status, codeOf(patched)]).toEqual([internet.status, codeOf(internet)]);
+      expect((internet.body as Json).effective.internet.reason).toBe("org_policy");
+      expect((patched.body as Json).effective.longTasks).toEqual({
+        enabled: true,
+        effective: false,
+        reason: "org_policy",
+      });
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: "org_policy" });
+    } finally {
+      const allow = { orgWide: true, personal: true };
+      await ok(putPolicy({ capabilities: { longTasks: allow, internet: allow } }));
+      await ok(
+        admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { internet: internetBefore }),
+      );
+    }
+    const back = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+    expect(back.effective.longTasks).toEqual({ enabled: true, effective: true, reason: null });
+  });
+
   it("organization B reads its own defaults after A saved limits (E22)", async () => {
     const { db } = stack.built.core;
     const policyB = await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => loadPolicy(tx));
