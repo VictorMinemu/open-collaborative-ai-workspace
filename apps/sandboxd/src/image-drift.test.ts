@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Egress } from "./egress-attach";
-import { createSandboxes } from "./sandboxes";
-import { nameFor } from "./spec";
+import { createSandboxes, type SandboxdEventInput } from "./sandboxes";
+import { nameFor, SHELL_ENV } from "./spec";
 import { FakeDocker } from "./testing/fake-docker";
 import { testPolicy } from "./testing/policy";
 
@@ -35,12 +35,14 @@ function setup(opts: { egress?: boolean } = {}) {
     close: () => undefined,
   };
   const lines: Line[] = [];
+  const emitted: SandboxdEventInput[] = [];
   const sandboxes = createSandboxes({
     docker,
     ns: NS,
     runtime: "auto",
     image: IMAGE,
     egress: opts.egress === false ? null : egress,
+    onEvent: (e) => emitted.push(e),
     log: (line) => lines.push(line),
   });
   sandboxes.setPolicy(testPolicy(ORG));
@@ -57,6 +59,11 @@ function setup(opts: { egress?: boolean } = {}) {
   const mark = () => {
     from = docker.calls.length;
     lines.length = 0;
+    emitted.length = 0;
+  };
+  const restarts = () => since().filter((c) => c.method === "POST" && c.path.includes("/restart"));
+  const setEnv = (env: string[]) => {
+    (sbx()?.Spec as { Env: string[] }).Env = env;
   };
   const since = () => docker.calls.slice(from);
   const deletes = () => since().filter((c) => c.method === "DELETE");
@@ -81,8 +88,20 @@ function setup(opts: { egress?: boolean } = {}) {
     imageCalls,
     volumeCalls,
     ensureLine,
+    emitted,
+    restarts,
+    setEnv,
   };
 }
+
+/** The shell environment before the toolkit (07.17.1.1.1-01): no toolkit on PATH or PYTHONPATH. */
+const PREVIOUS_ENV = [
+  "HOME=/workspace",
+  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+  "NODE_PATH=/opt/ocw-packages/node_modules",
+  "PYTHONPATH=/opt/ocw-packages/python",
+  ...SHELL_ENV.filter((l) => /^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy)=/.test(l)),
+];
 
 const refusal = (p: Promise<unknown>) => p.then(() => null).catch((e: unknown) => e);
 
@@ -212,5 +231,143 @@ describe("ensure re-creates a stopped shell built from an older image (07.17.1.1
     expect(await refusal(s.sandboxes.ensure(target))).toMatchObject({ code: "disk_full", status: 409 });
     expect(s.deletes()).toEqual([]);
     expect(s.creates()).toEqual([]);
+  });
+});
+
+describe("ensure re-creates a stopped shell whose environment lacks a current line (07.17.1.1.1 D-10)", () => {
+  it("re-creates a stopped shell on the previous environment (image unchanged), volumes kept, Env now SHELL_ENV", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    const c1 = s.sbx()?.Id as string;
+    await s.sandboxes.stop({ target, reason: "idle" });
+    s.setEnv([...PREVIOUS_ENV]);
+    const volumesBefore = [...s.docker.volumes.values()];
+    s.mark();
+    await expect(s.sandboxes.ensure(target)).resolves.toMatchObject({ state: "running" });
+    expect(s.deletes().map((c) => c.path)).toEqual([`/containers/${encodeURIComponent(c1)}?force=1`]);
+    expect(s.creates()).toHaveLength(1);
+    expect(s.volumeCalls()).toEqual([]);
+    expect([...s.docker.volumes.values()]).toEqual(volumesBefore);
+    const after = await s.inspect();
+    expect(after.Id).not.toBe(c1);
+    expect(after.Config.Env).toEqual([...SHELL_ENV]);
+    expect(s.ensureLine()).toMatchObject({ recreated: "env" });
+  });
+
+  it("image-provided lines are never drift: a shell whose Env also has NODE_VERSION starts in place", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    const c1 = s.sbx()?.Id;
+    await s.sandboxes.stop({ target, reason: "idle" });
+    s.setEnv(["NODE_VERSION=24.22.1", ...SHELL_ENV]);
+    s.mark();
+    await s.sandboxes.ensure(target);
+    expect(s.sbx()?.Id).toBe(c1);
+    expect(s.deletes()).toEqual([]);
+    expect(s.ensureLine()).toMatchObject({ recreated: null });
+  });
+
+  it("a stopped shell with a stale hosts entry and a changed image is re-created once, for `hosts`", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    await s.sandboxes.stop({ target, reason: "idle" });
+    s.proxy.address = "10.1.0.5";
+    s.docker.images.set(IMAGE, "sha256:new");
+    s.mark();
+    await s.sandboxes.ensure(target);
+    expect(s.deletes()).toHaveLength(1);
+    expect(s.creates()).toHaveLength(1);
+    expect((await s.inspect()).Image).toBe("sha256:new");
+    expect(s.ensureLine()).toMatchObject({ recreated: "hosts" });
+  });
+
+  it("a running shell on the previous environment is left alone by ensure", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    const c1 = s.sbx()?.Id;
+    s.setEnv([...PREVIOUS_ENV]);
+    s.mark();
+    await s.sandboxes.ensure(target);
+    expect(s.sbx()?.Id).toBe(c1);
+    expect(s.deletes()).toEqual([]);
+    expect(s.ensureLine()).toMatchObject({ recreated: null });
+  });
+});
+
+describe("restart re-creates a drifted shell and restarts an up-to-date one in place (07.17.1.1.1 D-10)", () => {
+  for (const egress of [true, false]) {
+    const mode = egress ? "with an egress proxy" : "without an egress proxy";
+
+    it(`${mode}: a running shell on an older image is re-created from the current image and started`, async () => {
+      const s = setup({ egress });
+      await s.sandboxes.ensure(target);
+      const c1 = s.sbx()?.Id as string;
+      s.docker.images.set(IMAGE, "sha256:new");
+      s.mark();
+      await expect(s.sandboxes.restart(target)).resolves.toMatchObject({ state: "running" });
+      expect(s.deletes().map((c) => c.path)).toEqual([`/containers/${encodeURIComponent(c1)}?force=1`]);
+      expect(s.creates()).toHaveLength(1);
+      expect(s.starts()).toHaveLength(1);
+      expect(s.restarts()).toEqual([]);
+      expect(s.volumeCalls()).toEqual([]);
+      const after = await s.inspect();
+      expect(after.Id).not.toBe(c1);
+      expect(after.Image).toBe("sha256:new");
+      expect(s.sbx()?.Running).toBe(true);
+      expect(s.emitted).toContainEqual(
+        expect.objectContaining({ type: "state", target, kind: "sbx", state: "running", reason: null }),
+      );
+    });
+
+    it(`${mode}: a running shell on the previous environment is re-created with SHELL_ENV`, async () => {
+      const s = setup({ egress });
+      await s.sandboxes.ensure(target);
+      const c1 = s.sbx()?.Id;
+      s.setEnv([...PREVIOUS_ENV]);
+      s.mark();
+      await s.sandboxes.restart(target);
+      expect(s.deletes()).toHaveLength(1);
+      expect(s.sbx()?.Id).not.toBe(c1);
+      expect((await s.inspect()).Config.Env).toEqual([...SHELL_ENV]);
+    });
+
+    it(`${mode}: an up-to-date running shell restarts in place`, async () => {
+      const s = setup({ egress });
+      await s.sandboxes.ensure(target);
+      const c1 = s.sbx()?.Id;
+      s.mark();
+      await expect(s.sandboxes.restart(target)).resolves.toMatchObject({ state: "running" });
+      expect(s.restarts().map((c) => c.path)).toEqual([
+        `/containers/${encodeURIComponent(c1 as string)}/restart?t=5`,
+      ]);
+      expect(s.deletes()).toEqual([]);
+      expect(s.creates()).toEqual([]);
+      expect(s.sbx()?.Id).toBe(c1);
+    });
+
+    it(`${mode}: an image Docker cannot inspect restarts in place and writes the warn line`, async () => {
+      const s = setup({ egress });
+      await s.sandboxes.ensure(target);
+      const c1 = s.sbx()?.Id;
+      s.docker.images.delete(IMAGE);
+      s.mark();
+      await s.sandboxes.restart(target);
+      expect(s.restarts()).toHaveLength(1);
+      expect(s.deletes()).toEqual([]);
+      expect(s.sbx()?.Id).toBe(c1);
+      expect(s.lines.filter((l) => l.level === "warn")).toEqual([
+        { level: "warn", msg: "image_unknown", orgId: ORG, agentId: AGENT },
+      ]);
+    });
+  }
+
+  it("a killed organization's restart is refused and nothing is removed, even with a drifted image", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    s.docker.images.set(IMAGE, "sha256:new");
+    s.sandboxes.setPolicy(testPolicy(ORG, { killed: true, version: 2 }));
+    s.mark();
+    expect(await refusal(s.sandboxes.restart(target))).toMatchObject({ code: "killed", status: 409 });
+    expect(s.deletes()).toEqual([]);
   });
 });

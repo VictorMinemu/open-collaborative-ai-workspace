@@ -18,6 +18,7 @@ import {
   SHELL_ENV,
   type ShellSpecInput,
   STAGING_DIR,
+  shellEnvCurrent,
   shellSpec,
   TOOLS_DIR,
   TOOLS_SITE,
@@ -393,5 +394,30 @@ describe("the proxy's address in /etc/hosts (07.8 gVisor DNS fix)", () => {
     expect(egressHostsCurrent(["sandbox-egress:10.1.0.2", "x:1.2.3.4"], "10.1.0.2")).toBe(false);
     expect(egressHostsCurrent(null, null)).toBe(true);
     expect(egressHostsCurrent([], null)).toBe(true);
+  });
+});
+
+describe("shellEnvCurrent (07.17.1.1.1 D-10, PD-10)", () => {
+  /** The shell environment before the toolkit: no toolkit bin on PATH, approved packages alone on PYTHONPATH. */
+  const previous = [
+    "HOME=/workspace",
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+    "NODE_PATH=/opt/ocw-packages/node_modules",
+    "PYTHONPATH=/opt/ocw-packages/python",
+    ...SHELL_ENV.filter((l) => /^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy)=/.test(l)),
+  ];
+
+  it("is true when every SHELL_ENV line is present, in any order, with the image's own ENV lines merged in", () => {
+    expect(shellEnvCurrent([...SHELL_ENV])).toBe(true);
+    expect(shellEnvCurrent(["NODE_VERSION=24.22.1", ...SHELL_ENV.slice().reverse()])).toBe(true);
+  });
+
+  it("is false for the previous environment, a missing line, or no environment at all", () => {
+    expect(shellEnvCurrent(previous)).toBe(false);
+    expect(shellEnvCurrent(SHELL_ENV.slice(1))).toBe(false);
+    expect(shellEnvCurrent(null)).toBe(false);
+    expect(shellEnvCurrent(undefined)).toBe(false);
+    expect(shellEnvCurrent([])).toBe(false);
+    expect(shellEnvCurrent("HOME=/workspace")).toBe(false);
   });
 });
