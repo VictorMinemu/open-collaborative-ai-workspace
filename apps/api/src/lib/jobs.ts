@@ -48,6 +48,11 @@ export const JOB_QUEUES = {
   "work_session.bot_sync": z.object({ organizationId: Id, workSessionId: Id }).strict(),
   // Phase 07.17 (D-04, PD-09): one opened item's own bot turn (ids only; the worker is registered by 07.17-17).
   "automation.item": z.object({ organizationId: Id, itemId: Id }).strict(),
+  // Phase 07.17.1.1.2 (D-02, D-03, PD-06): a long task's next turn (ids only; the handler decides under the task's row
+  // lock, so an extra or stale job delivers nothing) and the minute tick reading `app.due_bot_tasks` (the workers and
+  // the schedule are registered by 07.17.1.1.2-09).
+  "bot_task.continue": z.object({ organizationId: Id, taskId: Id }).strict(),
+  "bot_task.tick": Empty,
 } as const satisfies Record<JobQueueName, z.ZodType>;
 
 export type QueueName = keyof typeof JOB_QUEUES;
@@ -64,7 +69,8 @@ export type TickQueue =
   | "mailbox.tick"
   | "watched.tick"
   | "maintenance.daily"
-  | "consult.tick";
+  | "consult.tick"
+  | "bot_task.tick";
 
 export interface JobContext {
   /** Aborted when pg-boss gives up on the job (expiry or shutdown past the grace period). */

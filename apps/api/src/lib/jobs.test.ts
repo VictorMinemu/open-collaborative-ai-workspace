@@ -27,8 +27,8 @@ describe("work_session.bot_sync queue", () => {
  * the external key, its title and its body never enter a job (job tables live outside RLS).
  */
 describe("automation.item queue", () => {
-  it("is the catalog's newest queue, in both catalogs", () => {
-    expect(JOB_QUEUE_NAMES.at(-1)).toBe("automation.item");
+  it("is in both catalogs (07.17.1.1.2 appended the bot task queues after it)", () => {
+    expect(JOB_QUEUE_NAMES).toContain("automation.item");
     expect(Object.keys(JOB_QUEUES)).toContain("automation.item");
   });
 
@@ -39,5 +39,32 @@ describe("automation.item queue", () => {
     expect(schema.safeParse({ ...ids, externalKey: "SO-1001" }).success).toBe(false);
     expect(schema.safeParse({ organizationId: ids.organizationId }).success).toBe(false);
     expect(schema.safeParse({ ...ids, itemId: "not-an-id" }).success).toBe(false);
+  });
+});
+
+/**
+ * Phase 07.17.1.1.2 (D-02, D-03, PD-06, ADR-0042): a long task's next turn and the minute tick that finds lost wakes are
+ * ids-only jobs. The task row holds the goal, progress and wait; none of it ever enters a job (job tables live outside
+ * RLS).
+ */
+describe("bot task queues", () => {
+  it("are the catalog's newest queues, in both catalogs", () => {
+    expect(JOB_QUEUE_NAMES.slice(-2)).toEqual(["bot_task.continue", "bot_task.tick"]);
+    expect(Object.keys(JOB_QUEUES)).toEqual(expect.arrayContaining(["bot_task.continue", "bot_task.tick"]));
+  });
+
+  it("bot_task.continue carries the organization and task ids only", () => {
+    const schema = JOB_QUEUES["bot_task.continue"];
+    const ids = { organizationId: randomUUID(), taskId: randomUUID() };
+    expect(schema.parse(ids)).toEqual(ids);
+    expect(schema.safeParse({ ...ids, goal: "Read the knowledge pack" }).success).toBe(false);
+    expect(schema.safeParse({ organizationId: ids.organizationId }).success).toBe(false);
+    expect(schema.safeParse({ ...ids, taskId: "not-an-id" }).success).toBe(false);
+  });
+
+  it("bot_task.tick carries nothing", () => {
+    const schema = JOB_QUEUES["bot_task.tick"];
+    expect(schema.parse({})).toEqual({});
+    expect(schema.safeParse({ taskId: randomUUID() }).success).toBe(false);
   });
 });
