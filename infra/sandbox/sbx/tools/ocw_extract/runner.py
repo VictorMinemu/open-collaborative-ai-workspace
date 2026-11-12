@@ -1,5 +1,11 @@
-"""Children of `ocw-extract` (phase 07.17.1.1.1, PD-06): argv lists only, each in its own session with a step timeout,
-a fresh minimal environment without any proxy variable, and a private scratch directory removed afterwards.
+"""Children of `ocw-extract` (phase 07.17.1.1.1, PD-06): argv lists only, each with a step timeout, a fresh minimal
+environment without any proxy variable, and a private scratch directory removed afterwards.
+
+Children stay in ocw-extract's own process group, which is the one `ocw-run` records (07.17.1.1.1 review WR-01): when
+`ocw-run --kill` or the exec timeout SIGKILLs that group, every child and grandchild (LibreOffice's soffice.bin
+included) dies with ocw-extract. A step timeout kills the child's whole process tree, found through /proc, and
+ocw-extract is a child subreaper, so a grandchild orphaned during a step is reparented here and killed with it. The
+tree is killed before the child is reaped, so its pid cannot have been reused (review IN-03).
 
 Nothing here ever hands a string to a shell. Output is written to unnamed files in the scratch directory and read
 back with a cap, so a hostile input cannot fill this process's memory through a pipe.
@@ -40,7 +46,8 @@ WORKER = (
 )
 
 _scratch = None
-_live_groups = set()
+_live = {}  # pid of a running child → this process's children before it started (kill_tree's orphans)
+_SUBREAPER = [False]
 
 
 class Result:
@@ -73,7 +80,8 @@ def child_env(scratch=None):
 
 
 def _limits(timeout, fsize):
-    """Runs in the child before exec: CPU-time backstop, per-file size cap, and death with its parent (Linux)."""
+    """Runs in the child before exec: CPU-time backstop, per-file size cap, and death with its parent (Linux). The
+    child keeps ocw-extract's process group (never a new session), so ocw-run's group kill reaches it."""
 
     def apply():
         cpu = int(timeout) + 5
@@ -86,15 +94,105 @@ def _limits(timeout, fsize):
     return apply
 
 
-def kill_group(pgid):
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, signal.SIGKILL)
+def _subreaper():
+    """Become a child subreaper (PR_SET_CHILD_SUBREAPER, Linux): a grandchild whose parent exits during a step is
+    reparented to this process, where `kill_tree` finds it, instead of to the container's init."""
+    if not _SUBREAPER[0] and _LIBC is not None:
+        with contextlib.suppress(Exception):
+            _LIBC.prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
+        _SUBREAPER[0] = True
+
+
+def _processes():
+    """{pid: (ppid, state)} of every process /proc shows (this container's pid namespace), or None without /proc."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    table = {}
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        rest = data[data.rfind(b")") + 2 :].split()  # the command name may hold spaces and parentheses
+        if len(rest) >= 2:
+            table[int(name)] = (int(rest[1]), rest[0])
+    return table
+
+
+def _descendants(table, roots):
+    found, todo = set(), list(roots)
+    while todo:
+        parent = todo.pop()
+        for pid, (ppid, _state) in table.items():
+            if ppid == parent and pid not in found:
+                found.add(pid)
+                todo.append(pid)
+    return found
+
+
+def kill_tree(pid, orphans_since=None):
+    """SIGKILL `pid` and every live descendant of it, plus any process reparented to this one (a subreaper) that is
+    not in `orphans_since` and its descendants; repeated until none is left, so a fork during the kill is caught
+    too. Zombies left as this process's children are reaped, never the child `pid` itself (its Popen does that)."""
+    me = os.getpid()
+    for _ in range(20):
+        table = _processes()
+        if table is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+            return
+        roots = {pid}
+        if orphans_since is not None:
+            roots |= {p for p, (pp, _s) in table.items() if pp == me and p != pid and p not in orphans_since}
+        targets = {p for p in roots | _descendants(table, roots) if p in table and table[p][1] != b"Z" and p != me}
+        for p in targets:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(p, signal.SIGKILL)
+        for p, (pp, state) in table.items():
+            if pp == me and p != pid and state == b"Z" and p not in _live and (orphans_since is None or p not in orphans_since):
+                with contextlib.suppress(ChildProcessError, OSError):
+                    os.waitpid(p, os.WNOHANG)
+        if not targets:
+            return
+        time.sleep(0.01)
+
+
+def own_children():
+    table = _processes() or {}
+    me = os.getpid()
+    return {p for p, (pp, _s) in table.items() if pp == me}
+
+
+def wait_exited(proc, timeout):
+    """Wait up to `timeout` s for the child to exit without reaping it (waitid WNOWAIT), so its tree can be killed
+    while its pid is still reserved. True when it exited."""
+    deadline = time.monotonic() + timeout
+    delay = 0.002
+    while True:
+        try:
+            info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return True
+        if info is not None and info.si_pid == proc.pid:
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(delay, left))
+        delay = min(delay * 2, 0.05)
 
 
 def spawn(argv, timeout, *, cwd=None, stdout=None, stderr=None, fsize=None, env=None):
-    """Start one argv in its own session with the limits; the caller waits. Never a shell."""
+    """Start one argv with the limits, in this process group; the caller waits. Never a shell."""
     if not isinstance(argv, (list, tuple)) or not argv:
         raise TypeError("argv must be a non-empty list")
+    _subreaper()
+    before = own_children()
     proc = subprocess.Popen(
         [str(a) for a in argv],
         stdin=subprocess.DEVNULL,
@@ -102,20 +200,20 @@ def spawn(argv, timeout, *, cwd=None, stdout=None, stderr=None, fsize=None, env=
         stderr=stderr if stderr is not None else subprocess.DEVNULL,
         cwd=cwd or _scratch or tempfile.gettempdir(),
         env=env or child_env(),
-        start_new_session=True,
         close_fds=True,
         preexec_fn=_limits(timeout, fsize or bounds.CHILD_MAX_FILE_BYTES),
     )
-    _live_groups.add(proc.pid)
+    proc.ocw_before = before
+    _live[proc.pid] = before
     return proc
 
 
 def reap(proc):
-    """Kill whatever is left of the child's process group and forget it."""
-    kill_group(proc.pid)
+    """Kill whatever is left of the child's process tree (itself included while it runs), then reap it."""
+    kill_tree(proc.pid, getattr(proc, "ocw_before", None))
     with contextlib.suppress(Exception):
         proc.wait(timeout=5)
-    _live_groups.discard(proc.pid)
+    _live.pop(proc.pid, None)
 
 
 def run(argv, timeout, *, cwd=None, max_output=bounds.OUTPUT_FILE_MAX_BYTES, fsize=None):
@@ -126,12 +224,11 @@ def run(argv, timeout, *, cwd=None, max_output=bounds.OUTPUT_FILE_MAX_BYTES, fsi
     with tempfile.TemporaryFile(dir=where) as out, tempfile.TemporaryFile(dir=where) as err:
         proc = spawn(argv, timeout, cwd=cwd, stdout=out, stderr=err, fsize=fsize)
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            reap(proc)
-            raise bounds.StepTimeout(
-                f"{os.path.basename(str(argv[0]))} did not finish within {int(timeout)} s", pgid=proc.pid
-            ) from None
+            if not wait_exited(proc, timeout):
+                reap(proc)
+                raise bounds.StepTimeout(
+                    f"{os.path.basename(str(argv[0]))} did not finish within {int(timeout)} s", pgid=proc.pid
+                )
         finally:
             reap(proc)
         out.seek(0)
@@ -197,11 +294,11 @@ def lo_profile():
 
 
 def install_signal_handlers():
-    """SIGTERM, SIGHUP and SIGINT kill the live child groups, then unwind (finally blocks remove the scratch)."""
+    """SIGTERM, SIGHUP and SIGINT kill the live children's trees, then unwind (finally blocks remove the scratch)."""
 
     def handler(signum, _frame):
-        for pgid in list(_live_groups):
-            kill_group(pgid)
+        for pid, before in list(_live.items()):
+            kill_tree(pid, before)
         raise SystemExit(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):

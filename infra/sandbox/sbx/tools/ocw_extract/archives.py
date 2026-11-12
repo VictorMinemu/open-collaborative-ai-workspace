@@ -3,9 +3,9 @@
 Single-file mode only lists. `--batch` lists first and refuses the archive (exit 6 when it is the top-level argument)
 when the listing breaks a cap: a total over ARCHIVE_MAX_TOTAL_BYTES or the free space of /workspace, more than
 ARCHIVE_MAX_ENTRIES entries, an entry over 10 MiB packed more than ARCHIVE_MAX_RATIO to 1, an absolute or `..` path,
-a link or a special file. A listing can lie, so the extraction runs in its own session with RLIMIT_FSIZE and under a
+a link or a special file. A listing can lie, so the extraction runs with RLIMIT_FSIZE and under a
 size watcher that sums the bytes really written every 0.25 s against min(cap, free space − 64 MiB): above it the
-process group is killed, the destination removed and the archive refused (`caps: extracted size`). Every extracted
+child's process tree is killed, the destination removed and the archive refused (`caps: extracted size`). Every extracted
 path is re-checked to stay under the destination. Symbolic links are never stored on extraction.
 
 zip and 7z go through 7-Zip (`7zz`); tar and tar.gz through the stdlib `tarfile` in a child interpreter (7-Zip lists
@@ -19,7 +19,6 @@ import re
 import shutil
 import signal
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -240,11 +239,8 @@ def extract(path, dest, max_bytes=None, timeout=bounds.STEP_TIMEOUTS["7zz_extrac
             over = False
             try:
                 while True:
-                    try:
-                        proc.wait(timeout=bounds.ARCHIVE_WATCH_INTERVAL_S)
+                    if runner.wait_exited(proc, bounds.ARCHIVE_WATCH_INTERVAL_S):
                         break
-                    except subprocess.TimeoutExpired:
-                        pass
                     if tree_bytes(dest) > limit:
                         over = True
                         break

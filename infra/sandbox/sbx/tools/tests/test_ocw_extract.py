@@ -82,6 +82,28 @@ def leftovers():
     return found
 
 
+def live_comms():
+    """(pid, comm) of every live (not zombie) process in the container."""
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        comm = data[data.index(b"(") + 1 : data.rindex(b")")].decode("utf-8", "replace")
+        state = data[data.rindex(b")") + 2 :].split()[0]
+        if state != b"Z":
+            found.append((int(name), comm))
+    return found
+
+
+def office_processes():
+    return sorted(comm for _pid, comm in live_comms() if comm in ("soffice.bin", "oosplash", "soffice"))
+
+
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -149,26 +171,30 @@ class Runner(Base):
             os.environ.clear()
             os.environ.update(saved)
 
-    def test_a_child_past_its_timeout_is_killed_with_its_group(self):
+    def test_a_child_past_its_timeout_is_killed_with_its_tree(self):
         from ocw_extract import bounds, runner
 
+        sleeps = lambda: [pid for pid, comm in live_comms() if comm == "sleep"]  # noqa: E731
         with runner.scratch():
             started = time.monotonic()
             with self.assertRaises(bounds.StepTimeout) as ctx:
-                runner.run(["sh", "-c", "sleep 60 & sleep 60"], 1)
+                # A grandchild in the background and one whose parent exits first (reparented to the subreaper).
+                runner.run(["sh", "-c", "sleep 60 & (sleep 61 &) ; sleep 62"], 1)
             self.assertLess(time.monotonic() - started, 10)
-        pgid = ctx.exception.pgid
-        self.assertIsInstance(pgid, int)
+        self.assertIsInstance(ctx.exception.pgid, int)
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                break
+        while sleeps() and time.monotonic() < deadline:
             time.sleep(0.1)
-        else:
-            self.fail("the child's process group outlived its timeout")
+        self.assertEqual(sleeps(), [], "a process of the child's tree outlived its timeout")
         self.assertEqual(ctx.exception.code, 7)
+
+    def test_a_child_that_exits_leaves_no_orphan_running(self):
+        from ocw_extract import runner
+
+        with runner.scratch():
+            res = runner.run(["sh", "-c", "(sleep 63 &) ; echo done"], 30)
+        self.assertEqual(res.stdout, b"done\n")
+        self.assertEqual([pid for pid, comm in live_comms() if comm == "sleep"], [])
 
     def test_a_step_timeout_is_exit_7_at_the_cli(self):
         from ocw_extract import bounds, cli as cli_module, runner
@@ -186,6 +212,84 @@ class Runner(Base):
             runner.run = original
         self.assertEqual(rc, 7)
         assert_reason(self, err.getvalue(), "did not finish")
+
+    def test_killing_ocw_extract_through_ocw_run_kills_libreoffice_too(self):
+        """07.17.1.1.1 review WR-01: `ocw-run --kill` (and its exec timeout) SIGKILL ocw-extract's process group; every
+        child, LibreOffice's soffice.bin grandchild included, must be in it and die with it."""
+        import docx
+
+        path = f"{WS}/slow.docx"
+        document = docx.Document()
+        for i in range(30_000):
+            document.add_paragraph(f"Párrafo {i}: texto de relleno para que LibreOffice tarde en convertirlo.")
+        document.save(path)
+        rid = f"wr01x{os.getpid()}"
+        proc = subprocess.Popen(
+            ["/usr/local/bin/ocw-run", rid, "600", "--", EXTRACT, path, "-o", f"{WS}/slow.txt"],
+            cwd=WS,
+            env=BOT_ENV,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 90
+            while not office_processes() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn("soffice.bin", office_processes(), "LibreOffice never started")
+            kill = subprocess.run(["/usr/local/bin/ocw-run", "--kill", rid], capture_output=True, check=False)
+            self.assertEqual(kill.returncode, 0, kill.stderr)
+            proc.wait(timeout=10)
+            deadline = time.monotonic() + 2
+            while office_processes() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(office_processes(), [], "LibreOffice outlived the kill of ocw-extract")
+        finally:
+            proc.kill()
+            proc.wait()
+            for name in ("slow.docx", "slow.txt"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(f"{WS}/{name}")
+            # A SIGKILLed run cannot remove its scratch; the next run does (review WR-06, tested there).
+            shutil.rmtree(f"{WS}/.ocw-extract-tmp", ignore_errors=True)
+            for name in os.listdir("/tmp"):
+                if name.startswith("ocw-lo-"):
+                    shutil.rmtree(f"/tmp/{name}", ignore_errors=True)
+
+    def test_killing_ocw_extract_through_ocw_run_kills_every_grandchild(self):
+        """07.17.1.1.1 review WR-01: a grandchild without a death signal (any program that forks, as soffice forks
+        soffice.bin) dies with the group ocw-run kills; nothing runs on in a session nobody kills."""
+        code = (
+            "import sys; sys.path.insert(0, '/opt/ocw-tools/lib'); from ocw_extract import runner\n"
+            "with runner.scratch():\n"
+            "    runner.run(['sh', '-c', 'sleep 300 & sleep 301; wait'], 600)\n"
+        )
+        rid = f"wr01g{os.getpid()}"
+        proc = subprocess.Popen(
+            ["/usr/local/bin/ocw-run", rid, "600", "--", "/opt/ocw-tools/venv/bin/python3", "-I", "-c", code],
+            cwd=WS,
+            env=BOT_ENV,
+        )
+        sleeps = lambda: sorted(comm for _pid, comm in live_comms() if comm == "sleep")  # noqa: E731
+        try:
+            deadline = time.monotonic() + 30
+            while len(sleeps()) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(sleeps(), ["sleep", "sleep"])
+            kill = subprocess.run(["/usr/local/bin/ocw-run", "--kill", rid], capture_output=True, check=False)
+            self.assertEqual(kill.returncode, 0, kill.stderr)
+            proc.wait(timeout=10)
+            deadline = time.monotonic() + 2
+            while sleeps() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(sleeps(), [], "a grandchild outlived the kill of ocw-extract")
+        finally:
+            proc.kill()
+            proc.wait()
+            for pid, comm in live_comms():
+                if comm == "sleep":
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, 9)
+            shutil.rmtree(f"{WS}/.ocw-extract-tmp", ignore_errors=True)
 
     def test_argv_is_never_a_string(self):
         from ocw_extract import runner
