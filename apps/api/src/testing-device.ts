@@ -1,5 +1,10 @@
-import { randomUUID } from "node:crypto";
-import type { RuntimeSelfStatus } from "@ocw/contracts";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  RUNTIME_FILE_ROUTE,
+  type RuntimeSelfStatus,
+  SessionFileWritePayload,
+  sessionFileAckError,
+} from "@ocw/contracts";
 import WebSocket from "ws";
 
 /**
@@ -14,6 +19,9 @@ export class FakeDevice {
   readonly frames: Frame[] = [];
   private cursor = 0;
   closed = false;
+  /** The API this link was opened against and the device JWT it used (null for a raw device token). */
+  baseUrl: string | null = null;
+  jwt: string | null = null;
   private constructor(readonly ws: WebSocket) {
     ws.on("message", (d) => this.frames.push(JSON.parse(d.toString()) as Frame));
     ws.on("close", () => {
@@ -26,7 +34,12 @@ export class FakeDevice {
       headers: { authorization: `Bearer ${token}` },
     });
     return new Promise((resolve, reject) => {
-      ws.once("open", () => resolve(new FakeDevice(ws)));
+      ws.once("open", () => {
+        const d = new FakeDevice(ws);
+        d.baseUrl = baseUrl;
+        d.jwt = token.includes(".") ? token : null;
+        resolve(d);
+      });
       ws.once("unexpected-response", (_req, res) => reject(new Error(`HTTP ${res.statusCode}`)));
       ws.once("error", reject);
     });
@@ -118,7 +131,7 @@ export class FakeDevice {
     return this.next(
       (f) => f.type === "command" && f.kind === kind && (!sessionId || f.sessionId === sessionId),
       timeoutMs,
-    ) as Promise<Frame & { id: string; payload: Record<string, unknown>; sessionId: string }>;
+    ) as Promise<Frame & { id: string; kind: string; payload: Record<string, unknown>; sessionId: string }>;
   }
 
   pending(kind: string) {
@@ -127,6 +140,40 @@ export class FakeDevice {
 
   ack(id: string, ok = true, error?: string) {
     this.send({ type: "ack", commandId: id, ...(ok ? { ok: true } : { ok: false, error }) });
+  }
+
+  /**
+   * 07.17.1.1 (D-08, PD-05): do what the daemon does with a `session.file.write`: GET the bytes from
+   * `RUNTIME_FILE_ROUTE/<command id>` under the device JWT, check their size and sha256 against the payload, and ack on
+   * the link (`expired` for a 410, `transfer_failed: HTTP <status>` for another refusal, `mismatch` when the bytes
+   * differ). With `ackAs` it acks that error without any request (e.g. an old daemon's `invalid command frame`).
+   * `baseUrl` and `jwt` default to the link's own. Returns the ack it sent. 08 adds `session.file.read`.
+   */
+  async serveFileCommand(
+    cmd: { id: string; kind: string; payload: Record<string, unknown> },
+    opts: { baseUrl?: string; jwt?: string; ackAs?: string } = {},
+  ): Promise<{ ok: boolean; error: string | null }> {
+    const answer = (error: string | null) => {
+      this.ack(cmd.id, error === null, error ?? undefined);
+      return { ok: error === null, error };
+    };
+    if (opts.ackAs !== undefined) return answer(opts.ackAs);
+    if (cmd.kind !== "session.file.write") throw new Error(`serveFileCommand: unsupported kind ${cmd.kind}`);
+    const payload = SessionFileWritePayload.parse(cmd.payload);
+    const baseUrl = opts.baseUrl ?? this.baseUrl;
+    const jwt = opts.jwt ?? this.jwt;
+    if (!baseUrl || !jwt) throw new Error("serveFileCommand: no base URL or device JWT for this link");
+    const res = await fetch(`${baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    });
+    if (res.status === 410) return answer(sessionFileAckError("expired"));
+    if (res.status !== 200) return answer(sessionFileAckError("transfer_failed", `HTTP ${res.status}`));
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length !== payload.sizeBytes || (payload.sha256 !== null && sha !== payload.sha256)) {
+      return answer(sessionFileAckError("mismatch"));
+    }
+    return answer(null);
   }
 
   /** Report what the device's runtimes offer (P-05); `isolatedServer` (07.16, D-19) is sent only when given. */

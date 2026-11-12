@@ -5,21 +5,16 @@ import {
   EventTypes,
   type ServerToDeviceFrame,
 } from "@ocw/contracts";
-import { devices, projects } from "@ocw/db";
+import { projects } from "@ocw/db";
 import { and, eq, isNull, notInArray, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { App, Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import { createPermissionService } from "../organization";
+import { authenticateDeviceJwt } from "./auth";
 import type { DeviceHub, DeviceRef } from "./hub";
 import { bearerValue, looksLikeJwt } from "./token";
-
-declare module "fastify" {
-  interface FastifyRequest {
-    device?: DeviceRef;
-  }
-}
 
 /** A device still using its raw token is warned and audited at most once per this window. */
 export const LEGACY_TOKEN_AUDIT_EVERY_MS = 60 * 60_000;
@@ -45,7 +40,8 @@ export function sanitizeAnnouncements(list: DeviceProjectAnnouncement[]): Device
 /**
  * `GET /runtime/ws` — the Device Link. The credential is verified BEFORE the upgrade:
  * - a 10-minute device JWT (aud `ocw:device-link`, from `POST /api/v1/devices/token`) verified against the
- *   JWKS, then the device row re-checked (a revoked device is refused even with a JWT it still holds);
+ *   JWKS, then the device row re-checked (a revoked device is refused even with a JWT it still holds), through
+ *   `authenticateDeviceJwt` (`auth.ts`, shared with the file transfer route, 07.17.1.1 PD-05);
  * - the raw device token (SHA-256 lookup), only while `OCW_ACCEPT_LEGACY_DEVICE_TOKEN` is true, for desktop
  *   apps built before Phase 2 (D-03): warned and audited (`device.legacy_token_used`) once per device per hour.
  * Either way the resolver decides `device.link` for the device principal. A user JWT never verifies here.
@@ -56,23 +52,6 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
   const acceptLegacyToken = core.env.OCW_ACCEPT_LEGACY_DEVICE_TOKEN;
   /** deviceId → when its legacy-token use was last warned and audited (this API instance). */
   const legacyAuditedAt = new Map<string, number>();
-
-  /** Device JWT → the non-revoked device it names, with `device.link` decided; null otherwise. */
-  async function deviceFromJwt(req: FastifyRequest, token: string): Promise<DeviceRef | null> {
-    const claims = await core.identity.verifyDeviceAccessToken(token);
-    if (!claims) return null;
-    return core.db.withTenant({ organizationId: claims.organizationId, userId: null }, async (tx) => {
-      const [row] = await tx
-        .select({ ownerUserId: devices.ownerUserId, revokedAt: devices.revokedAt })
-        .from(devices)
-        .where(eq(devices.id, claims.deviceId))
-        .limit(1);
-      if (!row || row.revokedAt) return null;
-      const ref: DeviceRef = { ...claims, ownerUserId: row.ownerUserId };
-      req.device = ref;
-      return (await perms.can(req, tx, "device.link")) ? ref : null;
-    });
-  }
 
   /** Raw device token (pre-Phase 2 desktop apps) → its non-revoked device, with `device.link` decided. */
   async function deviceFromLegacyToken(req: FastifyRequest, token: string): Promise<DeviceRef | null> {
@@ -128,7 +107,7 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
         const found = !token
           ? null
           : looksLikeJwt(token)
-            ? await deviceFromJwt(req, token)
+            ? await authenticateDeviceJwt(core, perms, req, token)
             : await deviceFromLegacyToken(req, token);
         if (!found) {
           req.device = undefined;

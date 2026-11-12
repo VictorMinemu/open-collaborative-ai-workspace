@@ -14,6 +14,8 @@ export {
   isRevokedPrincipal,
   loadDeviceAccess,
 } from "./access";
+// 07.17.1.1 PD-05: the Device Link and the file transfer route authenticate a device JWT with the same check.
+export { authenticateDeviceJwt } from "./auth";
 export { listGrants, loadGrants } from "./grants";
 export {
   CommandUndeliverableError,
@@ -27,6 +29,7 @@ export {
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
 export { deviceFacts, normalizePairingCode, toDevice } from "./routes";
+export { bearerValue, looksLikeJwt } from "./token";
 
 export interface DeviceModule extends ApiModule {
   /** Public interface for the work-session module: command queue, presence, diff relay. */

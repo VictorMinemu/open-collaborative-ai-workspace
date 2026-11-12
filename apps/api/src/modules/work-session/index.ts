@@ -15,6 +15,7 @@ import { registerBotProfileRoutes } from "./bot-profile";
 import { type BotReadParams, readBotWorkSession } from "./bot-read";
 import { type BotSessions, createBotSessions } from "./bot-sessions";
 import { sessionFacts } from "./facts";
+import { registerFileTransferRoutes } from "./file-transfer-routes";
 import { loadWorkZonePolicy } from "./policy";
 import { registerProjectRoutes } from "./projects";
 import {
@@ -235,6 +236,8 @@ export function createWorkSessionModule(
       registerProjectRoutes(app, core, perms);
       // 07.16 (D-01 … D-03): a bot's Work Zone profile and the per-bot device consent; changes sweep the device.
       registerBotProfileRoutes(app, core, perms, service);
+      // 07.17.1.1 (D-08, PD-05): the device side of a bot's file move, `GET /api/v1/runtime/files/:transferId`.
+      registerFileTransferRoutes(app, core, { storage: deps.storage ?? null });
     },
     start,
     proposals,

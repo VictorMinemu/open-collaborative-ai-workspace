@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
-import { connectWithProject, invite, pairDevice, startSession } from "../../testing-workzone";
+import { connectWithProject, pairDevice, startSession } from "../../testing-workzone";
 import { insertTransfer } from "./bot-files";
 
 /**
