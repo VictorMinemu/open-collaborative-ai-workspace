@@ -83,11 +83,11 @@ def xlsx_child(args):
 
 def read_xlsx(path, steps):
     res = steps.python("ocw_extract.sheets", "xlsx_child", path)
+    reason = f"could not read the workbook {os.path.basename(path)}: {res.err_line() or 'damaged file'}"
+    if res.returncode == bounds.EXIT_CAPS:
+        raise bounds.CapsError(reason)
     if res.returncode != 0:
-        code = bounds.EXIT_CAPS if res.returncode == bounds.EXIT_CAPS else bounds.EXIT_FAILED
-        raise bounds.ExtractError(
-            f"could not read the workbook {os.path.basename(path)}: {res.err_line() or 'damaged file'}", code
-        )
+        raise bounds.ConversionError(reason)
     return res.stdout.decode("utf-8", "replace")
 
 
@@ -117,7 +117,9 @@ def extract(path, type_name, opts):
         converted = office.convert(path, XLSX_FILTER, steps)
         doc.add(read_xlsx(converted, steps))
         doc.method = "soffice+openpyxl"
-    except bounds.StepTimeout:
+    except (bounds.StepTimeout, bounds.CapsError):
+        # A cap is final (07.17.1.1.1 review IN-05): a second, CSV export of the same oversized workbook would hit it
+        # again after another LibreOffice run.
         raise
     except bounds.ExtractError:
         doc.add(via_csv(path, steps))

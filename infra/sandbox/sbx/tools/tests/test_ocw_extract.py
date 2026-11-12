@@ -741,6 +741,34 @@ class Sheets(Base):
                 self.assertIn("### sheet: Notas", result)
                 self.assertLess(v, result.index("### sheet: Notas"))
 
+    def test_an_oversized_converted_workbook_is_exit_6_without_a_second_export(self):
+        """07.17.1.1.1 review IN-05: the 64 MiB cap hit while reading LibreOffice's .xlsx is exit 6; it never falls
+        back to a second 120 s CSV export of the same oversized workbook."""
+        from ocw_extract import bounds, cli as cli_module, runner, sheets
+
+        calls = []
+
+        def fake(argv, timeout, **_kw):
+            argv = [str(a) for a in argv]
+            tool = os.path.basename(argv[0])
+            if tool.startswith("python"):
+                tool = argv[6]
+            calls.append(tool)
+            if tool == "soffice":
+                outdir = argv[argv.index("--outdir") + 1]
+                with open(os.path.join(outdir, "big.xlsx"), "wb") as f:
+                    f.write(b"x")
+            if tool == "xlsx_child":
+                return runner.Result(bounds.EXIT_CAPS, b"", b"the workbook's text is larger than 64 MiB\n")
+            return runner.Result(0, b"", b"")
+
+        opts = cli_module.Options(runner.Steps(runner=fake))
+        with runner.scratch(), self.assertRaises(bounds.CapsError) as ctx:
+            sheets.extract(f"{FX}/ventas.ods", "ods", opts)
+        self.assertEqual(ctx.exception.code, 6)
+        self.assertIn("64 MiB", ctx.exception.reason)
+        self.assertEqual(calls.count("soffice"), 1, calls)
+
 
 class TextFormats(Base):
     def test_a_latin1_csv_comes_out_as_utf8(self):
