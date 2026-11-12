@@ -4,10 +4,14 @@ import { BOT_WORK_ZONE_LIMITS, DEFAULT_WORK_ZONE_POLICY, type WorkZonePolicyView
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { ApiRequestError } from "@/lib/api";
 import {
+  BOT_FILE_MAX_COPY,
   BOT_SESSIONS_COPY,
+  botFileMaxError,
   botSessionsError,
   PolicyForm,
+  policyFieldError,
   toDraft,
   toPolicyBody,
 } from "./work-zone-policy-settings";
@@ -29,7 +33,10 @@ function policy(over: Partial<WorkZonePolicyView> = {}): WorkZonePolicyView {
   };
 }
 
-function render(view: WorkZonePolicyView, initial?: { botSessions?: string }): string {
+function render(
+  view: WorkZonePolicyView,
+  initial?: { botSessions?: string; botFileMax?: string; botFileMaxError?: string },
+): string {
   const qc = new QueryClient();
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
@@ -127,5 +134,125 @@ describe("Bot sessions at once (Task 3)", () => {
     const input = tagsOf(render(policy()), "policy-bot-sessions")[0] ?? "";
     expect(input).toContain("max-lg:h-11");
     expect(input).toContain("w-full");
+  });
+});
+
+/**
+ * 07.17.1.1-09 (D-07, PD-11, PD-20): "Largest file a bot moves" under "Bot sessions at once", in MB (MiB, the chat's
+ * `formatBytes`), at most the server's `OCW_ATTACHMENT_MAX_BYTES` (`serverFileMaxBytes`), saved in bytes.
+ */
+describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
+  const MIB = 1024 * 1024;
+  const GIB = 1024 * MIB;
+
+  it("prefills from botFileMaxBytes, 25 MB for an organization that never saved", () => {
+    expect(toDraft(policy()).botFileMaxMb).toBe(25);
+    expect(toDraft(policy({ botFileMaxBytes: 41943040 })).botFileMaxMb).toBe(40);
+    // A server ceiling below the stored value: the field shows what applies (the lower of the two wins anyway).
+    expect(toDraft(policy({ botFileMaxBytes: 25 * MIB, serverFileMaxBytes: 10 * MIB })).botFileMaxMb).toBe(10);
+  });
+
+  it.each([
+    ["40", GIB, null],
+    ["1", GIB, null],
+    ["1024", GIB, null],
+    ["0", GIB, "Enter a whole number from 1 to 1024."],
+    ["1.5", GIB, "Enter a whole number from 1 to 1024."],
+    ["abc", GIB, "Enter a whole number from 1 to 1024."],
+    ["", GIB, "Enter a whole number from 1 to 1024."],
+    ["1025", GIB, "Enter a whole number from 1 to 1024."],
+    ["51", 50 * MIB, "Enter a whole number from 1 to 50."],
+    ["50", 50 * MIB, null],
+  ])("botFileMaxError(%s, %d)", (value, ceiling, error) => {
+    expect(botFileMaxError(value, ceiling)).toBe(error);
+    expect(BOT_FILE_MAX_COPY.invalid(7)).toBe("Enter a whole number from 1 to 7.");
+  });
+
+  it("Save sends botFileMaxBytes = MB × 1 048 576 when the API reports its ceiling, and nothing else new", () => {
+    const view = policy({ botFileMaxBytes: 25 * MIB, serverFileMaxBytes: GIB });
+    const draft = { ...toDraft(view), botFileMaxMb: 40 };
+    const body = toPolicyBody(draft, { "claude-code": false, codex: false });
+    expect(body.botFileMaxBytes).toBe(41943040);
+    expect(body).not.toHaveProperty("botFileMaxMb");
+    expect(body).not.toHaveProperty("serverFileMaxBytes");
+    expect(body).toEqual({
+      allowedPermissionModes: DEFAULT_WORK_ZONE_POLICY.allowedPermissionModes,
+      allowFullAccess: false,
+      allowedModels: { "claude-code": [], codex: [] },
+      maxEffort: { "claude-code": null, codex: null },
+      allowFastMode: false,
+      runtimeUpdates: "automatic",
+      botSessionsMax: 10,
+      botFileMaxBytes: 41943040,
+    });
+    // An older API (no ceiling in the view) does not know the field: the body omits it.
+    expect(toPolicyBody(toDraft(policy()), { "claude-code": false, codex: false })).not.toHaveProperty(
+      "botFileMaxBytes",
+    );
+  });
+
+  it("renders under Bot sessions at once: label tied to the input, the unit, the server's ceiling", () => {
+    const html = render(policy({ botFileMaxBytes: 40 * MIB, serverFileMaxBytes: GIB }));
+    const t = text(html);
+    expect(t).toContain("Largest file a bot moves");
+    expect(t).toContain(
+      "Up to 1 GB on this server. Applies to files bots upload into or download from their Work Zone sessions.",
+    );
+    expect(t.indexOf("Bot sessions at once")).toBeLessThan(t.indexOf("Largest file a bot moves"));
+    expect(t).toContain("How many Work Zone sessions bots may run at once, and the largest file they move.");
+    expect(tagsOf(html, "bot-file-max")).toHaveLength(1);
+    const input = tagsOf(html, "bot-file-max")[0] ?? "";
+    expect(input).toContain('value="40"');
+    expect(input).toContain('type="number"');
+    expect(input).toContain('min="1"');
+    expect(input).toContain('max="1024"');
+    const id = input.match(/\sid="([^"]+)"/)?.[1] ?? "none";
+    expect(html).toContain(`for="${id}"`);
+    const described = input.match(/aria-describedby="([^"]+)"/)?.[1]?.split(" ") ?? [];
+    expect(described).toContain(`${id}-unit`);
+    expect(described).toContain(`${id}-hint`);
+    expect(html).toMatch(new RegExp(`id="${id}-unit"[^>]*>MB<`));
+    // 44 px on touch screens, full width on a phone.
+    expect(input).toContain("max-lg:h-11");
+    expect(input).toContain("w-full");
+  });
+
+  it("without serverFileMaxBytes (an older API) the hint drops the ceiling and validation uses 1 GiB", () => {
+    const html = render(policy());
+    const t = text(html);
+    expect(t).not.toContain("on this server.");
+    expect(t).toContain("Applies to files bots upload into or download from their Work Zone sessions.");
+    expect(tagsOf(html, "bot-file-max")[0]).toContain('max="1024"');
+  });
+
+  it("an out-of-range value is shown under the field and Save is off", () => {
+    const html = render(policy({ serverFileMaxBytes: 50 * MIB }), { botFileMax: "51" });
+    expect(tagsOf(html, "bot-file-max")[0]).toContain('aria-invalid="true"');
+    expect(text(html)).toContain("Enter a whole number from 1 to 50.");
+    expect(tagsOf(html, "save-policy")[0]).toMatch(/\sdisabled=""/);
+    // Changing only this field marks the form dirty.
+    expect(text(html)).toContain("Unsaved changes");
+  });
+
+  it("the API's 400 for the field is shown under it", () => {
+    const message = "Bots can move files up to 10 MB on this server";
+    const refused = new ApiRequestError(400, "invalid_work_zone_policy", message, { field: "botFileMaxBytes" });
+    expect(policyFieldError(refused)).toEqual({ field: "botFileMaxBytes", message });
+    expect(policyFieldError(new ApiRequestError(500, "internal", "boom"))).toBeNull();
+    const html = render(policy({ serverFileMaxBytes: GIB }), { botFileMaxError: message });
+    expect(tagsOf(html, "bot-file-max")[0]).toContain('aria-invalid="true"');
+    expect(text(html)).toContain(message);
+  });
+
+  it("dirty and reset follow the bot sessions field; the existing fields stay where they were", () => {
+    const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
+    expect(source).toContain("botFileMax.trim() !== String(saved.botFileMaxMb)");
+    expect(source).toContain("setBotFileMax(String(saved.botFileMaxMb))");
+    expect(source).toMatch(/if \(noModes \|\| botError \|\| fileError \|\|[^\n]*\) return;/);
+    const html = render(policy({ serverFileMaxBytes: GIB }));
+    expect(text(html)).toContain("All changes saved");
+    expect(html.indexOf('data-testid="policy-bot-sessions"')).toBeLessThan(
+      html.indexOf('data-testid="bot-file-max"'),
+    );
   });
 });
