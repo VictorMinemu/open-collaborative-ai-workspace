@@ -856,7 +856,13 @@ describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
     const lines = await plugin.simulateToolCalls(m, [
       {
         tool: "ocw_work_session_upload",
-        args: { workSessionId: WS, attachmentId: ATTACHMENT, path: " docs/spec.md ", overwrite: true, url: "x" },
+        args: {
+          workSessionId: WS,
+          attachmentId: ATTACHMENT,
+          path: " docs/spec.md ",
+          overwrite: true,
+          url: "x",
+        },
       },
       { tool: "ocw_work_session_download", args: { workSessionId: WS, path: "notes/out.md", name: "x" } },
     ]);

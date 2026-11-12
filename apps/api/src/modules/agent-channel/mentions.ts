@@ -325,6 +325,8 @@ export async function buildMentionEvents(
             askerUserId: mention.author.id,
             conversationId: conv.id,
             tainted: taintedAtStart,
+            // 07.17.1.1 (D-07): the file tools' limit on the turn, under this server's ceiling.
+            fileCeilingBytes: deps.core.env.OCW_ATTACHMENT_MAX_BYTES,
           });
     const decision = await turnPolicy(
       tx,

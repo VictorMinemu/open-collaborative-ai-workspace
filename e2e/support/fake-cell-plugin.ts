@@ -429,6 +429,9 @@ const WORK_SESSION_KEYS: Record<WorkSessionTool, readonly string[]> = {
   ocw_work_session_prompt: ["workSessionId", "prompt"],
   ocw_work_session_read: ["workSessionId", "cursor"],
   ocw_work_session_stop: ["workSessionId"],
+  // 07.17.1.1 (D-02, D-03): a chat attachment into the session's tree, and a file of the tree back into the chat.
+  ocw_work_session_upload: ["workSessionId", "attachmentId", "path", "overwrite"],
+  ocw_work_session_download: ["workSessionId", "path"],
 };
 
 /**
