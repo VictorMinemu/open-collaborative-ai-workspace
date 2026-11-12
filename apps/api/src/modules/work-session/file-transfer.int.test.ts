@@ -416,7 +416,10 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
     return { ...up, key: attachmentKey(orgId, general, up.attachmentId, "original") };
   }
 
-  type Answer = { status: number; body: { ok?: boolean; sizeBytes?: number; error?: { code: string } } | null };
+  type Answer = {
+    status: number;
+    body: { ok?: boolean; sizeBytes?: number; error?: { code: string } } | null;
+  };
 
   /**
    * A PUT over a raw socket, so the test controls the declared length and how much is sent: `declared` is the
@@ -460,7 +463,12 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
       "select status, failure, size_bytes::int as size, sha256 from app.bot_work_session_files where id = $1",
       [id],
     );
-    return r.rows[0] as { status: string; failure: string | null; size: number | null; sha256: string | null };
+    return r.rows[0] as {
+      status: string;
+      failure: string | null;
+      size: number | null;
+      sha256: string | null;
+    };
   }
 
   async function attachmentRow(id: string) {
@@ -591,7 +599,11 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
     try {
       for (let i = 0; i < max; i++) {
         const up = await fromDevice();
-        const open = openPut(up.id, jwtA, { declared: first.length, send: first.subarray(0, 64 * 1024), end: false });
+        const open = openPut(up.id, jwtA, {
+          declared: first.length,
+          send: first.subarray(0, 64 * 1024),
+          end: false,
+        });
         held.push({ up, open });
         await eventually(async () => (await ledger(up.id)).status === "streaming");
       }
@@ -621,9 +633,9 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
 
   it("FakeDevice.serveFileCommand PUTs a session.file.read's bytes under its JWT and acks ok", async () => {
     const up = await fromDevice();
-    const cmd = (await deviceA.next(
-      (f) => f.type === "command" && f.id === up.id,
-    )) as unknown as Parameters<FakeDevice["serveFileCommand"]>[0];
+    const cmd = (await deviceA.next((f) => f.type === "command" && f.id === up.id)) as unknown as Parameters<
+      FakeDevice["serveFileCommand"]
+    >[0];
     expect(cmd.kind).toBe("session.file.read");
     const body = pdf(64 * 1024);
     const served = await deviceA.serveFileCommand(cmd, { baseUrl: stack.baseUrl, jwt: jwtA, body });

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   RUNTIME_FILE_ROUTE,
+  RuntimeFilePutAnswer,
   type RuntimeSelfStatus,
+  SessionFileReadPayload,
   SessionFileWritePayload,
   sessionFileAckError,
 } from "@ocw/contracts";
@@ -147,22 +149,44 @@ export class FakeDevice {
    * `RUNTIME_FILE_ROUTE/<command id>` under the device JWT, check their size and sha256 against the payload, and ack on
    * the link (`expired` for a 410, `transfer_failed: HTTP <status>` for another refusal, `mismatch` when the bytes
    * differ). With `ackAs` it acks that error without any request (e.g. an old daemon's `invalid command frame`).
-   * `baseUrl` and `jwt` default to the link's own. Returns the ack it sent. 08 adds `session.file.read`.
+   * `baseUrl` and `jwt` default to the link's own. Returns the ack it sent.
+   *
+   * 07.17.1.1-08: a `session.file.read` PUTs `opts.body` (the session file's bytes; `too_large: <n>` without a request
+   * when they exceed the payload's `maxBytes`, as the daemon does) with its `content-length`, and acks ok only when the
+   * API answers `RuntimeFilePutAnswer` with exactly that size (`expired` for 410, `too_large` for 413).
    */
   async serveFileCommand(
     cmd: { id: string; kind: string; payload: Record<string, unknown> },
-    opts: { baseUrl?: string; jwt?: string; ackAs?: string } = {},
+    opts: { baseUrl?: string; jwt?: string; ackAs?: string; body?: Uint8Array } = {},
   ): Promise<{ ok: boolean; error: string | null }> {
     const answer = (error: string | null) => {
       this.ack(cmd.id, error === null, error ?? undefined);
       return { ok: error === null, error };
     };
     if (opts.ackAs !== undefined) return answer(opts.ackAs);
-    if (cmd.kind !== "session.file.write") throw new Error(`serveFileCommand: unsupported kind ${cmd.kind}`);
-    const payload = SessionFileWritePayload.parse(cmd.payload);
     const baseUrl = opts.baseUrl ?? this.baseUrl;
     const jwt = opts.jwt ?? this.jwt;
     if (!baseUrl || !jwt) throw new Error("serveFileCommand: no base URL or device JWT for this link");
+    if (cmd.kind === "session.file.read") {
+      const read = SessionFileReadPayload.parse(cmd.payload);
+      const body = opts.body;
+      if (!body) throw new Error("serveFileCommand: a session.file.read needs the file's bytes (opts.body)");
+      if (body.length > read.maxBytes) return answer(sessionFileAckError("too_large", String(body.length)));
+      const res = await fetch(`${baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${jwt}`, "content-type": "application/octet-stream" },
+        body,
+      });
+      if (res.status === 410) return answer(sessionFileAckError("expired"));
+      if (res.status === 413) return answer(sessionFileAckError("too_large"));
+      if (res.status !== 200) return answer(sessionFileAckError("transfer_failed", `HTTP ${res.status}`));
+      const put = RuntimeFilePutAnswer.safeParse(await res.json().catch(() => null));
+      if (!put.success || put.data.sizeBytes !== body.length)
+        return answer(sessionFileAckError("transfer_failed"));
+      return answer(null);
+    }
+    if (cmd.kind !== "session.file.write") throw new Error(`serveFileCommand: unsupported kind ${cmd.kind}`);
+    const payload = SessionFileWritePayload.parse(cmd.payload);
     const res = await fetch(`${baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
       headers: { authorization: `Bearer ${jwt}` },
     });
