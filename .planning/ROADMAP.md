@@ -1179,7 +1179,7 @@ bot's profile configure (the lower wins), decided server-side, audited, and neve
   4. Integration tests (containment, transport, caps, taint, tenant isolation) and an e2e spec pass on desktop and
      mobile; ADR-0041 records the decisions
 
-**Plans:** 14/15 plans executed
+**Plans:** 15/15 plans executed
 
 Plans:
 
@@ -1197,7 +1197,7 @@ Plans:
 - [x] 07.17.1.1-12-PLAN.md — Wave 6: The upload route (the phase's API end to end, upload) and its own refusals
 - [x] 07.17.1.1-13-PLAN.md — Wave 7: The download route and the refusal matrix both tools share
 - [x] 07.17.1.1-14-PLAN.md — Wave 8: The browser journey e2e (upload, download, limit refusal; desktop and mobile)
-- [ ] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
+- [x] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
