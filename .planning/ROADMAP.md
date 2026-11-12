@@ -1199,6 +1199,28 @@ Plans:
 - [x] 07.17.1.1-14-PLAN.md — Wave 8: The browser journey e2e (upload, download, limit refusal; desktop and mobile)
 - [x] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
 
+### Phase 07.17.1.1.2: Long-running bot tasks: a bot keeps working across turns on its own (bounded, visible, stoppable) and is woken when its sandbox processes finish (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 07.17.1.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.17.1.1.2 to break down)
+
+### Phase 07.17.1.1.1: Sandbox document toolkit: bots read PDFs (incl. scanned, OCR), images, Office files and archives with tools baked into the sbx image (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 07.17.1.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.17.1.1.1 to break down)
+
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
 **Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and
