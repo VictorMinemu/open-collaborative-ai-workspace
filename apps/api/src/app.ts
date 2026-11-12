@@ -407,6 +407,7 @@ export async function buildApp(
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       workSession, // 07.16-15: a bot's own Work Zone sessions, in its sponsor's name (PD-03)
+      storage: artifactModule.storage, // 07.17.1.1 review IN-04: the one storage instance the file moves use
       automations: automation.proposals, // 07.6-12: natural-language automation proposals (AUTO-03)
       fanOut: automation.fanOut, // 07.17-16: a fan-out run opens one conversation per new item (AFO-02)
       records: createRecordWrites(core), // 07.6-14: compare-and-set writes to watched records (AUTO-04)
