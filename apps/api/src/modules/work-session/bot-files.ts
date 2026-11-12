@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import {
   type AgentChannelWorkSessionDownloadResponse,
   type AgentChannelWorkSessionUploadResponse,
+  BOT_FILE_LIMITS,
   type BotFileLimit,
   type BotFileLimitSource,
   type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
   botFileTooLargeSentence,
+  MAX_ATTACHMENTS_PER_MESSAGE,
   parseSessionFileAck,
   type SessionFileReadPayload,
   SessionFileReadPayload as SessionFileReadPayloadSchema,
@@ -27,13 +29,13 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
+import { and, count, eq, gt, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { ObjectStorage } from "../artifact";
+import { type ObjectStorage, pendingTurnAttachmentCount } from "../artifact";
 import type { DeviceHub, FileCommandAck } from "../device";
 import type { PermissionService } from "../organization";
 import type { BotProfileRow } from "./bot-profile";
-import { type BotWorkSessionRow, lockBot, refusedAnswer } from "./bot-sessions";
+import { type BotWorkSessionRow, botSessionLoad, lockBot, refusedAnswer } from "./bot-sessions";
 import { sessionFacts } from "./facts";
 import { loadBotFileLimit } from "./policy";
 import type { SessionRow, WorkSessionService } from "./service";
@@ -333,6 +335,46 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     return { session: s };
   }
 
+  /**
+   * PD-12 (D-06), under the bot's lock (taken first by `decideSession`), counted in the same transaction as the insert
+   * so two calls never both take the last slot: one unit of the bot's hourly prompt budget per move (the hour's load
+   * counts the ledger with the prompts), at most five moves per turn in each direction, and for a download at most
+   * `MAX_ATTACHMENTS_PER_MESSAGE` files waiting for the turn's reply (the pending ones and the downloads in flight).
+   */
+  async function budgetRefusal(
+    tx: Tx,
+    p: BotFileCallParams,
+    s: SessionRow,
+    direction: TransferDirection,
+  ): Promise<BotWorkSessionRefused | null> {
+    const load = await botSessionLoad(tx, p.turn.agentId, s.projectId);
+    if (load.botPromptsHour >= p.profile.promptsPerHour) return refusedAnswer("prompt_rate");
+    const [moved] = await tx
+      .select({ n: count() })
+      .from(botWorkSessionFiles)
+      .where(
+        and(eq(botWorkSessionFiles.eventId, p.turn.eventId), eq(botWorkSessionFiles.direction, direction)),
+      );
+    if (Number(moved?.n ?? 0) >= BOT_FILE_LIMITS.filesPerTurnEachWay)
+      return refusedAnswer("file_cap_reached");
+    if (direction === "from_device") {
+      const [inFlight] = await tx
+        .select({ n: count() })
+        .from(botWorkSessionFiles)
+        .where(
+          and(
+            eq(botWorkSessionFiles.eventId, p.turn.eventId),
+            eq(botWorkSessionFiles.direction, "from_device"),
+            inArray(botWorkSessionFiles.status, ["pending", "streaming"]),
+            gt(botWorkSessionFiles.expiresAt, sql`now()`),
+          ),
+        );
+      const waiting = (await pendingTurnAttachmentCount(tx, p.turn.eventId)) + Number(inFlight?.n ?? 0);
+      if (waiting >= MAX_ATTACHMENTS_PER_MESSAGE) return refusedAnswer("file_cap_reached");
+    }
+    return null;
+  }
+
   /** The checks every move makes before any lock: storage, then the path (the route decided both already). */
   function precheck(p: BotFileCallParams): BotWorkSessionRefused | null {
     if (!deps.storage) return refusedAnswer("storage_unavailable");
@@ -534,6 +576,8 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
         )
         .limit(1);
       if (busy) return refusedAnswer("session_busy");
+      const over = await budgetRefusal(tx, p, s, "to_device");
+      if (over) return over;
       await insertRow(
         tx,
         p,
@@ -576,6 +620,8 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
       const decided = await decideSession(tx, p, "from_device");
       if ("kind" in decided) return decided;
       const s = decided.session;
+      const over = await budgetRefusal(tx, p, s, "from_device");
+      if (over) return over;
       // PD-17: the attachment's id is chosen now; the device's PUT stores the bytes under it.
       await insertRow(
         tx,
