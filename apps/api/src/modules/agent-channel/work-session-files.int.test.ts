@@ -6,9 +6,11 @@ import {
   AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionUploadResponse,
+  BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_SENTENCES,
   type BotWorkSessionRefusal,
   type BotWorkZoneProfileInput,
+  RUNTIME_FILE_ROUTE,
 } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -22,9 +24,16 @@ import {
   grantBotConsent,
   invite,
   pairDevice,
+  startSession,
 } from "../../testing-workzone";
 
 /**
+ * 07.17.1.1-13 (D-01, D-03, D-04, D-06, D-07, D-10 … D-13; PD-08, PD-12 … PD-18; E6, E8 – E17, E24, P1; BWF-01,
+ * BWF-03 … BWF-07): the download (`POST /work-sessions/download`, a session file back as a pending attachment of the
+ * turn that its reply links, so Ana downloads it) and the refusal matrix both tools share: ownership and origin, the
+ * profile, taint, session output, the caps and the hourly budget, an old daemon, a device that never answers, and no
+ * path in any record or log line of the whole file.
+ *
  * 07.17.1.1-12 (D-01, D-02, D-05, D-07, D-09, D-12; PD-06, PD-13, PD-14, PD-16, PD-18; E3, E5, E19, E20; BWF-01,
  * BWF-02, BWF-05, BWF-07): the phase's API end to end, upload. Ana attaches `spec.pdf` in a thread of #eng and asks the
  * team bot Atlas; the turn's `POST /agent-channel/v1/work-sessions/upload` moves it into the session Atlas started from
@@ -1045,5 +1054,404 @@ describe("the download's own rules (D-07, D-13, PD-08, PD-12; E6, E14, E24)", ()
     await refusedWith(downloadCall({ eventId, workSessionId, path: "README.md" }), "file_cap_reached");
     expect(await ledgerOfTurn(eventId)).toEqual([]);
     expect(await fileCommandsOf(workSessionId)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- the refusal matrix both tools share (Task 2)
+
+const BOTH: readonly FileTool[] = [UPLOAD, DOWNLOAD];
+
+/** One call of `tool` on `workSessionId` from the turn: the upload names the turn's file, the download the README. */
+const moveCall = (
+  tool: FileTool,
+  p: { eventId: string; workSessionId: string; attachmentId: string; path?: string },
+) =>
+  tool === UPLOAD
+    ? uploadCall({
+        eventId: p.eventId,
+        workSessionId: p.workSessionId,
+        attachmentId: p.attachmentId,
+        path: p.path ?? "docs/spec.pdf",
+      })
+    : downloadCall({ eventId: p.eventId, workSessionId: p.workSessionId, path: p.path ?? "README.md" });
+
+/** A fresh turn of Ana in `rootId`'s thread carrying a fresh file (what an upload may take). */
+async function fileTurn(rootId: string): Promise<{ eventId: string; attachmentId: string }> {
+  const file = await chatFile(randomBytes(512));
+  return { eventId: await askWithFile(rootId, file.id), attachmentId: file.id };
+}
+
+/** Ana's text file (the bot can read it with `ocw_attachment_read`, outside content for the turn). */
+const notesFile = () =>
+  chatFile(new TextEncoder().encode("# Notes\n\nShip on Friday.\n"), "notes.md", engId, "text/markdown");
+
+/** The turn reads Ana's file with `ocw_attachment_read`: outside content, the turn is tainted from now on. */
+async function readOutsideContent(eventId: string, attachmentId: string) {
+  const r = await cell("/attachments/read", { eventId, agentId: atlasId, attachmentId });
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body.kind, JSON.stringify(r.body)).not.toBe("refused");
+  expect((await turnRow(eventId)).tainted).toBe(true);
+}
+
+const taintedAt = async (workSessionId: string) =>
+  (await rowsOf("select tainted_at from app.work_sessions where id = $1", [workSessionId]))[0]!.tainted_at;
+
+describe("ownership and origin, both tools (D-01, D-12, E12, E13, T-07.17.1.1-13-01)", () => {
+  it("a person's session, Echo's session and Atlas's session started from #ops → not_your_session before the claim", async () => {
+    const person = await startSession(victor, server, billingId);
+    const echo = (await idleSession({ bot: { id: echoId, handle: "echo" } })).workSessionId;
+    const fromOps = (await idleSession({ conv: opsId })).workSessionId;
+    // A thread of #eng where Ana attaches the files (the upload's attachment rule passes; the session decides).
+    const rootId = await post(ana, engId, "files for the sessions");
+    for (const workSessionId of [person, echo, fromOps]) {
+      for (const tool of BOTH) {
+        const { eventId, attachmentId } = await fileTurn(rootId);
+        await refusedWith(moveCall(tool, { eventId, workSessionId, attachmentId }), "not_your_session");
+        await refusedBeforeClaim(eventId, workSessionId, "not_your_session", 1, tool);
+      }
+    }
+  });
+});
+
+describe("the profile, both tools (D-01, WR-05)", () => {
+  it("a disabled bot → profile_inactive with reason bot_disabled, before the claim", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    // Delivered while the bot was enabled; disabled while the turn runs.
+    const turns = [await fileTurn(rootId), await fileTurn(rootId)];
+    await su.query("update app.agents set status = 'disabled' where id = $1", [atlasId]);
+    try {
+      for (const [i, tool] of BOTH.entries()) {
+        const { eventId, attachmentId } = turns[i]!;
+        const body = await refusedWith(
+          moveCall(tool, { eventId, workSessionId, attachmentId }),
+          "profile_inactive",
+          `${BOT_WORK_SESSION_SENTENCES.profile_inactive} ${BOT_PROFILE_STATUS_SENTENCES.bot_disabled}`,
+        );
+        expect(body.reason).toBe("bot_disabled");
+        await refusedBeforeClaim(eventId, workSessionId, "profile_inactive", 1, tool);
+      }
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [atlasId]);
+    }
+  });
+
+  it("a session started while Ana sponsored the profile, which Víctor re-saved since → profile_inactive", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    await su.query("update app.bot_work_sessions set sponsor_user_id = $2 where work_session_id = $1", [
+      workSessionId,
+      anaId,
+    ]);
+    await su.query("update app.work_sessions set created_by = $2 where id = $1", [workSessionId, anaId]);
+    for (const tool of BOTH) {
+      const { eventId, attachmentId } = await fileTurn(rootId);
+      await refusedWith(moveCall(tool, { eventId, workSessionId, attachmentId }), "profile_inactive");
+      // Recorded under the session's own sponsor; nothing moves in Víctor's name.
+      await refusedBeforeClaim(eventId, workSessionId, "profile_inactive", 1, tool, anaId);
+    }
+  });
+});
+
+describe("outside content, both tools (D-02, D-10, PD-13, E10, T-07.17.1.1-13-03)", () => {
+  it("after an ocw_attachment_read, without the profile's flag → outside_content; nothing moves", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const notes = await notesFile();
+    const eventId = await askWithFile(rootId, notes.id);
+    await readOutsideContent(eventId, notes.id);
+    for (const tool of BOTH) {
+      await refusedWith(
+        moveCall(tool, { eventId, workSessionId, attachmentId: notes.id }),
+        "outside_content",
+      );
+      expect(await toolCallsOf(eventId, tool)).toEqual([
+        { tool, decision: "denied", reason: "outside_content", target: workSessionId },
+      ]);
+    }
+    expect(await ledgerOfTurn(eventId)).toEqual([]);
+    expect(await fileCommandsOf(workSessionId)).toEqual([]);
+    expect(await taintedAt(workSessionId)).toBeNull();
+    for (const refusal of await auditsOf("bot.work_session_refused", eventId)) {
+      expect(refusal.metadata).toMatchObject({ outcome: "outside_content", outsideContent: true });
+    }
+  });
+
+  it("with the flag both move, audited outsideContent: true; the upload taints the session", async () => {
+    await saveProfile({ actOnOutsideContent: true });
+    try {
+      const { workSessionId, rootId } = await idleSession();
+      const notes = await notesFile();
+      const eventId = await askWithFile(rootId, notes.id);
+      await readOutsideContent(eventId, notes.id);
+      expect(await taintedAt(workSessionId)).toBeNull();
+
+      const up = await uploadServed({
+        eventId,
+        workSessionId,
+        attachmentId: notes.id,
+        path: "docs/notes.md",
+      });
+      expect(up.r.body, JSON.stringify(up.r.body)).toMatchObject({ kind: "uploaded" });
+      // D-02 (PD-13): a file written after outside content taints the session for good, like a tainted prompt.
+      const first = await taintedAt(workSessionId);
+      expect(first).not.toBeNull();
+
+      const down = await downloadServed({ eventId, workSessionId, path: "README.md" });
+      expect(downloadedBody(down.r).sizeBytes).toBe(64);
+      // The download marks nothing on the session; the first mark is kept.
+      expect(await taintedAt(workSessionId)).toEqual(first);
+
+      expect((await auditsOf("bot.work_session_upload", eventId))[0]!.metadata).toMatchObject({
+        outcome: "uploaded",
+        outsideContent: true,
+      });
+      expect((await auditsOf("bot.work_session_download", eventId))[0]!.metadata).toMatchObject({
+        outcome: "downloaded",
+        outsideContent: true,
+      });
+    } finally {
+      await saveProfile();
+    }
+  });
+});
+
+describe("the session-output rule, both tools (D-11, WR-02, E11)", () => {
+  it("after reading S, an upload into S and a download from S pass; T (also Atlas's, same channel) → session_output", async () => {
+    const s = await idleSession();
+    const t = await idleSession();
+    const file = await chatFile();
+    const eventId = await askWithFile(s.rootId, file.id);
+    const read = await cell("/work-sessions/read", {
+      eventId,
+      agentId: atlasId,
+      workSessionId: s.workSessionId,
+    });
+    expect(read.body.kind, JSON.stringify(read.body)).toBe("read");
+
+    const up = await uploadServed({
+      eventId,
+      workSessionId: s.workSessionId,
+      attachmentId: file.id,
+      path: "docs/spec.pdf",
+    });
+    expect(up.r.body, JSON.stringify(up.r.body)).toMatchObject({ kind: "uploaded" });
+    const down = await downloadServed({ eventId, workSessionId: s.workSessionId, path: "README.md" });
+    expect(downloadedBody(down.r).name).toBe("README.md");
+
+    for (const tool of BOTH) {
+      await refusedWith(
+        moveCall(tool, { eventId, workSessionId: t.workSessionId, attachmentId: file.id }),
+        "session_output",
+      );
+      expect(await toolCallsOf(eventId, tool)).toEqual([
+        { tool, decision: "allowed", reason: null, target: s.workSessionId },
+        { tool, decision: "denied", reason: "session_output", target: t.workSessionId },
+      ]);
+    }
+    expect(await fileCommandsOf(t.workSessionId)).toEqual([]);
+  });
+});
+
+describe("caps and the hourly budget (D-06, PD-12, E8, E9, T-07.17.1.1-13-04)", () => {
+  it("five uploads then the sixth → file_cap_reached; downloads have their own five; the ninth call → cap_reached", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const file = await chatFile(randomBytes(256));
+    const eventId = await askWithFile(rootId, file.id);
+    for (let i = 1; i <= 5; i++) {
+      const { r } = await uploadServed({
+        eventId,
+        workSessionId,
+        attachmentId: file.id,
+        path: `docs/copy-${i}.pdf`,
+      });
+      expect(r.body, JSON.stringify(r.body)).toMatchObject({ kind: "uploaded" });
+    }
+    // The sixth upload of the turn: the per-direction cap (decided after the claim, so the call counts).
+    await refusedWith(
+      uploadCall({ eventId, workSessionId, attachmentId: file.id, path: "docs/copy-6.pdf" }),
+      "file_cap_reached",
+    );
+    // Downloads are counted on their own.
+    for (let i = 1; i <= 2; i++) {
+      downloadedBody((await downloadServed({ eventId, workSessionId, path: "README.md" })).r);
+    }
+    expect((await turnRow(eventId)).tool_calls).toBe(8);
+    // The ninth call of the turn: the claim's cap.
+    await refusedWith(downloadCall({ eventId, workSessionId, path: "README.md" }), "cap_reached");
+    const ledger = await ledgerOfTurn(eventId);
+    expect(ledger.map((r) => [r.direction, r.status])).toEqual([
+      ...Array.from({ length: 5 }, () => ["to_device", "done"]),
+      ["from_device", "done"],
+      ["from_device", "done"],
+    ]);
+  });
+
+  it("a turn at 8 tool calls → cap_reached from the claim for both tools; nothing moves", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const { eventId, attachmentId } = await fileTurn(rootId);
+    await su.query("update app.agent_turns set tool_calls = 8 where event_id = $1", [eventId]);
+    for (const tool of BOTH) {
+      await refusedWith(moveCall(tool, { eventId, workSessionId, attachmentId }), "cap_reached");
+    }
+    expect(await ledgerOfTurn(eventId)).toEqual([]);
+    expect(await fileCommandsOf(workSessionId)).toEqual([]);
+    expect(
+      (await auditsOf("bot.work_session_refused", eventId)).map((a) => [a.metadata.tool, a.metadata.outcome]),
+    ).toEqual(BOTH.map((tool) => [tool, "cap_reached"]));
+  });
+
+  it("promptsPerHour 2: the start's prompt and one move spend it; the next move and a prompt → prompt_rate", async () => {
+    await saveProfile({ promptsPerHour: 2 });
+    try {
+      const { workSessionId, rootId } = await idleSession();
+      const file = await chatFile();
+      const eventId = await askWithFile(rootId, file.id);
+      const { r } = await uploadServed({
+        eventId,
+        workSessionId,
+        attachmentId: file.id,
+        path: "docs/spec.pdf",
+      });
+      expect(r.body, JSON.stringify(r.body)).toMatchObject({ kind: "uploaded" });
+      for (const tool of BOTH) {
+        await refusedWith(
+          moveCall(tool, {
+            eventId,
+            workSessionId,
+            attachmentId: file.id,
+            ...(tool === UPLOAD ? { path: "docs/b.pdf" } : {}),
+          }),
+          "prompt_rate",
+        );
+      }
+      // Moves and prompts share the one budget.
+      const prompted = await cell("/work-sessions/prompt", {
+        eventId,
+        agentId: atlasId,
+        workSessionId,
+        prompt: "now run the tests",
+      });
+      expect(prompted.body, JSON.stringify(prompted.body)).toMatchObject({
+        kind: "refused",
+        code: "prompt_rate",
+      });
+      expect((await ledgerOfTurn(eventId)).map((x) => x.direction)).toEqual(["to_device"]);
+    } finally {
+      await saveProfile();
+    }
+  });
+});
+
+describe("skew and time (D-04, PD-15, PD-18, E16, E17)", () => {
+  it("an old daemon acks `invalid command frame` → runtime_too_old with its sentence, for both tools", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const { eventId, attachmentId } = await fileTurn(rootId);
+    for (const tool of BOTH) {
+      const { r, ack } = await served(
+        eventId,
+        () => moveCall(tool, { eventId, workSessionId, attachmentId }),
+        (cmd) => server.serveFileCommand(cmd, { ackAs: "invalid command frame" }),
+      );
+      expect(ack).toEqual({ ok: false, error: "invalid command frame" });
+      await refusedWith(Promise.resolve(r), "runtime_too_old");
+    }
+    expect((await ledgerOfTurn(eventId)).map((x) => x.status)).toEqual(["failed", "failed"]);
+    expect(await rowsOf("select id from app.attachments where event_id = $1", [eventId])).toEqual([]);
+    expect(
+      (await auditsOf("bot.work_session_refused", eventId)).map((a) => [a.metadata.tool, a.metadata.outcome]),
+    ).toEqual(BOTH.map((tool) => [tool, "runtime_too_old"]));
+  });
+
+  /**
+   * The route call for `tool` while the FakeDevice receives its command and never answers: the answer, how long it
+   * took and the transfer id.
+   */
+  async function unanswered(tool: FileTool) {
+    const { workSessionId, rootId } = await idleSession();
+    const { eventId, attachmentId } = await fileTurn(rootId);
+    const started = Date.now();
+    const pending = moveCall(tool, { eventId, workSessionId, attachmentId });
+    const transferId = await eventually(
+      async () => (await ledgerOfTurn(eventId))[0]?.id as string | undefined,
+    );
+    // The device received the command and never acks (asleep, stuck, or the link dropped after delivery).
+    const cmd = await commandOf(transferId);
+    expect(cmd.kind).toBe(tool === UPLOAD ? "session.file.write" : "session.file.read");
+    await refusedWith(pending, "transfer_timeout");
+    const elapsed = Date.now() - started;
+    // The stack's deadline for a small file or a 1 MiB limit (`botFileDeadlineMs`, 5 s), never production's 30 s.
+    expect(elapsed).toBeGreaterThanOrEqual(STACK_DEADLINE_MS - 500);
+    expect(elapsed).toBeLessThan(STACK_DEADLINE_MS + 15_000);
+    expect(await rowsOf("select status, error from app.device_commands where id = $1", [transferId])).toEqual(
+      [{ status: "failed", error: "timeout" }],
+    );
+    expect((await ledgerOfTurn(eventId)).map((x) => x.status)).toEqual(["failed"]);
+    return { eventId, transferId };
+  }
+
+  it("an upload the device never answers → transfer_timeout after about 5 s; the command failed; a later GET is 410", async () => {
+    const { transferId } = await unanswered(UPLOAD);
+    const late = await fetch(`${stack.baseUrl}${RUNTIME_FILE_ROUTE}/${transferId}`, {
+      headers: { authorization: `Bearer ${server.jwt}` },
+    });
+    expect(late.status).toBe(410);
+  }, 40_000);
+
+  it("a download the device never answers (the bot at 1 MiB) → transfer_timeout; a later PUT is 410, no file", async () => {
+    await saveProfile({ fileMaxBytes: MIB });
+    try {
+      const { eventId, transferId } = await unanswered(DOWNLOAD);
+      const late = await fetch(`${stack.baseUrl}${RUNTIME_FILE_ROUTE}/${transferId}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${server.jwt}`, "content-type": "application/octet-stream" },
+        body: readme,
+      });
+      expect(late.status).toBe(410);
+      expect(await rowsOf("select id from app.attachments where event_id = $1", [eventId])).toEqual([]);
+    } finally {
+      await saveProfile();
+    }
+  }, 40_000);
+});
+
+// Last in the file: it sweeps the records of every case above.
+describe("no path, file name or device path in any record or log line of this file (D-05, P1, T-07.17.1.1-13-05)", () => {
+  it("audit rows, tool calls, the ledger and every captured API log line hold none of them", async () => {
+    // The cases above moved files both ways: there is something to sweep.
+    const [moved] = await rowsOf(
+      "select count(*) filter (where direction = 'to_device')::int as up, count(*) filter (where direction = 'from_device')::int as down from app.bot_work_session_files",
+    );
+    expect(moved!.up).toBeGreaterThan(5);
+    expect(moved!.down).toBeGreaterThan(5);
+    // The moves logged into the captured stream (ids and codes), so an absent needle means something.
+    expect(logs.some((l) => l.includes("bot file move finished"))).toBe(true);
+    // The names are real in this run: they live where they belong (the attachments people open), nowhere else.
+    expect(
+      await rowsOf("select id from app.attachments where filename in ('README.md', 'spec.pdf') limit 1"),
+    ).toHaveLength(1);
+    for (const needle of ["docs/spec.pdf", "spec.pdf", "README.md", scratch]) {
+      const like = `%${needle}%`;
+      expect(
+        await rowsOf("select action from app.audit_events where to_jsonb(audit_events)::text like $1", [
+          like,
+        ]),
+        needle,
+      ).toEqual([]);
+      expect(
+        await rowsOf("select id from app.agent_tool_calls where to_jsonb(agent_tool_calls)::text like $1", [
+          like,
+        ]),
+        needle,
+      ).toEqual([]);
+      expect(
+        await rowsOf(
+          "select id from app.bot_work_session_files where to_jsonb(bot_work_session_files)::text like $1",
+          [like],
+        ),
+        needle,
+      ).toEqual([]);
+      expect(
+        logs.filter((l) => l.includes(needle)),
+        needle,
+      ).toEqual([]);
+    }
   });
 });
