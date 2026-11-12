@@ -4768,13 +4768,13 @@ describe("07.17.1.1.2 tasks", () => {
     }
   });
 
-  it("an agent.task.v1 event fails the mirror's mention schema only on its type, and this bridge skips it", async () => {
+  it("an agent.task.v1 event fails the mirror's mention schema only on its type, and this bridge runs it as a task turn", async () => {
     const { m } = await load();
     const asMention = m.AgentMentionEvent.safeParse(taskEvent);
     expect(asMention.success).toBe(false);
     expect(asMention.error?.issues.map((i) => i.path.join("."))).toEqual(["type"]);
-    // The bridge's own type check: before 07.17.1.1.2-05 adds the handler, a task turn is an unknown type, logged with
-    // its seq and skipped (no run, no post, no failure reply); 05 replaces this pin with the task handler's tests.
+    // 07.17.1.1.2-05 replaced the skip pin of 01: the bridge maps a task turn like a mention on the task card (one run,
+    // the reply in the card's thread) and reports it done; bridge-task.test.ts covers quiet and silent task turns.
     const logs: string[] = [];
     const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
     const bridge = createBridge({
@@ -4791,9 +4791,13 @@ describe("07.17.1.1.2 tasks", () => {
       agent: { id: ARCHIE.id, handle: ARCHIE.handle, displayName: ARCHIE.displayName },
     };
     await bridge.handleFrame({ seq: 12, type: "agent.task.v1", data: frame });
-    expect(port.dispatched).toEqual([]);
-    expect(api.messages).toEqual([]);
-    expect(logs.some((l) => l.includes("seq=12: ignoring unknown event type agent.task.v1"))).toBe(true);
+    expect(port.dispatched.map((d) => d.eventId)).toEqual([taskEvent.eventId]);
+    expect(port.dispatched[0]?.body).toBe("Continue your task (turn 8 of 40).");
+    expect(api.messages.map((x) => [x.eventId, x.inReplyToMessageId])).toEqual([
+      [taskEvent.eventId, taskEvent.message.id],
+    ]);
+    expect(api.turnsDone.map((d) => [d.eventId, d.outcome])).toEqual([[taskEvent.eventId, "replied"]]);
+    expect(logs.some((l) => l.includes("ignoring unknown event type agent.task.v1"))).toBe(false);
   });
 
   it("TurnContext without task and with task: undefined parse to the same value in both copies; a bad task is dropped by the mirror only", async () => {
