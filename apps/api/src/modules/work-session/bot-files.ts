@@ -32,7 +32,7 @@ import {
 import { and, count, eq, gt, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { type ObjectStorage, pendingTurnAttachmentCount } from "../artifact";
-import type { DeviceHub, FileCommandAck } from "../device";
+import type { DeviceHub, FileAckWaiter, FileCommandAck } from "../device";
 import type { PermissionService } from "../organization";
 import type { BotProfileRow } from "./bot-profile";
 import { type BotWorkSessionRow, botSessionLoad, lockBot, refusedAnswer } from "./bot-sessions";
@@ -179,7 +179,7 @@ export interface OwnSession {
 
 export interface BotFilesDeps {
   core: Pick<Core, "log">;
-  hub: Pick<DeviceHub, "enqueue" | "waitForFileAck">;
+  hub: Pick<DeviceHub, "enqueue" | "waitForFileAck" | "subscribeFileAck">;
   svc: Pick<WorkSessionService, "lock">;
   perms: PermissionService;
   /** Attachment object storage; null when the server has none (every move answers `storage_unavailable`). */
@@ -253,6 +253,11 @@ export interface BotFiles {
   deadlineFor(bytes: number): number;
   /** Wait for the device's ack of `transferId` (the hub's `waitForFileAck`; the Agent Channel never holds the hub). */
   waitForAck(transferId: string, timeoutMs: number, signal?: AbortSignal): Promise<FileCommandAck | null>;
+  /**
+   * Review WR-02: subscribe to the ack of `transferId` and resolve once the subscription is live; the route awaits it
+   * BEFORE it enqueues the command, then `wait`s. An abort of `signal` releases it.
+   */
+  subscribeAck(transferId: string, signal?: AbortSignal): Promise<FileAckWaiter>;
   /**
    * Review CR-03: true while the transfer route still serves the row's bytes (`streaming`). An upload's GET records
    * `streamed` just after its response finished, so the route polls this briefly after an ok before `finish`.
@@ -575,6 +580,7 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     limitFor: (tx, profile) => loadBotFileLimit(tx, profile, deps.serverMaxBytes),
     deadlineFor,
     waitForAck: (transferId, timeoutMs, signal) => hub.waitForFileAck(transferId, timeoutMs, signal),
+    subscribeAck: (transferId, signal) => hub.subscribeFileAck(transferId, signal),
 
     async streaming(tx, transferId) {
       const [row] = await tx

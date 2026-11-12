@@ -229,14 +229,11 @@ export function registerBotWorkSessionFileRoutes(
     if ("answer" in asked) return asked.answer;
     const { source } = asked;
 
-    // PD-18: the waiter subscribes before the command can be enqueued; any refusal or error below aborts it.
+    // PD-18, review WR-02: the subscription is live before the command can be enqueued (a device that refuses at once
+    // is never missed); any refusal or error below aborts it, which releases it.
     const transferId = randomUUID();
     const ac = new AbortController();
-    const wait = botFiles.waitForAck(
-      transferId,
-      botFiles.deadlineFor(move.deadlineBytes(source, limit)),
-      ac.signal,
-    );
+    const waiter = await botFiles.subscribeAck(transferId, ac.signal);
 
     // txB, AS THE SESSION'S SPONSOR: the session, the path, taint, the claim, then the move.
     let decided: typeof UNKNOWN | BotWorkSessionRefused | { enqueued: AgentTurnRow };
@@ -311,7 +308,7 @@ export function registerBotWorkSessionFileRoutes(
     const turn = decided.enqueued;
 
     // The wait, outside any transaction; then txC as the sponsor: the outcome and its one record.
-    const ack = await wait;
+    const ack = await waiter.wait(botFiles.deadlineFor(move.deadlineBytes(source, limit)));
     // Review CR-03: an upload's GET records `streamed` just after its response finished, so the device's ok can come
     // first. Wait a moment for it; a row still `streaming` after that never counts as moved (`finish`).
     if (ack?.ok) {

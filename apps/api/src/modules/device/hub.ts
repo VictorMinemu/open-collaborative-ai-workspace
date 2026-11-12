@@ -124,7 +124,9 @@ interface LocalLink {
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
 const diffChannel = (requestId: string) => `ocw:diff:${requestId}`;
 /** 07.17.1.1 (PD-18): where the ack of a bot file transfer's command is published (the transfer id is the command id). */
-const fileChannel = (transferId: string) => `ocw:file:${transferId}`;
+/** The Redis channel a file command's ack is published on (exported for tests). */
+export const fileAckChannel = (transferId: string) => `ocw:file:${transferId}`;
+const fileChannel = fileAckChannel;
 /** The two command kinds of a bot's file move: their ack goes to the waiting route, never to the session handler. */
 const FILE_COMMAND_KINDS: ReadonlySet<string> = new Set<CommandKind>([
   "session.file.write",
@@ -136,6 +138,14 @@ const isFileCommand = (row: Pick<DeviceCommandRow, "kind">) => FILE_COMMAND_KIND
 export interface FileCommandAck {
   ok: boolean;
   error: string | null;
+}
+
+/** A live subscription to one file command's ack (`DeviceHub.subscribeFileAck`, review WR-02). */
+export interface FileAckWaiter {
+  /** The ack, null on timeout or abort; releases the subscription. */
+  wait(timeoutMs: number): Promise<FileCommandAck | null>;
+  /** Drop the subscription without waiting (idempotent). */
+  release(): Promise<void>;
 }
 
 /** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
@@ -319,9 +329,64 @@ export class DeviceHub {
   }
 
   /**
-   * 07.17.1.1 (PD-18): wait for the ack of the file command `transferId`, published by whichever instance received it
-   * (or by the hub when it could not deliver the command). Call it BEFORE the command is enqueued. Resolves null on
-   * timeout, or at once when `signal` aborts; the Redis subscription is always released.
+   * 07.17.1.1 (PD-18, review WR-02): subscribe to the ack of the file command `transferId`, published by whichever
+   * instance received it (or by the hub when it could not deliver the command). Resolves only once the subscription is
+   * live, so the caller enqueues the command AFTER awaiting it and a device that answers at once is never missed. The
+   * first well-formed ack is kept until `wait` reads it. `wait` resolves it, null on timeout, at once once `signal`
+   * aborted, or at once when the subscription failed (the caller then reads the command row); the subscription is
+   * released after `wait` and on abort.
+   */
+  async subscribeFileAck(transferId: string, signal?: AbortSignal): Promise<FileAckWaiter> {
+    let got: FileCommandAck | null = null;
+    let settle: ((value: FileCommandAck | null) => void) | null = null;
+    let released = false;
+    const unsubscribe = signal?.aborted
+      ? null
+      : await this.opts.bus
+          .subscribe(fileChannel(transferId), (msg) => {
+            const parsed = parseFileAck(msg);
+            if (!parsed || got) return;
+            got = parsed;
+            settle?.(parsed);
+          })
+          .catch(() => null);
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await unsubscribe?.().catch(() => undefined);
+    };
+    const onAbort = () => {
+      settle?.(null);
+      void release();
+    };
+    if (signal?.aborted) void release();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    return {
+      wait: async (timeoutMs) => {
+        try {
+          if (got) return got;
+          if (released || !unsubscribe) return null;
+          return await new Promise<FileCommandAck | null>((resolve) => {
+            const timer = setTimeout(() => done(null), timeoutMs);
+            const done = (value: FileCommandAck | null) => {
+              clearTimeout(timer);
+              settle = null;
+              resolve(value);
+            };
+            settle = done;
+          });
+        } finally {
+          signal?.removeEventListener("abort", onAbort);
+          await release();
+        }
+      },
+      release,
+    };
+  }
+
+  /**
+   * `subscribeFileAck` then `wait` (07.17.1.1 PD-18): the timeout runs from the moment the subscription is live. The
+   * route subscribes before it enqueues (review WR-02); this one-call form is for callers that enqueue nothing after.
    */
   async waitForFileAck(
     transferId: string,
@@ -329,34 +394,8 @@ export class DeviceHub {
     signal?: AbortSignal,
   ): Promise<FileCommandAck | null> {
     if (signal?.aborted) return null;
-    let subscribed: Promise<(() => Promise<void>) | null> = Promise.resolve(null);
-    try {
-      return await new Promise<FileCommandAck | null>((resolve) => {
-        let settled = false;
-        const settle = (value: FileCommandAck | null) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", onAbort);
-          resolve(value);
-        };
-        const onAbort = () => settle(null);
-        const timer = setTimeout(() => settle(null), timeoutMs);
-        signal?.addEventListener("abort", onAbort, { once: true });
-        subscribed = this.opts.bus
-          .subscribe(fileChannel(transferId), (msg) => {
-            const parsed = parseFileAck(msg);
-            if (parsed) settle(parsed);
-          })
-          .catch(() => {
-            settle(null);
-            return null;
-          });
-      });
-    } finally {
-      // An abort may land before the SUBSCRIBE round trip: the subscription is released once it exists.
-      await (await subscribed)?.();
-    }
+    const waiter = await this.subscribeFileAck(transferId, signal);
+    return waiter.wait(timeoutMs);
   }
 
   isConnectedHere(deviceId: string): boolean {
