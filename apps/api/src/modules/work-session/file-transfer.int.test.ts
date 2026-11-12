@@ -372,6 +372,27 @@ describe("only the right device, once, in time; a busy server never burns the tr
     expect((await statusOf(id)).failure).toBe("not_found");
   });
 
+  it("a source whose message was deleted since answers 410 and fails the row, whatever the file's status (review IN-02)", async () => {
+    const bytes = new TextEncoder().encode("posted then deleted");
+    const fileId = await uploadAttachment(admin, general, {
+      name: "tombstoned.txt",
+      type: "text/plain",
+      bytes,
+    });
+    const posted = await admin.request("POST", `/api/v1/conversations/${general}/messages`, {
+      body: "the plan",
+      attachmentIds: [fileId],
+    });
+    expect(posted.status, JSON.stringify(posted.body)).toBe(200);
+    const messageId = (posted.body as { id: string }).id;
+    const sent = await su.query("select status, message_id from app.attachments where id = $1", [fileId]);
+    expect(sent.rows[0]).toMatchObject({ status: "ready", message_id: messageId });
+    await su.query("update app.messages set deleted_at = now() where id = $1", [messageId]);
+    const id = await transfer({ attachmentId: fileId, sizeBytes: bytes.length, sha256: sha256(bytes) });
+    expect((await get(id, jwtA)).status).toBe(410);
+    expect(await statusOf(id)).toEqual({ status: "failed", failure: "not_found" });
+  });
+
   it("an organization's slow streams make its next GET 503 busy with its row still pending; once one ends, it streams (review WR-01)", async () => {
     // One organization holds at most its share of the app's slots (the rest stay for the others: transfer-slots.test).
     const max = BOT_FILE_LIMITS.concurrentTransfersPerOrganization;

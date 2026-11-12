@@ -8,8 +8,8 @@ import {
   SessionFileReadPayload,
   transferLandMarginMs,
 } from "@ocw/contracts";
-import { attachments, deviceCommands } from "@ocw/db";
-import { and, eq } from "drizzle-orm";
+import { attachments, deviceCommands, messages } from "@ocw/db";
+import { and, eq, isNull, or } from "drizzle-orm";
 import type { FastifyBaseLogger, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { App, Core } from "../../core";
@@ -186,15 +186,18 @@ export function registerFileTransferRoutes(
                 });
                 return "late" as const;
               }
-              // The person may have deleted the file since the bot asked: its bytes no longer leave storage.
+              // The person may have deleted the file, or its message, since the bot asked: its bytes no longer leave
+              // storage. A tombstone decides, whatever the file's own status says (07.15 rule, review IN-02).
               const [source] = await tx
                 .select({ id: attachments.id })
                 .from(attachments)
+                .leftJoin(messages, eq(messages.id, attachments.messageId))
                 .where(
                   and(
                     eq(attachments.id, row.attachmentId),
                     eq(attachments.conversationId, row.conversationId),
                     eq(attachments.status, "ready"),
+                    or(isNull(attachments.messageId), isNull(messages.deletedAt)),
                   ),
                 )
                 .limit(1);
