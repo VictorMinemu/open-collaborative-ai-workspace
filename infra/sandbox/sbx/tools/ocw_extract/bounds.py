@@ -84,6 +84,8 @@ EXIT_PATH = 4
 EXIT_ENCRYPTED = 5
 EXIT_CAPS = 6
 EXIT_FAILED = 7
+# A batch run that changed nothing in its index (07.17.1.1.1 review CR-02): stopped instead of "run again" forever.
+EXIT_STUCK = 8
 EXIT_MORE = 75
 
 
@@ -129,6 +131,12 @@ class StepTimeout(ConversionError):
     def __init__(self, reason, pgid=None):
         super().__init__(reason)
         self.pgid = pgid
+
+
+class StuckError(ExtractError):
+    """A --batch run made no progress: its index is the same as when it started (exit 8, never 75)."""
+
+    code = EXIT_STUCK
 
 
 class BudgetReached(Exception):
@@ -178,8 +186,10 @@ def parse_budget(value):
         n = int(value)
     except (TypeError, ValueError):
         raise UsageError(f"--budget must be a whole number of seconds (got {value!r})") from None
-    if n < 1 or n > BATCH_MAX_BUDGET_S:
-        raise UsageError(f"--budget must be between 1 and {BATCH_MAX_BUDGET_S} seconds (got {n})")
+    # At least the longest step plus 10 s (07.17.1.1.1 review CR-02): a shorter budget could never start a soffice,
+    # tesseract, parser or extraction step, so its batch would exit 75 forever without progress.
+    if n < BATCH_MIN_BUDGET_S or n > BATCH_MAX_BUDGET_S:
+        raise UsageError(f"--budget must be between {BATCH_MIN_BUDGET_S} and {BATCH_MAX_BUDGET_S} seconds (got {n})")
     return n
 
 

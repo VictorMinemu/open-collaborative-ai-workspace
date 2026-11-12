@@ -1384,8 +1384,10 @@ section_docs() {
   else
     docs_fail "batch under the default 120 s timeout"
   fi
-  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx","--budget","1"]' 120 && [ "$(exit_code)" = 75 ]; then
-    ok "docs: ocw-extract --batch with --budget 1 → exit 75 (run again)"
+  # 07.17.1.1.1 review CR-02: a budget under the longest step (plus 10 s) is a usage error, never an endless exit 75.
+  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx","--budget","1"]' 120 && [ "$(exit_code)" = 2 ] &&
+    jfield "$WORK/body.json" stderr | grep -q -- "--budget must be between 130"; then
+    ok "docs: ocw-extract --batch with --budget 1 → exit 2 (usage), never an endless 75"
   else
     docs_fail "batch --budget 1"
   fi

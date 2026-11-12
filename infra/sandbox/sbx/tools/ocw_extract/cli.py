@@ -1,7 +1,8 @@
 """The `ocw-extract` command line (phase 07.17.1.1.1, D-04, D-11; the hub's CLI contract).
 
 Exit codes: 0 ok · 2 usage · 3 unsupported type · 4 not found or outside /workspace · 5 encrypted (password needed) ·
-6 too large or a cap hit · 7 conversion failed or timed out · 75 batch budget reached, more to do. Every non-zero exit
+6 too large or a cap hit · 7 conversion failed or timed out · 8 batch made no progress (stopped, not run again) ·
+75 batch budget reached, more to do. Every non-zero exit
 prints one line to stderr starting `ocw-extract: `.
 """
 
@@ -22,7 +23,8 @@ with a command timeout of 600 s (in the background); a shorter timeout is refuse
 
 EPILOG = """\
 exit codes: 0 ok, 2 usage, 3 unsupported type, 4 not found or outside /workspace, 5 encrypted (password needed),
-6 too large or a cap hit, 7 conversion failed or timed out, 75 batch budget reached (run it again)."""
+6 too large or a cap hit, 7 conversion failed or timed out, 8 batch made no progress (do not run it again),
+75 batch budget reached (run it again)."""
 
 
 class Options:

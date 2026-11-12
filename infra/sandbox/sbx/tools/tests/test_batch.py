@@ -157,7 +157,11 @@ class Folder(Base):
         self.assertEqual(bounds.BATCH_DEFAULT_BUDGET_S, 450)
         self.assertEqual(bounds.STEP_TIMEOUT_MAX_S, 120)
         self.assertLessEqual(bounds.BATCH_MAX_BUDGET_S + bounds.STEP_TIMEOUT_MAX_S, 600)
-        for value in ("471", "0", "x"):
+        # 07.17.1.1.1 review CR-02: a budget shorter than the longest step (plus 10 s) could never finish an Office,
+        # sheet, image or archive entry, so it is a usage error instead of an endless exit 75.
+        self.assertEqual(bounds.BATCH_MIN_BUDGET_S, 130)
+        self.assertEqual(bounds.parse_budget("130"), 130)
+        for value in ("471", "0", "x", "1", "129"):
             rc, _out, err = cli("--batch", "fx/pack", "--budget", value)
             self.assertEqual(rc, 2, value)
             assert_reason(self, err, "--budget")
@@ -236,12 +240,22 @@ class ExecDeadline(Base):
 
 
 class Resume(Base):
-    def test_budget_1_exits_75_and_reruns_finish_without_rework(self):
+    def test_a_chunk_that_runs_out_exits_75_and_reruns_finish_without_rework(self):
+        from ocw_extract import runner
+
         src = copy_fixtures(f"{WS}/resume", ["text.pdf", "scan.pdf", "plan.docx", "latin1.csv"])
         out_root = fresh(f"{WS}/extracted/resume")
-        rc, out, err = cli("--batch", src, "--budget", "1")
-        self.assertEqual(rc, 75, err)
-        self.assertEqual(text(out).splitlines()[-1], "more to do: run the same command again")
+        now = [0.0]
+
+        def jumping(argv, timeout, **kw):
+            res = runner.run(argv, timeout, **kw)
+            if "text_child" in [str(a) for a in argv]:
+                now[0] = 10_000.0  # the budget is gone right after latin1.csv, the first entry
+            return res
+
+        rc, out = in_process(src, out=out_root, steps=jumping, clock=lambda: now[0])
+        self.assertEqual(rc, 75, out)
+        self.assertEqual(out.splitlines()[-1], "more to do: run the same command again")
         self.assertTrue(os.path.isfile(f"{out_root}/_index.tsv"))
         for _ in range(4):
             rc, out, err = cli("--batch", src, timeout=500)
@@ -293,11 +307,13 @@ class Resume(Base):
 
 
 class FakeSteps:
-    """A step runner that takes `seconds` per step and answers like the real tools for a one-page text PDF."""
+    """A step runner that takes `seconds` per step (or `per_tool[tool]`) and answers like the real tools for a
+    one-page text PDF."""
 
-    def __init__(self, seconds=0.0, fail=None):
+    def __init__(self, seconds=0.0, fail=None, per_tool=None):
         self.seconds = seconds
         self.fail = fail
+        self.per_tool = per_tool or {}
         self.log = []
 
     def __call__(self, argv, timeout, **_kw):
@@ -308,7 +324,7 @@ class FakeSteps:
         if self.fail == tool:
             self.log.append(f"{tool}:timeout")
             raise bounds.StepTimeout(f"{tool} did not finish within {timeout} s")
-        time.sleep(self.seconds)
+        time.sleep(self.per_tool.get(tool, self.seconds))
         self.log.append(f"{tool}:done")
         answers = {
             "file": b"application/pdf\n",
@@ -328,26 +344,35 @@ class BudgetRule(Base):
         self.timeouts = dict.fromkeys(bounds.STEP_TIMEOUTS, 4)
 
     def test_a_step_that_does_not_fit_is_never_started(self):
-        fake = FakeSteps(seconds=3)
+        fake = FakeSteps(per_tool={"pdftotext": 3})
         started = time.monotonic()
         rc, out = in_process(self.src, out=self.out_root, budget=5, steps=fake, timeouts=self.timeouts)
         elapsed = time.monotonic() - started
         self.assertEqual(rc, 75, out)
         self.assertLess(elapsed, 6)
-        self.assertEqual(fake.log, ["file:start", "file:done"])
+        self.assertEqual(fake.log[-2:], ["pdftotext:start", "pdftotext:done"])
+        self.assertEqual(sum(1 for line in fake.log if line == "file:start"), 1)
         self.assertIn("more to do: run the same command again", out)
         _header, rows = index(self.out_root)
-        self.assertNotEqual(rows.get("zz.pdf", {}).get("status"), "done")
+        self.assertEqual(rows["text.pdf"]["status"], "done")
         self.assertNotIn("zz.pdf", rows)
 
-    def test_a_budget_shorter_than_any_step_starts_nothing(self):
+    def test_a_run_that_starts_nothing_stops_with_exit_8_not_75(self):
+        # 07.17.1.1.1 review CR-02: the no-progress guard. Only injected timeouts can get here (the CLI refuses a
+        # budget under 130 s); the same index twice is a clear error, never another "run again".
+        from ocw_extract import bounds
+
         fake = FakeSteps(seconds=3)
-        started = time.monotonic()
-        rc, _out = in_process(self.src, out=self.out_root, budget=3, steps=fake, timeouts=self.timeouts)
-        self.assertEqual(rc, 75)
-        self.assertLess(time.monotonic() - started, 1)
+        for attempt in range(2):
+            started = time.monotonic()
+            with self.subTest(attempt=attempt), self.assertRaises(bounds.StuckError) as ctx:
+                in_process(self.src, out=self.out_root, budget=3, steps=fake, timeouts=self.timeouts)
+            self.assertEqual(ctx.exception.code, 8)
+            self.assertIn("no progress", ctx.exception.reason)
+            self.assertLess(time.monotonic() - started, 1)
         self.assertEqual(fake.log, [])
         self.assertTrue(os.path.isfile(f"{self.out_root}/_index.tsv"))
+        self.assertEqual(bounds.EXIT_STUCK, 8)
 
     def test_a_timed_out_step_leaves_partial_then_failed(self):
         fake = FakeSteps(fail="pdftotext")
@@ -363,6 +388,151 @@ class BudgetRule(Base):
         self.assertEqual(rows["text.pdf"]["status"], "failed")
         self.assertEqual(rows["text.pdf"]["note"], "timeout")
         self.assertRegex(out.splitlines()[0], SUMMARY)
+
+
+class VirtualSteps:
+    """A step runner on a virtual clock (07.17.1.1.1 review CR-02): each step takes `seconds(tool, argv)` virtual
+    seconds, no real time. It answers like the real tools: `file` from the extension, soffice writes a PDF, pdfinfo
+    gives `pages`, pdftotext gives `layer` text (empty: a scan), pdftoppm writes a PNG, tesseract reads the page."""
+
+    MIMES = {".pdf": "application/pdf", ".txt": "text/plain", ".docx": "application/zip",
+             ".ods": "application/vnd.oasis.opendocument.spreadsheet"}
+
+    def __init__(self, seconds, pages=3, layer=""):
+        self.now = 0.0
+        self.seconds = seconds
+        self.pages = pages
+        self.layer = layer
+        self.log = []
+
+    def clock(self):
+        return self.now
+
+    def __call__(self, argv, timeout, **_kw):
+        from ocw_extract import bounds, runner
+
+        argv = [str(a) for a in argv]
+        tool = os.path.basename(argv[0])
+        if tool.startswith("python"):
+            tool = argv[6]
+        page = None
+        if tool in ("pdftotext", "pdftoppm"):
+            page = int(argv[argv.index("-f") + 1])
+        elif tool == "tesseract":
+            page = int(os.path.basename(argv[1]).split("-")[1].split(".")[0])
+        took = self.seconds(tool, page)
+        self.log.append((tool, page))
+        if took > timeout:
+            self.now += timeout
+            raise bounds.StepTimeout(f"{tool} did not finish within {timeout} s")
+        self.now += took
+        out = b""
+        if tool == "file":
+            out = (self.MIMES[os.path.splitext(argv[-1])[1]] + "\n").encode()
+        elif tool == "soffice":
+            outdir, src = argv[argv.index("--outdir") + 1], argv[-1]
+            with open(os.path.join(outdir, os.path.splitext(os.path.basename(src))[0] + ".pdf"), "wb") as f:
+                f.write(b"%PDF-1.4 virtual\n")
+        elif tool == "pdfinfo":
+            out = f"Pages:          {self.pages}\n".encode()
+        elif tool == "pdftotext":
+            out = self.layer.encode()
+        elif tool == "pdftoppm":
+            with open(argv[-1] + ".png", "wb") as f:
+                f.write(b"png")
+        elif tool == "tesseract":
+            out = f"Texto reconocido de la pagina {page} con bastantes caracteres.".encode()
+        elif tool == "text_child":
+            out = b"una nota de texto"
+        elif tool == "xlsx_child":
+            out = b"### sheet: Hoja1\na,b\n"
+        return runner.Result(0, out, b"")
+
+
+def dummies(dest, names):
+    fresh(dest)
+    os.makedirs(dest)
+    for name in names:
+        with open(os.path.join(dest, name), "wb") as f:
+            f.write(b"x")
+    return dest
+
+
+class Progress(Base):
+    """07.17.1.1.1 review CR-02: every run of a batch either moves an entry on or stops with exit 8; one entry that
+    needs more than one budget never makes the batch exit 75 forever."""
+
+    def run3(self, src, out_root, fake, runs=4, **kwargs):
+        codes = []
+        for _ in range(runs):
+            fake.now = 0.0
+            rc, _out = in_process(src, out=out_root, budget=130, steps=fake, clock=fake.clock, **kwargs)
+            codes.append(rc)
+            if rc == 0:
+                break
+        return codes
+
+    def test_an_entry_that_needs_more_than_one_budget_ends_failed_within_two_runs(self):
+        src = dummies(f"{WS}/cr02-sheet", ["a.ods", "b.txt"])
+        out_root = fresh(f"{WS}/extracted/cr02-sheet")
+        # a.ods: LibreOffice's export takes 110 s, then openpyxl's 120 s step no longer fits a 130 s budget.
+        fake = VirtualSteps(lambda tool, _page: {"file": 5, "soffice": 110}.get(tool, 1))
+        codes = self.run3(src, out_root, fake)
+        self.assertEqual(codes, [75, 0])
+        _header, rows = index(out_root)
+        self.assertEqual(rows["a.ods"]["status"], "failed", rows["a.ods"])
+        self.assertIn("did not fit in one run", rows["a.ods"]["note"])
+        self.assertEqual(rows["b.txt"]["status"], "done")
+
+    def test_a_pdf_page_that_does_not_fit_a_fresh_run_is_skipped_and_the_pdf_goes_on(self):
+        src = dummies(f"{WS}/cr02-pdf", ["scan.pdf"])
+        out_root = fresh(f"{WS}/extracted/cr02-pdf")
+
+        def seconds(tool, page):
+            if page == 2 and tool in ("pdftotext", "pdftoppm"):
+                return 50  # page 2 alone leaves less than tesseract's 120 s, even in a fresh run
+            return {"tesseract": 30}.get(tool, 1)
+
+        fake = VirtualSteps(seconds)
+        codes = self.run3(src, out_root, fake)
+        self.assertEqual(codes[-1], 0, codes)
+        self.assertLessEqual(len(codes), 3, codes)
+        _header, rows = index(out_root)
+        row = rows["scan.pdf"]
+        self.assertEqual(row["status"], "done", row)
+        self.assertIn("skipped page 2", row["note"])
+        with open(f"{out_root}/scan.pdf.txt", encoding="utf-8") as f:
+            body = f.read()
+        self.assertEqual(body.count("--- page 1 (ocr) ---"), 1)
+        self.assertEqual(body.count("--- page 2 (skipped) ---"), 1)
+        self.assertEqual(body.count("--- page 3 (ocr) ---"), 1)
+        self.assertIn("--pages 2", body)
+        self.assertFalse(os.path.exists(f"{out_root}/scan.pdf.txt.partial"))
+
+    def test_an_office_file_read_through_its_pdf_resumes_at_the_next_page(self):
+        src = dummies(f"{WS}/cr02-docx", ["plan.docx"])
+        out_root = fresh(f"{WS}/extracted/cr02-docx")
+        # --ocr always: soffice to PDF, then pdftoppm + tesseract per page; two pages never fit one 130 s run.
+        fake = VirtualSteps(lambda tool, _page: {"soffice": 5, "tesseract": 60}.get(tool, 1))
+        fake.now = 0.0
+        rc, _out = in_process(src, out=out_root, budget=130, steps=fake, clock=fake.clock, ocr="always")
+        self.assertEqual(rc, 75)
+        _header, rows = index(out_root)
+        self.assertEqual(rows["plan.docx"]["status"], "partial", rows["plan.docx"])
+        self.assertEqual(rows["plan.docx"]["next_page"], "2")
+        self.assertTrue(os.path.isfile(f"{out_root}/plan.docx.txt.partial"))
+        codes = self.run3(src, out_root, fake, ocr="always")
+        self.assertEqual(codes, [75, 0])
+        _header, rows = index(out_root)
+        self.assertEqual(rows["plan.docx"]["status"], "done", rows["plan.docx"])
+        self.assertEqual(rows["plan.docx"]["method"], "soffice+ocr")
+        with open(f"{out_root}/plan.docx.txt", encoding="utf-8") as f:
+            body = f.read()
+        for n in (1, 2, 3):
+            self.assertEqual(body.count(f"--- page {n} (ocr) ---"), 1, body)
+        self.assertIn("· pages 1-3 of 3 · text 0 · ocr 3 ===", body.splitlines()[0])
+        tesseract_pages = [p for tool, p in fake.log if tool == "tesseract"]
+        self.assertEqual(sorted(tesseract_pages), [1, 2, 3])  # no page OCR'd twice
 
 
 class Caps(Base):

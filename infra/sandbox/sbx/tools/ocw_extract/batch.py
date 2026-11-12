@@ -7,9 +7,13 @@ mirror tree plus `_index.tsv` under /workspace/extracted/<name>, in chunks that 
   exact line and its `.txt`. A PDF resumes per page: its blocks are appended to `<rel>.txt.partial` and `next_page`
   records where to go on; the file becomes `<rel>.txt` when the last page is done.
 - Budget rule: before every step (one child process) with nominal timeout T, the remaining budget R is computed;
-  R < T writes the index and exits 75 without starting the step, otherwise the step runs with timeout min(T, R). A
-  step that still times out leaves its entry `partial` (a PDF at that page); the second timeout makes it `failed`
-  with the note `timeout`. Exit 75 while work remains, 0 when every entry is final; failures are counted, not exit codes.
+  R < T writes the index and exits 75 without starting the step, otherwise the step runs with timeout T. A step that
+  still times out leaves its entry `partial` (a PDF at that page); the second timeout makes it `failed` with the note
+  `timeout`. Exit 75 while work remains, 0 when every entry is final; failures are counted, not exit codes.
+- Progress (07.17.1.1.1 review CR-02): the budget is at least the longest step plus 10 s. Office files read through
+  a PDF resume per page like PDFs. When nothing moved in a run, the entry that used the whole budget is failed
+  (`did not fit in one run`), or its page is written as skipped and the entry goes on, so every run moves the batch
+  on. A run that still ends with the index it loaded exits 8 (no progress), never 75.
 - Archives (PD-09): listed and checked against every cap, extracted into the scratch folder under the size watcher,
   each member mirrored under `<rel>.d/` with a `<rel>!<member>` row; a nested archive is listed, not extracted. A
   top-level archive that breaks a cap exits 6.
@@ -22,14 +26,16 @@ import sys
 import tempfile
 import time
 
-from . import archives, bounds, detect, pdf, runner
+from . import archives, bounds, detect, office, pdf, runner
 
 INDEX = "_index.tsv"
 COLUMNS = ("path", "size", "mtime_ns", "type", "method", "pages", "next_page", "chars", "status", "note")
 HEADER = "\t".join(COLUMNS)
 FINAL = ("done", "failed", "unsupported", "skipped")
 WRITE_EVERY_S = 5.0
-PAGE_MARK = re.compile(r"(?m)^--- page (\d+)( \(ocr\))? ---$")
+# A page or slide block in a `.partial` file: plain, OCR'd, or skipped (did not fit in one run).
+PAGE_MARK = re.compile(r"(?m)^--- page (\d+)(?: \((ocr|skipped)\))? ---$")
+SLIDE_MARK = re.compile(r"(?m)^### slide (\d+)(?: \((ocr|skipped)\))?$")
 _ESC = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
 _UNESC = {"\\": "\\", "t": "\t", "n": "\n", "r": "\r"}
 
@@ -40,6 +46,19 @@ def esc(value):
 
 def unesc(value):
     return re.sub(r"\\(.)", lambda m: _UNESC.get(m.group(1), m.group(1)), value)
+
+
+def page_block(unit, n, text, used_ocr):
+    if unit == "slides":
+        return f"### slide {n}" + (" (ocr)" if used_ocr else "") + (f"\n{text}" if text.strip() else "")
+    return pdf.block(n, text, used_ocr)
+
+
+def skipped_block(unit, n, name):
+    why = f"[not read: it did not fit in one --batch run; read it alone with ocw-extract {name} --pages {n}]"
+    if unit == "slides":
+        return f"### slide {n} (skipped)\n{why}"
+    return f"--- page {n} (skipped) ---\n{why}"
 
 
 def one_line(reason, limit=300):
@@ -105,6 +124,11 @@ class Batch:
         self.archive_rels = set()
         self.ocr_pages = 0
         self.last_write = self.clock()
+        # What this run started from (07.17.1.1.1 review CR-02): `moved` turns true when a row changes or a page is
+        # written; a run that ends with the same index it loaded stops with exit 8 instead of 75.
+        self.loaded = {}
+        self.loaded_lines = []
+        self.moved = False
         self.load()
 
     # --- index -------------------------------------------------------------------------------------------------
@@ -124,6 +148,8 @@ class Batch:
             row = Row.parse(line)
             if row is not None:
                 self.rows[row.f["path"]] = row
+                self.loaded[row.f["path"]] = line
+                self.loaded_lines.append(line)
 
     def member_of(self, key, walk):
         """The archive a `<rel>!<member>` key belongs to, or None (a plain name may contain `!` too)."""
@@ -238,6 +264,7 @@ class Batch:
         rel = entry.rel
         if entry.kind == "symlink":
             self.rows[rel] = Row({"path": rel, "status": "skipped", "note": "symlink (links are never followed)"})
+            self.note_moved(rel)
             return
         st = os.lstat(entry.path)
         if entry.kind == "special":
@@ -245,6 +272,7 @@ class Batch:
                 {"path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns, "status": "skipped",
                  "note": "not a regular file"}
             )
+            self.note_moved(rel)
             return
         prev = self.rows.get(rel)
         if prev is not None and prev.status in FINAL and prev.same_file(st):
@@ -256,17 +284,24 @@ class Batch:
         resume = prev if prev is not None and prev.status == "partial" and prev.same_file(st) else None
         row = Row({"path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns})
         self.rows[rel] = row
+        steps_at_start = self.steps.count
+        paged = False
         try:
             mime = detect.mime_type(path, self.steps)
             type_name = detect.decide(mime, os.path.basename(path))
             if type_name is None:
                 row.update(status="unsupported", note=mime)
                 self.drop(mirror)
+                self.note_moved(rel)
                 return
             row.update(type=type_name)
             family = detect.family(type_name)
             if family == "pdf":
-                self.pdf_entry(rel, path, mirror, row, resume)
+                paged = True
+                self.paged_entry(rel, path, mirror, row, resume, type_name, "pages")
+            elif self.through_pdf(type_name, family):
+                paged = True
+                self.paged_entry(rel, path, mirror, row, resume, type_name, "slides" if family == "slides" else "pages")
             elif family == "archive" and not member:
                 self.archive_entry(rel, path, type_name, st, row, resume)
             else:
@@ -284,23 +319,36 @@ class Batch:
                 )
         except bounds.BudgetReached:
             if not row.status:
-                if resume is not None:
+                if not self.moved and self.steps.count > steps_at_start:
+                    # Nothing moved in this run and this entry alone used the whole fresh budget: the next run would
+                    # start it again and stop at the same point. Fail it, so the batch goes on (07.17.1.1.1 review
+                    # CR-02); a paged entry skips the page instead (paged_entry).
+                    row.update(
+                        status="failed",
+                        note=f"did not fit in one run ({int(self.steps.budget)} s budget): read it alone with "
+                        "ocw-extract <file> -o FILE",
+                        next_page="",
+                    )
+                    self.drop(mirror)
+                    self.moved = True
+                elif resume is not None:
                     self.rows[rel] = resume
                 else:
                     del self.rows[rel]
             raise
         except bounds.StepTimeout:
             again = resume is not None and resume.f["note"].startswith("timeout")
-            if again and (row.f["type"] != "pdf" or resume.f["next_page"] == row.f["next_page"]):
+            if again and (not paged or resume.f["next_page"] == row.f["next_page"]):
                 row.update(status="failed", note="timeout", next_page="")
                 self.drop(mirror)
             else:
-                where = f" at page {row.f['next_page']}" if row.f["type"] == "pdf" and row.f["next_page"] else ""
+                where = f" at page {row.f['next_page']}" if paged and row.f["next_page"] else ""
                 row.update(status="partial", note=f"timeout{where}")
         except bounds.CapsError as exc:
             row.update(status="failed", note=one_line(exc.reason), next_page="")
             self.drop(mirror)
             if top:
+                self.note_moved(rel)
                 raise TopLevelCaps(exc) from None
         except bounds.ExtractError as exc:
             row.update(status="failed", note=one_line(exc.reason), next_page="")
@@ -308,65 +356,110 @@ class Batch:
         except Exception as exc:  # noqa: BLE001 - one entry never stops the batch
             row.update(status="failed", note=one_line(f"error: {type(exc).__name__}: {exc}"), next_page="")
             self.drop(mirror)
+        self.note_moved(rel)
+
+    def note_moved(self, rel):
+        """An entry whose row is not the line this run loaded moved the batch on."""
+        row = self.rows.get(rel)
+        if row is not None and row.line() != self.loaded.get(rel):
+            self.moved = True
+
+    def through_pdf(self, type_name, family):
+        """Office files `office.py` reads through a PDF, page by page (07.17.1.1.1 review CR-02): a writer document
+        with --ocr always, and every presentation but a pptx outside --ocr always (python-pptx reads that one)."""
+        if family == "writer":
+            return self.opts.ocr == "always"
+        if family == "slides":
+            return self.opts.ocr == "always" or type_name != "pptx"
+        return False
 
     def count_ocr(self, n):
         self.ocr_pages += n
 
-    def pdf_entry(self, rel, path, mirror, row, resume):
-        total = pdf.info(path, self.steps)
+    def paged_entry(self, rel, path, mirror, row, resume, type_name, unit):
+        """A PDF, or an Office file through its PDF (LibreOffice converts it again on every run): one page at a time
+        appended to `<rel>.txt.partial`, `next_page` in the index, so the next run goes on at the next page. A page
+        that does not fit even a fresh run (nothing else moved) is written as skipped and the entry goes on."""
+        office_file = detect.family(type_name) != "pdf"
+        if office_file:
+            source = office.convert(path, "pdf", self.steps)
+            page_opts = office.Options(self.steps, "always" if self.opts.ocr == "always" else "never", self.opts.lang)
+        else:
+            source, page_opts = path, self.opts
+        total = pdf.info(source, self.steps)
+        mark = SLIDE_MARK if unit == "slides" else PAGE_MARK
         partial = mirror + ".partial"
         start = int(resume.f["next_page"]) if resume is not None and resume.f["next_page"].isdigit() else 1
-        if start > 1 and not os.path.isfile(partial):
+        if start > 1 and (not os.path.isfile(partial) or resume.f["pages"] != str(total)):
             start = 1
         if start == 1:
             self.drop(mirror)
         else:
-            self.trim(partial, start)
+            self.trim(partial, start, mark)
         os.makedirs(os.path.dirname(partial), exist_ok=True)
-        row.update(pages=total, next_page=start, method="pdftotext")
+        row.update(pages=total, next_page=start, method="soffice+pdftotext" if office_file else "pdftotext")
+        name = os.path.basename(rel.split("!")[-1])
         for n in range(start, total + 1):
             row.update(next_page=n)
             try:
-                text, used_ocr = pdf.page(path, n, self.opts)
+                text, used_ocr = pdf.page(source, n, page_opts)
             except bounds.BudgetReached:
+                if not self.moved:
+                    with open(partial, "a", encoding="utf-8") as f:
+                        f.write(skipped_block(unit, n, name) + "\n")
+                    self.moved = True
+                    if n == total:
+                        self.finish_paged(rel, partial, mirror, row, total, type_name, unit)
+                        raise
+                    row.update(next_page=n + 1, chars=os.path.getsize(partial), status="partial", note="")
+                    raise
                 row.update(status="partial", note="")
                 raise
             with open(partial, "a", encoding="utf-8") as f:
-                f.write(pdf.block(n, text, used_ocr) + "\n")
+                f.write(page_block(unit, n, text, used_ocr) + "\n")
             if used_ocr:
                 self.count_ocr(1)
+            self.moved = True
             row.update(next_page=n + 1, chars=os.path.getsize(partial), status="partial", note="")
             self.maybe_write()
-        self.finish_pdf(rel, partial, mirror, row, total)
+        self.finish_paged(rel, partial, mirror, row, total, type_name, unit)
 
     @staticmethod
-    def trim(partial, start):
+    def trim(partial, start, mark=None):
         """Drop any block of page `start` or later (a run killed after writing a page but before the index)."""
         with open(partial, encoding="utf-8") as f:
             text = f.read()
-        for m in PAGE_MARK.finditer(text):
+        for m in (mark or PAGE_MARK).finditer(text):
             if int(m.group(1)) >= start:
                 with open(partial, "w", encoding="utf-8") as f:
                     f.write(text[: m.start()])
                 return
 
-    def finish_pdf(self, rel, partial, mirror, row, total):
+    def finish_paged(self, rel, partial, mirror, row, total, type_name, unit):
         body = ""
         if os.path.isfile(partial):
             with open(partial, encoding="utf-8") as f:
                 body = f.read()
-        marks = PAGE_MARK.findall(body)
-        doc = bounds.Doc("pdf")
-        doc.unit = "pages"
+        marks = (SLIDE_MARK if unit == "slides" else PAGE_MARK).findall(body)
+        skipped = [int(n) for n, flag in marks if flag == "skipped"]
+        doc = bounds.Doc(type_name)
+        doc.unit = unit
         doc.first, doc.last, doc.total = (1 if total else 0), total, total
-        doc.ocr_pages = sum(1 for _, o in marks if o)
-        doc.text_pages = len(marks) - doc.ocr_pages
+        doc.ocr_pages = sum(1 for _, flag in marks if flag == "ocr")
+        doc.text_pages = len(marks) - doc.ocr_pages - len(skipped)
         doc.add(body)
         self.write_mirror(mirror, doc.full_text(os.path.basename(rel.split("!")[-1])))
         if os.path.exists(partial):
             os.unlink(partial)
-        method = "ocr" if doc.ocr_pages and not doc.text_pages else "pdftotext+ocr" if doc.ocr_pages else "pdftotext"
-        row.update(method=method, next_page="", chars=len(doc.body()), status="done", note="")
+        if detect.family(type_name) != "pdf":
+            method = "soffice+ocr" if doc.ocr_pages else "soffice+pdftotext"
+        elif doc.ocr_pages:
+            method = "ocr" if not doc.text_pages else "pdftotext+ocr"
+        else:
+            method = "pdftotext"
+        word = "page" if unit == "pages" else "slide"
+        note = f"skipped {word}{'s' if len(skipped) > 1 else ''} {pdf.ranges(skipped)}: did not fit in one run" if skipped else ""
+        row.update(method=method, next_page="", chars=len(doc.body()), status="done", note=note)
 
     def archive_entry(self, rel, path, type_name, st, row, resume):
         self.archive_rels.add(rel)
@@ -432,17 +525,25 @@ class Batch:
                     self.process(e)
                     self.maybe_write()
             except bounds.BudgetReached:
-                self.write()
-                self.summary(more=True)
-                return bounds.EXIT_MORE
+                return self.finish(more=True)
             except TopLevelCaps as exc:
                 self.write()
                 self.summary(more=False)
                 raise exc.error from None
-        self.write()
         by, _total, pending = self.counts()
-        more = pending > 0 or by["partial"] > 0
-        self.summary(more=more)
+        return self.finish(more=pending > 0 or by["partial"] > 0)
+
+    def finish(self, more):
+        """Write the index and the summary; 75 while work remains, 0 when done, and exit 8 (StuckError) when work
+        remains but this run left the index exactly as it found it: running it again would do the same."""
+        self.write()
+        stuck = more and [row.line() for row in self.ordered()] == self.loaded_lines
+        self.summary(more=more and not stuck)
+        if stuck:
+            raise bounds.StuckError(
+                f"--batch made no progress in this run ({self.index_path()} is unchanged): stopping instead of running "
+                "again; the entries left are not final in the index"
+            )
         return bounds.EXIT_MORE if more else bounds.EXIT_OK
 
 

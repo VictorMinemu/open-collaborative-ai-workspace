@@ -253,7 +253,8 @@ class Steps:
     budget (PD-08) and a replaceable runner (the batch tests pass a fake).
 
     With a budget, before every step the remaining time R is computed; R < T raises BudgetReached without starting
-    the step, otherwise the step runs with timeout min(T, R)."""
+    the step, otherwise the step runs with its nominal timeout T (it always ends within the budget). `count` is the
+    number of steps started, so a batch can tell whether an entry ran anything (07.17.1.1.1 review CR-02)."""
 
     def __init__(self, runner=None, timeouts=None, budget=None, clock=time.monotonic):
         self._runner = runner or run
@@ -275,7 +276,7 @@ class Steps:
             return nominal
         if left < nominal:
             raise bounds.BudgetReached(kind)
-        return min(nominal, left)
+        return nominal
 
     def __call__(self, kind, argv, **kwargs):
         timeout = self.timeout_for(kind)
