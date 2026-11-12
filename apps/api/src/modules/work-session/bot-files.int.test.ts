@@ -1,8 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   AgentChannelWorkSessionStartResponse,
+  BOT_WORK_SESSION_SENTENCES,
   type BotFileLimit,
+  type BotWorkSessionRefusal,
   type BotWorkZoneProfileInput,
+  RUNTIME_FILE_ROUTE,
   transferDeadlineMs,
 } from "@ocw/contracts";
 import { agentTurns, type Tx } from "@ocw/db";
@@ -11,7 +14,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, type Frame } from "../../testing-device";
-import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
 import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
@@ -21,6 +24,7 @@ import {
   invite,
   pairDevice,
 } from "../../testing-workzone";
+import type { BotFiles } from "./bot-files";
 import { loadBotProfile } from "./bot-profile";
 import { ownBotSession } from "./bot-sessions";
 
@@ -449,5 +453,383 @@ describe("tracer: a download prepared as the sponsor reaches the device, which P
     expect(Number(row!.deadline_ms)).toBeLessThan(STACK_DEADLINE_MS + 2_000);
     // Production default: the contract's deadline (checked on a stack without the option, below).
     expect(transferDeadlineMs(10)).toBeGreaterThan(STACK_DEADLINE_MS);
+  });
+});
+
+// ---------------------------------------------------------------- uploads and every device answer (Task 2)
+
+type CallContext = Awaited<ReturnType<typeof callContext>>;
+type ChatFile = { id: string; sizeBytes: number; sha256: string | null; bytes: Uint8Array };
+
+/** Ana's file in #eng, ready (what `attachmentForTurn` hands the upload route). */
+async function chatFile(bytes: Uint8Array = randomBytes(2048), name = "spec.pdf"): Promise<ChatFile> {
+  const id = await uploadAttachment(ana, engId, { name, type: "application/pdf", bytes });
+  const [row] = await rowsOf("select size_bytes, sha256 from app.attachments where id = $1", [id]);
+  return { id, sizeBytes: Number(row!.size_bytes), sha256: (row!.sha256 as string | null) ?? null, bytes };
+}
+
+async function upload(
+  ctx: CallContext,
+  file: ChatFile,
+  opts: { path?: string; overwrite?: boolean; turn?: TurnRow } = {},
+) {
+  const transferId = randomUUID();
+  const prepared = await asSponsor((tx) =>
+    botFiles().prepareUpload(tx, {
+      turn: opts.turn ?? ctx.turn,
+      profile: ctx.profile,
+      own: ctx.own,
+      attachment: { id: file.id, sizeBytes: file.sizeBytes, sha256: file.sha256 },
+      path: opts.path ?? "docs/spec.pdf",
+      ...(opts.overwrite !== undefined ? { overwrite: opts.overwrite } : {}),
+      limit: ORG_LIMIT,
+      transferId,
+    }),
+  );
+  return { transferId, prepared };
+}
+
+async function download(ctx: CallContext, path = "README.md", limit = ORG_LIMIT) {
+  const transferId = randomUUID();
+  const prepared = await asSponsor((tx) =>
+    botFiles().prepareDownload(tx, {
+      turn: ctx.turn,
+      profile: ctx.profile,
+      own: ctx.own,
+      path,
+      limit,
+      transferId,
+    }),
+  );
+  return { transferId, prepared };
+}
+
+/** A refusal before any ledger row or device command (PD-08). */
+async function refusedBefore(
+  call: Promise<{ transferId: string; prepared: Json }>,
+  code: BotWorkSessionRefusal,
+): Promise<void> {
+  const { transferId, prepared } = await call;
+  expect(prepared, JSON.stringify(prepared)).toMatchObject({ kind: "refused", code });
+  expect(prepared.sentence).toBe(BOT_WORK_SESSION_SENTENCES[code]);
+  expect(await ledgerOf(transferId)).toEqual([]);
+  expect(await rowsOf("select id from app.device_commands where id = $1", [transferId])).toEqual([]);
+}
+
+const finishAs = (
+  transferId: string,
+  direction: "to_device" | "from_device",
+  ack: FileAck | null,
+): Promise<{ answer: Json; audit: Json | null }> =>
+  asSponsor(async (tx) =>
+    direction === "to_device"
+      ? await botFiles().finish(tx, { transferId, direction, ack })
+      : await botFiles().finish(tx, { transferId, direction, ack }),
+  );
+type FileAck = { ok: boolean; error: string | null };
+
+/** A fresh turn of Atlas on the same session (each call has its own per-turn budget). */
+const nextTurn = async (workSessionId: string) => callContext(await ask(), workSessionId);
+
+const sessionStatus = async (id: string) =>
+  (await rowsOf("select status, tainted_at from app.work_sessions where id = $1", [id]))[0]!;
+
+describe("uploads into an idle session, and every device answer mapped to its refusal", () => {
+  it("an upload writes one to_device row and a session.file.write; the device GETs the bytes and finish answers uploaded", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    const wait = (id: string) => botFiles().waitForAck(id, 20_000);
+    const transferId = randomUUID();
+    const waiting = wait(transferId);
+    const prepared = await asSponsor((tx) =>
+      botFiles().prepareUpload(tx, {
+        turn: ctx.turn,
+        profile: ctx.profile,
+        own: ctx.own,
+        attachment: { id: file.id, sizeBytes: file.sizeBytes, sha256: file.sha256 },
+        path: "docs/spec.pdf",
+        limit: ORG_LIMIT,
+        transferId,
+      }),
+    );
+    expect(prepared).toEqual({ kind: "enqueued", transferId });
+    const [row] = await ledgerOf(transferId);
+    expect(row).toMatchObject({
+      direction: "to_device",
+      status: "pending",
+      attachment_id: file.id,
+      size_bytes: String(file.sizeBytes),
+      sha256: file.sha256,
+      path_length: 13,
+    });
+    const cmd = await fileCommand(transferId);
+    expect(cmd.kind).toBe("session.file.write");
+    expect(cmd.payload).toEqual({
+      path: "docs/spec.pdf",
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+      overwrite: false,
+    });
+    expect(await server.serveFileCommand(cmd)).toEqual({ ok: true, error: null });
+    const ack = await waiting;
+    const finished = await finishAs(transferId, "to_device", ack);
+    expect(finished.answer).toEqual({
+      kind: "uploaded",
+      workSessionId: ctx.workSessionId,
+      path: "docs/spec.pdf",
+      sizeBytes: file.sizeBytes,
+    });
+    expect(finished.audit).toMatchObject({
+      attachmentId: file.id,
+      bytes: file.sizeBytes,
+      sha256: file.sha256,
+      direction: "to_device",
+      pathLength: 13,
+    });
+    expect((await ledgerOf(transferId))[0]!.status).toBe("done");
+  });
+
+  it("a tainted turn's upload marks the session's tainted_at once; an untainted one does not (PD-13, A-05)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    expect((await upload(ctx, file)).prepared.kind).toBe("enqueued");
+    expect((await sessionStatus(ctx.workSessionId)).tainted_at).toBeNull();
+    const tainted = { ...ctx.turn, tainted: true };
+    expect((await upload(ctx, file, { turn: tainted, path: "a.pdf" })).prepared.kind).toBe("enqueued");
+    const first = (await sessionStatus(ctx.workSessionId)).tainted_at as Date;
+    expect(first).not.toBeNull();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await upload(ctx, file, { turn: tainted, path: "b.pdf" })).prepared.kind).toBe("enqueued");
+    expect(((await sessionStatus(ctx.workSessionId)).tainted_at as Date).getTime()).toBe(first.getTime());
+  });
+
+  it("refuses before any row or command: running, a queued prompt, archived, completed, host offline, device offline or revoked", async () => {
+    const file = await chatFile();
+    // Running: the runtime holds the first turn.
+    const { workSessionId, first } = await botSession();
+    server.event(workSessionId, { type: "prompt.started", promptId: first.payload.promptId });
+    await eventually(async () => (await sessionStatus(workSessionId)).status === "running");
+    await refusedBefore(upload(await nextTurn(workSessionId), file), "session_busy");
+
+    // Idle, but a prompt waits in its queue.
+    const idle = await idleSession();
+    await su.query("update app.work_prompts set status = 'queued' where work_session_id = $1", [
+      idle.workSessionId,
+    ]);
+    await refusedBefore(upload(idle, file), "session_busy");
+    await su.query("update app.work_prompts set status = 'completed' where work_session_id = $1", [
+      idle.workSessionId,
+    ]);
+
+    for (const [status, code] of [
+      ["host_offline", "device_offline"],
+      ["completed", "session_not_running"],
+      ["archived", "session_ended"],
+    ] as const) {
+      await su.query("update app.work_sessions set status = $2 where id = $1", [idle.workSessionId, status]);
+      await refusedBefore(upload(await nextTurn(idle.workSessionId), file), code);
+      await refusedBefore(download(await nextTurn(idle.workSessionId)), code);
+    }
+
+    const other = await idleSession();
+    await su.query("update app.devices set status = 'offline' where id = $1", [serverId]);
+    try {
+      await refusedBefore(upload(other, file), "device_offline");
+      await refusedBefore(download(other), "device_offline");
+    } finally {
+      await su.query("update app.devices set status = 'online' where id = $1", [serverId]);
+    }
+    await su.query("update app.devices set revoked_at = now() where id = $1", [serverId]);
+    try {
+      await refusedBefore(upload(other, file), "device_offline");
+    } finally {
+      await su.query("update app.devices set revoked_at = null where id = $1", [serverId]);
+    }
+  });
+
+  it("the sponsor denied work_session.prompt cannot upload, and still downloads with work_session.read (PD-07)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    const rule = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: victorId,
+        permission: "work_session.prompt",
+        effect: "deny",
+      }),
+    );
+    try {
+      await refusedBefore(upload(ctx, file), "not_allowed");
+      expect((await download(ctx)).prepared.kind).toBe("enqueued");
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+  });
+
+  it("maps each device answer of a download to its refusal and fails the row with the code (PD-15)", async () => {
+    const { workSessionId } = await idleSession();
+    const cases: Array<[string, BotWorkSessionRefusal, string]> = [
+      ["invalid command frame", "runtime_too_old", "runtime_too_old"],
+      ["not_found", "file_not_found", "not_found"],
+      ["not_a_file", "not_a_file", "not_a_file"],
+      ["invalid_path", "path_not_allowed", "invalid_path"],
+      ["path_not_allowed", "path_not_allowed", "path_not_allowed"],
+      ["busy", "session_busy", "busy"],
+      ["not_running", "session_not_running", "not_running"],
+      ["no_space", "transfer_failed", "no_space"],
+      ["the runtime crashed at /Users/someone/secret", "transfer_failed", "transfer_failed"],
+    ];
+    for (const [ackText, code, failure] of cases) {
+      const ctx = await nextTurn(workSessionId);
+      const { transferId } = await download(ctx);
+      const waiting = botFiles().waitForAck(transferId, 20_000);
+      await server.serveFileCommand(await fileCommand(transferId), { ackAs: ackText });
+      const finished = await finishAs(transferId, "from_device", await waiting);
+      expect(finished.answer, ackText).toEqual({
+        kind: "refused",
+        code,
+        sentence: BOT_WORK_SESSION_SENTENCES[code],
+      });
+      const [row] = await ledgerOf(transferId);
+      expect(row, ackText).toMatchObject({ status: "failed", failure });
+    }
+  });
+
+  it("too_large names the limit that applied and the file's size (PD-11, E6)", async () => {
+    const ctx = await idleSession();
+    const { transferId } = await download(ctx);
+    const waiting = botFiles().waitForAck(transferId, 20_000);
+    await server.serveFileCommand(await fileCommand(transferId), { ackAs: "too_large: 41943040" });
+    const finished = await finishAs(transferId, "from_device", await waiting);
+    expect(finished.answer).toEqual({
+      kind: "refused",
+      code: "file_too_large",
+      sentence: "That file is 40 MB. This bot moves files up to 25 MB (the organization's limit).",
+      limit: { bytes: 26214400, source: "organization" },
+      sizeBytes: 41943040,
+    });
+    expect(finished.audit).toMatchObject({ bytes: 41943040, limitSource: "organization" });
+    expect((await ledgerOf(transferId))[0]).toMatchObject({ status: "failed", failure: "too_large" });
+  });
+
+  it("an upload's exists → file_exists and mismatch → transfer_failed (E4, E22)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    for (const [ackText, code, failure] of [
+      ["exists", "file_exists", "exists"],
+      ["mismatch: size", "transfer_failed", "mismatch"],
+    ] as const) {
+      const { transferId } = await upload(ctx, file);
+      const waiting = botFiles().waitForAck(transferId, 20_000);
+      await server.serveFileCommand(await fileCommand(transferId), { ackAs: ackText });
+      const finished = await finishAs(transferId, "to_device", await waiting);
+      expect(finished.answer).toEqual({ kind: "refused", code, sentence: BOT_WORK_SESSION_SENTENCES[code] });
+      expect((await ledgerOf(transferId))[0]).toMatchObject({ status: "failed", failure });
+    }
+  });
+
+  it("no ack before the deadline → transfer_timeout; the command and the row fail, and a late GET is 410 (PD-18, E17)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    const { transferId } = await upload(ctx, file);
+    await fileCommand(transferId); // delivered; the device never answers
+    const finished = await finishAs(transferId, "to_device", null);
+    expect(finished.answer).toEqual({
+      kind: "refused",
+      code: "transfer_timeout",
+      sentence: BOT_WORK_SESSION_SENTENCES.transfer_timeout,
+    });
+    const [command] = await rowsOf("select status, error from app.device_commands where id = $1", [
+      transferId,
+    ]);
+    expect(command).toEqual({ status: "failed", error: "timeout" });
+    expect((await ledgerOf(transferId))[0]).toMatchObject({ status: "failed", failure: "timeout" });
+    const late = await fetch(`${stack.baseUrl}${RUNTIME_FILE_ROUTE}/${transferId}`, {
+      headers: { authorization: `Bearer ${server.jwt}` },
+    });
+    expect(late.status).toBe(410);
+  });
+
+  it("an ack that already reached the database is used when the route heard nothing", async () => {
+    const ctx = await idleSession();
+    const { transferId } = await download(ctx);
+    await server.serveFileCommand(await fileCommand(transferId), { body: randomBytes(16) });
+    await eventually(async () => {
+      const [c] = await rowsOf("select status from app.device_commands where id = $1", [transferId]);
+      return c?.status === "acked";
+    });
+    const finished = await finishAs(transferId, "from_device", null);
+    expect(finished.answer).toMatchObject({ kind: "downloaded", sizeBytes: 16 });
+  });
+
+  it("a download stored by its PUT but acked with an error leaves no linkable file: the attachment is rejected", async () => {
+    const ctx = await idleSession();
+    const { transferId } = await download(ctx);
+    const waiting = botFiles().waitForAck(transferId, 20_000);
+    const cmd = await fileCommand(transferId);
+    const put = await fetch(`${stack.baseUrl}${RUNTIME_FILE_ROUTE}/${cmd.id}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${server.jwt}`, "content-type": "application/octet-stream" },
+      body: randomBytes(32),
+    });
+    expect(put.status).toBe(200);
+    server.ack(cmd.id, false, "transfer_failed");
+    const finished = await finishAs(transferId, "from_device", await waiting);
+    expect(finished.answer).toMatchObject({ kind: "refused", code: "transfer_failed" });
+    const [row] = await ledgerOf(transferId);
+    expect(row).toMatchObject({ status: "failed", failure: "transfer_failed" });
+    const [att] = await rowsOf("select status from app.attachments where id = $1", [row!.attachment_id]);
+    expect(att!.status).toBe("rejected");
+  });
+});
+
+describe("a server without object storage (PostgreSQL and Redis only)", () => {
+  let bare: TestStack;
+  let bareSu: pg.Client;
+
+  beforeAll(async () => {
+    bare = await startTestStack();
+    bareSu = new pg.Client({ connectionString: bare.db.superuserUrl });
+    await bareSu.connect();
+  }, 180_000);
+
+  afterAll(async () => {
+    await bareSu?.end();
+    await bare?.stop();
+  });
+
+  it("answers storage_unavailable to both moves with no ledger row and no command; its deadline is the contract's", async () => {
+    const organizationId = randomUUID();
+    const sessionId = randomUUID();
+    // Storage is decided before anything about the session, so placeholders stand in for the route's rows.
+    const base = {
+      turn: { agentId: randomUUID(), eventId: randomUUID(), conversationId: randomUUID(), tainted: false },
+      profile: { fileMaxBytes: null },
+      own: { session: { id: sessionId }, bot: { workSessionId: sessionId } },
+      path: "README.md",
+      limit: ORG_LIMIT,
+    } as unknown as Omit<Parameters<BotFiles["prepareDownload"]>[1], "transferId">;
+    const files = bare.built.workSession.botFiles;
+    const answers = await bare.built.core.db.withTenant({ organizationId, userId: null }, async (tx) => [
+      await files.prepareDownload(tx, { ...base, transferId: randomUUID() }),
+      await files.prepareUpload(tx, {
+        ...base,
+        attachment: { id: randomUUID(), sizeBytes: 10, sha256: null },
+        transferId: randomUUID(),
+      }),
+    ]);
+    for (const answer of answers) {
+      expect(answer).toEqual({
+        kind: "refused",
+        code: "storage_unavailable",
+        sentence: BOT_WORK_SESSION_SENTENCES.storage_unavailable,
+      });
+    }
+    expect((await bareSu.query("select count(*)::int as n from app.bot_work_session_files")).rows[0].n).toBe(
+      0,
+    );
+    expect((await bareSu.query("select count(*)::int as n from app.device_commands")).rows[0].n).toBe(0);
+    expect(files.deadlineFor(10)).toBe(transferDeadlineMs(10));
+    expect(files.deadlineFor(500 * MIB)).toBe(transferDeadlineMs(500 * MIB));
   });
 });
