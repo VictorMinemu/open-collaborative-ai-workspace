@@ -265,6 +265,47 @@ export function collectPythonLock(root, spec) {
   });
 }
 
+/**
+ * The manifests themselves (PD-15): each must be a JSON array of records with a name, a version and a license, have
+ * its lock beside it, and describe only pinned `name==version`s. A pin without a record is checkGraph's (Unknown).
+ */
+export function checkPythonManifests(root) {
+  const failures = [];
+  for (const spec of PYTHON_LOCKS) {
+    const manifestPath = join(root, ...spec.manifest.split("/"));
+    const lockPath = join(root, ...spec.lock.split("/"));
+    if (!existsSync(manifestPath)) continue;
+    if (!existsSync(lockPath)) {
+      failures.push(`${spec.manifest}: its lock ${spec.lock} is missing`);
+      continue;
+    }
+    const records = readPythonManifest(root, spec.manifest);
+    if (!records) {
+      failures.push(`${spec.manifest}: not a JSON array of { name, version, license, source, repo }`);
+      continue;
+    }
+    const pinned = new Set(
+      parsePythonPins(readFileSync(lockPath, "utf8")).map((p) => `${p.name}==${p.version}`),
+    );
+    const manifestName = spec.manifest.slice(spec.manifest.lastIndexOf("/") + 1);
+    const lockName = spec.lock.slice(spec.lock.lastIndexOf("/") + 1);
+    records.forEach((r, i) => {
+      if (!r || typeof r.name !== "string" || typeof r.version !== "string") {
+        failures.push(`${spec.manifest}: entry ${i} has no "name" or "version"`);
+        return;
+      }
+      const label = `${r.name}@${r.version}`;
+      if (typeof r.license !== "string" || r.license === "") {
+        failures.push(`${spec.manifest}: entry ${label} has no "license"`);
+      }
+      if (!pinned.has(`${normalizePythonName(r.name)}==${r.version}`)) {
+        failures.push(`${manifestName} entry ${label} has no pin in ${lockName} [${spec.manifest}]`);
+      }
+    });
+  }
+  return failures;
+}
+
 export function collectPackages(root) {
   const dirs = [""];
   for (const parent of ["apps", "packages", "infra"]) {
