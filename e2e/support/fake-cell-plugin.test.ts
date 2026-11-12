@@ -888,6 +888,55 @@ describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
       },
     ]);
   });
+
+  it("07.17.1.1-14: an upload answer reads `uploaded <path>`, a download `downloaded <name>`, a file_too_large refusal `refused (file_too_large)`", async () => {
+    const ATTACHMENT = "00000000-0000-4000-8000-0000000000b2";
+    const m = atlasTurn({
+      turn: { tools: [...WORK_SESSION_TOOLS, "ocw_work_session_upload", "ocw_work_session_download"] },
+    });
+    const upload = {
+      tool: "ocw_work_session_upload",
+      args: { workSessionId: WS, attachmentId: ATTACHMENT, path: "docs/notes.md" },
+    };
+    const download = { tool: "ocw_work_session_download", args: { workSessionId: WS, path: "README.md" } };
+    answers["/agent-channel/v1/work-sessions/upload"] = [
+      200,
+      { kind: "uploaded", workSessionId: WS, path: "docs/notes.md", sizeBytes: 42 },
+    ];
+    answers["/agent-channel/v1/work-sessions/download"] = [
+      200,
+      {
+        kind: "downloaded",
+        workSessionId: WS,
+        attachmentId: ATTACHMENT,
+        name: "README.md",
+        sizeBytes: 64,
+        contentType: "text/markdown",
+      },
+    ];
+    expect(await plugin.simulateToolCalls(m, [upload, download])).toEqual([
+      "Tool ocw_work_session_upload: uploaded docs/notes.md",
+      "Tool ocw_work_session_download: downloaded README.md",
+    ]);
+    answers["/agent-channel/v1/work-sessions/upload"] = [
+      200,
+      {
+        kind: "refused",
+        code: "file_too_large",
+        sentence: "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit).",
+        limit: { bytes: 1048576, source: "bot" },
+        sizeBytes: 2097152,
+      },
+    ];
+    expect(await plugin.simulateToolCalls(m, [upload])).toEqual([
+      "Tool ocw_work_session_upload: refused (file_too_large)",
+    ]);
+    const recorded = plugin.workSessionRequests.at(-1);
+    expect(recorded?.tool).toBe("ocw_work_session_upload");
+    expect(recorded?.body?.sentence).toBe(
+      "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit).",
+    );
+  });
 });
 
 // ---------------------------------------------------------------- 07.17-18: fan-out runs, item turns, card wakes (PD-22)

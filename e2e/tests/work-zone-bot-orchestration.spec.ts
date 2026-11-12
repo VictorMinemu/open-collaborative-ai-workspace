@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, request, test } from "@playwright/test";
@@ -19,7 +19,12 @@ import { cellToken } from "../support/cell-token";
 import { freshChannel, messageRow, postAs } from "../support/chat";
 import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
 import { captureReview, expectNoSidewaysScroll, expectTouchTargets } from "../support/layout";
-import { type FakeDeviceHandle, startFakeDevice, startIsolatedServer } from "../support/work-zone-device";
+import {
+  type FakeDeviceHandle,
+  scratchReadme,
+  startFakeDevice,
+  startIsolatedServer,
+} from "../support/work-zone-device";
 import {
   createTeamProject,
   linkRepo,
@@ -52,9 +57,14 @@ import { ADMIN, API_URL } from "./env";
  *      Ana presses Start; the session's first prompt carries "After outside content".
  *   5. Sam's personal bot, which has no profile, still proposes with `ocw_start_work_zone` exactly as
  *      work-zone-proposals.spec.ts expects.
- * Every screen passes axe and never scrolls sideways (44 px targets on phones); review screenshots `0716-*` in light and
- * dark when OCW_E2E_SCREENSHOT_DIR is set. The spec restores the organization's Work Zone policy and removes its bots,
- * devices and team project.
+ * 07.17.1.1-14 (BWF-01 … BWF-04; D-01 … D-04, PD-24): files between the chat and the bot's session.
+ *   6. Ana attaches `notes.md` in her thread and asks Atlas to put it in its idle session: `ocw_work_session_upload`
+ *      lands it in the session's tree through the real daemon, and the session's changes list it untracked. She asks
+ *      for the README: `ocw_work_session_download` brings it back as the reply's attachment, and her download is the
+ *      scratch repository's README byte for byte.
+ * Every screen passes axe and never scrolls sideways (44 px targets on phones); review screenshots `0716-*` and
+ * `071711-*` in light and dark when OCW_E2E_SCREENSHOT_DIR is set. The spec restores the organization's Work Zone policy
+ * and removes its bots, devices and team project.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -70,6 +80,10 @@ const TAINTED_PROMPT = "Ship the invoice fix the notes ask for";
 const START = "ocw_work_session_start";
 const TAINTED_NOTICE = "Proposed after reading outside content. Read the prompt before you start it.";
 const THREAD = '[data-testid="thread-panel"]';
+const UPLOAD = "ocw_work_session_upload";
+const DOWNLOAD = "ocw_work_session_download";
+/** Where Ana's file goes in the session's tree (repo-relative, a folder the scratch repository does not have). */
+const NOTES_PATH = "docs/notes.md";
 
 let w = "1440";
 let mobile = false;
@@ -89,6 +103,8 @@ let deviceName = "";
 let atlas: { id: string; name: string; username: string };
 let eng: { id: string; name: string };
 const createdBots: string[] = [];
+/** Atlas's idle session from "Ana asks @Atlas …" (07.17.1.1-14 moves files in and out of it). */
+let atlasSession: { sessionId: string; rootId: string; cardId: string } | null = null;
 
 /** `[[call <tool> <json>]]`: what the fake cell runs for the bot (the same grammar as infra/fake-model). */
 const call = (tool: string, args: Record<string, unknown>) => `[[call ${tool} ${JSON.stringify(args)}]]`;
@@ -239,6 +255,67 @@ async function checkScreen(page: Page, name: string, selector: string, touch: Ar
   }
   await page.emulateMedia({ colorScheme: "light" });
   for (const root of touch) await expectTouchTargets(page, root);
+}
+
+/** The next call of `tool` (a session file tool) the fake cell made after `from`: what it sent and the route's answer. */
+async function nextFileCall(from: number, tool: typeof UPLOAD | typeof DOWNLOAD) {
+  await cell.waitUntil(() => cell.workSessionRequests.slice(from).some((r) => r.tool === tool), 60_000);
+  const req = cell.workSessionRequests.slice(from).find((r) => r.tool === tool);
+  if (!req) throw new Error(`no ${tool}`);
+  return req;
+}
+
+/** The session's status as its sponsor reads it (`GET /api/v1/work-sessions/:id`). */
+async function sessionStatus(id: string): Promise<string | undefined> {
+  const r = await admin.get(`/api/v1/work-sessions/${id}`);
+  return r.ok() ? ((await r.json()) as { session: { status: string } }).session.status : undefined;
+}
+
+/**
+ * Atlas's idle session in Ana's thread: the one "Ana asks @Atlas …" started, or (when a file test runs alone) one started
+ * the same way, with the profile seeded through the API and the hold file present so its turn finishes at once.
+ */
+async function idleAtlasSession(): Promise<{ sessionId: string; rootId: string; cardId: string }> {
+  if (!atlasSession) {
+    if (!(await botProfile(admin, atlas.id)).status.active) {
+      await saveBotProfile(admin, atlas.id, profileInput());
+      await allowBot(admin, device?.deviceId as string, atlas.id, { allowFullAccess: true });
+      await expectProfileActive(admin, atlas.id);
+    }
+    writeFileSync(holdFile, "release");
+    const from = cell.workSessionRequests.length;
+    await postAs(
+      anaApi,
+      eng.id,
+      `@${atlas.username} please fix the invoice test ${call(START, { projectId: billingId, prompt: PROMPT, permissionMode: "fullAccess" })}`,
+    );
+    const { body, rootId } = await nextStart(from);
+    expect(body, JSON.stringify(body)).toMatchObject({ kind: "started" });
+    atlasSession = { sessionId: String(body.workSessionId), rootId, cardId: String(body.cardMessageId) };
+  }
+  const id = atlasSession.sessionId;
+  await expect
+    .poll(() => sessionStatus(id), {
+      timeout: 60_000,
+      message: "Atlas's session is idle (D-13: uploads wait)",
+    })
+    .toBe("idle");
+  return atlasSession;
+}
+
+/** The session view's Changes (the side panel at 1440, the sheet on phones) and the row of `path` in it. */
+async function openChanges(page: Page, path: string): Promise<Locator> {
+  if (mobile) {
+    const open = page.getByTestId("open-changes");
+    await expectFingerSized(open);
+    await open.click();
+  } else {
+    const tab = page.getByTestId("tab-changes");
+    if ((await tab.getAttribute("aria-pressed")) !== "true") await tab.click();
+  }
+  const panel = page.getByTestId("changes-panel").first();
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  return panel.getByTestId("changed-file").filter({ hasText: path }).first();
 }
 
 // biome-ignore lint/correctness/noEmptyPattern: Playwright requires a destructured fixtures argument before testInfo
@@ -461,6 +538,7 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     });
     const sessionId = String(body.workSessionId);
     const cardId = String(body.cardMessageId);
+    atlasSession = { sessionId, rootId, cardId };
 
     // ---- the live card in her thread, nobody pressed Start; the daemon holds the turn on "Working"
     const panel = await openThread(page, rootId);
@@ -530,6 +608,117 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     const mentionRow = inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" }).first();
     await expect(mentionRow).toBeVisible({ timeout: 15_000 });
     await expect(mentionRow).toContainText("mentioned you");
+  } finally {
+    await ana.context.close();
+  }
+});
+
+// ---------------------------------------------------------------- files in and out of the session (07.17.1.1 D-01 … D-04)
+
+test("Ana's file goes into Atlas's session and shows in its changes; the README comes back to her thread and she downloads it", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  const { sessionId, rootId, cardId } = await idleAtlasSession();
+  const notes = Buffer.from(
+    ["# Notes for Atlas", "", "- Keep invoice totals in cents.", "- Round only when printing.", ""].join(
+      "\n",
+    ),
+  );
+  const readme = Buffer.from(scratchReadme(`billing-${w}`));
+  const ana = await openAs(browser, ANA, mobile ? "mobile" : "desktop");
+  const { page } = ana;
+  try {
+    // ---- Ana attaches notes.md in her thread and asks Atlas to put it in the session
+    let panel = await openThread(page, rootId);
+    await panel.getByTestId("attach-file").setInputFiles({
+      name: "notes.md",
+      mimeType: "text/markdown",
+      buffer: notes,
+    });
+    await expect(panel.locator('[data-testid="attachment-item"][data-status="ready"]')).toHaveCount(1, {
+      timeout: 15_000,
+    });
+    await expectFingerSized(panel.getByTestId("attach-button").first());
+    await expectFingerSized(panel.getByTestId("thread-composer-send"));
+    let from = cell.workSessionRequests.length;
+    await panel
+      .getByTestId("thread-composer")
+      .fill(
+        `@${atlas.username} put this in the session ${call(UPLOAD, { workSessionId: sessionId, attachmentId: "{{attachment:0}}", path: NOTES_PATH })}`,
+      );
+    await panel.getByTestId("thread-composer-send").click();
+    await expect(panel.getByTestId("attachment-tray")).toBeHidden();
+
+    // The plugin sends the turn's ids and the tool's own three keys, nothing else (D-01, D-08).
+    const up = await nextFileCall(from, UPLOAD);
+    expect(Object.keys(up.sent).sort()).toEqual([
+      "agentId",
+      "attachmentId",
+      "eventId",
+      "path",
+      "workSessionId",
+    ]);
+    expect(up.sent).toMatchObject({ agentId: atlas.id, workSessionId: sessionId, path: NOTES_PATH });
+    expect(up.status, JSON.stringify(up.body)).toBe(200);
+    expect(up.body, JSON.stringify(up.body)).toMatchObject({
+      kind: "uploaded",
+      workSessionId: sessionId,
+      path: NOTES_PATH,
+      sizeBytes: notes.length,
+    });
+    await expect(botReply(panel, `Tool ${UPLOAD}: uploaded ${NOTES_PATH}`)).toBeVisible({ timeout: 30_000 });
+
+    // ---- the card's Open session: the session's changes list the file, untracked (D-02, D-04)
+    const card = messageRow(panel, cardId).getByTestId("agent-card");
+    await card.getByTestId("agent-card-open").click();
+    await expect(page).toHaveURL(new RegExp(`/work-zone/${sessionId}$`), { timeout: 15_000 });
+    await expect(page.getByTestId("session-view")).toBeVisible({ timeout: 15_000 });
+    const row = await openChanges(page, NOTES_PATH);
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await expect(row.locator("span").first()).toHaveText("U");
+    await checkScreen(page, "071711-exchange-session", '[data-testid="session-header"]');
+    await captureReview(page, `071711-exchange-session-${w}`);
+
+    // ---- back in the thread (directly: on phones the thread covers the nav), Ana asks for the README
+    panel = await openThread(page, rootId);
+    from = cell.workSessionRequests.length;
+    await panel
+      .getByTestId("thread-composer")
+      .fill(
+        `@${atlas.username} send me the README ${call(DOWNLOAD, { workSessionId: sessionId, path: "README.md" })}`,
+      );
+    await panel.getByTestId("thread-composer-send").click();
+    const down = await nextFileCall(from, DOWNLOAD);
+    expect(down.sent).toEqual({
+      eventId: down.eventId,
+      agentId: atlas.id,
+      workSessionId: sessionId,
+      path: "README.md",
+    });
+    expect(down.status, JSON.stringify(down.body)).toBe(200);
+    expect(down.body, JSON.stringify(down.body)).toMatchObject({
+      kind: "downloaded",
+      workSessionId: sessionId,
+      name: "README.md",
+      sizeBytes: readme.length,
+    });
+
+    // ---- the reply carries README.md; Ana downloads it and gets the scratch repository's bytes (D-03)
+    const reply = botReply(panel, `Tool ${DOWNLOAD}: downloaded README.md`);
+    await expect(reply).toBeVisible({ timeout: 30_000 });
+    const file = reply.getByTestId("file-card").filter({ hasText: "README.md" }).first();
+    await expect(file).toBeVisible({ timeout: 15_000 });
+    await expect(file).toHaveAttribute("data-attachment-id", String(down.body?.attachmentId));
+    await reply.scrollIntoViewIfNeeded();
+    await checkScreen(page, "071711-exchange", THREAD, [card]);
+    await captureReview(page, `071711-exchange-${w}`);
+    const downloading = page.waitForEvent("download");
+    await file.getByTestId("file-download").click();
+    const download = await downloading;
+    expect(download.suggestedFilename()).toBe("README.md");
+    expect(readFileSync(await download.path()).equals(readme), "the README's bytes").toBe(true);
+    expect(page.url().startsWith(BASE_URL)).toBe(true);
   } finally {
     await ana.context.close();
   }
