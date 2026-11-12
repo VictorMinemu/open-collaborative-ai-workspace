@@ -80,6 +80,10 @@ assert BATCH_MAX_BUDGET_S + STEP_TIMEOUT_MAX_S <= EXEC_TIMEOUT_MAX_S, "batch bud
 # step plus 10 s between the end of its budget and that deadline, and refuses to start when what is left is shorter
 # than one longest step plus 10 s (the API's default 120 s is: the bot is told to pass timeoutSeconds 600).
 EXEC_DEADLINE_ENV = "OCW_EXEC_DEADLINE_S"
+# A single-file run ends this long before that deadline with what it read (07.17.1.1.1 review WR-05); a step is
+# cut to the time left, and none starts with less than SINGLE_MIN_STEP_S left.
+SINGLE_END_MARGIN_S = 10
+SINGLE_MIN_STEP_S = 2
 BATCH_END_MARGIN_S = STEP_TIMEOUT_MAX_S + 10
 BATCH_MIN_BUDGET_S = STEP_TIMEOUT_MAX_S + 10
 assert BATCH_MAX_BUDGET_S + BATCH_END_MARGIN_S <= EXEC_TIMEOUT_MAX_S, "the batch margin does not fit 600 s"
@@ -298,6 +302,20 @@ class Doc:
             parts.append(body)
         parts.extend(n for n in self.notes if n)
         return "\n".join(parts) + "\n"
+
+
+def stopped_note(n, last, deadline, unit="page"):
+    """The note of a single-file run that ran out of time before `unit` n (07.17.1.1.1 review WR-05)."""
+    where = f"at {unit} {n - 1} of {last}" if n > 1 else f"before {unit} {n} of {last}"
+    return (
+        f"[stopped {where}: this command's {deadline} s ran out; use --pages {n}-{last}, a longer timeoutSeconds with "
+        "-o FILE, or --batch]"
+    )
+
+
+def capped_note(n, last, unit="page"):
+    """The note of a stdout run that stopped reading once its capped output was full (07.17.1.1.1 review WR-05)."""
+    return f"[stopped after {unit} {n} of {last}: the output is capped; use --pages {n + 1}-{last} or -o FILE]"
 
 
 def footer(more):

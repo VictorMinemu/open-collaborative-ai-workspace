@@ -370,14 +370,16 @@ class Pdf(Base):
         self.assertEqual(rc, 0, err)
         self.assertBounded(out)
         lines = text(out).rstrip("\n").splitlines()
-        self.assertRegex(lines[-1], r"^\[truncated: \d+ more characters")
-        body = "\n".join(lines[1:-1])
+        # 07.17.1.1.1 review WR-05: once the capped output is full the run stops reading pages and says where to go on.
+        self.assertRegex(lines[-2], r"^\[truncated: \d+ more characters")
+        self.assertRegex(lines[-1], r"^\[stopped after page \d+ of 30: the output is capped; use --pages \d+-30 or -o FILE\]$")
+        body = "\n".join(lines[1:-2])
         self.assertLessEqual(len(body), 15_000)
         self.assertGreater(len(body), 10_000)
         rc, out, _err = cli("fx/long.pdf")
         self.assertEqual(rc, 0)
         self.assertBounded(out)
-        self.assertLessEqual(len("\n".join(text(out).splitlines()[1:-1])), 12_000)
+        self.assertLessEqual(len("\n".join(text(out).splitlines()[1:-2])), 12_000)
 
     def test_dash_o_writes_the_whole_text_and_prints_one_line(self):
         os.makedirs(f"{WS}/out", exist_ok=True)
@@ -429,6 +431,125 @@ def lol_run(value):
 
 def body_of(out):
     return "\n".join(text(out).splitlines()[1:])
+
+
+class Deadline(Base):
+    """07.17.1.1.1 review WR-05: a single-file run stops before the exec timeout `ocw-run` exported and prints what it
+    read, and in stdout mode it stops once the capped output is full; nothing runs on to be killed with no output."""
+
+    def fake(self, pages, layer="", tesseract_s=30.0, text_child_s=1.0):
+        from ocw_extract import runner
+
+        state = {"now": 0.0, "calls": []}
+
+        def run(argv, timeout, **_kw):
+            argv = [str(a) for a in argv]
+            tool = os.path.basename(argv[0])
+            if tool.startswith("python"):
+                tool = argv[6]
+            state["calls"].append(tool)
+            took = {"tesseract": tesseract_s, "text_child": text_child_s}.get(tool, 1.0)
+            if took > timeout:
+                state["now"] += timeout
+                raise __import__("ocw_extract.bounds", fromlist=["x"]).StepTimeout(f"{tool} timed out")
+            state["now"] += took
+            out = b""
+            if tool == "file":
+                out = b"application/pdf\n" if argv[-1].endswith(".pdf") else b"text/plain\n"
+            elif tool == "pdfinfo":
+                out = f"Pages:          {pages}\n".encode()
+            elif tool == "pdftotext":
+                n = argv[argv.index("-f") + 1]
+                out = layer.format(n=n).encode()
+            elif tool == "pdftoppm":
+                with open(argv[-1] + ".png", "wb") as f:
+                    f.write(b"png")
+            elif tool == "tesseract":
+                out = b"Texto reconocido de una pagina escaneada."
+            elif tool == "text_child":
+                out = b"texto"
+            return runner.Result(0, out, b"")
+
+        saved = (runner.run, runner.now)
+        runner.run, runner.now = run, lambda: state["now"]
+        self.addCleanup(lambda: setattr(runner, "run", saved[0]) or setattr(runner, "now", saved[1]))
+        return state
+
+    def main(self, *argv, deadline=None):
+        from ocw_extract import cli as cli_module
+
+        out, err = io.BytesIO(), io.StringIO()
+        saved = os.environ.get("OCW_EXEC_DEADLINE_S")
+        if deadline is not None:
+            os.environ["OCW_EXEC_DEADLINE_S"] = str(deadline)
+        try:
+            with contextlib.redirect_stdout(io.TextIOWrapper(out, encoding="utf-8")) as wrapper, \
+                    contextlib.redirect_stderr(err):
+                rc = cli_module.main(list(argv))
+                wrapper.flush()
+        finally:
+            if saved is None:
+                os.environ.pop("OCW_EXEC_DEADLINE_S", None)
+            else:
+                os.environ["OCW_EXEC_DEADLINE_S"] = saved
+        return rc, out.getvalue().decode("utf-8"), err.getvalue()
+
+    def dummy(self, name):
+        path = f"{WS}/{name}"
+        with open(path, "wb") as f:
+            f.write(b"x")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_a_long_scan_stops_before_the_deadline_with_the_pages_it_read(self):
+        path = self.dummy("deadline-scan.pdf")
+        self.fake(pages=5)
+        rc, out, err = self.main(path, deadline=120)
+        self.assertEqual(rc, 0, err)
+        lines = out.rstrip("\n").splitlines()
+        self.assertEqual(lines[0], "=== deadline-scan.pdf · pdf · pages 1-3 of 5 · text 0 · ocr 3 ===")
+        self.assertIn("--- page 3 (ocr) ---", out)
+        self.assertNotIn("--- page 4", out)
+        self.assertEqual(
+            lines[-1],
+            "[stopped at page 3 of 5: this command's 120 s ran out; use --pages 4-5, a longer timeoutSeconds with "
+            "-o FILE, or --batch]",
+        )
+
+    def test_dash_o_gets_the_same_bound_and_says_where_it_stopped(self):
+        path = self.dummy("deadline-o.pdf")
+        self.fake(pages=5)
+        rc, out, err = self.main(path, "-o", f"{WS}/deadline-o.txt", deadline=120)
+        self.addCleanup(os.unlink, f"{WS}/deadline-o.txt")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("pages 1-3 of 5", out)
+        with open(f"{WS}/deadline-o.txt", encoding="utf-8") as f:
+            self.assertIn("[stopped at page 3 of 5: this command's 120 s ran out", f.read())
+
+    def test_without_a_deadline_every_page_is_read(self):
+        path = self.dummy("deadline-none.pdf")
+        self.fake(pages=5)
+        os.environ.pop("OCW_EXEC_DEADLINE_S", None)
+        rc, out, err = self.main(path)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("pages 1-5 of 5", out)
+
+    def test_stdout_mode_stops_once_the_capped_output_is_full(self):
+        path = self.dummy("deadline-long.pdf")
+        state = self.fake(pages=100, layer="Pagina {n}: " + "texto " * 160)
+        rc, out, err = self.main(path, "--max-chars", "3000")
+        self.assertEqual(rc, 0, err)
+        self.assertLessEqual(state["calls"].count("pdftotext"), 5)
+        lines = out.rstrip("\n").splitlines()
+        self.assertRegex(lines[-2], r"^\[truncated: \d+ more characters; use -o FILE or --pages\]$")
+        self.assertRegex(lines[-1], r"^\[stopped after page [345] of 100: the output is capped; use --pages [456]-100 or -o FILE\]$")
+
+    def test_a_single_step_past_the_deadline_is_exit_7_naming_the_way_out(self):
+        path = self.dummy("deadline.txt")
+        self.fake(pages=1, text_child_s=500)
+        rc, _out, err = self.main(path, deadline=60)
+        self.assertEqual(rc, 7, err)
+        assert_reason(self, err, "did not finish within this command's 60 s", "timeoutSeconds")
 
 
 class Ocr(Base):

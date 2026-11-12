@@ -30,12 +30,17 @@ exit codes: 0 ok, 2 usage, 3 unsupported type, 4 not found or outside /workspace
 class Options:
     """What every extractor reads: the OCR mode and language, the page range and the step runner."""
 
-    def __init__(self, steps, ocr="auto", lang=bounds.DEFAULT_LANG, pages=None, batch=False):
+    def __init__(self, steps, ocr="auto", lang=bounds.DEFAULT_LANG, pages=None, batch=False, stop_chars=None,
+                 deadline=None):
         self.steps = steps
         self.ocr = ocr
         self.lang = lang
         self.pages = pages
         self.batch = batch
+        # A stdout run stops reading pages once its capped output is full; `deadline` is the exec timeout the time
+        # bound comes from (07.17.1.1.1 review WR-05).
+        self.stop_chars = stop_chars
+        self.deadline = deadline
 
 
 # Families whose output is page- or slide-numbered, so --pages applies.
@@ -158,10 +163,23 @@ def single(args):
     out = runner.confine(args.output, for_output=True) if args.output else None
     if out and out == src:
         raise bounds.UsageError("-o must not be the input file")
-    opts = Options(runner.Steps(), ocr=args.ocr, lang=args.lang, pages=args.pages)
-    with runner.scratch():
-        doc = extract_file(src, opts)
+    # Under ocw-run the run ends SINGLE_END_MARGIN_S before its exec timeout with what it read (07.17.1.1.1 review
+    # WR-05): a paged document stops at a page and says so, anything else is exit 7 naming the way out.
+    deadline = bounds.exec_deadline(os.environ)
+    budget = None if deadline is None else deadline - bounds.SINGLE_END_MARGIN_S
+    steps = runner.Steps(budget=budget, clamp=True)
+    opts = Options(
+        steps, ocr=args.ocr, lang=args.lang, pages=args.pages, stop_chars=None if out else max_chars, deadline=deadline
+    )
     name = os.path.basename(src)
+    with runner.scratch():
+        try:
+            doc = extract_file(src, opts)
+        except bounds.BudgetReached:
+            raise bounds.ConversionError(
+                f"{name} did not finish within this command's {deadline} s: run it again with background true and a "
+                "longer timeoutSeconds (at most 600), or read a part with --pages"
+            ) from None
     if out:
         data = doc.full_text(name).encode("utf-8")
         if len(data) > bounds.OUTPUT_FILE_MAX_BYTES:

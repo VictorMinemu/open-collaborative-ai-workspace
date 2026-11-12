@@ -83,19 +83,35 @@ def via_pdf(path, type_name, opts, unit):
     doc.unit = unit
     doc.total = total
     first, last = bounds.parse_pages(opts.pages, total) if opts.pages else (1, total)
-    doc.first, doc.last = first, last
+    doc.first, doc.last = first, first - 1
     mode = "always" if opts.ocr == "always" else "never"
     page_opts = Options(opts.steps, mode, opts.lang)
+    word = "slide" if unit == "slides" else "page"
+    chars = 0
+    stop_chars = getattr(opts, "stop_chars", None)
     for n in range(first, last + 1):
-        text, used_ocr = pdf.page(converted, n, page_opts)
+        try:
+            text, used_ocr = pdf.page(converted, n, page_opts)
+        except bounds.BudgetReached:
+            if getattr(opts, "batch", False):
+                raise
+            # The exec deadline is near (07.17.1.1.1 review WR-05): keep what was read and say where to go on.
+            doc.notes.append(bounds.stopped_note(n, last, getattr(opts, "deadline", None), word))
+            break
         if unit == "slides":
-            doc.add(f"### slide {n}" + (" (ocr)" if used_ocr else "") + (f"\n{text}" if text.strip() else ""))
+            added = f"### slide {n}" + (" (ocr)" if used_ocr else "") + (f"\n{text}" if text.strip() else "")
         else:
-            doc.add(pdf.block(n, text, used_ocr))
+            added = pdf.block(n, text, used_ocr)
+        doc.add(added)
         if used_ocr:
             doc.ocr_pages += 1
         else:
             doc.text_pages += 1
+        doc.last = n
+        chars += len(added) + 1
+        if stop_chars and chars > stop_chars and n < last:
+            doc.notes.append(bounds.capped_note(n, last, word))
+            break
     if doc.ocr_pages:
         doc.method = "soffice+ocr"
     return doc

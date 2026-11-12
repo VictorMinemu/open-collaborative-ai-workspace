@@ -85,23 +85,37 @@ def extract(path, type_name, opts):
     doc.first = first
     doc.last = first - 1
     no_layer = []
+    chars = 0
+    stop_chars = getattr(opts, "stop_chars", None)
     for n in range(first, last + 1):
-        text = None if opts.ocr == "always" else page_text(path, n, steps)
-        if needs_ocr(text or "", opts.ocr) and doc.ocr_pages >= bounds.OCR_PAGES_PER_CALL:
-            doc.notes.append(
-                f"[ocr stopped at page {n - 1} ({bounds.OCR_PAGES_PER_CALL} pages per call): "
-                f"use --pages {n}-{last} or --batch]"
-            )
+        try:
+            text = None if opts.ocr == "always" else page_text(path, n, steps)
+            if needs_ocr(text or "", opts.ocr) and doc.ocr_pages >= bounds.OCR_PAGES_PER_CALL:
+                doc.notes.append(
+                    f"[ocr stopped at page {n - 1} ({bounds.OCR_PAGES_PER_CALL} pages per call): "
+                    f"use --pages {n}-{last} or --batch]"
+                )
+                break
+            result, used_ocr = page(path, n, opts, text)
+        except bounds.BudgetReached:
+            if getattr(opts, "batch", False):
+                raise
+            # The exec deadline is near (07.17.1.1.1 review WR-05): print what was read and where to go on.
+            doc.notes.append(bounds.stopped_note(n, last, getattr(opts, "deadline", None)))
             break
-        result, used_ocr = page(path, n, opts, text)
         if opts.ocr == "never" and needs_ocr(result, "auto"):
             no_layer.append(n)
-        doc.add(block(n, result, used_ocr))
+        added = block(n, result, used_ocr)
+        doc.add(added)
         if used_ocr:
             doc.ocr_pages += 1
         else:
             doc.text_pages += 1
         doc.last = n
+        chars += len(added) + 1
+        if stop_chars and chars > stop_chars and n < last:
+            doc.notes.append(bounds.capped_note(n, last))
+            break
     if doc.ocr_pages:
         doc.method = "pdftotext+ocr" if doc.text_pages else "ocr"
     if no_layer:

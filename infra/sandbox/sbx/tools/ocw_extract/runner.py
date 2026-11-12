@@ -63,6 +63,11 @@ class Result:
         return lines[-1] if lines else ""
 
 
+def now():
+    """The clock of every Steps without its own (the image tests replace it with a virtual one)."""
+    return time.monotonic()
+
+
 def current_scratch():
     return _scratch
 
@@ -395,14 +400,19 @@ class Steps:
 
     With a budget, before every step the remaining time R is computed; R < T raises BudgetReached without starting
     the step, otherwise the step runs with its nominal timeout T (it always ends within the budget). `count` is the
-    number of steps started, so a batch can tell whether an entry ran anything (07.17.1.1.1 review CR-02)."""
+    number of steps started, so a batch can tell whether an entry ran anything (07.17.1.1.1 review CR-02).
 
-    def __init__(self, runner=None, timeouts=None, budget=None, clock=time.monotonic):
-        self._runner = runner or run
+    With `clamp` (a single-file run under an exec deadline, review WR-05) a step runs with min(T, R) instead, none
+    starts with less than SINGLE_MIN_STEP_S left, and a step cut short that times out raises BudgetReached: the
+    time ran out, the step did not fail."""
+
+    def __init__(self, runner=None, timeouts=None, budget=None, clock=None, clamp=False):
+        self._runner = runner or (lambda *a, **k: run(*a, **k))
         self.timeouts = timeouts or bounds.STEP_TIMEOUTS
         self.budget = budget
-        self.clock = clock
-        self.start = clock()
+        self.clock = clock or (lambda: now())
+        self.clamp = clamp
+        self.start = self.clock()
         self.count = 0
 
     def remaining(self):
@@ -415,6 +425,10 @@ class Steps:
         left = self.remaining()
         if left is None:
             return nominal
+        if self.clamp:
+            if left < bounds.SINGLE_MIN_STEP_S:
+                raise bounds.BudgetReached(kind)
+            return min(nominal, left)
         if left < nominal:
             raise bounds.BudgetReached(kind)
         return nominal
@@ -422,7 +436,12 @@ class Steps:
     def __call__(self, kind, argv, **kwargs):
         timeout = self.timeout_for(kind)
         self.count += 1
-        return self._runner(argv, timeout, **kwargs)
+        try:
+            return self._runner(argv, timeout, **kwargs)
+        except bounds.StepTimeout:
+            if timeout < self.timeouts[kind]:
+                raise bounds.BudgetReached(kind) from None
+            raise
 
     def python(self, module, function, *args, **kwargs):
         """One parser run in a child interpreter (kind `python`)."""
