@@ -461,7 +461,10 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
       const notes = [];
       assert.deepEqual(checkGraph([pinned], policy, notes), []);
       assert.equal(notes.length, 1);
-      assert.match(notes[0], new RegExp(`^exception: ${name} \\(pending approval before merge`));
+      // The exception's status is its audit trail: the recorded approval, never the pre-merge "pending" text.
+      assert.match(notes[0], new RegExp(`^exception: ${name} \\(approved 2026-11-12 `));
+      assert.match(notes[0], /lock sha256 857f81fd78a1b06d1167999282ee4ed3ad78b486ecb914448b09ea9a78939cdb/);
+      assert.doesNotMatch(notes[0], /pending/);
       const [major, minor, patch] = pinned.version.split(".").map(Number);
       const next = { ...pinned, version: `${major}.${minor}.${patch + 1}` };
       assert.equal(checkGraph([next], policy).length, 1, `${name}@${next.version} is not covered`);
@@ -473,7 +476,8 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
     assert.equal(res.status, 0, res.out);
     const count = Number(/licenses: (\d+) package versions checked/.exec(res.out)?.[1]);
     assert.ok(count > collectPythonLock(REPO_ROOT, PYTHON_LOCKS[0]).length, res.out);
-    assert.match(res.out, /exception: pypdfium2 \(pending approval before merge/);
+    assert.match(res.out, /exception: pypdfium2 \(approved 2026-11-12 /);
+    assert.doesNotMatch(res.out, /exception: pypdfium2 \(pending/);
     assert.doesNotMatch(res.out, /has no pin/);
   });
 });

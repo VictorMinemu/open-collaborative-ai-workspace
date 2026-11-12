@@ -52,7 +52,7 @@
       "source": "https://github.com/pypdfium2-team/pypdfium2/blob/main/README.md#licensing",
       "reason": "sbx document toolkit (07.17.1.1.1 D-03), a pdfplumber dependency in infra/sandbox/sbx/tools/requirements.lock; pypdfium2 itself is Apache-2.0 / BSD-3-Clause (docs CC-BY-4.0) and its wheel bundles PDFium (BSD-3-Clause) with the dependency texts it ships in dist-info/licenses/data/linux_<arch>/BUILD_LICENSES/ (read by tools/lock.sh; the same 15 files for linux_x64 and linux_arm64): abseil (Apache-2.0), AGG 2.3, fast_float, lcms, simdutf and pdfium-binaries (MIT), FreeType (FTL), ICU (Unicode-3.0; its GPL sections cover only ICU's autoconf build macros, with the autoconf exception, not the binary), libjpeg-turbo (IJG AND BSD-3-Clause AND Zlib), OpenJPEG (BSD-2-Clause), libpng (libpng-2.0), LLVM libc (Apache-2.0 WITH LLVM-exception) and zlib. Every one is permissive and none is copyleft, but FTL, Unicode-3.0, IJG, libpng-2.0 and the AGG 2.3 notice are outside the allow list",
       "adr": "docs/adr/0043-sandbox-document-toolkit.md",
-      "status": "pending approval before merge (07.17.1.1.1-07 T3)"
+      "status": "approved 2026-11-12 by the orchestrator under the owner's autonomy grant on the (a)-(f) merge evidence, lock sha256 857f81fd78a1b06d1167999282ee4ed3ad78b486ecb914448b09ea9a78939cdb (07.17.1.1.1-07)"
     }
   ]
 }
