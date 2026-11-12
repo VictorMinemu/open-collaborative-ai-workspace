@@ -60,17 +60,37 @@ function hasUnsafePathChar(p: string): boolean {
   return false;
 }
 
+/**
+ * The form two file names are compared in (review CR-01): NFKC, then a full case fold. Case-insensitive APFS and NTFS
+ * open a name under more spellings than `toLowerCase` folds: U+017F (long s) opens `s`, U+212A (Kelvin sign) opens `k`,
+ * NTFS's upcase table maps U+0131 (dotless i) to `I`, and NFKC maps compatibility forms (ligatures, fullwidth letters,
+ * superscript digits) to their plain letters. Upper-casing before lower-casing applies the folds `toLowerCase` alone
+ * misses (U+017F, U+0131, U+1E9E); the second NFKC re-composes what case mapping decomposed. Folding more than a volume
+ * does only ever refuses more, never less. The API and the device both compare in this form (`@ocw/contracts`).
+ */
+export function canonicalFileName(name: string): string {
+  return name.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFKC");
+}
+
 function isSafeSegment(seg: string): boolean {
   if (seg === "" || seg === "." || seg === "..") return false;
   if (seg.length > BOT_FILE_LIMITS.segmentMaxChars) return false;
   return !seg.endsWith(" ") && !seg.endsWith(".");
 }
 
+/** Safe as written AND in its folded form: a compatibility character never folds into `/`, `\`, `:` or `..`. */
+function isSafeSegmentBothForms(seg: string): boolean {
+  if (!isSafeSegment(seg)) return false;
+  const folded = canonicalFileName(seg);
+  return isSafeSegment(folded) && !/[/\\:]/.test(folded);
+}
+
 /**
  * A file inside a session's working tree, named relative to it: 1 … 1 024 characters, `/`-separated; never absolute
  * (`/`), a home shortcut (`~`), a drive (`C:`), a backslash, a control or bidi character; every segment non-empty, not
- * `.` or `..`, at most 255 characters and not ending in a space or a dot (Windows would silently drop them). The device
- * re-checks it against the real tree (realpath containment, no symlink escape).
+ * `.` or `..`, at most 255 characters and not ending in a space or a dot (Windows would silently drop them), in both its
+ * written and its folded form (`canonicalFileName`). The device re-checks it against the real tree (realpath
+ * containment, no symlink escape).
  */
 export const WorkSessionFilePath = z
   .string()
@@ -83,7 +103,7 @@ export const WorkSessionFilePath = z
       !/^[A-Za-z]:/.test(p) &&
       !p.includes("\\") &&
       !hasUnsafePathChar(p) &&
-      p.split("/").every(isSafeSegment),
+      p.split("/").every(isSafeSegmentBothForms),
     { message: "must be a file path inside the session's working tree" },
   );
 export type WorkSessionFilePath = z.infer<typeof WorkSessionFilePath>;
@@ -93,7 +113,7 @@ export type WorkSessionFilePath = z.infer<typeof WorkSessionFilePath>;
 /**
  * Copied verbatim from the Claude adapter's `ENV_TEMPLATE_ALLOW` / `SECRET_BASENAME`
  * (`apps/local-runtime/src/claude/tool-policy.ts`); since 07.17.1.1 the daemon imports this copy, so the two never
- * drift. Case-insensitive.
+ * drift. Matched against the folded name (`canonicalFileName`), so case-insensitively and compatibility-folded.
  */
 const ENV_TEMPLATE_ALLOW = /^\.env\.(example|sample|template|dist)$/i;
 const SECRET_BASENAME = [
@@ -114,8 +134,9 @@ const SECRET_BASENAME = [
 
 /** True for a file name that holds credentials (`.env*` except the templates, private keys, keychains, rc files). */
 export function isSecretBasename(name: string): boolean {
-  if (ENV_TEMPLATE_ALLOW.test(name)) return false;
-  return SECRET_BASENAME.some((re) => re.test(name));
+  const folded = canonicalFileName(name);
+  if (ENV_TEMPLATE_ALLOW.test(folded)) return false;
+  return SECRET_BASENAME.some((re) => re.test(folded));
 }
 
 /** Why a path may not be moved: the repository, the worktrees, a runtime's configuration, or a secrets file. */
@@ -125,11 +146,12 @@ export type WorkSessionFileDenyReason = z.infer<typeof WorkSessionFileDenyReason
 /**
  * The one deny list for both directions (D-09): any `.git` segment → `git`; any `.ocw-worktrees` → `worktrees`; any
  * `.claude` or `.codex`, or a final `.mcp.json` → `runtime_config` (planting runtime configuration would steer the
- * session); a secret base name → `secret` (uploading `.env` is refused on purpose). Segments are compared lowercased
- * (APFS and NTFS are case-insensitive by default). Pure: the API pre-checks it, the device decides it on real paths.
+ * session); a secret base name → `secret` (uploading `.env` is refused on purpose). Segments are compared in their
+ * folded form (`canonicalFileName`: APFS and NTFS are case-insensitive by default and fold more than `toLowerCase`,
+ * review CR-01). Pure: the API pre-checks it, the device decides it on real paths.
  */
 export function workSessionFilePathRefusal(rel: string): WorkSessionFileDenyReason | null {
-  const segments = rel.split("/").map((s) => s.toLowerCase());
+  const segments = rel.split("/").map(canonicalFileName);
   const last = segments[segments.length - 1] ?? "";
   if (segments.includes(".git")) return "git";
   if (segments.includes(".ocw-worktrees")) return "worktrees";

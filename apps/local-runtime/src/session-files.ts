@@ -142,7 +142,20 @@ export async function resolveSessionPath(
     throw new SessionFileError("not_found");
   }
   if (!inside(realRoot, parent)) throw new SessionFileError("path_not_allowed");
-  const target = join(parent, name);
+  let target = join(parent, name);
+  const existing = await lstatOrNull(target);
+  if (existing && !existing.isSymbolicLink()) {
+    // Review CR-01: a case-insensitive volume opens a file under other spellings of its name, and `join` keeps the
+    // requested one. The native realpath names the file as stored, so the second check decides on the real name.
+    let stored: string;
+    try {
+      stored = await realpath(target);
+    } catch {
+      throw new SessionFileError("not_found");
+    }
+    if (!inside(parent, stored) || stored === parent) throw new SessionFileError("path_not_allowed");
+    target = stored;
+  }
   const relReal = toPosix(relative(realRoot, target));
   if (relReal.startsWith("..") || workSessionFilePathRefusal(relReal) !== null) {
     throw new SessionFileError("path_not_allowed");

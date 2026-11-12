@@ -110,6 +110,41 @@ describe("resolveSessionPath (PD-10)", () => {
     expect(await codeOf(resolveSessionPath(root, `${DOT_ENV}.example`, { create: false }))).toBe("ok");
   });
 
+  it("a case-folded alias of a denied name is path_not_allowed, also where the volume opens it (review CR-01)", async () => {
+    // On APFS and NTFS (case-insensitive by default) "id_r<U+017F>a" opens "id_rsa"; on a case-sensitive volume it
+    // names a new file. Refused either way, before anything is opened.
+    const longS = String.fromCharCode(0x17f);
+    writeFileSync(join(root, "id_rsa"), "key");
+    mkdirSync(join(root, ".ocw-worktrees", "other"), { recursive: true });
+    writeFileSync(join(root, ".ocw-worktrees", "other", "a.md"), "theirs");
+    writeFileSync(join(root, ".mcp.json"), "{}");
+    for (const rel of [
+      `id_r${longS}a`,
+      `credential${longS}`,
+      `.mcp.j${longS}on`,
+      `.ocw-worktree${longS}/other/a.md`,
+    ]) {
+      expect(await codeOf(resolveSessionPath(root, rel, { create: false })), rel).toBe("path_not_allowed");
+      expect(await codeOf(openSessionFileForRead(root, rel, 1024)), rel).toBe("path_not_allowed");
+    }
+    expect(await codeOf(resolveSessionPath(root, `up/id_r${longS}a`, { create: true }))).toBe(
+      "path_not_allowed",
+    );
+    expect(existsSync(join(root, "up"))).toBe(false);
+  });
+
+  it("the second check decides on the names as stored on the volume, the file's own included (review CR-01)", async () => {
+    // A case-insensitive volume opens "DOCS/A.MD" as "docs/a.md"; the native realpath names the stored spelling.
+    const r = await resolveSessionPath(root, "docs/a.md", { create: false });
+    expect(r.relReal).toBe("docs/a.md");
+    if (existsSync(join(root, "DOCS", "A.MD"))) {
+      const folded = await resolveSessionPath(root, "DOCS/A.MD", { create: false });
+      expect(folded.parent).toBe(join(realpathSync(root), "docs"));
+      expect(folded.target).toBe(join(realpathSync(root), "docs", "a.md"));
+      expect(folded.relReal).toBe("docs/a.md");
+    }
+  });
+
   it("a directory symlink inside the tree pointing outside, or at .git, is path_not_allowed", async () => {
     symlinkSync(outside, join(root, "out"));
     symlinkSync(join(root, ".git"), join(root, "g"));

@@ -7,6 +7,7 @@ import {
   BotFileLimit,
   BotFileLimitSource,
   botFileTooLargeSentence,
+  canonicalFileName,
   effectiveBotFileMaxBytes,
   fileSizeLabel,
   isSecretBasename,
@@ -164,6 +165,45 @@ describe("the shared deny list (07.17.1.1 D-09, PD-09)", () => {
       ["mcp.json", null],
     ];
     for (const [path, reason] of cases) expect(workSessionFilePathRefusal(path), path).toBe(reason);
+  });
+
+  it("compares every segment in its folded form: APFS and NTFS case folding cannot alias a denied name (review CR-01)", () => {
+    const longS = String.fromCharCode(0x17f); // LATIN SMALL LETTER LONG S, folds to "s"
+    const kelvin = String.fromCharCode(0x212a); // KELVIN SIGN, folds to "k"
+    const dotlessI = String.fromCharCode(0x131); // LATIN SMALL LETTER DOTLESS I, upper-cases to "I" (NTFS upcase)
+    const ligatureSt = String.fromCharCode(0xfb06); // LATIN SMALL LIGATURE ST, NFKC "st"
+    const cases: Array<[string, string]> = [
+      [`id_r${longS}a`, "secret"],
+      [`keys/ID_R${longS}A.pub`, "secret"],
+      [`credential${longS}`, "secret"],
+      [`.mcp.j${longS}on`, "runtime_config"],
+      [`.ocw-worktree${longS}/other/x`, "worktrees"],
+      [`.g${dotlessI}t/config`, "git"],
+      [`server.${kelvin}ey`, "secret"],
+      [`.\uff43laude/settings.json`, "runtime_config"],
+      [`.env.te${ligatureSt}`, "secret"],
+    ];
+    for (const [path, reason] of cases) expect(workSessionFilePathRefusal(path), path).toBe(reason);
+    expect(isSecretBasename(`id_r${longS}a`)).toBe(true);
+    expect(canonicalFileName(`ID_R${longS}A`)).toBe("id_rsa");
+    expect(canonicalFileName(`${kelvin}eys`)).toBe("keys");
+    // A folded form that is not a plain segment any more is not a file name: the path rule refuses it.
+    const fullwidthSolidus = String.fromCharCode(0xff0f); // NFKC "/"
+    const twoDotLeader = String.fromCharCode(0x2025); // NFKC ".."
+    const fullwidthColon = String.fromCharCode(0xff1a); // NFKC ":"
+    for (const p of [
+      `a${fullwidthSolidus}.git`,
+      twoDotLeader,
+      `x/${twoDotLeader}/y`,
+      `a${fullwidthColon}b`,
+    ]) {
+      expect(WorkSessionFilePath.safeParse(p).success, p).toBe(false);
+    }
+    // Ordinary letters, accents and other scripts still pass, in either normalization form.
+    for (const p of ["docs/résumé.md", "docs/résumé.md", "notas/año.txt", "x/日本.md"]) {
+      expect(WorkSessionFilePath.safeParse(p).success, p).toBe(true);
+      expect(workSessionFilePathRefusal(p), p).toBeNull();
+    }
   });
 
   it("the secret base names are the Claude adapter's rules, unchanged (20-name fixture)", () => {
