@@ -19,7 +19,10 @@
 # Bot sandboxes (07.8-24): the images workflow keeps ocw-sandboxd/-sbx/-brw/-egress:ci (about 2.3 GB, the browser image
 # alone ~1.2 GB; since 07.17.1.1.1 the `sbx` share is about 1.1 GB unpacked, with the document toolkit: LibreOffice,
 # tesseract, poppler, 7-Zip and the Python venv) and a killed smoke leaves its ocw-sandbox-*:smoke-<sha> images (also
-# removed by the next run of its slot, infra/ci/slot-reset.sh); the budget carries 2 GB more for them.
+# removed by the next run of its slot, infra/ci/slot-reset.sh); the budget carries 2 GB more for them. That stays
+# enough with the toolkit: a smoke builds `sbx` from the same Dockerfile on this daemon, so on a cache hit its images
+# share every layer with the :ci one (docker system df counts a shared layer once); the macro control adds one tiny
+# layer (it removes ocw.xcd) and the drift rebuild only a label. A cold rebuild of one `sbx` (about 1.1 GB) still fits.
 set -eu
 . "$(dirname "$0")/wp-lib.sh"
 BUDGET_GB="${OCW_CI_DIND_BUDGET_GB:-62}"
