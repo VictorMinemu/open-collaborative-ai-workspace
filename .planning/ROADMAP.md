@@ -1257,7 +1257,8 @@ resumable chunks; the bot is told the toolkit exists, and existing bots get it a
 
 - **Toolkit:** poppler, qpdf, tesseract eng+spa, LibreOffice nogui (finalized no-macro config), ImageMagick with an
   allow-list policy, 7zip, exiftool, catdoc, unrtf, msgconvert; a hash-locked Python venv at `/opt/ocw-tools`.
-- **Rules:** Debian bookworm `main` only, wheels with hashes, licenses guarded, the owner approves the lock; the
+- **Rules:** Debian bookworm `main` only, wheels with hashes, licenses guarded, packages approved before merge on
+  scripted evidence; the
   egress proxy and package approval flow unchanged; everything runs as 10001 inside the sandbox limits.
 
 **Requirements**: DOC-01, DOC-02, DOC-03, DOC-04, DOC-05, DOC-06, DOC-07, DOC-08, DOC-09
@@ -1281,12 +1282,12 @@ resumable chunks; the bot is told the toolkit exists, and existing bots get it a
 Plans:
 
 - [ ] 07.17.1.1.1-01-PLAN.md — Wave 1: The image: Debian toolkit, ImageMagick policy, LibreOffice finalized config, image tests in CI, `SHELL_ENV` (+ the phase hub)
-- [ ] 07.17.1.1.1-02-PLAN.md — Wave 1: The Python supply chain: hash lock, license records, guard for Python locks, the owner's package approval (blocking)
+- [ ] 07.17.1.1.1-02-PLAN.md — Wave 1: The Python supply chain: hash lock, license records, guard for Python locks, scripted pre-install evidence (age ≥ 14 days, yanked, OSV, legitimacy, closure)
 - [ ] 07.17.1.1.1-03-PLAN.md — Wave 2: The venv layer and `ocw-extract` (every type, OCR, bounds, batch with resume and archive caps; TDD in the image)
 - [ ] 07.17.1.1.1-04-PLAN.md — Wave 2: sandboxd re-creates a stopped shell on image or env drift (fake Docker)
 - [ ] 07.17.1.1.1-05-PLAN.md — Wave 3: Real-Docker smokes: `docs` through sandboxd on runc and gVisor (the phase end to end), the macro control, `drift`
 - [ ] 07.17.1.1.1-06-PLAN.md — Wave 3: The bot is told (exec tool description, attachments clause)
-- [ ] 07.17.1.1.1-07-PLAN.md — Wave 4: ADR-0043, requirements, AGENTS.md row, docs, v0.3.2 notes, signed VALIDATION, phase gate and the owner's UAT
+- [ ] 07.17.1.1.1-07-PLAN.md — Wave 4: ADR-0043, requirements, AGENTS.md row, docs, v0.3.2 notes, signed VALIDATION, phase gate with the supply-chain approval before merge (blocking, on evidence) and the owner's UAT
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
