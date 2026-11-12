@@ -1249,14 +1249,44 @@ Plans:
 
 ### Phase 07.17.1.1.1: Sandbox document toolkit: bots read PDFs (incl. scanned, OCR), images, Office files and archives with tools baked into the sbx image (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** A bot reads, converts and searches the files people give it inside its own sandbox without installing
+anything: PDFs with a text layer, scanned PDFs and images (OCR in Spanish and English), Word, Excel, PowerPoint and
+OpenDocument files, CSV/JSON/XML/HTML, e-mails and archives, through a toolkit baked into the `sbx` image at build
+time and one helper, `ocw-extract`, that prints bounded UTF-8 text of any supported file and reads whole folders in
+resumable chunks; the bot is told the toolkit exists, and existing bots get it at their sandbox's next start.
+
+- **Toolkit:** poppler, qpdf, tesseract eng+spa, LibreOffice nogui (finalized no-macro config), ImageMagick with an
+  allow-list policy, 7zip, exiftool, catdoc, unrtf, msgconvert; a hash-locked Python venv at `/opt/ocw-tools`.
+- **Rules:** Debian bookworm `main` only, wheels with hashes, licenses guarded, the owner approves the lock; the
+  egress proxy and package approval flow unchanged; everything runs as 10001 inside the sandbox limits.
+
+**Requirements**: DOC-01, DOC-02, DOC-03, DOC-04, DOC-05, DOC-06, DOC-07, DOC-08, DOC-09
 **Depends on:** Phase 07.17.1.1
-**Plans:** 0 plans
+**ADR:** 0043
+**Success Criteria** (what must be TRUE):
+
+  1. Through sandboxd as 10001, on runc and gVisor, `ocw-extract` returns the text of a scanned PDF (OCR), a text PDF,
+     a Spanish PNG, docx, xlsx, pptx, odt, an e-mail and a zip listing; stdout fits the 16 KiB tail
+  2. `ocw-extract --batch` mirrors a folder or archive into `.txt` files and an index under /workspace without
+     touching the originals and resumes in chunks under 600 s (exit 75 until done); archive bombs, traversal and
+     links are refused
+  3. A document macro never runs under conversion (with a positive control or a stated configuration-only proof);
+     ImageMagick refuses PS/PDF/URL/MSL/TEXT; no gs, Java, Firebird or GStreamer; the image stays ≤ 1300 MiB
+  4. A stopped bot shell on an old image or environment is re-created with its volumes; a running one is never cut
+  5. The bot's exec tool and attachments how-to name the toolkit; ADR-0043 records the decisions and the
+     LibreOffice residual risk; the owner's UAT: Gertru reads the knowledge pack's 589 PDFs, scans included
+
+**Plans:** 7 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.17.1.1.1 to break down)
+- [ ] 07.17.1.1.1-01-PLAN.md — Wave 1: The image: Debian toolkit, ImageMagick policy, LibreOffice finalized config, image tests in CI, `SHELL_ENV` (+ the phase hub)
+- [ ] 07.17.1.1.1-02-PLAN.md — Wave 1: The Python supply chain: hash lock, license records, guard for Python locks, the owner's package approval (blocking)
+- [ ] 07.17.1.1.1-03-PLAN.md — Wave 2: The venv layer and `ocw-extract` (every type, OCR, bounds, batch with resume and archive caps; TDD in the image)
+- [ ] 07.17.1.1.1-04-PLAN.md — Wave 2: sandboxd re-creates a stopped shell on image or env drift (fake Docker)
+- [ ] 07.17.1.1.1-05-PLAN.md — Wave 3: Real-Docker smokes: `docs` through sandboxd on runc and gVisor (the phase end to end), the macro control, `drift`
+- [ ] 07.17.1.1.1-06-PLAN.md — Wave 3: The bot is told (exec tool description, attachments clause)
+- [ ] 07.17.1.1.1-07-PLAN.md — Wave 4: ADR-0043, requirements, AGENTS.md row, docs, v0.3.2 notes, signed VALIDATION, phase gate and the owner's UAT
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
