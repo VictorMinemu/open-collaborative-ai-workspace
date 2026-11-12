@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentCard,
+  AgentCardInput,
+  AgentCardKind,
+  AgentCardStatus,
+  AgentCardTaskLink,
   AgentChannelTaskContinue,
   AgentChannelTaskContinueResponse,
   AgentChannelTaskFinish,
@@ -13,14 +18,23 @@ import {
   BotTaskRefusal,
   BotTaskRefused,
   BotTaskStatus,
+  BotTaskStopResponse,
   BotTaskWaitKind,
   BotTaskWakeReason,
+  TASK_CARD_FIELD_LABELS,
+  TASK_STATUS_LABELS,
   TaskGoal,
   TaskNote,
   TaskProcessFact,
   TaskSummary,
   TaskWaitFor,
   TurnTask,
+  taskCardStatus,
+  taskContinueSentence,
+  taskQuiet,
+  taskStatusLabel,
+  taskStopNotice,
+  taskStopSentence,
 } from "./index";
 
 const EVENT = "0199b1c2-d3e4-7f5a-8b9c-000000000001";
@@ -343,5 +357,204 @@ describe("07.17.1.1.2 tasks: the turn's task block and process facts (D-03, PD-1
       TurnTask.safeParse({ ...task, waiting: { kind: "timer", ref: "r".repeat(65), until: null } }).success,
     ).toBe(false);
     expect(TurnTask.safeParse({ ...task, goal: "a\nb" }).success).toBe(false);
+  });
+});
+
+describe("07.17.1.1.2 tasks: the platform task card (D-05, PD-11, PD-12, T-07.17.1.1.2-01-05)", () => {
+  const link = {
+    taskId: TASK,
+    status: "waiting",
+    outcome: null,
+    turnsUsed: 7,
+    maxTurns: 40,
+    startedAt: AT,
+    deadlineAt: LATER,
+    finishedAt: null,
+    requesterId: ANA,
+    requesterName: "Ana",
+    waiting: "process",
+  };
+  const card = {
+    kind: "task",
+    title: "Read the knowledge pack and summarise it",
+    fields: [
+      { label: "Progress", value: "Read 400 of 3030 files" },
+      { label: "Next step", value: "Read the next 400" },
+    ],
+    status: "running",
+    actions: [{ kind: "follow", label: "Follow" }],
+    version: 3,
+    decision: null,
+    updatedAt: AT,
+    viewerCan: ["follow", "stop"],
+    platformOwned: true,
+    statusLabel: "Waiting",
+    task: link,
+  };
+
+  it("AgentCard parses a task card with its link and Stop; an older card without task parses unchanged", () => {
+    expect(AgentCardKind.options).toContain("task");
+    expect(AgentCard.parse(card)).toEqual(card);
+    const { task: _task, viewerCan: _viewerCan, ...older } = card;
+    const report = { ...older, kind: "report", platformOwned: undefined, statusLabel: undefined };
+    const parsed = AgentCard.parse(report);
+    expect(parsed).toEqual(report);
+    expect("task" in parsed).toBe(false);
+    expect(AgentCard.parse({ ...card, task: null }).task).toBeNull();
+    expect(AgentCard.safeParse({ ...card, viewerCan: ["cancel"] }).success).toBe(false);
+  });
+
+  it("AgentCardTaskLink: the platform's numbers and the requester, no viewer field", () => {
+    expect(AgentCardTaskLink.parse(link)).toEqual(link);
+    const done = { ...link, status: "stopped", outcome: "budget_turns", finishedAt: LATER, waiting: null };
+    expect(AgentCardTaskLink.parse(done)).toEqual(done);
+    expect(AgentCardTaskLink.safeParse({ ...link, status: "paused" }).success).toBe(false);
+    expect(AgentCardTaskLink.safeParse({ ...link, outcome: "exploded" }).success).toBe(false);
+    expect(AgentCardTaskLink.safeParse({ ...link, requesterName: "n".repeat(201) }).success).toBe(false);
+    expect(AgentCardTaskLink.safeParse({ ...link, waiting: "forever" }).success).toBe(false);
+    // A viewer field never travels in the link (realtime events may carry it to every reader).
+    expect("canStop" in AgentCardTaskLink.parse({ ...link, canStop: true })).toBe(false);
+  });
+
+  it("AgentCardInput refuses the platform-owned kinds (task, browser) and still accepts report", () => {
+    const input = {
+      kind: "report",
+      title: "Weekly report",
+      fields: [],
+      status: "info",
+      actions: [],
+      summary: "The weekly report.",
+    };
+    expect(AgentCardInput.parse(input).kind).toBe("report");
+    expect(AgentCardInput.safeParse({ ...input, kind: "task" }).success).toBe(false);
+    expect(AgentCardInput.safeParse({ ...input, kind: "browser" }).success).toBe(false);
+  });
+
+  it("BotTaskStopResponse: ok and the task's status", () => {
+    expect(BotTaskStopResponse.parse({ ok: true, status: "stopped" })).toEqual({
+      ok: true,
+      status: "stopped",
+    });
+    expect(BotTaskStopResponse.parse({ ok: true, status: "done" })).toEqual({ ok: true, status: "done" });
+    expect(BotTaskStopResponse.safeParse({ ok: false, status: "stopped" }).success).toBe(false);
+  });
+});
+
+describe("07.17.1.1.2 tasks: labels, cadence and sentences (D-05, D-11, D-12, PD-10, PD-18)", () => {
+  it("taskStatusLabel maps every status and outcome to the card's word, at most 24 characters", () => {
+    expect(taskStatusLabel("running", null)).toBe("Working");
+    expect(taskStatusLabel("waiting", null)).toBe("Waiting");
+    expect(taskStatusLabel("done", "done")).toBe("Done");
+    expect(taskStatusLabel("failed", "blocked")).toBe("Blocked");
+    expect(taskStatusLabel("failed", "no_progress")).toBe("Blocked");
+    expect(taskStatusLabel("failed", "error")).toBe("Failed");
+    expect(taskStatusLabel("failed", null)).toBe("Failed");
+    expect(taskStatusLabel("stopped", "budget_turns")).toBe("Stopped");
+    expect(taskStatusLabel("stopped", "stopped_by_person")).toBe("Stopped");
+    for (const status of BotTaskStatus.options) {
+      for (const outcome of [null, ...BotTaskOutcome.options]) {
+        expect(taskStatusLabel(status, outcome).length).toBeLessThanOrEqual(24);
+      }
+    }
+    expect(Object.values(TASK_STATUS_LABELS).sort()).toEqual(
+      ["Blocked", "Done", "Failed", "Stopped", "Waiting", "Working"].sort(),
+    );
+  });
+
+  it("taskCardStatus never flaps between turns: running and waiting are both running", () => {
+    expect(taskCardStatus("running")).toBe("running");
+    expect(taskCardStatus("waiting")).toBe("running");
+    expect(taskCardStatus("done")).toBe("succeeded");
+    expect(taskCardStatus("failed")).toBe("failed");
+    expect(taskCardStatus("stopped")).toBe("cancelled");
+    for (const status of BotTaskStatus.options) {
+      expect(AgentCardStatus.options).toContain(taskCardStatus(status));
+    }
+  });
+
+  it("the card's field labels", () => {
+    expect(TASK_CARD_FIELD_LABELS).toEqual({ progress: "Progress", next: "Next step" });
+  });
+
+  it("taskQuiet: at most one visible post every 5 turns or 10 minutes", () => {
+    const lastPostAt = new Date("2026-11-12T10:00:00.000Z");
+    const at = (minutes: number) => new Date(lastPostAt.getTime() + minutes * 60_000);
+    expect(taskQuiet({ turnsUsed: 2, lastPostTurn: 1, lastPostAt, now: at(2) })).toBe(true);
+    expect(taskQuiet({ turnsUsed: 5, lastPostTurn: 1, lastPostAt, now: at(2) })).toBe(true);
+    expect(taskQuiet({ turnsUsed: 6, lastPostTurn: 1, lastPostAt, now: at(2) })).toBe(false);
+    expect(taskQuiet({ turnsUsed: 2, lastPostTurn: 1, lastPostAt, now: at(11) })).toBe(false);
+    expect(taskQuiet({ turnsUsed: 2, lastPostTurn: 1, lastPostAt, now: at(10) })).toBe(false);
+    expect(taskQuiet({ turnsUsed: 2, lastPostTurn: 1, lastPostAt, now: at(9.99) })).toBe(true);
+  });
+
+  it("taskContinueSentence: the verbatim server sentence per wake reason", () => {
+    expect(taskContinueSentence("continue", 2, 40)).toBe("Continue your task (turn 2 of 40).");
+    expect(taskContinueSentence("timer", 7, 40)).toBe(
+      "The wait you asked for is over. Continue your task (turn 7 of 40).",
+    );
+    expect(taskContinueSentence("process", 3, 40)).toBe(
+      "A background command of your task ended. Continue your task (turn 3 of 40).",
+    );
+    expect(taskContinueSentence("nudge", 4, 40)).toBe(
+      "Your last turn ended without ocw_task_continue or ocw_task_finish. Continue the task or finish it (turn 4 of 40).",
+    );
+    for (const reason of BotTaskWakeReason.options) {
+      expect(taskContinueSentence(reason, 200, 200).length).toBeLessThanOrEqual(300);
+    }
+  });
+
+  it("taskStopSentence: the message the platform posts as the bot, or none", () => {
+    const p = { maxTurns: 40, maxHours: 8 };
+    expect(taskStopSentence("budget_turns", p)).toBe(
+      "I stopped this task after 40 turns, the limit for one task. The card shows where it got to.",
+    );
+    expect(taskStopSentence("budget_time", p)).toBe(
+      "I stopped this task after 8 h, the limit for one task. The card shows where it got to.",
+    );
+    expect(taskStopSentence("daily_limit", p)).toBe(
+      "I stopped this task: I reached my turn limit for today. The card shows where it got to.",
+    );
+    expect(taskStopSentence("policy_off", p)).toBe("I stopped this task: long tasks were turned off for me.");
+    expect(taskStopSentence("no_progress", p)).toBe(
+      "I stopped this task: two turns in a row ended without progress. The card shows where it got to.",
+    );
+    expect(taskStopSentence("blocked", p)).toBe("I need you to go on with this task. See my last message.");
+    for (const outcome of ["done", "access_lost", "bot_unavailable", "stopped_by_person", "error"] as const) {
+      expect(taskStopSentence(outcome, p), outcome).toBeNull();
+    }
+    for (const outcome of BotTaskOutcome.options) {
+      expect((taskStopSentence(outcome, { maxTurns: 200, maxHours: 24 }) ?? "").length).toBeLessThanOrEqual(
+        300,
+      );
+    }
+  });
+
+  it("taskStopNotice: the card's notice per outcome, at most 200 characters", () => {
+    const p = { maxTurns: 40, maxHours: 8 };
+    expect(taskStopNotice("budget_turns", p)).toBe("Stopped: it used its 40 turns.");
+    expect(taskStopNotice("budget_time", p)).toBe("Stopped: it ran for 8 h.");
+    expect(taskStopNotice("daily_limit", p)).toBe("Stopped: the bot's daily limit was reached.");
+    expect(taskStopNotice("policy_off", p)).toBe("Stopped: long tasks were turned off.");
+    expect(taskStopNotice("access_lost", p)).toBe(
+      "Stopped: the person it runs for can no longer read this conversation.",
+    );
+    expect(taskStopNotice("bot_unavailable", p)).toBe("Stopped: the bot is not available here any more.");
+    expect(taskStopNotice("stopped_by_person", { ...p, byName: "Ana" })).toBe("Stopped by Ana.");
+    expect(taskStopNotice("stopped_by_person", { ...p, byName: null })).toBe("Stopped.");
+    expect(taskStopNotice("stopped_by_person", p)).toBe("Stopped.");
+    expect(taskStopNotice("stopped_by_person", { ...p, byName: "   " })).toBe("Stopped.");
+    expect(taskStopNotice("no_progress", p)).toBe("Stopped: two turns in a row ended without progress.");
+    expect(taskStopNotice("error", p)).toBe("Stopped after an error.");
+    expect(taskStopNotice("done", p)).toBeNull();
+    expect(taskStopNotice("blocked", p)).toBeNull();
+    const long = taskStopNotice("stopped_by_person", { ...p, byName: "N".repeat(200) }) ?? "";
+    expect(long.length).toBeLessThanOrEqual(200);
+    expect(long.startsWith("Stopped by NNN")).toBe(true);
+    expect(long.endsWith(".")).toBe(true);
+    for (const outcome of BotTaskOutcome.options) {
+      expect((taskStopNotice(outcome, { maxTurns: 200, maxHours: 24 }) ?? "").length).toBeLessThanOrEqual(
+        200,
+      );
+    }
   });
 });

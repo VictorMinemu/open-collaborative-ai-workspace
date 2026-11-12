@@ -11,6 +11,8 @@ import {
   SandboxdContextOpen,
   SandboxdContextResize,
   SandboxdError,
+  SandboxdEvent,
+  SandboxdEventsResponse,
   SandboxdExportStateResult,
   SandboxdPackageInstall,
   SandboxdPackageInstallResult,
@@ -291,5 +293,62 @@ describe("broker package primitives (P-12, T-07.8-01-06)", () => {
         results: [{ id: ID, status: "failed", detail: "", code: "other" }],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("the process event (07.17.1.1.2 D-03, PD-13, T-07.17.1.1.2-01-04)", () => {
+  const AT = "2026-11-12T10:00:00.000Z";
+  const ended = {
+    seq: 41,
+    at: AT,
+    type: "process",
+    target,
+    processId: "a1B2_c3-d4",
+    status: "timed_out",
+    exitCode: null,
+    durationMs: 600000,
+  };
+
+  it("a background command that ended: ids and numbers only", () => {
+    expect(SandboxdEvent.parse(ended)).toEqual(ended);
+    for (const status of ["exited", "killed"]) {
+      const e = { ...ended, status, exitCode: status === "exited" ? 0 : null };
+      expect(SandboxdEvent.parse(e)).toEqual(e);
+    }
+    const parsed = SandboxdEvent.parse(ended);
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["at", "durationMs", "exitCode", "processId", "seq", "status", "target", "type"].sort(),
+    );
+  });
+
+  it("refuses a running or lost status, a missing or malformed process id and a negative duration", () => {
+    expect(SandboxdEvent.safeParse({ ...ended, status: "running" }).success).toBe(false);
+    expect(SandboxdEvent.safeParse({ ...ended, status: "lost" }).success).toBe(false);
+    const { processId: _p, ...noId } = ended;
+    expect(SandboxdEvent.safeParse(noId).success).toBe(false);
+    expect(SandboxdEvent.safeParse({ ...ended, processId: "has space" }).success).toBe(false);
+    expect(SandboxdEvent.safeParse({ ...ended, durationMs: -1 }).success).toBe(false);
+    expect(SandboxdEvent.safeParse({ ...ended, durationMs: null }).success).toBe(false);
+    expect(SandboxdEvent.safeParse({ ...ended, exitCode: 1.5 }).success).toBe(false);
+  });
+
+  it("an extra key (argv, output, a path) is stripped, never carried", () => {
+    const parsed = SandboxdEvent.parse({ ...ended, argv: ["sh", "-c", "secret"], output: "x", cwd: "/work" });
+    expect("argv" in parsed).toBe(false);
+    expect("output" in parsed).toBe(false);
+    expect("cwd" in parsed).toBe(false);
+  });
+
+  it("the four existing event types parse unchanged, beside it in one response", () => {
+    const events = [
+      { seq: 1, at: AT, type: "state", target, kind: "sbx", state: "running", reason: null },
+      { seq: 2, at: AT, type: "usage", target, cpuMs: 10, diskBytes: 2048 },
+      { seq: 3, at: AT, type: "egress", target, kind: "sbx", host: "pypi.org", allowed: true },
+      { seq: 4, at: AT, type: "browser", target, contextId: ID, event: "navigated", host: "example.com" },
+      { ...ended, seq: 5 },
+    ];
+    for (const e of events) expect(SandboxdEvent.parse(e)).toEqual(e);
+    const response = { bootId: ID, events, nextSeq: 6 };
+    expect(SandboxdEventsResponse.parse(response)).toEqual(response);
   });
 });

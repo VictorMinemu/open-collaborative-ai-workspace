@@ -4543,4 +4543,30 @@ describe("07.17.1.1.2 tasks", () => {
     expect(m.AgentMentionEvent.parse(mention)).toEqual(mention);
     expect(m.AgentMentionEvent.parse({ ...mention, turn: withTask }).turn).toEqual(withTask);
   });
+
+  it("the task card kind is the contracts' and platform-owned: the card input refuses it, like browser", async () => {
+    const cards = (await import(contracts("agent-cards.ts"))) as {
+      AgentCardKind: { options: string[] };
+      AgentCardInput: Schema;
+    };
+    const m = await import("./agent-channel-protocol.js");
+    expect([...m.AGENT_CARD_KINDS]).toEqual([...cards.AgentCardKind.options]);
+    expect(m.AGENT_CARD_KINDS).toContain("task");
+    expect(m.AGENT_POSTABLE_CARD_KINDS as readonly string[]).not.toContain("task");
+    expect(m.AGENT_POSTABLE_CARD_KINDS as readonly string[]).not.toContain("browser");
+    const input = {
+      kind: "report",
+      title: "Weekly report",
+      fields: [],
+      status: "info",
+      actions: [],
+      summary: "The weekly report.",
+    };
+    expectSameVerdicts(m.AgentCardInput, cards.AgentCardInput, [
+      input,
+      { ...input, kind: "task" },
+      { ...input, kind: "browser" },
+      { ...input, kind: "generic" },
+    ]);
+  });
 });
