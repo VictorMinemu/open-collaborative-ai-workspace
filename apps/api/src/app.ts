@@ -122,6 +122,8 @@ export async function buildApp(
     sandboxBudgetsMs?: SandboxBudgets;
     /** Test hook: shorter bot file transfer deadlines (07.17.1.1 PD-18); never read from the environment. */
     botFileDeadlineMs?: (bytes: number) => number;
+    /** Test hook: a shorter idle cut for a bot file transfer stream (07.17.1.1 review WR-01); never from the env. */
+    botFileTransferIdleMs?: number;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -347,6 +349,7 @@ export async function buildApp(
     storage: artifactModule.storage,
     approvals: approvals.service,
     ...(opts.botFileDeadlineMs ? { botFileDeadlineMs: opts.botFileDeadlineMs } : {}),
+    ...(opts.botFileTransferIdleMs ? { botFileTransferIdleMs: opts.botFileTransferIdleMs } : {}),
   });
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.

@@ -1,6 +1,13 @@
 import { posix } from "node:path";
-import type { Readable } from "node:stream";
-import { BOT_FILE_LIMITS, Id, type RuntimeFilePutAnswer, SessionFileReadPayload } from "@ocw/contracts";
+import { pipeline, type Readable } from "node:stream";
+import {
+  BOT_FILE_LIMITS,
+  Id,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
+  type RuntimeFilePutAnswer,
+  SessionFileReadPayload,
+  transferLandMarginMs,
+} from "@ocw/contracts";
 import { attachments, deviceCommands } from "@ocw/db";
 import { and, eq } from "drizzle-orm";
 import type { FastifyBaseLogger, FastifyReply, FastifyRequest } from "fastify";
@@ -15,7 +22,14 @@ import {
 } from "../artifact";
 import { authenticateDeviceJwt, bearerValue, type DeviceRef, looksLikeJwt } from "../device";
 import { createPermissionService } from "../organization";
-import { claimTransferForDevice, markTransfer, readTransferForDevice, type TransferRow } from "./bot-files";
+import {
+  claimTransferForDevice,
+  markTransfer,
+  readTransferForDevice,
+  type TransferRow,
+  transferTimes,
+} from "./bot-files";
+import { createTransferSlots, guardTransferStream } from "./transfer-slots";
 
 const TransferParams = z.object({ transferId: Id });
 
@@ -56,8 +70,11 @@ function deviceJwtOnly(core: Core, perms: ReturnType<typeof createPermissionServ
  * - then, in a tenant transaction of the device's organization without a user, the claim (`pending` → `streaming`
  *   under `FOR UPDATE`): absent (another organization's under RLS), another device's or a `from_device` row → 404;
  *   not `pending` or past `expires_at` → 410; a source attachment no longer `ready` → the row `failed` `not_found`, 410;
- * - the bytes of `original`, `content-length` = the row's `size_bytes`, `cache-control: no-store`; the row `streamed`
- *   when the last byte is written, `failed` `transfer_failed` when the stream breaks.
+ * - less than `transferLandMarginMs` left before `expires_at` → the row `failed` `timeout`, 410 (review WR-01);
+ * - the bytes of `original`, `content-length` = the row's `size_bytes`, `cache-control: no-store` and
+ *   `RUNTIME_FILE_LAND_WITHIN_HEADER` (the time the device may still land the file); the row `streamed` when the last
+ *   byte is written, `failed` `transfer_failed` when the stream breaks or is cut (at that landing deadline, or after
+ *   `transferIdleMs` without progress: review WR-01).
  *
  * `PUT /api/v1/runtime/files/:transferId` (07.17.1.1-08, D-03, PD-17) takes one session file of a `from_device`
  * transfer into its pre-allocated attachment id, never holding it whole:
@@ -67,7 +84,9 @@ function deviceJwtOnly(core: Core, perms: ReturnType<typeof createPermissionServ
  *   `too_large` with that size and 413, before a byte is read (the file is too big; the transfer is over);
  * - the claim, the command's own path (`device_commands`, same id and device), then the body streamed to storage in
  *   parts while it is hashed, sniffed and counted (`streamServerAttachment`, bounded by the declared length); a
- *   body of another length, or any failure, removes the object and fails the row `transfer_failed`;
+ *   body of another length, or any failure, removes the object and fails the row `transfer_failed`; the body is cut at
+ *   `expires_at` or after `transferIdleMs` without a byte, and one that ends after `expires_at` never lands (review
+ *   WR-01);
  * - in one tenant transaction the row `streamed` (only from `streaming`) with its size and sha256, and the attachment
  *   `pending`, uploaded by the bot, of the turn, named `sanitizeFilename(basename(path))`; the answer is
  *   `RuntimeFilePutAnswer`.
@@ -76,19 +95,19 @@ function deviceJwtOnly(core: Core, perms: ReturnType<typeof createPermissionServ
 export function registerFileTransferRoutes(
   app: App,
   core: Core,
-  deps: { storage: ObjectStorage | null },
+  deps: { storage: ObjectStorage | null; idleMs?: number },
 ): void {
   const perms = createPermissionService(core);
   const deviceOnly = deviceJwtOnly(core, perms);
-  const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
   /**
-   * Streams this app serves at once (07.17.1.1 PD-05): at most `BOT_FILE_LIMITS.concurrentTransfersPerProcess`. One
-   * counter per app (review IN-11), never shared by two apps built in one process. A request beyond that answers 503
-   * `busy` BEFORE its row is claimed, so the row stays `pending` and the daemon's retry (1 s, then 3 s) streams it. A
-   * slot is reserved before the claim and released when the stream ends (or the request is refused), so two requests
-   * never both pass a check at three.
+   * Streams this app serves at once (07.17.1.1 PD-05): at most `BOT_FILE_LIMITS.concurrentTransfersPerProcess`, and at
+   * most `concurrentTransfersPerOrganization` of them for one organization (review WR-01). One set per app (review
+   * IN-11). A request beyond that answers 503 `busy` BEFORE its row is claimed, so the row stays `pending` and the
+   * daemon's retry (1 s, then 3 s) streams it. A slot is reserved before the claim and released when the stream ends
+   * (or the request is refused), so two requests never both pass a check at three.
    */
-  let active = 0;
+  const slots = createTransferSlots();
+  const idleMs = deps.idleMs ?? BOT_FILE_LIMITS.transferIdleMs;
 
   /** Record how a claimed transfer's stream ended; a row the deadline sweep already closed is left alone. */
   async function settle(
@@ -134,13 +153,16 @@ export function registerFileTransferRoutes(
         const { transferId } = TransferParams.parse(req.params);
         const log = req.log;
         // Refusals that are not about the transfer come first: they never consume the row (PD-05).
-        if (active >= max) {
+        const release = slots.take(device.organizationId);
+        if (!release) {
           log.info({ transferId, deviceId: device.deviceId, code: "busy" }, "file transfer refused");
           throw busy();
         }
         const storage = deps.storage;
-        if (!storage) throw storageUnavailable();
-        active += 1;
+        if (!storage) {
+          release();
+          throw storageUnavailable();
+        }
         let handedOff = false;
         try {
           const claimed = await core.db.withTenant(
@@ -152,6 +174,18 @@ export function registerFileTransferRoutes(
                 direction: "to_device",
               });
               if (row === null || row === "gone") return row;
+              // Review WR-01: the bytes must reach the device a margin before the deadline, so it lands the file and
+              // acks before the API gives up. Less than that left: the transfer is over.
+              const times = await transferTimes(tx, row.id);
+              const landWithinMs = times.remainingMs - transferLandMarginMs(times.totalMs);
+              if (landWithinMs <= 0) {
+                await markTransfer(tx, row.id, {
+                  status: "failed",
+                  failure: "timeout",
+                  completedAt: new Date().toISOString(),
+                });
+                return "late" as const;
+              }
               // The person may have deleted the file since the bot asked: its bytes no longer leave storage.
               const [source] = await tx
                 .select({ id: attachments.id })
@@ -172,47 +206,69 @@ export function registerFileTransferRoutes(
                 });
                 return "source_gone" as const;
               }
-              return row;
+              return { row, landWithinMs };
             },
           );
           if (claimed === null) {
             log.info({ transferId, deviceId: device.deviceId, code: "not_found" }, "file transfer refused");
             throw notFound("Transfer not found");
           }
-          if (claimed === "gone" || claimed === "source_gone") {
-            const code = claimed === "gone" ? "gone" : "source_gone";
-            log.info({ transferId, deviceId: device.deviceId, code }, "file transfer refused");
+          if (claimed === "gone" || claimed === "source_gone" || claimed === "late") {
+            log.info({ transferId, deviceId: device.deviceId, code: claimed }, "file transfer refused");
             throw gone("This transfer is over");
           }
+          const { row: claimedRow, landWithinMs } = claimed;
 
           let source: Awaited<ReturnType<ObjectStorage["stream"]>>;
           try {
             source = await storage.stream(
-              attachmentKey(device.organizationId, claimed.conversationId, claimed.attachmentId, "original"),
+              attachmentKey(
+                device.organizationId,
+                claimedRow.conversationId,
+                claimedRow.attachmentId,
+                "original",
+              ),
             );
           } catch {
-            await settle(device, claimed, false, log);
+            await settle(device, claimedRow, false, log);
             throw new HttpError(502, "transfer_failed", "The file could not be read from storage");
           }
 
           let ended = false;
+          // Review WR-01: the stream's own deadline (the landing deadline) and idle cut; either frees the slot.
+          const guard = guardTransferStream({
+            deadlineMs: landWithinMs,
+            idleMs,
+            onExpire: () => {
+              log.info({ transferId, deviceId: device.deviceId, code: "cut" }, "file transfer cut");
+              source.destroy();
+              reply.raw.destroy();
+            },
+          });
           const end = (ok: boolean) => {
             if (ended) return;
             ended = true;
-            active -= 1;
-            void settle(device, claimed, ok, log);
+            guard.clear();
+            release();
+            void settle(device, claimedRow, ok, log);
           };
           reply.raw.once("finish", () => end(true));
           reply.raw.once("close", () => end(reply.raw.writableFinished));
-          source.once("error", () => end(false));
+          source.once("error", (err) => {
+            guard.meter.destroy(err);
+            end(false);
+          });
           handedOff = true;
           log.info({ transferId, deviceId: device.deviceId, code: "streaming" }, "file transfer started");
-          reply.header("content-type", "application/octet-stream").header("cache-control", "no-store");
+          reply
+            .header("content-type", "application/octet-stream")
+            .header("cache-control", "no-store")
+            .header(RUNTIME_FILE_LAND_WITHIN_HEADER, String(landWithinMs));
           // The enqueue records the source's size on every `to_device` row; the device checks it against the payload.
-          if (claimed.sizeBytes !== null) reply.header("content-length", String(claimed.sizeBytes));
-          return reply.send(source);
+          if (claimedRow.sizeBytes !== null) reply.header("content-length", String(claimedRow.sizeBytes));
+          return reply.send(source.pipe(guard.meter));
         } finally {
-          if (!handedOff) active -= 1;
+          if (!handedOff) release();
         }
       },
     );
@@ -243,13 +299,14 @@ export function registerFileTransferRoutes(
           return err;
         };
         // Refusals that are not about the file come first: they never consume the row (PD-05).
-        if (active >= max) throw refuse("busy", busy());
-        const declared = declaredLength(req.headers["content-length"]);
-        if (declared === null) throw refuse("length_required", lengthRequired());
-        const storage = deps.storage;
-        if (!storage) throw refuse("storage_unavailable", storageUnavailable());
-        active += 1;
+        const release = slots.take(device.organizationId);
+        if (!release) throw refuse("busy", busy());
+        let guard: ReturnType<typeof guardTransferStream> | null = null;
         try {
+          const declared = declaredLength(req.headers["content-length"]);
+          if (declared === null) throw refuse("length_required", lengthRequired());
+          const storage = deps.storage;
+          if (!storage) throw refuse("storage_unavailable", storageUnavailable());
           const found = await core.db.withTenant(tenant, (tx) =>
             readTransferForDevice(tx, {
               id: transferId,
@@ -305,29 +362,53 @@ export function registerFileTransferRoutes(
               });
               return "no_command" as const;
             }
-            return { row, path: payload.data.path };
+            const { remainingMs } = await transferTimes(tx, row.id);
+            return { row, path: payload.data.path, remainingMs };
           });
           if (claimed === null) throw refuse("not_found", notFound("Transfer not found"));
           if (claimed === "gone") throw refuse("gone", gone("This transfer is over"));
           if (claimed === "no_command") throw refuse("no_command", transferFailed());
 
-          const { row, path } = claimed;
+          const { row, path, remainingMs } = claimed;
           const key = attachmentKey(device.organizationId, row.conversationId, row.attachmentId, "original");
           log.info({ transferId, deviceId: device.deviceId, code: "streaming" }, "file transfer started");
+          // The raw request stream (the parser above), or the request itself when no body was parsed (empty).
+          const raw = (req.body as Readable | undefined) ?? req.raw;
+          // Review WR-01: the body is cut at the transfer's deadline, or after the idle time without a byte.
+          const cut = guardTransferStream({
+            deadlineMs: remainingMs,
+            idleMs,
+            onExpire: () => {
+              log.info({ transferId, deviceId: device.deviceId, code: "cut" }, "file transfer cut");
+              cut.meter.destroy(new Error("the transfer's deadline passed"));
+              req.raw.destroy();
+            },
+          });
+          guard = cut;
+          pipeline(raw, cut.meter, () => undefined);
           let sizeBytes: number;
           try {
             const stored = await streamServerAttachment(storage, {
               organizationId: device.organizationId,
               conversationId: row.conversationId,
               attachmentId: row.attachmentId,
-              // The raw request stream (the parser above), or the request itself when no body was parsed (empty).
-              body: (req.body as Readable | undefined) ?? req.raw,
+              body: cut.meter,
               // Counted as it streams: never more than the device declared (itself at most the row's bound).
               maxBytes: declared,
             });
             if (stored.sizeBytes !== declared) throw new Error("the body is shorter than its content-length");
             sizeBytes = stored.sizeBytes;
             const recorded = await core.db.withTenant(tenant, async (tx) => {
+              // Review WR-01: a body that ended after the deadline never lands, even before the sweep ran.
+              if ((await transferTimes(tx, row.id)).remainingMs <= 0) {
+                await markTransfer(
+                  tx,
+                  row.id,
+                  { status: "failed", failure: "timeout", completedAt: new Date().toISOString() },
+                  { from: ["streaming"] },
+                );
+                return false;
+              }
               // Only from `streaming`: a row the deadline sweep already failed is never revived.
               const moved = await markTransfer(
                 tx,
@@ -385,7 +466,8 @@ export function registerFileTransferRoutes(
           log.info({ transferId, deviceId: device.deviceId, code: "streamed" }, "file transfer ended");
           return { ok: true, sizeBytes };
         } finally {
-          active -= 1;
+          guard?.clear();
+          release();
         }
       },
     );

@@ -34,6 +34,8 @@ export interface TestStackOptions {
   sandboxBudgetsMs?: SandboxBudgets;
   /** Shorter bot file transfer deadlines for this stack (07.17.1.1 timeout tests). */
   botFileDeadlineMs?: (bytes: number) => number;
+  /** A shorter idle cut for a bot file transfer stream (07.17.1.1 review WR-01 tests). */
+  botFileTransferIdleMs?: number;
 }
 
 /** Real PostgreSQL 18 + Redis 8 (testcontainers) and the full API listening on a random port. */
@@ -79,6 +81,7 @@ async function buildStack(
     ...(opts.browserBudgetsMs ? { browserBudgetsMs: opts.browserBudgetsMs } : {}),
     ...(opts.sandboxBudgetsMs ? { sandboxBudgetsMs: opts.sandboxBudgetsMs } : {}),
     ...(opts.botFileDeadlineMs ? { botFileDeadlineMs: opts.botFileDeadlineMs } : {}),
+    ...(opts.botFileTransferIdleMs ? { botFileTransferIdleMs: opts.botFileTransferIdleMs } : {}),
   });
   try {
     await built.app.listen({ host: "127.0.0.1", port: 0 });

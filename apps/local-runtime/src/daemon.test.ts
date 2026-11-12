@@ -30,6 +30,7 @@ import {
   type DeviceToServerFrame,
   type PromptPayload,
   RUNTIME_COMPATIBILITY_MANIFEST,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
   type RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
@@ -269,6 +270,8 @@ class FakeServer {
   fileStatuses: number[] = [];
   /** The bytes a `GET` answers with. */
   fileBody: Buffer = Buffer.alloc(0);
+  /** Extra headers of a `GET`'s answer (review WR-01: the landing deadline). */
+  fileHeaders: Record<string, string> = {};
   /** Called with each transfer request before it is answered (a test may await something). */
   onFileRequest: ((r: FileRequest) => Promise<void> | void) | null = null;
 
@@ -336,6 +339,7 @@ class FakeServer {
         .writeHead(200, {
           "content-type": "application/octet-stream",
           "content-length": String(this.fileBody.byteLength),
+          ...this.fileHeaders,
         })
         .end(this.fileBody);
     }
@@ -3160,6 +3164,41 @@ describe("07.17.1.1 session.file.write: a file lands in an idle session's tree, 
     const ok = fileCmd("session.file.write", "wf-w7", writePayload("e.txt", server.fileBody));
     server.send(ok);
     expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+  });
+});
+
+describe("07.17.1.1 an upload lands only before the server's landing deadline (review WR-01)", () => {
+  function writePayload(path: string, bytes: Buffer) {
+    return { path, sizeBytes: bytes.byteLength, sha256: sha256Hex(bytes), overwrite: false };
+  }
+
+  it("bytes that arrive after the time the GET allowed land nothing and ack expired", async () => {
+    await fileDaemon();
+    await activeSession("wf-l1");
+    const bytes = Buffer.from("too late");
+    server.fileBody = bytes;
+    server.fileHeaders = { [RUNTIME_FILE_LAND_WITHIN_HEADER]: "0" };
+    const cmd = fileCmd("session.file.write", "wf-l1", writePayload("late.txt", bytes));
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: false, error: "expired" });
+    expect(existsSync(join(project, "late.txt"))).toBe(false);
+    expect(readdirSync(project).filter((n) => n.startsWith(".ocw-upload-"))).toEqual([]);
+  });
+
+  it("within the time, or from a server that names none, the file lands", async () => {
+    await fileDaemon();
+    await activeSession("wf-l2");
+    const bytes = Buffer.from("in time");
+    server.fileBody = bytes;
+    server.fileHeaders = { [RUNTIME_FILE_LAND_WITHIN_HEADER]: "60000" };
+    const ok = fileCmd("session.file.write", "wf-l2", writePayload("ok.txt", bytes));
+    server.send(ok);
+    expect(await fileAck(ok.id)).toMatchObject({ ok: true });
+    server.fileHeaders = {};
+    const old = fileCmd("session.file.write", "wf-l2", writePayload("old.txt", bytes));
+    server.send(old);
+    expect(await fileAck(old.id)).toMatchObject({ ok: true });
+    expect(readFileSync(join(project, "old.txt"), "utf8")).toBe("in time");
   });
 });
 

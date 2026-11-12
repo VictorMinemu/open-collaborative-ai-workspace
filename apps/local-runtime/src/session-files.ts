@@ -237,6 +237,11 @@ export interface WriteSessionFileParams {
   overwrite: boolean;
   /** The bytes, read only after every check passed (the daemon's GET starts on the first read). */
   body: AsyncIterable<Uint8Array>;
+  /**
+   * Review WR-01: the moment (epoch ms) after which the file must not land, known once the body started (the server
+   * names it on the GET). Null or absent: no bound (an older server). Past it, nothing lands and the write is `expired`.
+   */
+  landBy?: () => number | null;
   /** Tests only: the free-space probe (default `fs.promises.statfs`). */
   statfs?: (path: string) => Promise<{ bavail: number | bigint; bsize: number | bigint }>;
 }
@@ -297,6 +302,9 @@ export async function writeSessionFile(root: string, rel: string, p: WriteSessio
     await handle.chmod(0o644);
     await handle.close();
     handleOpen = false;
+    // Review WR-01: the server has given up (or is about to): the bot was told the move timed out, so nothing lands.
+    const landBy = p.landBy?.() ?? null;
+    if (landBy !== null && Date.now() >= landBy) throw new SessionFileError("expired");
     if (!p.overwrite) {
       try {
         await link(tmp, target);

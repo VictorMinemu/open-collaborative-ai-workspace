@@ -148,6 +148,8 @@ export function createWorkSessionModule(
      * (`transferDeadlineMs`); a test stack sets it through `botFileDeadlineMs`, never through the environment.
      */
     botFileDeadlineMs?: (bytes: number) => number;
+    /** 07.17.1.1 review WR-01, test hook: a shorter idle cut for a transfer stream (`BOT_FILE_LIMITS.transferIdleMs`). */
+    botFileTransferIdleMs?: number;
   } = {},
 ): WorkSessionModule {
   const perms = createPermissionService(core);
@@ -267,7 +269,10 @@ export function createWorkSessionModule(
       // 07.16 (D-01 … D-03): a bot's Work Zone profile and the per-bot device consent; changes sweep the device.
       registerBotProfileRoutes(app, core, perms, service);
       // 07.17.1.1 (D-08, PD-05): the device side of a bot's file move, `GET /api/v1/runtime/files/:transferId`.
-      registerFileTransferRoutes(app, core, { storage: deps.storage ?? null });
+      registerFileTransferRoutes(app, core, {
+        storage: deps.storage ?? null,
+        ...(deps.botFileTransferIdleMs ? { idleMs: deps.botFileTransferIdleMs } : {}),
+      });
     },
     start,
     proposals,

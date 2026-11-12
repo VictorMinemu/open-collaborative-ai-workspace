@@ -39,6 +39,7 @@ import {
   type PermissionMode,
   PromptPayload,
   RUNTIME_BYPASS_LITERALS,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
   RUNTIME_FILE_ROUTE,
   RuntimeCatalog,
   RuntimeFilePutAnswer,
@@ -1491,11 +1492,15 @@ export class Daemon {
     if (!active) throw new SessionFileError("not_running");
     if (this.turnsRunning.has(cmd.sessionId)) throw new SessionFileError("busy");
     const p = payload.data;
+    // Review WR-01: the server names how long the file may still land; past that it has told the bot the move timed out.
+    let landBy: number | null = null;
     const fetchBody = async function* (this: Daemon): AsyncGenerator<Uint8Array> {
       const res = await this.transfer(cmd.id, p.sizeBytes, () => ({
         method: "GET",
         headers: { accept: "application/octet-stream" },
       }));
+      const within = res.headers.get(RUNTIME_FILE_LAND_WITHIN_HEADER);
+      if (within !== null && /^\d{1,10}$/.test(within)) landBy = Date.now() + Number(within);
       if (!res.body) return;
       for await (const chunk of res.body) yield chunk;
     };
@@ -1505,6 +1510,7 @@ export class Daemon {
       sha256: p.sha256,
       overwrite: p.overwrite,
       body: fetchBody.call(this),
+      landBy: () => landBy,
     });
   }
 

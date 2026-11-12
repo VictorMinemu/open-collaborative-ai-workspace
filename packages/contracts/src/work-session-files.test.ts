@@ -13,6 +13,7 @@ import {
   isSecretBasename,
   isWindowsReservedName,
   parseSessionFileAck,
+  RUNTIME_FILE_LAND_WITHIN_HEADER,
   RUNTIME_FILE_ROUTE,
   RuntimeFilePutAnswer,
   SessionFileFailure,
@@ -20,6 +21,7 @@ import {
   SessionFileWritePayload,
   sessionFileAckError,
   transferDeadlineMs,
+  transferLandMarginMs,
   WorkSessionFileDenyReason,
   WorkSessionFilePath,
   workSessionFilePathRefusal,
@@ -42,7 +44,16 @@ describe("bot file limits (07.17.1.1 D-06, D-07, PD-05, PD-18)", () => {
       transferBytesPerSecond: MiB,
       transferMaxMs: 600_000,
       concurrentTransfersPerProcess: 4,
+      concurrentTransfersPerOrganization: 2,
+      transferIdleMs: 30_000,
+      transferLandMarginMs: 5_000,
     });
+    expect(RUNTIME_FILE_LAND_WITHIN_HEADER).toBe("x-ocw-land-within-ms");
+    // A fifth of the deadline, at most 5 s: the shortest real deadline (30 s) keeps the full 5 s.
+    expect(transferLandMarginMs(30_000)).toBe(5_000);
+    expect(transferLandMarginMs(600_000)).toBe(5_000);
+    expect(transferLandMarginMs(5_000)).toBe(1_000);
+    expect(transferLandMarginMs(0)).toBe(0);
     expect(BOT_FILE_LIMITS.defaultMaxBytes).toBe(25 * MiB);
   });
 

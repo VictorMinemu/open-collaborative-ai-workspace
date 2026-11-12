@@ -149,6 +149,24 @@ export async function markTransfer(
   return rows.length > 0;
 }
 
+/**
+ * Review WR-01: the milliseconds left before the row's `expires_at` and its whole deadline (`expires_at - created_at`),
+ * by the database's clock (the one both were set by). `remainingMs` is negative once past; both 0 when the row is absent.
+ */
+export async function transferTimes(tx: Tx, id: string): Promise<{ remainingMs: number; totalMs: number }> {
+  const [row] = await tx
+    .select({
+      remaining: sql<string>`floor(extract(epoch from (${botWorkSessionFiles.expiresAt} - now())) * 1000)`,
+      total: sql<string>`floor(extract(epoch from (${botWorkSessionFiles.expiresAt} - ${botWorkSessionFiles.createdAt})) * 1000)`,
+    })
+    .from(botWorkSessionFiles)
+    .where(eq(botWorkSessionFiles.id, id))
+    .limit(1);
+  return row
+    ? { remainingMs: Number(row.remaining), totalMs: Number(row.total) }
+    : { remainingMs: 0, totalMs: 0 };
+}
+
 // ---------------------------------------------------------------- the service (07.17.1.1-11)
 
 type AgentTurnRow = typeof agentTurns.$inferSelect;

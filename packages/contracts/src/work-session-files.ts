@@ -37,7 +37,25 @@ export const BOT_FILE_LIMITS = {
   transferMaxMs: 600_000,
   /** Streams one API process serves at once; beyond, the transfer route answers 503 and the device retries. */
   concurrentTransfersPerProcess: 4,
+  /** Of those, the streams one organization may hold (review WR-01): one tenant never blocks every other. */
+  concurrentTransfersPerOrganization: 2,
+  /** A transfer stream that moved no byte for this long is cut, and its slot freed (review WR-01). */
+  transferIdleMs: 30_000,
+  /**
+   * An upload's bytes must have reached the device this long (at most; `transferLandMarginMs()`) before the transfer's
+   * deadline, so the device lands the file and acks before the API gives up (review WR-01): the GET is cut there, and
+   * the device lands nothing later.
+   */
+  transferLandMarginMs: 5_000,
 } as const;
+
+/**
+ * Review WR-01: how long before a transfer's deadline its upload bytes must have reached the device: a fifth of the
+ * whole deadline, at most `transferLandMarginMs` (5 s of the shortest real deadline, 30 s).
+ */
+export function transferLandMarginMs(deadlineMs: number): number {
+  return Math.max(0, Math.min(BOT_FILE_LIMITS.transferLandMarginMs, Math.floor(deadlineMs / 5)));
+}
 
 /** How long a transfer of `bytes` may take, end to end (PD-18): 30 s + 1 s per MiB, at most 10 minutes. */
 export function transferDeadlineMs(bytes: number): number {
@@ -315,6 +333,13 @@ export function parseSessionFileAck(error: string | null | undefined): {
 
 /** Where a device streams a transfer's bytes, under its own device token: `GET|PUT <route>/<command id>`. */
 export const RUNTIME_FILE_ROUTE = "/api/v1/runtime/files";
+
+/**
+ * The upload GET's answer header (review WR-01): the milliseconds within which the device may still land the file
+ * (the transfer's deadline less `transferLandMarginMs`). A device that is not done by then lands nothing and acks
+ * `expired`; an older daemon ignores it (the GET is cut at the same moment).
+ */
+export const RUNTIME_FILE_LAND_WITHIN_HEADER = "x-ocw-land-within-ms";
 
 /** The `PUT` answer: the bytes the API counted and stored. */
 export const RuntimeFilePutAnswer = z.object({

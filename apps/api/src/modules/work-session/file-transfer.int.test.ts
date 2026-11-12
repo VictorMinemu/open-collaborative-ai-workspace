@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { BOT_FILE_LIMITS, RUNTIME_FILE_ROUTE } from "@ocw/contracts";
+import { BOT_FILE_LIMITS, RUNTIME_FILE_LAND_WITHIN_HEADER, RUNTIME_FILE_ROUTE } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,6 +26,8 @@ const FILE_TEXT = "Ship the bot file exchange.\n".repeat(64);
 /** The busy test's source: big enough that a reader who never reads holds its stream open (socket buffers fill). */
 const BIG_NAME = "board-minutes-walrus.txt";
 const BIG_BYTES = 32 * 1024 * 1024;
+/** This stack's idle cut for a transfer stream (`botFileTransferIdleMs`, review WR-01). */
+const IDLE_MS = 4_000;
 
 let storage: TestStorage;
 let stack: TestStack;
@@ -94,6 +96,7 @@ beforeAll(async () => {
   storage = await startTestStorage();
   stack = await startTestStack({
     env: { ...storage.env, LOG_LEVEL: "info", OCW_ATTACHMENT_MAX_BYTES: String(64 * 1024 * 1024) },
+    botFileTransferIdleMs: IDLE_MS,
     logStream: { write: (line) => void logs.push(line) },
   });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
@@ -248,6 +251,70 @@ describe("tracer: a device GETs an attachment's bytes through its transfer, unde
     await viaJwt.close();
     await expect(FakeDevice.open(stack.baseUrl, "not-a-token")).rejects.toThrow("HTTP 401");
     expect(BOT_FILE_LIMITS.concurrentTransfersPerProcess).toBe(4);
+    expect(BOT_FILE_LIMITS.concurrentTransfersPerOrganization).toBe(2);
+  });
+});
+
+describe("a transfer stream ends by its own deadline, and frees its slot (review WR-01)", () => {
+  const MARGIN = BOT_FILE_LIMITS.transferLandMarginMs;
+  const big = () => ({ attachmentId: bigId, sizeBytes: BIG_BYTES, sha256: null });
+
+  it("the GET names the time left to land the file; a row with less than the margin left is over (410, timeout)", async () => {
+    const id = await transfer({ expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const res = await get(id, jwtA);
+    expect(res.status).toBe(200);
+    const within = Number(res.headers.get(RUNTIME_FILE_LAND_WITHIN_HEADER));
+    expect(within).toBeGreaterThan(60_000 - MARGIN - 5_000);
+    expect(within).toBeLessThanOrEqual(60_000 - MARGIN);
+    await res.arrayBuffer();
+
+    // A 62 s deadline with 2 s left: less than its margin (5 s).
+    const late = await transfer({
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 2_000).toISOString(),
+    });
+    const refused = await get(late, jwtA);
+    expect(refused.status).toBe(410);
+    expect(await statusOf(late)).toEqual({ status: "failed", failure: "timeout" });
+  });
+
+  it("a GET that is not read is cut at its deadline: the row fails and the slot is free again", async () => {
+    const id = await transfer({ ...big(), expiresAt: new Date(Date.now() + MARGIN + 1_500).toISOString() });
+    const abort = new AbortController();
+    const res = await fetch(fileUrl(id), {
+      headers: { authorization: `Bearer ${jwtA}` },
+      signal: abort.signal,
+    });
+    expect(res.status).toBe(200);
+    try {
+      await eventually(async () => (await statusOf(id)).failure === "transfer_failed", 10_000);
+      // Both of the organization's slots are free: two more streams start.
+      const next = [await transfer(), await transfer()];
+      for (const n of next) {
+        const ok = await get(n, jwtA);
+        expect(ok.status).toBe(200);
+        expect(sha256(new Uint8Array(await ok.arrayBuffer()))).toBe(attachmentSha);
+      }
+    } finally {
+      abort.abort();
+    }
+  });
+
+  it("a GET whose reader stalls is cut after the idle time, long before its deadline", async () => {
+    const id = await transfer({ ...big(), expiresAt: new Date(Date.now() + 120_000).toISOString() });
+    const abort = new AbortController();
+    const started = Date.now();
+    const res = await fetch(fileUrl(id), {
+      headers: { authorization: `Bearer ${jwtA}` },
+      signal: abort.signal,
+    });
+    expect(res.status).toBe(200);
+    try {
+      await eventually(async () => (await statusOf(id)).failure === "transfer_failed", IDLE_MS + 8_000);
+      expect(Date.now() - started).toBeLessThan(60_000);
+    } finally {
+      abort.abort();
+    }
   });
 });
 
@@ -305,8 +372,9 @@ describe("only the right device, once, in time; a busy server never burns the tr
     expect((await statusOf(id)).failure).toBe("not_found");
   });
 
-  it("four slow streams make a fifth GET 503 busy with its row still pending; once one ends, the fifth streams", async () => {
-    const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
+  it("an organization's slow streams make its next GET 503 busy with its row still pending; once one ends, it streams (review WR-01)", async () => {
+    // One organization holds at most its share of the app's slots (the rest stay for the others: transfer-slots.test).
+    const max = BOT_FILE_LIMITS.concurrentTransfersPerOrganization;
     const big = { attachmentId: bigId, sizeBytes: BIG_BYTES, sha256: null };
     const held: Array<{ id: string; res: Response; abort: AbortController }> = [];
     try {
@@ -572,6 +640,42 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
     expect(await attachmentRow(up.attachmentId)).toBeUndefined();
   });
 
+  it("a PUT that keeps trickling past its deadline is cut there: no object, the row failed (review WR-01)", async () => {
+    const up = await fromDevice({ expiresAt: new Date(Date.now() + 2_000).toISOString() });
+    const { req, answer } = openPut(up.id, jwtA, { declared: 4 * MiB, send: pdf(64 * 1024), end: false });
+    await eventually(async () => (await ledger(up.id)).status === "streaming");
+    // A chunk every half second: never idle, but never done before the deadline.
+    const trickle = setInterval(() => {
+      if (!req.destroyed) req.write(Buffer.alloc(1024, 0x61));
+    }, 500);
+    try {
+      await eventually(async () => (await ledger(up.id)).status === "failed", 10_000);
+    } finally {
+      clearInterval(trickle);
+      req.destroy();
+    }
+    await answer.catch(() => undefined);
+    expect((await ledger(up.id)).failure).toBe("transfer_failed");
+    expect(await objects.head(up.key)).toBeNull();
+    expect(await attachmentRow(up.attachmentId)).toBeUndefined();
+  });
+
+  it("a PUT that stops sending is cut after the idle time, and the organization's slot is free again (review WR-01)", async () => {
+    const up = await fromDevice();
+    const { req, answer } = openPut(up.id, jwtA, { declared: 4 * MiB, send: pdf(64 * 1024), end: false });
+    try {
+      await eventually(async () => (await ledger(up.id)).status === "streaming");
+      await eventually(async () => (await ledger(up.id)).status === "failed", IDLE_MS + 8_000);
+    } finally {
+      req.destroy();
+    }
+    await answer.catch(() => undefined);
+    expect(await objects.head(up.key)).toBeNull();
+    const next = await fromDevice();
+    const body = new TextEncoder().encode("after the idle cut");
+    expect((await put(next.id, jwtA, body)).body).toEqual({ ok: true, sizeBytes: body.length });
+  });
+
   it("another device, organization B's device, an expired row and a to_device row → 404 / 404 / 410 / 404, rows untouched", async () => {
     const body = new Uint8Array([1, 2, 3]);
     const mine = await fromDevice();
@@ -592,8 +696,8 @@ describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)"
     expect((await put(mine.id, jwtA, body)).status).toBe(200);
   });
 
-  it("four streams held open make a fifth PUT 503 busy with its row pending; once one ends, the same PUT succeeds", async () => {
-    const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
+  it("an organization's streams held open make its next PUT 503 busy with its row pending; once one ends, the same PUT succeeds (review WR-01)", async () => {
+    const max = BOT_FILE_LIMITS.concurrentTransfersPerOrganization;
     const first = pdf(2 * MiB);
     const held: Array<{ up: Upload; open: ReturnType<typeof openPut> }> = [];
     try {
