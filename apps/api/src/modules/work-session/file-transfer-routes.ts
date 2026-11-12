@@ -383,6 +383,19 @@ export function registerFileTransferRoutes(
             idleMs,
             onExpire: () => {
               log.info({ transferId, deviceId: device.deviceId, code: "cut" }, "file transfer cut");
+              // The transfer is over now: the row fails and the slot is free at once, however long storage takes to
+              // drop what it held (the handler's own clean-up below still runs; neither step can revive the row).
+              release();
+              void core.db
+                .withTenant(tenant, (tx) =>
+                  markTransfer(
+                    tx,
+                    row.id,
+                    { status: "failed", failure: "transfer_failed", completedAt: new Date().toISOString() },
+                    { from: ["streaming"] },
+                  ),
+                )
+                .catch(() => undefined);
               cut.meter.destroy(new Error("the transfer's deadline passed"));
               req.raw.destroy();
             },
