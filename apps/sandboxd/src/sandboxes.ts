@@ -1225,8 +1225,16 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           const net = network ?? (await ensureNetwork(target));
           await removeShell(c);
           const fresh = await createShell(target, lim.container, dockerRuntime, net, egressAddress);
+          // The same kill-switch re-checks as `ensure` (07.17.1.1.1 review WR-09): the create can wait tens of seconds
+          // on a loaded daemon, so a kill pushed meanwhile never gets the fresh shell started, and one pushed during the
+          // start (killOrg listed the running containers before this one ran) kills it at once.
+          requirePolicy(target.orgId, { runnable: true });
           const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
           if (started.status !== 204 && started.status !== 304) throw dockerDown();
+          if (limitsFor(target.orgId)?.killed) {
+            await killListed([{ Id: fresh.Id, Labels: fresh.Config?.Labels ?? {} }]);
+            throw failure("killed", 409, "this organization's sandboxes are stopped");
+          }
           lastActive.set(targetKey(target), clock.now());
           stopReasons.delete(targetKey(target));
           cpuLast.delete(targetKey(target));

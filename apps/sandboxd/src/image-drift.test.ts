@@ -370,4 +370,45 @@ describe("restart re-creates a drifted shell and restarts an up-to-date one in p
     expect(await refusal(s.sandboxes.restart(target))).toMatchObject({ code: "killed", status: 409 });
     expect(s.deletes()).toEqual([]);
   });
+
+  // 07.17.1.1.1 review WR-09: the re-create path re-checks the kill switch exactly like `ensure` does.
+  const hold = (s: ReturnType<typeof setup>, pattern: RegExp, then: () => void) => {
+    s.docker.beforeRequest = async (method, path) => {
+      if (method !== "POST" || !pattern.test(path)) return;
+      await new Promise<void>((r) => setTimeout(r, 50));
+      then();
+    };
+  };
+
+  it("the kill switch pushed while Docker holds the re-create: refused `killed`, the fresh shell never starts", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    s.docker.images.set(IMAGE, "sha256:new");
+    s.mark();
+    hold(s, /^\/containers\/create/, () =>
+      s.sandboxes.setPolicy(testPolicy(ORG, { killed: true, version: 2 })),
+    );
+    expect(await refusal(s.sandboxes.restart(target))).toMatchObject({ code: "killed", status: 409 });
+    expect(s.creates()).toHaveLength(1);
+    expect(s.starts()).toEqual([]);
+    expect(s.sbx()?.Running ?? false).toBe(false);
+    expect(s.emitted.some((e) => e.type === "state" && e.state === "running")).toBe(false);
+  });
+
+  it("the kill switch pushed while Docker holds the fresh shell's start: it is killed at once and refused `killed`", async () => {
+    const s = setup();
+    await s.sandboxes.ensure(target);
+    s.docker.images.set(IMAGE, "sha256:new");
+    s.mark();
+    hold(s, /^\/containers\/[^/]+\/start$/, () =>
+      s.sandboxes.setPolicy(testPolicy(ORG, { killed: true, version: 2 })),
+    );
+    expect(await refusal(s.sandboxes.restart(target))).toMatchObject({ code: "killed", status: 409 });
+    expect(s.sbx()?.Running).toBe(false);
+    expect(s.since().some((c) => c.method === "POST" && c.path.endsWith("/kill"))).toBe(true);
+    expect(s.emitted.some((e) => e.type === "state" && e.state === "running")).toBe(false);
+    expect(s.emitted).toContainEqual(
+      expect.objectContaining({ type: "state", target, kind: "sbx", state: "killed", reason: "kill_switch" }),
+    );
+  });
 });
