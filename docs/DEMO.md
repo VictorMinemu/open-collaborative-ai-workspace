@@ -1153,8 +1153,9 @@ there:
   files up to 25 MB (the organization's limit)."
 - **What is refused, both ways.** Any path outside the project (absolute, `..`, symlinks out of the tree), `.git`,
   `.ocw-worktrees`, `.claude`, `.codex`, `.mcp.json`, `.env` and `.env.*` (but `.env.example`), key and credential
-  files (`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, …). Symlinks, folders and other non-regular files are refused
-  too.
+  files (`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, …), also under another spelling the disk would open the same
+  way (other letter cases, look-alike or invisible characters, Windows `:` streams and `~1` short names). Symlinks,
+  folders, files with a second hard link and other non-regular files are refused too.
 - **Budgets.** At most 5 files each way per turn, inside the turn's 8 tool calls. Each move counts as one prompt of
   the profile's hourly prompt budget (30 by default), whatever its outcome.
 - **The device.** Bytes go over HTTPS between the device and its own workspace (`/api/v1/runtime/files/`, the
@@ -1182,6 +1183,9 @@ server updated to this runtime (Settings › Devices › the server › Runtime 
 4. **The bot's limit.** The bot's sheet › Work Zone › Limits › **Largest file**: 1 MB, Save. Ask it to put a 2 MB file
    in the session. The bot relays "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit)." Empty the
    field and Save.
+   Then set the bot's **Largest file** to 20 MB and Save, lower the organization's **Largest file a bot moves** to
+   10 MB, and in the bot's sheet change only **Prompts per hour** and Save: it saves, and the Largest file line says
+   10 MB applies, with a note that the bot's 20 MB is above it. Put both limits back.
 5. **Secrets.** Ask the bot to download `.env` from the session. It is refused.
 6. **Audit.** The rows show ids, sizes and hashes only, never a path:
    `select action, result, metadata from app.audit_events where action in ('bot.work_session_upload', 'bot.work_session_download', 'bot.work_session_refused') order by occurred_at desc limit 10;`

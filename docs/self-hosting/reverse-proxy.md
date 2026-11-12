@@ -148,6 +148,10 @@ nginx, Traefik, HAProxy, a cloud load balancer and others all work if they follo
    }
    ```
 
+   The API ends a transfer stream itself at the transfer's deadline (at most 10 minutes) or after 30 s without a
+   byte, so a proxy timeout of at least 60 s between bytes is enough; a longer one never keeps a stalled transfer
+   alive.
+
    **CDNs cap request bodies too** (Cloudflare's free and pro plans at 100 MB, business at 200 MB), whatever the
    proxy behind them allows. Keep the organization's limit (Settings › Work Zone policy › Bots › Largest file a bot
    moves) below your CDN's cap, or let devices reach the workspace without the CDN. The release gate checks the

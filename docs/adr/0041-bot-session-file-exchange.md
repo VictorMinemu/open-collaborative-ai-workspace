@@ -318,3 +318,71 @@ two limit fields of § 8.
   - downloads from a finished session (`session_not_running`);
   - release notes (the v0.3.1 release PR writes them).
 - AGENTS.md's "Bot Work Zone orchestration" row names the file exchange and cites this record next to ADR-0038.
+
+## Amendment (code review), 2026-11-11
+
+The phase's code review
+(`.planning/phases/07.17.1.1-bot-file-exchange-with-its-work-zone-sessions-upload-chat-at/07.17.1.1-REVIEW.md`, its Fix
+log names each commit and test) changed the documented behaviour below. The accepted text above stays as written;
+where it disagrees, this section decides.
+
+- **CR-01, § 6 (names are compared folded, not lowercased).** Replaces "segments compared case-insensitively".
+  Case-insensitive APFS and NTFS open a name under more spellings than lowercasing covers: `id_r` + U+017F + `a` opens
+  `id_rsa`, `.mcp.j` + U+017F + `on` opens `.mcp.json`, and the same letter after `.ocw-worktree` opens another session's
+  worktree. Both sides now compare every segment in one form, `canonicalFileName` in `@ocw/contracts`: NFKC, upper then
+  lower case (which applies U+017F, U+212A and U+0131), NFKC again. A segment whose folded form is not a plain segment
+  (`/`, `\`, `:`, `..`, a short name) is refused by `WorkSessionFilePath`. The daemon's second check also resolves an
+  existing final component to the name the volume stores (the native realpath) before deciding.
+- **CR-02, § 1 and § 6 (NTFS streams and short names).** `WorkSessionFilePath` also refuses `:` anywhere (an NTFS stream:
+  `.env::$DATA` reads `.env`) and `~` followed by a digit in any segment (an 8.3 short name: `ENV~1`, `GIT~1`), on every
+  platform. The Windows daemon refuses a device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, any
+  extension) as any segment. After it opens a file, and before an overwrite replaces one, the daemon decides the deny
+  list once more on the file's stored name (on Windows its long name).
+- **WR-05, § 1 (default-ignorable code points).** `WorkSessionFilePath` refuses every `Default_Ignorable_Code_Point`
+  (U+00AD, U+200B-200F, U+202A-202E, U+2060-206F, U+FEFF, variation selectors, tags), never stripping it: HFS+ ignores
+  some of them when it compares names (the git CVE-2014-9390 class).
+- **WR-03, § 6 (a download is decided on its open handle).** Completes "Read: a regular file only". Downloads run while
+  the runtime may write the tree, so after the open: a file with a second hard link is `path_not_allowed` (a link to
+  `~/.aws/config` passes every name check, and a second name inside the tree cannot be told apart); the parent must
+  still resolve to the real folder decided before the open (no swap for a link); the name must still name the opened
+  file (same `dev` and `ino`); on Linux the descriptor's own path (`/proc/self/fd`) must be inside the root. Files that
+  pnpm or another tool hard-links (a `node_modules` store) are therefore not downloadable.
+- **CR-03, § 12 (a redelivered command is idempotent and truthful).** The daemon keys file commands by their id (the
+  transfer id). A copy the hub redelivers while the first still runs is not answered; the running one acks with its
+  real outcome. A copy of a finished one is answered with the remembered outcome (bounded like the processed-command
+  set), never a blind `ok`. The API counts a move as done only when the ledger says `streamed`: after an `ok` it waits
+  up to 5 s for an upload GET's `streamed` record; a row still `streaming` or `pending` is `transfer_failed`. This
+  supersedes the 07.17.1.1-12 rule that took an upload's `streaming` row as done.
+- **WR-01, § 4 and § 12 (the transfer routes have their own deadlines).** Replaces "Fastify's request timeout stays
+  off; the transfer's deadline bounds the time" and completes "at most four streams per API process":
+  - the slots are per app (four), and **one organization holds at most two** of them, so one tenant (or a member who
+    paired devices) never blocks every other;
+  - every stream is cut at its deadline, or after 30 s without a byte (`BOT_FILE_LIMITS.transferIdleMs`); the cut fails
+    the row and frees the slot at once;
+  - an upload's GET needs a margin left before `expires_at` (a fifth of the deadline, at most 5 s; 410 and the row
+    failed `timeout` otherwise), is cut at that margin, and names the time left in `x-ocw-land-within-ms`. The daemon
+    lands nothing after it and acks `expired`, so a file never appears after the bot was told `transfer_timeout`. An
+    older daemon ignores the header; the cut still applies;
+  - a download's PUT that ends after `expires_at` never records its attachment.
+- **WR-02, § 12 (the waiter is live before the enqueue).** "The waiter subscribes before the command is enqueued" now
+  holds as written: the route awaits the Redis subscription before the transaction that enqueues the command, so a
+  device that refuses at once is never missed. The wait's deadline runs from that point.
+- **IN-01, § 5 and § 14 (the path does not outlive the move).** Completes "The path lives only in the command's own
+  payload": once `finish` decides the move, the command's payload (acked or failed, so never delivered again) is
+  cleared to `{}`.
+- **IN-02, § 4 (a tombstone decides).** An upload's GET serves the source only while its carrier message is live, as
+  the 07.15 rule says; a message deleted since fails the row `not_found` and answers 410.
+- **IN-08, § 3 (the audience relation, stated the right way round).** Replaces "The session's audience is a subset of
+  that conversation's readers, so a downloaded file never reaches a wider audience": a downloaded file reaches the
+  origin conversation's readers, who may be more than the session's audience, as the 07.16 reports do (by design;
+  research Pitfall 5). That is why the secrets deny list applies to downloads.
+- **IN-07, § 6 (instruction files stay movable, by choice).** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.agents/`,
+  `.envrc` and `.husky/` are not on the deny list. They are ordinary repository content that people ask bots to add or
+  fetch, an upload shows in the session's changes like any file, an upload after outside content needs the profile's
+  admin flag (§ 10), and the bot can already ask the runtime to write any of them with a prompt under the same rules.
+  The deny list keeps to what would let a move cross a boundary a prompt cannot: the repository's own database, other
+  sessions' worktrees, the runtimes' configuration and secrets.
+- **The profile's Largest file (WR-04, § 8).** The bot's sheet sends `fileMaxBytes` only when the person edited the
+  field (the API keeps the stored value otherwise), and checks it against the organization's limit only then. A stored
+  value above an organization limit lowered since shows the limit that applies and a note, never an error that blocks
+  an unrelated save. The organization's field (IN-06) is sent only when it changed.
