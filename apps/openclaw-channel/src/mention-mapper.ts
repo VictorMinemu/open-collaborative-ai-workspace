@@ -459,10 +459,11 @@ function attachmentsHowTo(tools: readonly string[]): string {
   const read = tools.includes(ATTACHMENT_TOOL_NAME);
   const copy = tools.includes(SANDBOX_IMPORT_TOOL);
   if (read && copy) {
-    return `Read one with ${ATTACHMENT_TOOL_NAME}; copy one into your sandbox with ${SANDBOX_IMPORT_TOOL}.`;
+    return `Read one with ${ATTACHMENT_TOOL_NAME}; copy one into your sandbox with ${SANDBOX_IMPORT_TOOL} and read it there with ocw-extract.`;
   }
   if (read) return `Read one with ${ATTACHMENT_TOOL_NAME}.`;
-  if (copy) return `Copy one into your sandbox with ${SANDBOX_IMPORT_TOOL}.`;
+  if (copy)
+    return `Copy one into your sandbox with ${SANDBOX_IMPORT_TOOL} and read it there with ocw-extract.`;
   return "None of these files can be read on this turn.";
 }
 
