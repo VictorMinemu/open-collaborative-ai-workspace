@@ -200,18 +200,20 @@ export function egressHostsCurrent(extraHosts: unknown, address: string | null):
 }
 
 /**
- * The document toolkit baked into the `sbx` image (07.17.1.1.1, D-03, PD-05; ADR-0043): it comes after the system paths
- * and before approved packages, in PATH and in PYTHONPATH. `bin` holds curated links only (e.g. `pdfplumber`), never
- * the venv's own `bin` (it has `python`, which would shadow bookworm's missing one).
+ * The document toolkit baked into the `sbx` image (07.17.1.1.1, D-03, PD-05; ADR-0043): its `bin` comes after the system
+ * paths and before approved package bins in PATH; in PYTHONPATH it comes after approved packages (07.17.1.1.1 review
+ * WR-08), so a version an approval pinned is never replaced by the toolkit's. `bin` holds curated links only (e.g.
+ * `pdfplumber`), never the venv's own `bin` (it has `python`, which would shadow bookworm's missing one).
  */
 export const TOOLS_DIR = "/opt/ocw-tools";
-/** The toolkit venv's site-packages (Python 3.11, the image's interpreter), first on the shell's PYTHONPATH. */
+/** The toolkit venv's site-packages (Python 3.11, the image's interpreter), after approved packages on PYTHONPATH. */
 export const TOOLS_SITE = `${TOOLS_DIR}/venv/lib/python3.11/site-packages`;
 
 /**
  * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): the toolkit (07.17.1.1.1) and then package bins after
- * the system paths (neither ever shadows a system command), Node and Python find the toolkit and approved packages (a
- * toolkit module wins over an approved package of the same name), and every tool uses the egress proxy by default.
+ * the system paths (neither ever shadows a system command), Node and Python find approved packages and then the toolkit
+ * (an approved package and the dependencies its approval pinned win over a toolkit module of the same name; ocw-extract
+ * runs isolated and never reads PYTHONPATH), and every tool uses the egress proxy by default.
  * Constants only: nothing here comes from a request, and no secret is ever set. Package runs (`runEnv`) never see the
  * toolkit.
  */
@@ -219,7 +221,7 @@ export const SHELL_ENV: readonly string[] = [
   `HOME=${WORKSPACE}`,
   `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${TOOLS_DIR}/bin:${PACKAGES_DIR}/bin`,
   `NODE_PATH=${PACKAGES_DIR}/node_modules`,
-  `PYTHONPATH=${TOOLS_SITE}:${PACKAGES_DIR}/python`,
+  `PYTHONPATH=${PACKAGES_DIR}/python:${TOOLS_SITE}`,
   ...PROXY_ENV,
 ];
 

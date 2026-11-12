@@ -99,7 +99,7 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
       "HOME=/workspace",
       "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin",
       "NODE_PATH=/opt/ocw-packages/node_modules",
-      "PYTHONPATH=/opt/ocw-tools/venv/lib/python3.11/site-packages:/opt/ocw-packages/python",
+      "PYTHONPATH=/opt/ocw-packages/python:/opt/ocw-tools/venv/lib/python3.11/site-packages",
       "HTTP_PROXY=http://sandbox-egress:3128",
       "HTTPS_PROXY=http://sandbox-egress:3128",
       "http_proxy=http://sandbox-egress:3128",
@@ -111,7 +111,7 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     for (const line of SHELL_ENV) expect(line).not.toMatch(/OCW_|TOKEN|SECRET|PASSWORD|@/i);
   });
 
-  it("puts the toolkit after the system paths and before approved packages, never the venv's own bin (07.17.1.1.1)", () => {
+  it("puts the toolkit bin between the system and package bins and its site after approved packages (07.17.1.1.1)", () => {
     expect(TOOLS_DIR).toBe("/opt/ocw-tools");
     expect(TOOLS_SITE).toBe("/opt/ocw-tools/venv/lib/python3.11/site-packages");
     const value = (name: string) => {
@@ -123,7 +123,9 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     expect(path.indexOf("/opt/ocw-tools/bin")).toBe(path.indexOf("/bin") + 1);
     expect(path.indexOf("/opt/ocw-packages/bin")).toBe(path.indexOf("/opt/ocw-tools/bin") + 1);
     const pythonPath = value("PYTHONPATH");
-    expect(pythonPath).toEqual([TOOLS_SITE, `${PACKAGES_DIR}/python`]);
+    // 07.17.1.1.1 review WR-08: approved packages come first, so the versions an approval pinned (e.g. numpy<2) win
+    // over the toolkit's; ocw-extract runs isolated (-I) and never reads PYTHONPATH.
+    expect(pythonPath).toEqual([`${PACKAGES_DIR}/python`, TOOLS_SITE]);
     for (const line of SHELL_ENV) expect(line).not.toContain("/opt/ocw-tools/venv/bin");
   });
 

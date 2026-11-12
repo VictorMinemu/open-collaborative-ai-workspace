@@ -7,8 +7,10 @@ Runs as 10001 in the hardened, network-less container (`infra/sandbox/test/run-s
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
+import tempfile
 import unittest
 
 TOOLS = "/opt/ocw-tools"
@@ -17,7 +19,10 @@ SITE = f"{TOOLS}/venv/lib/python3.11/site-packages"
 LOCK = f"{TOOLS}/requirements.lock"
 LAUNCHER = "/usr/local/bin/ocw-extract"
 LIB = f"{TOOLS}/lib/ocw_extract"
-TOOLKIT_PYTHONPATH = f"{SITE}:/opt/ocw-packages/python"
+# The bot shell's PYTHONPATH (apps/sandboxd/src/spec.ts SHELL_ENV): approved packages first, then the toolkit
+# (07.17.1.1.1 review WR-08), so the versions an approval pinned win over the toolkit's.
+PACKAGES_PY = "/opt/ocw-packages/python"
+TOOLKIT_PYTHONPATH = f"{PACKAGES_PY}:{SITE}"
 SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # What a bot's own scripts import with the system python3 (D-03). xlrd was dropped (its license): .xls goes through
 # LibreOffice inside ocw-extract.
@@ -130,6 +135,41 @@ class Venv(unittest.TestCase):
         files = json.loads(out)
         for module in BOT_MODULES:
             self.assertTrue(files[module].startswith(SITE + "/"), (module, files[module]))
+
+    def test_the_image_default_pythonpath_is_the_shells(self):
+        self.assertEqual(os.environ.get("PYTHONPATH"), TOOLKIT_PYTHONPATH)
+
+    def test_an_approved_packages_pinned_dependency_wins_over_the_toolkits(self):
+        """An approval that pinned numpy 1.x (installed into /opt/ocw-packages/python) keeps it: the toolkit's numpy 2
+        never shadows it. A stand-in package tree takes the packages volume's place (the image's is read-only)."""
+        pkgs = tempfile.mkdtemp(prefix="pkgs-", dir="/workspace")
+        try:
+            os.makedirs(f"{pkgs}/numpy")
+            with open(f"{pkgs}/numpy/__init__.py", "w", encoding="utf-8") as f:
+                f.write('__version__ = "1.26.4"\n')
+            env = {
+                "PATH": SYSTEM_PATH,
+                "LC_ALL": "C.UTF-8",
+                "HOME": "/tmp",
+                # The image default mirrors the shell (asserted above), with the stand-in in the volume's place.
+                "PYTHONPATH": os.environ["PYTHONPATH"].replace(PACKAGES_PY, pkgs),
+            }
+            code = (
+                "import json, numpy, pdfplumber;"
+                "print(json.dumps([numpy.__version__, numpy.__file__, pdfplumber.__file__]))"
+            )
+            rc, out, err = run(["/usr/bin/python3", "-c", code], env=env)
+            self.assertEqual(rc, 0, err)
+            version, numpy_file, plumber_file = json.loads(out)
+            self.assertEqual(version, "1.26.4")
+            self.assertTrue(numpy_file.startswith(pkgs + "/"), numpy_file)
+            self.assertTrue(plumber_file.startswith(SITE + "/"), plumber_file)
+            # ocw-extract runs isolated (-I): the approved tree never reaches it, whatever the order.
+            rc, out, err = run([LAUNCHER, "--types"], env=env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("pdf", out.split())
+        finally:
+            shutil.rmtree(pkgs, ignore_errors=True)
 
 
 if __name__ == "__main__":

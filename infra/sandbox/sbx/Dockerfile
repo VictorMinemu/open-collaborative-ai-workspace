@@ -81,11 +81,12 @@ COPY --chmod=0755 ocw-extract /usr/local/bin/ocw-extract
 
 # sandboxd sets the whole environment of every container it creates (spec.ts SHELL_ENV); this default only keeps a
 # hand-run container in the same order: the document toolkit (07.17.1.1.1, D-03) and then approved package bins after
-# the system paths, never before them; Python finds the toolkit's venv before approved packages.
+# the system paths, never before them; Python finds approved packages before the toolkit's venv (07.17.1.1.1 review
+# WR-08: a version an approval pinned wins; ocw-extract runs isolated and never reads PYTHONPATH).
 ENV HOME=/workspace \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin \
     NODE_PATH=/opt/ocw-packages/node_modules \
-    PYTHONPATH=/opt/ocw-tools/venv/lib/python3.11/site-packages:/opt/ocw-packages/python
+    PYTHONPATH=/opt/ocw-packages/python:/opt/ocw-tools/venv/lib/python3.11/site-packages
 WORKDIR /workspace
 USER 10001:10001
 # sandboxd always sets Cmd and Init (docker-init as PID 1); this default only keeps the container idle.

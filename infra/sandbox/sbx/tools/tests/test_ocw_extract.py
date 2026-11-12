@@ -30,7 +30,7 @@ BOT_ENV = {
     "HOME": WS,
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin",
     "NODE_PATH": "/opt/ocw-packages/node_modules",
-    "PYTHONPATH": "/opt/ocw-tools/venv/lib/python3.11/site-packages:/opt/ocw-packages/python",
+    "PYTHONPATH": "/opt/ocw-packages/python:/opt/ocw-tools/venv/lib/python3.11/site-packages",
     "HTTP_PROXY": "http://sandbox-egress.invalid:3128",
     "HTTPS_PROXY": "http://sandbox-egress.invalid:3128",
     "http_proxy": "http://sandbox-egress.invalid:3128",
