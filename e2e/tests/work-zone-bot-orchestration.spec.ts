@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, request, test } from "@playwright/test";
 import type { BotWorkZoneProfileInput } from "../../packages/contracts/src/bot-work-zone.ts";
+import { BOT_FILE_LIMITS, fileSizeLabel } from "../../packages/contracts/src/work-session-files.ts";
+import { WorkZonePolicyView } from "../../packages/contracts/src/work-zone-policy.ts";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { clearPendingApprovals, proposeWorkZoneFromDm } from "../support/approvals";
@@ -57,14 +59,18 @@ import { ADMIN, API_URL } from "./env";
  *      Ana presses Start; the session's first prompt carries "After outside content".
  *   5. Sam's personal bot, which has no profile, still proposes with `ocw_start_work_zone` exactly as
  *      work-zone-proposals.spec.ts expects.
- * 07.17.1.1-14 (BWF-01 … BWF-04; D-01 … D-04, PD-24): files between the chat and the bot's session.
- *   6. Ana attaches `notes.md` in her thread and asks Atlas to put it in its idle session: `ocw_work_session_upload`
+ * 07.17.1.1-14 (BWF-01 … BWF-04, BWF-07; D-01 … D-04, D-07, PD-20, PD-24): files between the chat and the bot's session.
+ *   6. Settings › Work Zone policy shows "Largest file a bot moves" with the server's ceiling; the desktop run sets
+ *      Atlas's "Largest file" to 1 MB in its sheet (the line names this bot's limit), the phone run checks both fields.
+ *   7. Ana attaches `notes.md` in her thread and asks Atlas to put it in its idle session: `ocw_work_session_upload`
  *      lands it in the session's tree through the real daemon, and the session's changes list it untracked. She asks
  *      for the README: `ocw_work_session_download` brings it back as the reply's attachment, and her download is the
  *      scratch repository's README byte for byte.
+ *   8. A 2 MB file with Atlas at 1 MB is refused before it moves (`file_too_large`, the composed sentence verbatim);
+ *      nothing new appears in the session's changes.
  * Every screen passes axe and never scrolls sideways (44 px targets on phones); review screenshots `0716-*` and
  * `071711-*` in light and dark when OCW_E2E_SCREENSHOT_DIR is set. The spec restores the organization's Work Zone policy
- * and removes its bots, devices and team project.
+ * and Atlas's Largest file, and removes its bots, devices and team project.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -82,8 +88,13 @@ const TAINTED_NOTICE = "Proposed after reading outside content. Read the prompt 
 const THREAD = '[data-testid="thread-panel"]';
 const UPLOAD = "ocw_work_session_upload";
 const DOWNLOAD = "ocw_work_session_download";
+const MIB = 1024 * 1024;
 /** Where Ana's file goes in the session's tree (repo-relative, a folder the scratch repository does not have). */
 const NOTES_PATH = "docs/notes.md";
+/** Atlas's "Largest file" for the refusal (D-07), and the line and sentence that name it. */
+const ATLAS_FILE_MAX = MIB;
+const ATLAS_LIMIT_LINE = "This bot moves files up to 1 MB (this bot's limit).";
+const TOO_LARGE_SENTENCE = "That file is 2 MB. This bot moves files up to 1 MB (this bot's limit).";
 
 let w = "1440";
 let mobile = false;
@@ -105,6 +116,8 @@ let eng: { id: string; name: string };
 const createdBots: string[] = [];
 /** Atlas's idle session from "Ana asks @Atlas …" (07.17.1.1-14 moves files in and out of it). */
 let atlasSession: { sessionId: string; rootId: string; cardId: string } | null = null;
+/** Atlas's "Largest file" was changed (afterAll puts it back, PD-24). */
+let fileMaxChanged = false;
 
 /** `[[call <tool> <json>]]`: what the fake cell runs for the bot (the same grammar as infra/fake-model). */
 const call = (tool: string, args: Record<string, unknown>) => `[[call ${tool} ${JSON.stringify(args)}]]`;
@@ -318,6 +331,30 @@ async function openChanges(page: Page, path: string): Promise<Locator> {
   return panel.getByTestId("changed-file").filter({ hasText: path }).first();
 }
 
+/**
+ * Settings › Work Zone policy: "Largest file a bot moves" (`bot-file-max`) shows what applies (the organization's value,
+ * never above the server's ceiling, in whole MB) and its hint names this server's ceiling (D-07, PD-20).
+ */
+async function checkBotFileMaxField(page: Page) {
+  const view = WorkZonePolicyView.parse(await (await admin.get("/api/v1/work-zone-policy")).json());
+  const ceiling = view.serverFileMaxBytes;
+  expect(ceiling, "the API reports the server's ceiling").toBeDefined();
+  const stored = view.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes;
+  const shown = Math.min(Math.floor((ceiling as number) / MIB), Math.max(1, Math.floor(stored / MIB)));
+  await page.goto(`${BASE_URL}/settings/work-zone-policy`);
+  const field = page.getByTestId("bot-file-max");
+  await expect(field).toBeVisible({ timeout: 15_000 });
+  await field.scrollIntoViewIfNeeded();
+  await expect(field).toHaveValue(String(shown));
+  await expect(page.getByLabel("Largest file a bot moves")).toHaveAttribute("data-testid", "bot-file-max");
+  await expect(page.getByTestId("work-zone-policy-settings")).toContainText(
+    `Up to ${fileSizeLabel(ceiling as number)} on this server.`,
+  );
+  await expectFingerSized(field);
+  await checkScreen(page, "071711-limits-policy", '[data-testid="work-zone-policy-settings"]');
+  await captureReview(page, `071711-limits-policy-${w}`);
+}
+
 // biome-ignore lint/correctness/noEmptyPattern: Playwright requires a destructured fixtures argument before testInfo
 test.beforeAll(async ({}, info) => {
   test.setTimeout(180_000);
@@ -378,6 +415,10 @@ test.beforeAll(async ({}, info) => {
 test.afterAll(async () => {
   await cell?.stop();
   if (admin) {
+    // PD-24: Atlas's Largest file goes back to the organization's (null) before the spec removes it.
+    if (fileMaxChanged && atlas && device) {
+      await saveBotProfile(admin, atlas.id, profileInput(), { fileMaxBytes: null }).catch(() => undefined);
+    }
     if (team) await removeTeamProject(admin, team).catch(() => undefined);
     for (const id of createdBots.splice(0)) await admin.delete(`/api/v1/agents/${id}`).catch(() => undefined);
     if (policyBefore) await setWorkZonePolicy(admin, policyBefore).catch(() => undefined);
@@ -398,6 +439,9 @@ test("desktop: the admin saves Atlas's Work Zone profile in its sheet and allows
   test.setTimeout(150_000);
   const s = await openAs(browser, ADMIN, "desktop");
   try {
+    // 07.17.1.1-14 (D-07): the organization's "Largest file a bot moves" and this server's ceiling.
+    await checkBotFileMaxField(s.page);
+
     const sheet = await openBotSheet(s.page, atlas.name);
     const section = sheet.getByTestId("work-zone-profile");
     await section.scrollIntoViewIfNeeded();
@@ -424,6 +468,12 @@ test("desktop: the admin saves Atlas's Work Zone profile in its sheet and allows
     await expect(section).toContainText(
       "Full access also needs the device's own opt-in and its owner's consent for this bot.",
     );
+    // 07.17.1.1-14 (D-07): Atlas moves files up to 1 MB; the line under the limits names this bot's limit at once.
+    const fileMax = section.getByTestId("work-zone-file-max");
+    await fileMax.scrollIntoViewIfNeeded();
+    await fileMax.fill(String(ATLAS_FILE_MAX / MIB));
+    await expect(section.getByTestId("work-zone-file-limit")).toHaveText(ATLAS_LIMIT_LINE);
+    fileMaxChanged = true;
     await section.getByTestId("work-zone-save").click();
 
     // Saved, sponsored by the admin, inactive until the device allows the bot.
@@ -436,12 +486,18 @@ test("desktop: the admin saves Atlas's Work Zone profile in its sheet and allows
       runtime: "claude-code",
       defaultModel: "opus",
       maxMode: "fullAccess",
+      fileMaxBytes: ATLAS_FILE_MAX,
       sponsor: { id: adminId },
     });
     expect(saved?.projects.map((p) => p.id).sort()).toEqual([billingId, ledgerId].sort());
     await section.scrollIntoViewIfNeeded();
     await checkScreen(s.page, "0716-profile", '[data-testid="work-zone-profile"]');
     await captureReview(s.page, `0716-profile-${w}`);
+    // The saved sheet still says 1 MB and names this bot's limit (PD-20).
+    await expect(section.getByTestId("work-zone-file-max")).toHaveValue(String(ATLAS_FILE_MAX / MIB));
+    await expect(section.getByTestId("work-zone-file-limit")).toHaveText(ATLAS_LIMIT_LINE);
+    await section.getByTestId("work-zone-file-limit").scrollIntoViewIfNeeded();
+    await captureReview(s.page, `071711-limits-${w}`);
 
     // Settings › Devices: the server is isolated; Atlas asks first; allow it, then its Full access checkbox.
     const { card, block } = await openDeviceBots(s.page);
@@ -490,6 +546,14 @@ test("phone: the bot's Work Zone section and the device's bot block are 44 px ta
       '[data-testid="work-zone-profile"]',
     ]);
     await captureReview(s.page, `0716-profile-${w}`);
+    // 07.17.1.1-14 (D-07, PD-20): the bot's "Largest file" (empty: the organization's) and the line that names it.
+    const fileMax = section.getByTestId("work-zone-file-max");
+    await fileMax.scrollIntoViewIfNeeded();
+    await expect(fileMax).toBeVisible();
+    await expect(fileMax).toHaveValue("");
+    await expectFingerSized(fileMax);
+    await expect(section.getByTestId("work-zone-file-limit")).toContainText("This bot moves files up to");
+    await captureReview(s.page, `071711-limits-${w}`);
 
     const { block } = await openDeviceBots(s.page);
     const allowed = block.locator(`[data-testid="bot-consent-row"][data-agent-id="${atlas.id}"]`);
@@ -499,6 +563,9 @@ test("phone: the bot's Work Zone section and the device's bot block are 44 px ta
       '[data-testid="device-bot-consents"]',
     ]);
     await captureReview(s.page, `0716-consent-${w}`);
+
+    // 07.17.1.1-14: the organization's "Largest file a bot moves" at 390.
+    await checkBotFileMaxField(s.page);
   } finally {
     await s.context.close();
   }
@@ -719,6 +786,62 @@ test("Ana's file goes into Atlas's session and shows in its changes; the README 
     expect(download.suggestedFilename()).toBe("README.md");
     expect(readFileSync(await download.path()).equals(readme), "the README's bytes").toBe(true);
     expect(page.url().startsWith(BASE_URL)).toBe(true);
+  } finally {
+    await ana.context.close();
+  }
+});
+
+test("a 2 MB file with Atlas at 1 MB is refused before it moves: the sentence names this bot's limit, the session gets nothing", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const { sessionId, rootId } = await idleAtlasSession();
+  // D-07: Atlas at 1 MB (the desktop run already saved it in the sheet; the phone run sets it here).
+  await saveBotProfile(admin, atlas.id, profileInput(), { fileMaxBytes: ATLAS_FILE_MAX });
+  fileMaxChanged = true;
+  await expectProfileActive(admin, atlas.id);
+  expect((await botProfile(admin, atlas.id)).profile?.fileMaxBytes).toBe(ATLAS_FILE_MAX);
+
+  const name = "ledger-dump.txt";
+  const fileId = await upload(anaApi, eng.id, {
+    name,
+    type: "text/plain",
+    bytes: Buffer.alloc(2 * MIB, "ledger line\n"),
+  });
+  const from = cell.workSessionRequests.length;
+  await postAs(
+    anaApi,
+    eng.id,
+    `@${atlas.username} put this one in too ${call(UPLOAD, { workSessionId: sessionId, attachmentId: "{{attachment:0}}", path: `docs/${name}` })}`,
+    { threadRootId: rootId, attachmentIds: [fileId] },
+  );
+  const refused = await nextFileCall(from, UPLOAD);
+  expect(refused.status, JSON.stringify(refused.body)).toBe(200);
+  expect(refused.body, JSON.stringify(refused.body)).toMatchObject({
+    kind: "refused",
+    code: "file_too_large",
+    sentence: TOO_LARGE_SENTENCE,
+    limit: { bytes: ATLAS_FILE_MAX, source: "bot" },
+    sizeBytes: 2 * MIB,
+  });
+
+  const ana = await openAs(browser, ANA, mobile ? "mobile" : "desktop");
+  const { page } = ana;
+  try {
+    const panel = await openThread(page, rootId);
+    // A retry of the spec adds rows of its own attempt: the latest reply with the line is enough.
+    await expect(botReply(panel, `Tool ${UPLOAD}: refused (file_too_large)`)).toBeVisible({
+      timeout: 30_000,
+    });
+    await checkScreen(page, "071711-refusal", THREAD);
+    await captureReview(page, `071711-refusal-${w}`);
+
+    // Nothing moved: the session's changes list no such file (the panel has loaded: the fake turn's file is there).
+    await page.goto(`${BASE_URL}/work-zone/${sessionId}`);
+    await expect(page.getByTestId("session-view")).toBeVisible({ timeout: 15_000 });
+    await openChanges(page, name);
+    await expect(page.getByTestId("changed-file").first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("changed-file").filter({ hasText: name })).toHaveCount(0);
   } finally {
     await ana.context.close();
   }

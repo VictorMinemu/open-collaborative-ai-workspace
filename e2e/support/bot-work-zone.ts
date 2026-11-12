@@ -67,14 +67,22 @@ export async function botProfile(api: APIRequestContext, agentId: string): Promi
   return parsed(`GET ${path}`, await api.get(path), BotWorkZoneProfileView);
 }
 
-/** Saves the bot's whole Work Zone profile as `api` (who becomes its sponsor, PD-04). */
+/**
+ * Saves the bot's whole Work Zone profile as `api` (who becomes its sponsor, PD-04). `opts.fileMaxBytes` sets its
+ * "Largest file" (07.17.1.1 D-07: null = the organization's value); absent, `input` decides.
+ */
 export async function saveBotProfile(
   api: APIRequestContext,
   agentId: string,
   input: BotWorkZoneProfileInput,
+  opts: { fileMaxBytes?: number | null } = {},
 ): Promise<BotWorkZoneProfileView> {
   const path = `/api/v1/agents/${agentId}/work-zone-profile`;
-  return parsed(`PUT ${path}`, await api.put(path, { data: input }), BotWorkZoneProfileView);
+  const data: BotWorkZoneProfileInput =
+    opts.fileMaxBytes === undefined ? input : { ...input, fileMaxBytes: opts.fileMaxBytes };
+  const view = await parsed(`PUT ${path}`, await api.put(path, { data }), BotWorkZoneProfileView);
+  if (opts.fileMaxBytes !== undefined) expect(view.profile?.fileMaxBytes ?? null).toBe(opts.fileMaxBytes);
+  return view;
 }
 
 /** The device lets the bot run sessions there, with or without its own Full access checkbox (D-03, D-04). */
