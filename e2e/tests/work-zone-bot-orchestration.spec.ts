@@ -744,6 +744,8 @@ test("Ana's file goes into Atlas's session and shows in its changes; the README 
     const row = await openChanges(page, NOTES_PATH);
     await expect(row).toBeVisible({ timeout: 30_000 });
     await expect(row.locator("span").first()).toHaveText("U");
+    // Review WR-07: the panel's green counts and A/U letters pass axe (contrast included), light and dark, both widths.
+    await checkScreen(page, "071711-exchange-changes", '[data-testid="changes-panel"]');
     await checkScreen(page, "071711-exchange-session", '[data-testid="session-header"]');
     await captureReview(page, `071711-exchange-session-${w}`);
 
