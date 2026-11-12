@@ -65,11 +65,17 @@ export function transferDeadlineMs(bytes: number): number {
 
 // ---------------------------------------------------------------- the path rule (D-02, D-03, principle 7)
 
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
+
 /**
  * C0 controls and DEL, and the bidi embeddings, overrides, isolates and marks (a "fdp.exe" spoof). Compared by code
  * point, so no such character ever appears in this source file.
  */
 function hasUnsafePathChar(p: string): boolean {
+  // Review WR-05: every Default_Ignorable_Code_Point (U+00AD, U+200B-200F, U+202A-202E, U+2060-206F, U+FEFF, the
+  // variation selectors, the tags): HFS+ ignores some of them when it compares names, so ".en" + U+200C + "v" opened
+  // ".env" there. Refused, never stripped.
+  if (DEFAULT_IGNORABLE.test(p)) return true;
   for (const ch of p) {
     const c = ch.codePointAt(0) ?? 0;
     if (c <= 0x1f || c === 0x7f || c === 0x200e || c === 0x200f) return true;

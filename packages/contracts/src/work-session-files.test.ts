@@ -112,6 +112,20 @@ describe("WorkSessionFilePath (07.17.1.1 D-02, D-03, principle 7)", () => {
     }
   });
 
+  it("refuses every code point a file system may ignore when it compares names (review WR-05)", () => {
+    // HFS+ ignores U+200C, U+200D, U+206A-206F and U+FEFF (git CVE-2014-9390): ".en<ZWNJ>v" opened ".env" there.
+    const ignorable = [
+      0xad, 0x34f, 0x61c, 0x115f, 0x180b, 0x200b, 0x200c, 0x200d, 0x2060, 0x2064, 0x206a, 0x206f, 0xfe00,
+      0xfe0f, 0xfeff, 0xe0001,
+    ];
+    for (const cp of ignorable) {
+      const ch = String.fromCodePoint(cp);
+      expect(ok(`.en${ch}v`), cp.toString(16)).toBe(false);
+      expect(ok(`docs/.mcp${ch}.json`), cp.toString(16)).toBe(false);
+      expect(ok(`a${ch}b/c.md`), cp.toString(16)).toBe(false);
+    }
+  });
+
   it("refuses a segment ending in a dot or a space, a segment over 255 characters and a path over 1 024", () => {
     expect(ok("notes.")).toBe(false);
     expect(ok("notes ")).toBe(false);
