@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { createPermissionService } from "../organization";
-import { currentTurnTools, findBot, governanceList } from "./index";
+import { currentTurn, currentTurnTools, findBot, governanceList, loadPolicy, loadTaskPolicy } from "./index";
 
 /**
  * 03.1-03 (BOT-04, BOT-05, BOT-10, SC4): bot capabilities, the org policy and personal-bot governance through
@@ -754,5 +754,141 @@ describe("per-turn policy (D-07, SC4)", () => {
     for (const a of snap.agents as Json[]) {
       for (const name of SESSION_TOOLS) expect(a.capabilities.tools).not.toContain(name);
     }
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1.1.2-04: "Allow long tasks" and its limits
+
+describe("long tasks policy (07.17.1.1.2 D-04, E11, E22)", () => {
+  let adminId: string;
+  let orgB: string;
+  let userB: string;
+
+  const putPolicy = (body: Json) => admin.request("PUT", "/api/v1/bot-policy", body);
+  const taskPolicyOf = async (agentId: string) => {
+    const { db } = stack.built.core;
+    return db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+      const row = await findBot(tx, agentId);
+      if (!row) throw new Error("bot not found");
+      return loadTaskPolicy(tx, row);
+    });
+  };
+  const longTasksOnTurn = async (agentId: string, humanUserId: string, conversationKind: string) => {
+    const { core } = stack.built;
+    const turn = await core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      currentTurn(tx, createPermissionService(core), { agentId, humanUserId, conversationKind }, core.env),
+    );
+    return turn.longTasks;
+  };
+
+  beforeAll(async () => {
+    adminId = (
+      await su.query("select user_id from app.org_members where organization_id = $1 and role = 'admin'", [
+        orgId,
+      ])
+    ).rows[0].user_id as string;
+    orgB = randomUUID();
+    userB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Bea', $2)", [
+      userB,
+      `${userB}@other.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Bea', 'admin')",
+      [orgB, userB],
+    );
+  });
+
+  it("an organization that never chose answers long tasks allowed with 40 turns, 8 hours and 10 running", async () => {
+    const p = await ok(admin.request("GET", "/api/v1/bot-policy"));
+    expect(p.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(p.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+  });
+
+  it("a PUT of one limit saves only it, audited as tasks.maxTurns; out-of-range limits are 400; members 403", async () => {
+    const before = (await audits("bot_policy.updated")).length;
+    const p = await ok(putPolicy({ tasks: { maxTurns: 12 } }));
+    expect(p.tasks).toEqual({ maxTurns: 12, maxHours: 8, maxRunning: 10 });
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).tasks).toEqual({
+      maxTurns: 12,
+      maxHours: 8,
+      maxRunning: 10,
+    });
+    const rows = await audits("bot_policy.updated");
+    expect(rows).toHaveLength(before + 1);
+    expect(rows.at(-1)!.metadata.changed).toEqual(["tasks.maxTurns"]);
+    const stored = (
+      await su.query(
+        "select task_max_turns, task_max_hours, max_running_tasks from app.bot_policies where organization_id = $1",
+        [orgId],
+      )
+    ).rows[0];
+    expect(stored).toEqual({ task_max_turns: 12, task_max_hours: 8, max_running_tasks: 10 });
+
+    for (const tasks of [{ maxTurns: 201 }, { maxHours: 0 }, { maxRunning: 101 }]) {
+      expect((await putPolicy({ tasks })).status, JSON.stringify(tasks)).toBe(400);
+    }
+    expect((await sam.request("PUT", "/api/v1/bot-policy", { tasks: { maxTurns: 200 } })).status).toBe(403);
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).tasks.maxTurns).toBe(12);
+    expect(await audits("bot_policy.updated")).toHaveLength(before + 1);
+  });
+
+  it("loadTaskPolicy: the bot's toggle, then the organization's switch, then the personal one, with the limits", async () => {
+    expect(await taskPolicyOf(teamBotId)).toEqual({
+      enabled: true,
+      reason: null,
+      maxTurns: 12,
+      maxHours: 8,
+      maxRunning: 10,
+    });
+    await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: false } } }));
+    try {
+      expect(await taskPolicyOf(samBotId)).toMatchObject({ enabled: false, reason: "personal_policy" });
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: true, reason: null });
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: false, personal: false } } }));
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: "org_policy" });
+      const rows = await audits("bot_policy.updated");
+      expect(rows.at(-1)!.metadata.changed).toEqual(["capabilities.longTasks"]);
+    } finally {
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } }));
+    }
+    const stored = (await su.query("select capabilities from app.agents where id = $1", [teamBotId])).rows[0]
+      .capabilities as Json;
+    await su.query("update app.agents set capabilities = $2 where id = $1", [
+      teamBotId,
+      { ...stored, longTasks: false },
+    ]);
+    try {
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: null });
+    } finally {
+      await su.query("update app.agents set capabilities = $2 where id = $1", [teamBotId, stored]);
+    }
+  });
+
+  it("every turn knows whether its bot may run a long task (computeTurn.longTasks)", async () => {
+    expect(await longTasksOnTurn(teamBotId, adminId, "channel")).toBe(true);
+    await ok(putPolicy({ capabilities: { longTasks: { orgWide: false, personal: true } } }));
+    try {
+      expect(await longTasksOnTurn(teamBotId, adminId, "channel")).toBe(false);
+      expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(false);
+    } finally {
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } }));
+    }
+    expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(true);
+  });
+
+  it("organization B reads its own defaults after A saved limits (E22)", async () => {
+    const { db } = stack.built.core;
+    const policyB = await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => loadPolicy(tx));
+    expect(policyB.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+    expect(policyB.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(policyB.updatedAt).toBeNull();
+    // Not vacuous: A's saved limit is read in A.
+    const policyA = await db.withTenant({ organizationId: orgId, userId: adminId }, (tx) => loadPolicy(tx));
+    expect(policyA.tasks.maxTurns).toBe(12);
   });
 });

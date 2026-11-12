@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { TurnConsult } from "./agent-chains";
-import { TurnTask } from "./bot-tasks";
+import { BOT_TASK_LIMITS, TurnTask } from "./bot-tasks";
 import { TurnWorkZone } from "./bot-work-zone";
 import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
@@ -27,8 +27,11 @@ import { SANDBOX_LIMITS } from "./sandbox";
 export const ReplyMode = z.enum(["mentions", "all"]);
 export type ReplyMode = z.infer<typeof ReplyMode>;
 
-/** Built-in capabilities governed by the org policy (`replyModeAll` = reply mode `all`). */
-export const BuiltinCapability = z.enum(["internet", "memory", "dateTime", "replyModeAll"]);
+/**
+ * Built-in capabilities governed by the org policy (`replyModeAll` = reply mode `all`). `longTasks` (07.17.1.1.2 D-04):
+ * "Allow long tasks", a bot keeps working across turns on its own, within `BotPolicy.tasks`.
+ */
+export const BuiltinCapability = z.enum(["internet", "memory", "dateTime", "replyModeAll", "longTasks"]);
 export type BuiltinCapability = z.infer<typeof BuiltinCapability>;
 
 /** Highest daily limit any bot may have (team bots; personal bots are capped by the org policy). */
@@ -50,6 +53,12 @@ export const BotCapabilities = z.object({
    */
   sandbox: z.boolean().default(false),
   browser: z.boolean().default(false),
+  /**
+   * Phase 07.17.1.1.2 (D-04): the bot may start a long task that keeps working across turns. On by default (a stored
+   * object without it parses as on); effective only with the organization's "Allow long tasks" switch (and its
+   * personal sub-switch for a personal bot).
+   */
+  longTasks: z.boolean().default(true),
 });
 export type BotCapabilities = z.infer<typeof BotCapabilities>;
 
@@ -63,6 +72,7 @@ export const DEFAULT_CAPABILITIES: Record<AgentScope, BotCapabilities> = {
     dailyLimit: 100,
     sandbox: false,
     browser: false,
+    longTasks: true,
   },
   personal: {
     internet: false,
@@ -72,6 +82,7 @@ export const DEFAULT_CAPABILITIES: Record<AgentScope, BotCapabilities> = {
     dailyLimit: 30,
     sandbox: false,
     browser: false,
+    longTasks: true,
   },
 };
 
@@ -89,18 +100,32 @@ export type CapabilityPolicyEntry = z.infer<typeof CapabilityPolicyEntry>;
 export const SearchProvider = z.enum(["duckduckgo", "searxng"]);
 export type SearchProvider = z.infer<typeof SearchProvider>;
 
+/**
+ * Phase 07.17.1.1.2 (D-04, PD-09): the organization's long-task limits. A task snapshots `maxTurns` and `maxHours` at
+ * start; `maxRunning` caps the organization's active tasks (0 = no task may start).
+ */
+export const BotTaskPolicyLimits = z.object({
+  maxTurns: z.number().int().min(1).max(BOT_TASK_LIMITS.maxTurnsCap),
+  maxHours: z.number().int().min(1).max(BOT_TASK_LIMITS.maxHoursCap),
+  maxRunning: z.number().int().min(0).max(BOT_TASK_LIMITS.maxRunningCap),
+});
+export type BotTaskPolicyLimits = z.infer<typeof BotTaskPolicyLimits>;
+
 export const BotPolicy = z.object({
   capabilities: z.object({
     internet: CapabilityPolicyEntry,
     memory: CapabilityPolicyEntry,
     dateTime: CapabilityPolicyEntry,
     replyModeAll: CapabilityPolicyEntry,
+    longTasks: CapabilityPolicyEntry,
   }),
   searchProvider: SearchProvider,
   maxPersonalBotsPerUser: z.number().int().min(0).max(20),
   personalDailyLimitMax: z.number().int().min(1).max(10_000),
   /** `provider/modelId` entries; empty = every allowed model of the organization. */
   personalAllowedModels: z.array(z.string().max(250)).max(100),
+  /** Phase 07.17.1.1.2 (D-04): the long-task limits. */
+  tasks: BotTaskPolicyLimits,
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -119,14 +144,22 @@ const ALLOW = { orgWide: true, personal: true } as const;
 
 /** Defaults when an organization has no `bot_policies` row: everything allowed (D-06). */
 export const DEFAULT_BOT_POLICY: Omit<BotPolicy, "updatedAt"> = {
-  capabilities: { internet: ALLOW, memory: ALLOW, dateTime: ALLOW, replyModeAll: ALLOW },
+  capabilities: { internet: ALLOW, memory: ALLOW, dateTime: ALLOW, replyModeAll: ALLOW, longTasks: ALLOW },
   searchProvider: "duckduckgo",
   maxPersonalBotsPerUser: 3,
   personalDailyLimitMax: 100,
   personalAllowedModels: [],
+  tasks: {
+    maxTurns: BOT_TASK_LIMITS.maxTurnsDefault,
+    maxHours: BOT_TASK_LIMITS.maxHoursDefault,
+    maxRunning: BOT_TASK_LIMITS.maxRunningDefault,
+  },
 };
 
-/** `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability. */
+/**
+ * `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability and `tasks` per limit (a patch
+ * naming one limit leaves the others unchanged).
+ */
 export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
   .extend({
     capabilities: z
@@ -135,8 +168,10 @@ export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
         memory: CapabilityPolicyEntry,
         dateTime: CapabilityPolicyEntry,
         replyModeAll: CapabilityPolicyEntry,
+        longTasks: CapabilityPolicyEntry,
       })
       .partial(),
+    tasks: BotTaskPolicyLimits.partial(),
   })
   .partial();
 export type UpdateBotPolicyRequest = z.infer<typeof UpdateBotPolicyRequest>;
@@ -227,6 +262,8 @@ export const BotCapabilityView = z.object({
     memory: EffectiveCapability,
     dateTime: EffectiveCapability,
     replyModeAll: EffectiveCapability,
+    /** Phase 07.17.1.1.2 (D-04): "Long tasks"; absent on older payloads. */
+    longTasks: EffectiveCapability.optional(),
   }),
   tools: z.array(CatalogTool),
   usage: BotUsage,
@@ -250,6 +287,7 @@ export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
 export const UpdateBotCapabilitiesRequest = BotCapabilities.partial().extend({
   sandbox: z.boolean().optional(),
   browser: z.boolean().optional(),
+  longTasks: z.boolean().optional(),
   tools: z.array(ToolGrant).max(200).optional(),
 });
 export type UpdateBotCapabilitiesRequest = z.infer<typeof UpdateBotCapabilitiesRequest>;

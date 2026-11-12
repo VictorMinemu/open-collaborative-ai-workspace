@@ -13,6 +13,7 @@ import {
   effectiveCapabilities,
   effectiveTools,
   readCapabilities,
+  taskPolicyFor,
 } from "./capabilities";
 
 /**
@@ -35,6 +36,7 @@ const allOn: BotCapabilities = {
   dailyLimit: 30,
   sandbox: false,
   browser: false,
+  longTasks: true,
 };
 
 const view = (
@@ -156,6 +158,65 @@ describe("effectiveCapabilities", () => {
     expect(view("personal", { configured: false, human: { internet: false } }).internet.reason).toBe(
       "not_configured",
     );
+  });
+});
+
+describe("taskPolicyFor: may this bot run long tasks (07.17.1.1.2 D-04, E11)", () => {
+  const limits = { maxTurns: 40, maxHours: 8, maxRunning: 10 };
+
+  it("a team bot with the defaults may, with the policy's three limits", () => {
+    expect(taskPolicyFor({ scope: "team", caps: allOn, policy: policy() })).toEqual({
+      enabled: true,
+      reason: null,
+      ...limits,
+    });
+    const saved = { ...policy(), tasks: { maxTurns: 12, maxHours: 3, maxRunning: 0 } };
+    expect(taskPolicyFor({ scope: "personal", caps: allOn, policy: saved })).toEqual({
+      enabled: true,
+      reason: null,
+      maxTurns: 12,
+      maxHours: 3,
+      maxRunning: 0,
+    });
+  });
+
+  it("the organization switch off → org_policy for every bot", () => {
+    const p = policy({ longTasks: { orgWide: false, personal: true } });
+    for (const scope of ["team", "personal"] as const) {
+      expect(taskPolicyFor({ scope, caps: allOn, policy: p })).toEqual({
+        enabled: false,
+        reason: "org_policy",
+        ...limits,
+      });
+    }
+  });
+
+  it("only the personal switch off → personal_policy for a personal bot; a team bot still may", () => {
+    const p = policy({ longTasks: { orgWide: true, personal: false } });
+    expect(taskPolicyFor({ scope: "personal", caps: allOn, policy: p })).toMatchObject({
+      enabled: false,
+      reason: "personal_policy",
+    });
+    expect(taskPolicyFor({ scope: "team", caps: allOn, policy: p })).toMatchObject({
+      enabled: true,
+      reason: null,
+    });
+  });
+
+  it("the bot's own toggle off → never enabled; the policy's reason, if any, is kept", () => {
+    const off = { ...allOn, longTasks: false };
+    expect(taskPolicyFor({ scope: "team", caps: off, policy: policy() })).toEqual({
+      enabled: false,
+      reason: null,
+      ...limits,
+    });
+    expect(
+      taskPolicyFor({
+        scope: "team",
+        caps: off,
+        policy: policy({ longTasks: { orgWide: false, personal: false } }),
+      }),
+    ).toMatchObject({ enabled: false, reason: "org_policy" });
   });
 });
 

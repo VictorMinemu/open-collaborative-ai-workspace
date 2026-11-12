@@ -71,6 +71,35 @@ function policyReason(
   return null;
 }
 
+/**
+ * Phase 07.17.1.1.2 (D-04, PD-09): whether a bot may run long tasks, and the organization's limits. `enabled` = the
+ * bot's own toggle ∧ the organization's "Allow long tasks" ∧ (personal bot ? its personal sub-switch : true); `reason`
+ * names the policy that stands in the way (kept while the toggle is off, like `EffectiveCapability`).
+ */
+export interface TaskPolicy {
+  enabled: boolean;
+  reason: CapabilityDenialReason | null;
+  maxTurns: number;
+  maxHours: number;
+  maxRunning: number;
+}
+
+/** The long-task decision for one bot (pure). `loadTaskPolicy` loads its inputs; `computeTurn` reuses its policy. */
+export function taskPolicyFor(input: {
+  scope: AgentScope;
+  caps: Pick<BotCapabilities, "longTasks">;
+  policy: BotPolicy;
+}): TaskPolicy {
+  const reason = policyReason(input.scope, input.policy, "longTasks");
+  return {
+    enabled: input.caps.longTasks && reason === null,
+    reason,
+    maxTurns: input.policy.tasks.maxTurns,
+    maxHours: input.policy.tasks.maxHours,
+    maxRunning: input.policy.tasks.maxRunning,
+  };
+}
+
 /** A toggle that is off keeps its reason, so the UI can refuse to switch on what would not work. */
 function result(enabled: boolean, reason: CapabilityDenialReason | null): EffectiveCapability {
   return { enabled, effective: enabled && reason === null, reason };

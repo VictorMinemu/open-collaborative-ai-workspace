@@ -61,7 +61,13 @@ import {
 } from "../organization";
 import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
-import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
+import {
+  type CatalogSource,
+  effectiveCapabilities,
+  effectiveTools,
+  readCapabilities,
+  taskPolicyFor,
+} from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { stickyMemberData } from "./member-data";
 import { loadTurnMemory } from "./memory";
@@ -94,7 +100,12 @@ export interface TurnKeys {
  * `currentTurn`'s answer: the tools and flags, plus the keychain decision and the withheld entries the proxy routes
  * re-check (07.4-12: a per-member tool withheld here as `member_account` is refused with that reason).
  */
-export type CurrentTurnTools = TurnTools & { keys: TurnKeys; withheld: Withheld };
+export type CurrentTurnTools = TurnTools & {
+  keys: TurnKeys;
+  withheld: Withheld;
+  /** Phase 07.17.1.1.2 (D-04): the bot may run long tasks on this turn (`computeTurn.longTasks`). */
+  longTasks: boolean;
+};
 
 /**
  * Who reads a persona's answer in a shared AI chat (06-10, D-06, P-10): the joined humans who can read it, and whether a
@@ -395,6 +406,11 @@ interface ComputedTurn extends TurnTools {
   sandboxOffered: boolean;
   /** The bot's model reads images (`modelAcceptsImages`): what a listed image's access depends on (07.15 PD-04). */
   imageModel: boolean;
+  /**
+   * Phase 07.17.1.1.2 (D-04, PD-07): the bot may run long tasks (`loadTaskPolicy`'s rule over the policy this turn
+   * already loaded). Adds no tool here; the task offer (07) is gated on it.
+   */
+  longTasks: boolean;
 }
 
 /**
@@ -660,6 +676,7 @@ async function computeTurn(
     keys: { usable, memberAccount, unitAudience },
     sandboxOffered,
     imageModel: modelAcceptsImages(row.modelProvider, row.modelId),
+    longTasks: taskPolicyFor({ scope: row.scope, caps, policy }).enabled,
     ...assembled,
   };
 }
@@ -742,8 +759,20 @@ export async function currentTurn(
 ): Promise<CurrentTurnTools> {
   const turn = await computeTurn(tx, perms, p, env, audience);
   return turn
-    ? { tools: turn.tools, toolFlags: turn.toolFlags, keys: turn.keys, withheld: turn.withheld }
-    : { tools: [], toolFlags: {}, keys: { usable: [], memberAccount: [], unitAudience: [] }, withheld: [] };
+    ? {
+        tools: turn.tools,
+        toolFlags: turn.toolFlags,
+        keys: turn.keys,
+        withheld: turn.withheld,
+        longTasks: turn.longTasks,
+      }
+    : {
+        tools: [],
+        toolFlags: {},
+        keys: { usable: [], memberAccount: [], unitAudience: [] },
+        withheld: [],
+        longTasks: false,
+      };
 }
 
 function validTimeZone(zone: string | null | undefined): string {

@@ -12,6 +12,7 @@ import {
   BotPolicy,
   BROWSER_TOOL_NAMES,
   BUILTIN_TOOLS,
+  BuiltinCapability,
   CellAgent,
   CellConfigChangedEvent,
   CellSnapshot,
@@ -88,6 +89,7 @@ describe("capability defaults (D-06)", () => {
       dailyLimit: 30,
       sandbox: false,
       browser: false,
+      longTasks: true,
     });
     expect(DEFAULT_CAPABILITIES.team).toEqual({
       internet: false,
@@ -97,6 +99,7 @@ describe("capability defaults (D-06)", () => {
       dailyLimit: 100,
       sandbox: false,
       browser: false,
+      longTasks: true,
     });
   });
 
@@ -128,6 +131,75 @@ describe("update requests", () => {
     expect(UpdateBotPolicyRequest.parse({}).searchProvider).toBeUndefined();
     expect(UpdateBotPolicyRequest.safeParse({ maxPersonalBotsPerUser: 21 }).success).toBe(false);
     expect(UpdateBotPolicyRequest.safeParse({ searchProvider: "brave" }).success).toBe(false);
+  });
+});
+
+describe("long tasks policy (07.17.1.1.2 D-04, PD-09)", () => {
+  it("a stored bot without longTasks parses as on; a patch never resets it", () => {
+    const stored = BotCapabilities.parse({
+      internet: false,
+      memory: true,
+      dateTime: true,
+      replyMode: "mentions",
+      dailyLimit: 30,
+    });
+    expect(stored.longTasks).toBe(true);
+    expect(BuiltinCapability.options).toContain("longTasks");
+    const patch = UpdateBotCapabilitiesRequest.parse({ internet: true });
+    expect("longTasks" in patch).toBe(false);
+    expect(UpdateBotCapabilitiesRequest.parse({ longTasks: false }).longTasks).toBe(false);
+  });
+
+  it("the default policy allows long tasks with 40 turns, 8 hours and 10 running", () => {
+    expect(DEFAULT_BOT_POLICY.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(DEFAULT_BOT_POLICY.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+    const { tasks: _tasks, ...withoutTasks } = DEFAULT_BOT_POLICY;
+    expect(BotPolicy.safeParse({ ...withoutTasks, updatedAt: null }).success).toBe(false);
+    const { longTasks: _longTasks, ...capsWithout } = DEFAULT_BOT_POLICY.capabilities;
+    expect(
+      BotPolicy.safeParse({ ...DEFAULT_BOT_POLICY, capabilities: capsWithout, updatedAt: null }).success,
+    ).toBe(false);
+  });
+
+  it("policy updates take a partial tasks object and the longTasks entry, within the bounds", () => {
+    expect(UpdateBotPolicyRequest.parse({ tasks: { maxHours: 12 } }).tasks).toEqual({ maxHours: 12 });
+    expect(
+      UpdateBotPolicyRequest.parse({ capabilities: { longTasks: { orgWide: false, personal: false } } })
+        .capabilities,
+    ).toEqual({ longTasks: { orgWide: false, personal: false } });
+    expect(UpdateBotPolicyRequest.parse({})).toEqual({});
+    expect(UpdateBotPolicyRequest.parse({ tasks: { maxRunning: 0 } }).tasks).toEqual({ maxRunning: 0 });
+    for (const tasks of [
+      { maxTurns: 0 },
+      { maxTurns: 201 },
+      { maxTurns: 1.5 },
+      { maxHours: 0 },
+      { maxHours: 25 },
+      { maxRunning: -1 },
+      { maxRunning: 101 },
+    ]) {
+      expect(UpdateBotPolicyRequest.safeParse({ tasks }).success, JSON.stringify(tasks)).toBe(false);
+    }
+  });
+
+  it("the capability view may carry effective.longTasks; older views without it parse", () => {
+    const off = { enabled: false, effective: false, reason: null };
+    const view = {
+      agentId: ID,
+      scope: "team",
+      capabilities: DEFAULT_CAPABILITIES.team,
+      effective: { internet: off, memory: off, dateTime: off, replyModeAll: off },
+      tools: [],
+      usage: { today: 0, limit: 100, resetsAt: NOW },
+      dailyLimitMax: 10_000,
+      viewerCan: [],
+    };
+    expect(BotCapabilityView.parse(view).effective.longTasks).toBeUndefined();
+    const denied = { enabled: true, effective: false, reason: "org_policy" };
+    expect(
+      BotCapabilityView.parse({ ...view, effective: { ...view.effective, longTasks: denied } }).effective
+        .longTasks,
+    ).toEqual(denied);
   });
 });
 

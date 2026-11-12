@@ -27,6 +27,7 @@ function view(confined?: BotCapabilityView["confined"]): BotCapabilityView {
       dailyLimit: 100,
       sandbox: false,
       browser: false,
+      longTasks: true,
     },
     effective: { internet: eff, memory: eff, dateTime: eff, replyModeAll: eff },
     tools: [],
