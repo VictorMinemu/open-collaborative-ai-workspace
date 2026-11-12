@@ -10,7 +10,6 @@ import io
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time

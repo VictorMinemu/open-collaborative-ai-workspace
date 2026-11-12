@@ -6,7 +6,6 @@ abuse is refused with exit 6. Runs as 10001 in the hardened, network-less contai
 watcher are also exercised in-process with an injected step runner and clock.
 """
 
-import contextlib
 import hashlib
 import io
 import os
