@@ -215,7 +215,7 @@ async function idleSession(
     await eventually(async () => {
       const [s] = await rowsOf("select status from app.work_sessions where id = $1", [id]);
       return s?.status === "running";
-    });
+    }, 30_000); // a loaded CI runner: the 8 s default flaked once locally (07.17.1.1-13)
     return { workSessionId: id, rootId };
   }
   server.emitTurn(id, { promptId: first.payload.promptId as string, text: "done" });
@@ -223,7 +223,7 @@ async function idleSession(
     const [p] = await rowsOf("select status from app.work_prompts where id = $1", [first.payload.promptId]);
     const [s] = await rowsOf("select status from app.work_sessions where id = $1", [id]);
     return p?.status === "completed" && s?.status === "idle";
-  });
+  }, 30_000);
   return { workSessionId: id, rootId };
 }
 
