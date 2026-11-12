@@ -80,6 +80,11 @@ REVOKE TRUNCATE ON app.bot_work_zone_profiles, app.bot_work_zone_profile_project
 -- granted for the cascades of an automation, a run or a conversation.
 REVOKE TRUNCATE ON app.automation_conversations FROM ocw_app;
 
+-- Long bot tasks (Phase 07.17.1.1.2, D-01): TRUNCATE ignores RLS, so the app role never truncates every organization's
+-- tasks or the processes they wait for (stated explicitly, as for 07.16). DELETE stays granted for the cascades of a bot,
+-- a conversation or a task.
+REVOKE TRUNCATE ON app.bot_tasks, app.bot_task_processes FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the

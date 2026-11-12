@@ -47,11 +47,6 @@ import {
  */
 
 export type CardRow = typeof messageCards.$inferSelect;
-/**
- * The kinds the `message_cards.kind` column stores. 07.17.1.1.2-01 adds `task` to `AgentCardKind` before
- * 07.17.1.1.2-03 widens the column and its CHECK; until then the database refuses a `task` row on its own.
- */
-type StoredCardKind = (typeof messageCards.$inferInsert)["kind"];
 
 /** Kinds a card may live in: wherever an agent may post (P-10). */
 const CARD_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
@@ -272,7 +267,7 @@ export async function insertCard(
       organizationId: a.message.organizationId,
       conversationId: a.message.conversationId,
       agentId: a.agentId,
-      kind: a.input.kind as StoredCardKind,
+      kind: a.input.kind,
       title: a.input.title,
       fields: a.input.fields,
       status: a.input.status,
