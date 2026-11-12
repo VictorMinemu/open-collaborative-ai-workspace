@@ -89,6 +89,17 @@ export const REQUIRED_AREAS = [
   { area: "automation fan-out dedupe and caps", file: "apps/api/src/modules/automation/fan-out.ts" },
   { area: "automation escalation targets", file: "apps/api/src/modules/automation/escalation.ts" },
   { area: "team mention audience", file: "apps/api/src/modules/notification/team-mentions.ts" },
+  // Phase 07.17.1.1 (ADR-0041): bots move files between a thread and their own session: the device's containment and
+  // deny list, the device-JWT transfer route, the sponsor's transaction with its ledger and budgets, the two bot
+  // routes, and the device JWT check the transfer route shares with the Device Link.
+  { area: "device file containment", file: "apps/local-runtime/src/session-files.ts" },
+  { area: "device file transfer route", file: "apps/api/src/modules/work-session/file-transfer-routes.ts" },
+  {
+    area: "bot file transfers (sponsor transaction)",
+    file: "apps/api/src/modules/work-session/bot-files.ts",
+  },
+  { area: "bot file exchange routes", file: "apps/api/src/modules/agent-channel/work-session-files.ts" },
+  { area: "device JWT authentication", file: "apps/api/src/modules/device/auth.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
