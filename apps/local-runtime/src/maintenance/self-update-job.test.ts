@@ -332,7 +332,7 @@ describe("SelfUpdate: one click on an idle service device (07.17.1, D-03, D-05, 
     expect(gatesOpen(r)).toBe(true);
     expect(r.stub.requests).toEqual([RUNTIME_ROUTES.version]);
     expect(r.su.status().lastRun).toMatchObject({ outcome: "unchanged", fromBuild: oldSha12(r) });
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
     expectNoHostPath(r);
   });
 
@@ -354,7 +354,7 @@ describe("SelfUpdate: one click on an idle service device (07.17.1, D-03, D-05, 
     });
     expect(r.exit).not.toHaveBeenCalled();
     expect(gatesOpen(r)).toBe(true);
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
     expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
     expect(stagingLeft(r)).toEqual([]);
     expect(r.su.status()).toMatchObject({ state: "idle", lastRun: { outcome: "failed" } });
@@ -499,7 +499,8 @@ describe("SelfUpdate: never cut a turn (07.17.1, D-04, PD-09, E12)", () => {
     ]);
     expect(r.frames[1]?.output).toBe(HOLD_TIMED_OUT);
     expect(r.su.status().lastRun).toMatchObject({ outcome: "failed" });
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    // The lock is released by the run's own cleanup, just after the finished frame (CI p272 saw it a tick later).
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
     expect(readlinkSync(join(runtimeDirOf(r), "current"))).toBe(`versions/${oldSha12(r)}`);
     await r.clock.advance(120_000);
     expect(r.exit).not.toHaveBeenCalled();
@@ -674,7 +675,7 @@ describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => 
     expect(ran).toEqual([]);
     expect(r.gates.get("claude-code")?.heldCount).toBe(1);
     expect(r.su.holding).toBe(false);
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
     expect(stagingLeft(r)).toEqual([]);
     expect(r.frames.map((f) => [f.phase, f.outcome, f.commandId])).toEqual([
       ["started", undefined, COMMAND_ID],
@@ -699,7 +700,7 @@ describe("SelfUpdate: stop() before and after the switch (07.17.1, E29)", () => 
     await untilState(r, "installing");
     await r.su.stop();
     // stop() waited for the prepare: its lock is gone and no staging directory is left behind.
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
     expect(stagingLeft(r)).toEqual([]);
     // npm was killed: nothing writes into versions/ after the stop.
     await new Promise((resolve) => setTimeout(resolve, 2_500));
@@ -858,7 +859,7 @@ describe("SelfUpdate: when the device checks its workspace and updates by itself
     expect(r.stub.requests).toEqual([RUNTIME_ROUTES.version]);
     expect(r.frames).toEqual([]);
     expect(r.su.status()).toMatchObject({ servedBuild: oldSha12(r), state: "idle" });
-    expect(existsSync(lockFileOf(r))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(lockFileOf(r))).toBe(false), { timeout: 10_000, interval: 20 });
   });
 
   it("a failed automatic run of a build is not retried before failedBackoffMs; a check after it retries", async () => {

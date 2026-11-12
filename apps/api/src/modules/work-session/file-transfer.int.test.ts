@@ -1,12 +1,15 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { BOT_FILE_LIMITS, RUNTIME_FILE_ROUTE } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createEnvFileSecretStore } from "../../lib/secret-store";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
 import { connectWithProject, invite, pairDevice, startSession } from "../../testing-workzone";
+import { attachmentKey, createObjectStorage, type ObjectStorage } from "../artifact";
 import { insertTransfer } from "./bot-files";
 
 /**
@@ -347,5 +350,295 @@ describe("only the right device, once, in time; a busy server never burns the tr
     expect(all).toContain('"code":"busy"');
     expect(all).toContain('"code":"streamed"');
     for (const name of [FILE_NAME, BIG_NAME, "deleted-notes.txt"]) expect(all).not.toContain(name);
+  });
+});
+
+/**
+ * 07.17.1.1-08 (D-03, D-07, D-08, PD-05, PD-17, E21): the write side. The device PUTs one session file into the
+ * transfer's pre-allocated attachment id; the API streams it to storage in parts, never whole, then records a `pending`
+ * attachment of the bot's turn. Refusals that are not about the file (the JWT, a busy server, a missing length) come
+ * before the claim and leave the transfer `pending`; a declared size above the bound is refused before a byte is read.
+ */
+describe("the device PUTs a session file into its transfer (D-03, PD-05, PD-17)", () => {
+  const MiB = 1024 * 1024;
+  /** The path in the command's own payload: the attachment's name comes from it, and no log line may carry it. */
+  const READ_PATH = "dist/report v2.pdf";
+  const PDF_HEAD = Buffer.from("%PDF-1.7\n%âãÏÓ\n", "latin1");
+  let objects: ObjectStorage;
+
+  beforeAll(() => {
+    const built = createObjectStorage(
+      storage.env as unknown as Parameters<typeof createObjectStorage>[0],
+      createEnvFileSecretStore(storage.env),
+    );
+    if (!built) throw new Error("storage not configured");
+    objects = built;
+  });
+
+  const pdf = (bytes: number) => Buffer.concat([PDF_HEAD, randomBytes(bytes - PDF_HEAD.length)]);
+
+  interface Upload {
+    id: string;
+    attachmentId: string;
+    eventId: string;
+    agentId: string;
+    key: string;
+  }
+
+  /** One `from_device` ledger row of device A and its `session.file.read` command (same id), as 11 will enqueue. */
+  async function fromDevice(over: Record<string, unknown> = {}): Promise<Upload> {
+    const up = { id: randomUUID(), attachmentId: randomUUID(), eventId: randomUUID(), agentId: randomUUID() };
+    const maxBytes = (over.maxBytes as number | undefined) ?? 20 * MiB;
+    await inOrg(async (tx) => {
+      await insertTransfer(tx, {
+        ...up,
+        organizationId: orgId,
+        workSessionId: sessionId,
+        deviceId: deviceAId,
+        conversationId: general,
+        direction: "from_device",
+        maxBytes,
+        limitSource: "organization",
+        sizeBytes: null,
+        sha256: null,
+        pathLength: READ_PATH.length,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        ...over,
+      });
+      await stack.built.deviceHub.enqueue(tx, {
+        id: up.id,
+        deviceId: deviceAId,
+        workSessionId: sessionId,
+        kind: "session.file.read",
+        payload: { path: READ_PATH, maxBytes },
+      });
+    });
+    return { ...up, key: attachmentKey(orgId, general, up.attachmentId, "original") };
+  }
+
+  type Answer = { status: number; body: { ok?: boolean; sizeBytes?: number; error?: { code: string } } | null };
+
+  /**
+   * A PUT over a raw socket, so the test controls the declared length and how much is sent: `declared` is the
+   * `content-length` (`"chunked"` sends none), `send` the bytes written now; `end` false holds the request open.
+   */
+  function openPut(
+    id: string,
+    token: string,
+    opts: { declared: number | "chunked"; send?: Uint8Array; end?: boolean },
+  ) {
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/octet-stream",
+    };
+    if (opts.declared !== "chunked") headers["content-length"] = String(opts.declared);
+    const req = httpRequest(fileUrl(id), { method: "PUT", headers });
+    const answer = new Promise<Answer>((resolve, reject) => {
+      req.on("response", (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: res.statusCode ?? 0, body: text ? (JSON.parse(text) as Answer["body"]) : null });
+        });
+      });
+      req.on("error", reject);
+    });
+    // Once answered, a later socket error (the server closing a refused upload) is not the test's concern.
+    answer.catch(() => undefined);
+    if (opts.send && opts.send.length > 0) req.write(opts.send);
+    if (opts.end ?? true) req.end();
+    else req.flushHeaders();
+    return { req, answer };
+  }
+
+  const put = (id: string, token: string, body: Uint8Array) =>
+    openPut(id, token, { declared: body.length, send: body }).answer;
+
+  async function ledger(id: string) {
+    const r = await su.query(
+      "select status, failure, size_bytes::int as size, sha256 from app.bot_work_session_files where id = $1",
+      [id],
+    );
+    return r.rows[0] as { status: string; failure: string | null; size: number | null; sha256: string | null };
+  }
+
+  async function attachmentRow(id: string) {
+    const r = await su.query(
+      `select status, filename, content_type, size_bytes::int as size, sha256, event_id, message_id, uploader_id,
+              conversation_id from app.attachments where id = $1`,
+      [id],
+    );
+    return r.rows[0] as Record<string, unknown> | undefined;
+  }
+
+  async function storedSha(key: string): Promise<string> {
+    const hash = createHash("sha256");
+    for await (const chunk of await objects.stream(key)) hash.update(chunk as Buffer);
+    return hash.digest("hex");
+  }
+
+  it("tracer: 17 MiB of a PDF become a pending attachment of the bot's turn, stored in three parts (E21)", async () => {
+    const up = await fromDevice();
+    const body = pdf(17 * MiB);
+    const res = await put(up.id, jwtA, body);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ ok: true, sizeBytes: body.length });
+
+    expect(await attachmentRow(up.attachmentId)).toEqual({
+      status: "pending",
+      filename: "report v2.pdf",
+      content_type: "application/pdf",
+      size: body.length,
+      sha256: sha256(body),
+      event_id: up.eventId,
+      message_id: null,
+      uploader_id: up.agentId,
+      conversation_id: general,
+    });
+    expect(await ledger(up.id)).toEqual({
+      status: "streamed",
+      failure: null,
+      size: body.length,
+      sha256: sha256(body),
+    });
+    expect(await storedSha(up.key)).toBe(sha256(body));
+    // An S3 multipart object's ETag names its part count.
+    const { HeadObjectCommand } = await import("@aws-sdk/client-s3");
+    const { s3Client } = await import("../artifact");
+    const head = await s3Client(storage.env.OCW_S3_ENDPOINT!, "garage", {
+      accessKeyId: storage.env.OCW_S3_ACCESS_KEY_ID!,
+      secretAccessKey: storage.env.OCW_S3_SECRET_ACCESS_KEY!,
+    }).send(new HeadObjectCommand({ Bucket: storage.env.OCW_S3_BUCKET, Key: up.key }));
+    expect(head.ETag).toMatch(/-3"$/);
+
+    // Single use: the same PUT again is 410 and changes nothing.
+    const again = await put(up.id, jwtA, new Uint8Array([1, 2, 3]));
+    expect(again.status).toBe(410);
+    expect((await attachmentRow(up.attachmentId))?.size).toBe(body.length);
+  });
+
+  it("a small file is one object; an empty file is a zero-byte attachment", async () => {
+    const small = await fromDevice();
+    const text = new TextEncoder().encode("hello from the session\n");
+    expect((await put(small.id, jwtA, text)).body).toEqual({ ok: true, sizeBytes: text.length });
+    expect(await storedSha(small.key)).toBe(sha256(text));
+    expect((await attachmentRow(small.attachmentId))?.content_type).toBe("application/octet-stream");
+
+    const empty = await fromDevice();
+    expect((await put(empty.id, jwtA, new Uint8Array(0))).body).toEqual({ ok: true, sizeBytes: 0 });
+    expect((await attachmentRow(empty.attachmentId))?.size).toBe(0);
+  });
+
+  it("without content-length (chunked) → 411 length_required, and the row stays pending", async () => {
+    const up = await fromDevice();
+    const res = await openPut(up.id, jwtA, { declared: "chunked", send: new Uint8Array(1024) }).answer;
+    expect(res.status).toBe(411);
+    expect(res.body?.error?.code).toBe("length_required");
+    expect(await ledger(up.id)).toMatchObject({ status: "pending", failure: null });
+    expect(await objects.head(up.key)).toBeNull();
+  });
+
+  it("a declared size above max_bytes → 413 before a byte is read: no object, the row failed too_large with the size", async () => {
+    const up = await fromDevice();
+    const declared = 20 * MiB + 1;
+    const { req, answer } = openPut(up.id, jwtA, { declared, end: false });
+    const res = await answer;
+    req.destroy();
+    expect(res.status).toBe(413);
+    expect(res.body?.error?.code).toBe("too_large");
+    expect(await ledger(up.id)).toMatchObject({ status: "failed", failure: "too_large", size: declared });
+    expect(await objects.head(up.key)).toBeNull();
+    expect(await attachmentRow(up.attachmentId)).toBeUndefined();
+  });
+
+  it("a body shorter than its content-length (the client gives up): no object, no attachment, the row failed", async () => {
+    const up = await fromDevice();
+    const { req, answer } = openPut(up.id, jwtA, { declared: 9 * MiB, send: pdf(MiB), end: false });
+    await eventually(async () => (await ledger(up.id)).status === "streaming");
+    req.destroy();
+    await answer.catch(() => undefined);
+    await eventually(async () => (await ledger(up.id)).status === "failed");
+    expect((await ledger(up.id)).failure).toBe("transfer_failed");
+    expect(await objects.head(up.key)).toBeNull();
+    expect(await attachmentRow(up.attachmentId)).toBeUndefined();
+  });
+
+  it("another device, organization B's device, an expired row and a to_device row → 404 / 404 / 410 / 404, rows untouched", async () => {
+    const body = new Uint8Array([1, 2, 3]);
+    const mine = await fromDevice();
+    expect((await put(mine.id, jwtB, body)).status).toBe(404);
+    expect((await put(mine.id, jwtOrgB, body)).status).toBe(404);
+    expect(await ledger(mine.id)).toMatchObject({ status: "pending", failure: null });
+
+    const late = await fromDevice({ expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect((await put(late.id, jwtA, body)).status).toBe(410);
+    expect(await ledger(late.id)).toMatchObject({ status: "pending", failure: null });
+
+    const wrongWay = await fromDevice({ direction: "to_device", sizeBytes: 3, sha256: sha256(body) });
+    expect((await put(wrongWay.id, jwtA, body)).status).toBe(404);
+    expect(await ledger(wrongWay.id)).toMatchObject({ status: "pending", failure: null });
+
+    // The raw device token is never accepted, and nothing was spent: the right device still gets it.
+    expect((await put(mine.id, deviceAToken, body)).status).toBe(401);
+    expect((await put(mine.id, jwtA, body)).status).toBe(200);
+  });
+
+  it("four streams held open make a fifth PUT 503 busy with its row pending; once one ends, the same PUT succeeds", async () => {
+    const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
+    const first = pdf(2 * MiB);
+    const held: Array<{ up: Upload; open: ReturnType<typeof openPut> }> = [];
+    try {
+      for (let i = 0; i < max; i++) {
+        const up = await fromDevice();
+        const open = openPut(up.id, jwtA, { declared: first.length, send: first.subarray(0, 64 * 1024), end: false });
+        held.push({ up, open });
+        await eventually(async () => (await ledger(up.id)).status === "streaming");
+      }
+
+      const fifth = await fromDevice();
+      const body = new TextEncoder().encode("the fifth file");
+      const refused = await put(fifth.id, jwtA, body);
+      expect(refused.status).toBe(503);
+      expect(refused.body?.error?.code).toBe("busy");
+      expect(await ledger(fifth.id)).toMatchObject({ status: "pending", failure: null });
+
+      const done = held.shift()!;
+      done.open.req.end(first.subarray(64 * 1024));
+      expect((await done.open.answer).body).toEqual({ ok: true, sizeBytes: first.length });
+      expect(await storedSha(done.up.key)).toBe(sha256(first));
+
+      expect((await put(fifth.id, jwtA, body)).body).toEqual({ ok: true, sizeBytes: body.length });
+      expect((await ledger(fifth.id)).status).toBe("streamed");
+    } finally {
+      for (const h of held) h.open.req.destroy();
+    }
+    for (const h of held) {
+      await eventually(async () => (await ledger(h.up.id)).failure === "transfer_failed");
+      expect(await objects.head(h.up.key)).toBeNull();
+    }
+  });
+
+  it("FakeDevice.serveFileCommand PUTs a session.file.read's bytes under its JWT and acks ok", async () => {
+    const up = await fromDevice();
+    const cmd = (await deviceA.next(
+      (f) => f.type === "command" && f.id === up.id,
+    )) as unknown as Parameters<FakeDevice["serveFileCommand"]>[0];
+    expect(cmd.kind).toBe("session.file.read");
+    const body = pdf(64 * 1024);
+    const served = await deviceA.serveFileCommand(cmd, { baseUrl: stack.baseUrl, jwt: jwtA, body });
+    expect(served).toEqual({ ok: true, error: null });
+    await eventually(async () => {
+      const r = await su.query("select status from app.device_commands where id = $1", [up.id]);
+      return r.rows[0]?.status === "acked";
+    });
+    expect((await attachmentRow(up.attachmentId))?.sha256).toBe(sha256(body));
+    expect((await ledger(up.id)).status).toBe("streamed");
+  });
+
+  it("no captured log line carries the session path or the file's name (P1)", () => {
+    const all = logs.join("");
+    expect(all).toContain('"code":"length_required"');
+    for (const name of [READ_PATH, "report v2.pdf"]) expect(all).not.toContain(name);
   });
 });
