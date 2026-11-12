@@ -16,6 +16,8 @@ export interface FakeObject {
   Spec?: Record<string, unknown>;
   /** Cumulative CPU nanoseconds reported by stats. */
   cpuNs?: number;
+  /** The image ID the spec's image ref named when the container was created (none when the ref was unknown). */
+  ImageId?: string;
 }
 
 export interface ExecCall {
@@ -47,6 +49,12 @@ export class FakeDocker implements Docker {
   containers = new Map<string, FakeObject>();
   networks = new Map<string, FakeObject>();
   volumes = new Map<string, FakeObject>();
+  /**
+   * Local images: ref (e.g. `ocw-sandbox-sbx:local`) → image ID (`sha256:…`). Rebuilding a tag is `images.set(ref, …)`
+   * with a new ID; containers created before keep the old one (07.17.1.1.1 D-10). `GET /images/<ref>/json` answers
+   * `{ Id }`, or 404 for a ref not listed here. Empty by default: every ref is unknown.
+   */
+  images = new Map<string, string>();
   execs = new Map<string, ExecCall & { exitCode: number | null }>();
   onExec: ExecHandler = () => ({ exitCode: 0 });
   /** How long a stats call takes (a loaded Docker daemon can take seconds per one-shot sample). */
@@ -93,15 +101,27 @@ export class FakeDocker implements Docker {
     if (method === "GET" && path === "/info") {
       return json(200, { Runtimes: Object.fromEntries(this.runtimes.map((r) => [r, { path: r }])) });
     }
-    let m = /^\/containers\/([^/]+)\/json$/.exec(path);
+    let m = /^\/images\/(.+)\/json$/.exec(path);
+    if (method === "GET" && m) {
+      const id = this.images.get(m[1] as string);
+      return id ? json(200, { Id: id }) : json(404, { message: "No such image" });
+    }
+    m = /^\/containers\/([^/]+)\/json$/.exec(path);
     if (method === "GET" && m) {
       const c = this.container(m[1] as string);
       if (!c) return json(404, { message: "No such container" });
-      const spec = (c.Spec ?? {}) as { HostConfig?: Record<string, unknown> };
+      const spec = (c.Spec ?? {}) as {
+        HostConfig?: Record<string, unknown>;
+        Image?: string;
+        Env?: string[];
+      };
+      // As the real daemon: top-level `Image` is the image ID the container runs, `Config.Image` the ref it was created
+      // from, and `Config.Env` the merged environment (the spec's here; Docker also adds the image's own `ENV` lines).
       return json(200, {
         Id: c.Id,
         Name: `/${c.Name}`,
-        Config: { Labels: c.Labels },
+        ...(c.ImageId ? { Image: c.ImageId } : {}),
+        Config: { Labels: c.Labels, Image: spec.Image, Env: spec.Env },
         State: {
           Running: c.Running,
           Status: c.Running ? "running" : "exited",
@@ -146,8 +166,16 @@ export class FakeDocker implements Docker {
     if (method === "POST" && path === "/containers/create") {
       const name = url.searchParams.get("name") as string;
       if (this.containers.has(name)) return json(409);
-      const b = body as { Labels: Record<string, string> } & Record<string, unknown>;
-      this.containers.set(name, { Id: this.id(), Name: name, Labels: b.Labels, Running: false, Spec: b });
+      const b = body as { Labels: Record<string, string>; Image?: unknown } & Record<string, unknown>;
+      const imageId = typeof b.Image === "string" ? this.images.get(b.Image) : undefined;
+      this.containers.set(name, {
+        Id: this.id(),
+        Name: name,
+        Labels: b.Labels,
+        Running: false,
+        Spec: b,
+        ...(imageId ? { ImageId: imageId } : {}),
+      });
       return json(201, {});
     }
     m = /^\/containers\/([^/]+)$/.exec(path);

@@ -155,9 +155,10 @@ export interface SandboxesOptions {
   egress?: Egress | null;
   /**
    * One line per `ensure`: the target's ids, whether it created or started the shell, and the milliseconds of each phase
-   * (CI p142/p164/p178: a cold start's time is Docker's create and start, not the proxy's attach). Never a spec.
+   * (CI p142/p164/p178: a cold start's time is Docker's create and start, not the proxy's attach), and why a stopped
+   * shell was created again (`recreated`); a `warn` line when the shell's image cannot be compared. Never a spec.
    */
-  log?: (line: { level: "info"; msg: string; [key: string]: unknown }) => void;
+  log?: (line: { level: "info" | "warn"; msg: string; [key: string]: unknown }) => void;
 }
 
 /** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
@@ -305,7 +306,9 @@ function stripLeadingPartial(text: string, bytes: Buffer): string {
 
 interface ContainerInspect {
   Id: string;
-  Config?: { Labels?: Record<string, string> | null; Image?: string };
+  /** The image ID the container runs (`sha256:…`); `Config.Image` is the ref it was created from. */
+  Image?: string;
+  Config?: { Labels?: Record<string, string> | null; Image?: string; Env?: string[] | null };
   State?: { Running?: boolean; Restarting?: boolean; Status?: string; StartedAt?: string };
   HostConfig?: { Runtime?: string; ExtraHosts?: string[] | null };
 }
@@ -974,6 +977,37 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     if (res.status !== 204 && res.status !== 404) throw dockerDown();
   }
 
+  /** The ID of the image `options.image` names now (a rebuilt tag names a new one), or null when Docker cannot say. */
+  async function currentImageId(): Promise<string | null> {
+    const res = await call("GET", `/images/${encodeURIComponent(image)}/json`);
+    if (res.status !== 200) return null;
+    const id = asRecord(res.body).Id;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  }
+
+  /**
+   * Why the bot's shell must be created again before it runs, or null to reuse it (07.17.1.1.1 D-10, PD-10), in this
+   * order: a stale proxy entry in /etc/hosts (only with an egress proxy), an image other than the one the tag names now
+   * (Compose rebuilds the same tag, so a shell otherwise keeps the old toolkit forever). Called only for a stopped shell from `ensure` (a running one is never cut) and from
+   * `restart` (which stops its commands anyway). An image Docker cannot inspect, or a shell that reports none, is
+   * unknown: nothing is re-created (a create from a missing image would fail and lose a startable shell), and one warn
+   * line with ids only says so.
+   */
+  async function driftOf(
+    target: SandboxdTarget,
+    c: ContainerInspect,
+    egressAddress: string | null,
+  ): Promise<"hosts" | "image" | "env" | null> {
+    if (options.egress && !egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)) return "hosts";
+    const want = await currentImageId();
+    if (!want || !c.Image) {
+      options.log?.({ level: "warn", msg: "image_unknown", orgId: target.orgId, agentId: target.agentId });
+      return null;
+    }
+    if (c.Image !== want) return "image";
+    return null;
+  }
+
   /**
    * SIGKILLs the process group `ocw-run` recorded for this process. Docker answers the exec start before runc has
    * spawned the command, so on a loaded daemon the helper can run before the command recorded its group; it then exits
@@ -1026,6 +1060,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         mark = Date.now(); // time spent waiting for another call of this bot is nobody's phase
         let created = false;
         let startedNow = false;
+        let recreated: "hosts" | "image" | "env" | null = null;
         let c = await ownedShell(target);
         const network = await ensureNetwork(target);
         lap("network");
@@ -1033,15 +1068,16 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         // and its address there now, for the shell's /etc/hosts.
         const egressAddress = options.egress ? await options.egress.attach(target, "sbx", network) : null;
         lap("egress");
-        if (
-          c &&
-          !c.State?.Running &&
-          options.egress &&
-          !egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)
-        ) {
-          // Stopped with a stale entry (the proxy restarted, or the shell predates the entry): created again below.
-          await removeShell(c);
-          c = null;
+        if (c && !c.State?.Running) {
+          // Stopped with a stale entry (the proxy restarted, or the shell predates the entry) or built from an older
+          // image (07.17.1.1.1 D-10): created again below from the current spec, its volumes kept. A running shell is
+          // left alone (it converges at its next start). The kill switch may have been pushed during the attach.
+          recreated = await driftOf(target, c, egressAddress);
+          if (recreated) {
+            requirePolicy(target.orgId, { runnable: true });
+            await removeShell(c);
+            c = null;
+          }
         }
         if (!c) {
           c = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
@@ -1075,6 +1111,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           agentId: target.agentId,
           created,
           started: startedNow,
+          recreated,
           ms,
         });
         return statusOf(target, c);

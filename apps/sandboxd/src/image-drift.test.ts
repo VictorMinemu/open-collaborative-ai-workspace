@@ -110,7 +110,7 @@ describe("ensure re-creates a stopped shell built from an older image (07.17.1.1
     expect(after.Config.Image).toBe(IMAGE);
     const volumesAfter = [...s.docker.volumes.values()];
     expect(volumesAfter).toHaveLength(2);
-    volumesAfter.forEach((v, i) => expect(v).toBe(volumesBefore[i]));
+    for (const [i, v] of volumesAfter.entries()) expect(v).toBe(volumesBefore[i]);
     expect(s.sbx()?.Running).toBe(true);
     expect(s.ensureLine()).toMatchObject({ created: true, started: true, recreated: "image" });
   });
