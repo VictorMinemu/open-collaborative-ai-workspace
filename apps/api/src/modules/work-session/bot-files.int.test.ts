@@ -336,7 +336,7 @@ describe("tracer: a download prepared as the sponsor reaches the device, which P
       direction: "from_device",
       pathLength: 9,
     });
-    expect(finished.audit.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(finished.audit?.sha256).toMatch(/^[0-9a-f]{64}$/);
     const [done] = await ledgerOf(transferId);
     expect(done!.status).toBe("done");
     const [att] = await rowsOf(

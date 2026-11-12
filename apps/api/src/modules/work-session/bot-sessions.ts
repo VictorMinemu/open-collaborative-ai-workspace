@@ -353,8 +353,9 @@ function settingsOf(profile: BotProfileRow, input: AgentChannelWorkSessionStart)
 /**
  * The caps' counts (`app.bot_work_session_load`, SECURITY DEFINER): the sponsor's transaction hides other people's
  * sessions behind the audience backstop, but every cap counts the whole organization. Numbers and one flag only.
+ * 07.17.1.1 (PD-12): `botPromptsHour` also counts the bot's file moves of the hour (`bot-files.ts`, module-internal).
  */
-async function botSessionLoad(
+export async function botSessionLoad(
   tx: Tx,
   agentId: string,
   projectId: string,
@@ -378,8 +379,9 @@ async function botSessionLoad(
 /**
  * The bot's own lock (PD-10): its starts and its prompts are serialised, so the hour's prompt count (and the start's
  * session count) is exact under concurrency. Always taken before any session row lock and before the org's lock.
+ * 07.17.1.1 (PD-12): its file moves take it too (`bot-files.ts`, module-internal; not exported from `index.ts`).
  */
-async function lockBot(tx: Tx, agentId: string): Promise<void> {
+export async function lockBot(tx: Tx, agentId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${agentId}`}, 0))`);
 }
 

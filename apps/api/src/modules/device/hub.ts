@@ -123,6 +123,20 @@ interface LocalLink {
 
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
 const diffChannel = (requestId: string) => `ocw:diff:${requestId}`;
+/** 07.17.1.1 (PD-18): where the ack of a bot file transfer's command is published (the transfer id is the command id). */
+const fileChannel = (transferId: string) => `ocw:file:${transferId}`;
+/** The two command kinds of a bot's file move: their ack goes to the waiting route, never to the session handler. */
+const FILE_COMMAND_KINDS: ReadonlySet<string> = new Set<CommandKind>([
+  "session.file.write",
+  "session.file.read",
+]);
+const isFileCommand = (row: Pick<DeviceCommandRow, "kind">) => FILE_COMMAND_KINDS.has(row.kind);
+
+/** The outcome of a file command as the waiting route reads it: the device's ack, or the hub's failure reason. */
+export interface FileCommandAck {
+  ok: boolean;
+  error: string | null;
+}
 
 /** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
 type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string } | { op: "config" };
@@ -301,6 +315,47 @@ export class DeviceHub {
       });
     } finally {
       await (stop as (() => Promise<void>) | null)?.();
+    }
+  }
+
+  /**
+   * 07.17.1.1 (PD-18): wait for the ack of the file command `transferId`, published by whichever instance received it
+   * (or by the hub when it could not deliver the command). Call it BEFORE the command is enqueued. Resolves null on
+   * timeout, or at once when `signal` aborts; the Redis subscription is always released.
+   */
+  async waitForFileAck(
+    transferId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<FileCommandAck | null> {
+    if (signal?.aborted) return null;
+    let subscribed: Promise<(() => Promise<void>) | null> = Promise.resolve(null);
+    try {
+      return await new Promise<FileCommandAck | null>((resolve) => {
+        let settled = false;
+        const settle = (value: FileCommandAck | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        };
+        const onAbort = () => settle(null);
+        const timer = setTimeout(() => settle(null), timeoutMs);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        subscribed = this.opts.bus
+          .subscribe(fileChannel(transferId), (msg) => {
+            const parsed = parseFileAck(msg);
+            if (parsed) settle(parsed);
+          })
+          .catch(() => {
+            settle(null);
+            return null;
+          });
+      });
+    } finally {
+      // An abort may land before the SUBSCRIBE round trip: the subscription is released once it exists.
+      await (await subscribed)?.();
     }
   }
 
@@ -492,7 +547,15 @@ export class DeviceHub {
       },
     );
     // A repeated ack (redelivered command the daemon had already executed) changes nothing.
-    if (row && row.kind !== "runtime.update") await this.handler?.onCommandResult(device, row, ok, error);
+    if (!row || row.kind === "runtime.update") return;
+    // 07.17.1.1 (PD-18): a file command's ack goes to the route waiting for it; no session state changes with it.
+    if (isFileCommand(row)) return this.publishFileAck(row.id, { ok, error });
+    await this.handler?.onCommandResult(device, row, ok, error);
+  }
+
+  /** 07.17.1.1 (PD-18): the outcome of a file command, for `waitForFileAck` on any instance. */
+  private async publishFileAck(transferId: string, ack: FileCommandAck): Promise<void> {
+    await this.opts.bus.publish(fileChannel(transferId), JSON.stringify(ack));
   }
 
   async onDiffResult(device: DeviceRef, frame: DiffResultFrame): Promise<void> {
@@ -701,6 +764,10 @@ export class DeviceHub {
           );
           continue;
         }
+        if (isFileCommand(row)) {
+          await this.publishFileAck(row.id, { ok: false, error: row.error });
+          continue;
+        }
         await this.handler?.onCommandResult(device, row, false, row.error, "hub");
       } catch (err) {
         this.opts.log.error({ err, commandId: row.id }, "device command failure handling failed");
@@ -736,5 +803,16 @@ export class DeviceHub {
       },
     );
     if (changed) await this.handler?.onOffline(device);
+  }
+}
+
+/** A published file ack (07.17.1.1), or null for anything else on the channel. */
+function parseFileAck(msg: string): FileCommandAck | null {
+  try {
+    const v = JSON.parse(msg) as { ok?: unknown; error?: unknown };
+    if (typeof v.ok !== "boolean") return null;
+    return { ok: v.ok, error: typeof v.error === "string" ? v.error : null };
+  } catch {
+    return null;
   }
 }

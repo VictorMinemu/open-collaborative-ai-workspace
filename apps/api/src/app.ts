@@ -120,6 +120,8 @@ export async function buildApp(
     browserBudgetsMs?: BrowserBudgets;
     /** Test hook: shorter bot sandbox call budgets (CI p142/p164/p178); never read from the environment. */
     sandboxBudgetsMs?: SandboxBudgets;
+    /** Test hook: shorter bot file transfer deadlines (07.17.1.1 PD-18); never read from the environment. */
+    botFileDeadlineMs?: (bytes: number) => number;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -344,6 +346,7 @@ export async function buildApp(
   const workSession = createWorkSessionModule(core, deviceModule.hub, {
     storage: artifactModule.storage,
     approvals: approvals.service,
+    ...(opts.botFileDeadlineMs ? { botFileDeadlineMs: opts.botFileDeadlineMs } : {}),
   });
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.

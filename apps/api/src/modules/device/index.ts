@@ -24,6 +24,7 @@ export {
   type DeviceRef,
   type DeviceSessionHandler,
   type EnqueueCommand,
+  type FileCommandAck,
   frameFits,
   type RuntimePolicySource,
 } from "./hub";

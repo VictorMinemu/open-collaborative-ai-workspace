@@ -1,5 +1,35 @@
-import { botWorkSessionFiles, type Tx } from "@ocw/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import {
+  type AgentChannelWorkSessionDownloadResponse,
+  type AgentChannelWorkSessionUploadResponse,
+  type BotFileLimit,
+  type BotFileLimitSource,
+  type BotWorkSessionRefused,
+  type SessionFileReadPayload,
+  SessionFileReadPayload as SessionFileReadPayloadSchema,
+  transferDeadlineMs,
+  WorkSessionFilePath,
+  workSessionFilePathRefusal,
+} from "@ocw/contracts";
+import {
+  type agentTurns,
+  attachments,
+  botWorkSessionFiles,
+  deviceCommands,
+  devices,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
+import { and, eq, inArray, type SQL, sql } from "drizzle-orm";
+import type { Core } from "../../core";
+import type { ObjectStorage } from "../artifact";
+import type { DeviceHub, FileCommandAck } from "../device";
+import type { PermissionService } from "../organization";
+import type { BotProfileRow } from "./bot-profile";
+import { type BotWorkSessionRow, lockBot, refusedAnswer } from "./bot-sessions";
+import { sessionFacts } from "./facts";
+import { loadBotFileLimit } from "./policy";
+import type { SessionRow, WorkSessionService } from "./service";
 
 /**
  * The bot file transfer ledger (`app.bot_work_session_files`, 07.17.1.1 D-05, D-06, D-08, PD-05): one row per transfer
@@ -23,8 +53,14 @@ export interface TransferFor {
   direction: TransferDirection;
 }
 
-/** Insert one ledger row in the caller's tenant transaction (the row's organization is the tenant's). */
-export async function insertTransfer(tx: Tx, row: NewTransfer): Promise<TransferRow> {
+/**
+ * Insert one ledger row in the caller's tenant transaction (the row's organization is the tenant's). `expiresAt` may be
+ * SQL (`createBotFiles` computes it from the database's own clock, which the transfer routes compare it with).
+ */
+export async function insertTransfer(
+  tx: Tx,
+  row: Omit<NewTransfer, "expiresAt"> & { expiresAt: string | SQL },
+): Promise<TransferRow> {
   const [inserted] = await tx.insert(botWorkSessionFiles).values(row).returning();
   return inserted!;
 }
@@ -102,4 +138,331 @@ export async function markTransfer(
     .where(where)
     .returning({ id: botWorkSessionFiles.id });
   return rows.length > 0;
+}
+
+// ---------------------------------------------------------------- the service (07.17.1.1-11)
+
+type AgentTurnRow = typeof agentTurns.$inferSelect;
+
+/** The bot's own session as the routes found it (`ownBotSession`). */
+export interface OwnSession {
+  session: SessionRow;
+  bot: BotWorkSessionRow;
+}
+
+export interface BotFilesDeps {
+  core: Pick<Core, "log">;
+  hub: Pick<DeviceHub, "enqueue" | "waitForFileAck">;
+  svc: Pick<WorkSessionService, "lock">;
+  perms: PermissionService;
+  /** Attachment object storage; null when the server has none (every move answers `storage_unavailable`). */
+  storage: ObjectStorage | null;
+  /** The server's attachment ceiling (`serverFileMaxBytes(env)`, `OCW_ATTACHMENT_MAX_BYTES`). */
+  serverMaxBytes: number;
+  /**
+   * The transfer deadline for a size in bytes. Absent in production (`transferDeadlineMs`); a test stack shortens it
+   * through its `botFileDeadlineMs` option (PD-18), never through an environment variable.
+   */
+  deadlineMs?: (bytes: number) => number;
+}
+
+/** What both moves are given by the route, in the sponsor's transaction (PD-06 txB). */
+export interface BotFileCallParams {
+  turn: AgentTurnRow;
+  /** The bot's profile, active (the route decided its status). */
+  profile: BotProfileRow;
+  own: OwnSession;
+  /** The repo-relative path inside the session's working tree (never stored; only its length is, P1). */
+  path: string;
+  /** The effective per-file limit (`limitFor`), computed by the route for this call. */
+  limit: BotFileLimit;
+  /** The transfer id the route created and subscribed to (`waitForAck`) before this call. */
+  transferId: string;
+}
+
+export interface BotFileDownloadParams extends BotFileCallParams {}
+
+export interface BotFileUploadParams extends BotFileCallParams {
+  /** The chat attachment the turn may read (`attachmentForTurn`), its size and sha256. */
+  attachment: { id: string; sizeBytes: number; sha256: string | null };
+  overwrite?: boolean;
+}
+
+/** A move the API enqueued (the waiter now waits for its ack), or why it refused before any row or command. */
+export type BotFilePrepared = { kind: "enqueued"; transferId: string } | BotWorkSessionRefused;
+
+/**
+ * What the routes audit about a finished move (PD-16): ids, the size, the sha256, the direction and the path's length.
+ * Never a path, a file name or content.
+ */
+export interface BotFileAuditFacts {
+  attachmentId: string;
+  bytes: number | null;
+  sha256: string | null;
+  direction: TransferDirection;
+  pathLength: number;
+  limitSource: BotFileLimitSource;
+}
+
+/** `finish`'s result: the bot's answer and the facts the route audits (null when no ledger row was found). */
+export interface BotFileFinished<A> {
+  answer: A;
+  audit: BotFileAuditFacts | null;
+}
+
+export interface BotFileFinishParams<D extends TransferDirection> {
+  transferId: string;
+  direction: D;
+  /** The device's ack the route waited for; null when the wait timed out (PD-18). */
+  ack: FileCommandAck | null;
+}
+
+export interface BotFiles {
+  /** The per-file limit of one call (`loadBotFileLimit` bound to the server's ceiling), recomputed at every call. */
+  limitFor(tx: Tx, profile: { fileMaxBytes: number | null } | null): Promise<BotFileLimit>;
+  /** The transfer deadline for `bytes` (the waiter's timeout and the ledger's `expires_at`). */
+  deadlineFor(bytes: number): number;
+  /** Wait for the device's ack of `transferId` (the hub's `waitForFileAck`; the Agent Channel never holds the hub). */
+  waitForAck(transferId: string, timeoutMs: number, signal?: AbortSignal): Promise<FileCommandAck | null>;
+  /** One chat attachment into the bot's own idle session (D-02, D-13), in the sponsor's transaction. */
+  prepareUpload(tx: Tx, p: BotFileUploadParams): Promise<BotFilePrepared>;
+  /** One file of the bot's own active session into a pending attachment of its turn (D-03), in the sponsor's tx. */
+  prepareDownload(tx: Tx, p: BotFileDownloadParams): Promise<BotFilePrepared>;
+  /** The move's outcome from the device's ack (or its absence), in the sponsor's transaction. */
+  finish(
+    tx: Tx,
+    p: BotFileFinishParams<"to_device">,
+  ): Promise<BotFileFinished<AgentChannelWorkSessionUploadResponse>>;
+  finish(
+    tx: Tx,
+    p: BotFileFinishParams<"from_device">,
+  ): Promise<BotFileFinished<AgentChannelWorkSessionDownloadResponse>>;
+}
+
+const COMMAND_KIND = { to_device: "session.file.write", from_device: "session.file.read" } as const;
+
+/** The stored outcome of a command the route did not hear about (an ack published before it subscribed). */
+function storedAck(command: { status: string; error: string | null } | undefined): FileCommandAck | null {
+  if (command?.status === "acked") return { ok: true, error: null };
+  if (command?.status === "failed") return { ok: false, error: command.error };
+  return null;
+}
+
+/**
+ * 07.17.1.1 (D-02 … D-07, D-13; PD-06 … PD-08, PD-12, PD-13, PD-15 … PD-18): the work-session module decides and runs
+ * one file move for a bot's own session. `prepare*` run in the sponsor's tenant transaction after the Agent Channel
+ * route decided the turn, the tool, the profile, the path's deny list, taint and the claim: the bot's lock, the session
+ * row's lock, its state, the sponsor's own right on it (principle 6: never above the sponsor), the device, then one
+ * ledger row and one `session.file.read|write` command whose id is the transfer id. The route waits for the ack outside
+ * any transaction (`waitForAck`), then `finish` maps it to one fixed answer. Every refusal is `refusedAnswer(code)`:
+ * a fixed sentence, never device text. Nothing here stores, logs or audits a path or a file name (P1).
+ */
+export function createBotFiles(deps: BotFilesDeps): BotFiles {
+  const { core, hub, svc, perms } = deps;
+  const deadlineFor = (bytes: number) => (deps.deadlineMs ?? transferDeadlineMs)(bytes);
+
+  /**
+   * PD-08: the session's state and the sponsor's right, under the bot's lock then the session row's lock (the order
+   * `bots.prompt` takes them). Returns the locked row, or the refusal.
+   */
+  async function decideSession(
+    tx: Tx,
+    p: BotFileCallParams,
+    direction: TransferDirection,
+  ): Promise<{ session: SessionRow } | BotWorkSessionRefused> {
+    const { turn, own } = p;
+    await lockBot(tx, turn.agentId);
+    const s = await svc.lock(tx, own.session.id);
+    // Hidden from the sponsor (the audience backstop): the sponsor may not act on it.
+    if (!s) return refusedAnswer("not_allowed");
+    if (
+      s.startedByAgentId !== turn.agentId ||
+      own.bot.agentId !== turn.agentId ||
+      own.bot.workSessionId !== s.id
+    ) {
+      return refusedAnswer("not_your_session");
+    }
+    // D-12: only from the conversation where the bot started the session, so a file never hops between conversations.
+    if (own.bot.originConversationId !== turn.conversationId) return refusedAnswer("not_your_session");
+    if (s.status === "archived") return refusedAnswer("session_ended");
+    if (s.status === "completed" || s.status === "failed") return refusedAnswer("session_not_running");
+    if (s.status === "host_offline") return refusedAnswer("device_offline");
+    // PD-07: writing into the tree is acting on the session like a prompt; reading a file is what the diff route asks.
+    const sponsorUserId = own.bot.sponsorUserId;
+    const { allowed } = await perms.decide(
+      tx,
+      { kind: "user", userId: sponsorUserId },
+      direction === "to_device" ? "work_session.prompt" : "work_session.read",
+      await sessionFacts(tx, sponsorUserId, s),
+    );
+    if (!allowed) return refusedAnswer("not_allowed");
+    const [device] = await tx
+      .select({ status: devices.status, revokedAt: devices.revokedAt })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId))
+      .limit(1);
+    if (device?.status !== "online" || device.revokedAt !== null) return refusedAnswer("device_offline");
+    // A session still starting has no tree to read from yet.
+    if (s.status === "provisioning") return refusedAnswer("session_busy");
+    return { session: s };
+  }
+
+  /** The checks every move makes before any lock: storage, then the path (the route decided both already). */
+  function precheck(p: BotFileCallParams): BotWorkSessionRefused | null {
+    if (!deps.storage) return refusedAnswer("storage_unavailable");
+    if (!WorkSessionFilePath.safeParse(p.path).success || workSessionFilePathRefusal(p.path) !== null) {
+      return refusedAnswer("path_not_allowed");
+    }
+    return null;
+  }
+
+  async function insertRow(
+    tx: Tx,
+    p: BotFileCallParams,
+    s: SessionRow,
+    row: {
+      direction: TransferDirection;
+      attachmentId: string;
+      sizeBytes: number | null;
+      sha256: string | null;
+    },
+    deadlineBytes: number,
+  ): Promise<void> {
+    await insertTransfer(tx, {
+      id: p.transferId,
+      organizationId: tenantOf(tx).organizationId,
+      workSessionId: s.id,
+      agentId: p.turn.agentId,
+      eventId: p.turn.eventId,
+      deviceId: s.deviceId,
+      conversationId: p.turn.conversationId,
+      direction: row.direction,
+      attachmentId: row.attachmentId,
+      maxBytes: p.limit.bytes,
+      limitSource: p.limit.source,
+      sizeBytes: row.sizeBytes,
+      sha256: row.sha256,
+      pathLength: p.path.length,
+      // The database's clock: the transfer routes compare `expires_at` with its `now()`.
+      expiresAt: sql`now() + ${deadlineFor(deadlineBytes)} * interval '1 millisecond'`,
+    });
+  }
+
+  async function finishTransfer(
+    tx: Tx,
+    p: BotFileFinishParams<TransferDirection>,
+  ): Promise<
+    BotFileFinished<AgentChannelWorkSessionUploadResponse | AgentChannelWorkSessionDownloadResponse>
+  > {
+    const [row] = await tx
+      .select()
+      .from(botWorkSessionFiles)
+      .where(eq(botWorkSessionFiles.id, p.transferId))
+      .for("update")
+      .limit(1);
+    if (!row || row.direction !== p.direction)
+      return { answer: refusedAnswer("transfer_failed"), audit: null };
+    const audit: BotFileAuditFacts = {
+      attachmentId: row.attachmentId,
+      bytes: row.sizeBytes,
+      sha256: row.sha256,
+      direction: row.direction,
+      pathLength: row.pathLength,
+      limitSource: row.limitSource,
+    };
+    const [command] = await tx
+      .select({ status: deviceCommands.status, error: deviceCommands.error, payload: deviceCommands.payload })
+      .from(deviceCommands)
+      .where(and(eq(deviceCommands.id, row.id), eq(deviceCommands.kind, COMMAND_KIND[row.direction])))
+      .for("update")
+      .limit(1);
+    const ack = p.ack ?? storedAck(command);
+    const path = (command?.payload as { path?: unknown } | undefined)?.path;
+    const fail = async (failure: string) => {
+      await markTransfer(
+        tx,
+        row.id,
+        { status: "failed", failure, completedAt: new Date().toISOString() },
+        { from: ["pending", "streaming", "streamed"] },
+      );
+    };
+    if (ack?.ok && row.status === "streamed" && typeof path === "string") {
+      if (row.direction === "to_device") {
+        await markTransfer(tx, row.id, { status: "done", completedAt: new Date().toISOString() });
+        core.log.debug({ transferId: row.id, code: "uploaded" }, "bot file move finished");
+        return {
+          answer: { kind: "uploaded", workSessionId: row.workSessionId, path, sizeBytes: row.sizeBytes ?? 0 },
+          audit,
+        };
+      }
+      const [att] = await tx
+        .select({
+          id: attachments.id,
+          filename: attachments.filename,
+          sizeBytes: attachments.sizeBytes,
+          contentType: attachments.contentType,
+          status: attachments.status,
+        })
+        .from(attachments)
+        .where(eq(attachments.id, row.attachmentId))
+        .limit(1);
+      if (att && att.status === "pending") {
+        await markTransfer(tx, row.id, { status: "done", completedAt: new Date().toISOString() });
+        core.log.debug({ transferId: row.id, code: "downloaded" }, "bot file move finished");
+        return {
+          answer: {
+            kind: "downloaded",
+            workSessionId: row.workSessionId,
+            attachmentId: att.id,
+            name: att.filename,
+            sizeBytes: att.sizeBytes,
+            contentType: att.contentType ?? "application/octet-stream",
+          },
+          audit,
+        };
+      }
+    }
+    await fail("transfer_failed");
+    return { answer: refusedAnswer("transfer_failed"), audit };
+  }
+
+  return {
+    limitFor: (tx, profile) => loadBotFileLimit(tx, profile, deps.serverMaxBytes),
+    deadlineFor,
+    waitForAck: (transferId, timeoutMs, signal) => hub.waitForFileAck(transferId, timeoutMs, signal),
+
+    async prepareUpload(_tx, _p) {
+      return refusedAnswer("transfer_failed");
+    },
+
+    async prepareDownload(tx, p) {
+      const pre = precheck(p);
+      if (pre) return pre;
+      const decided = await decideSession(tx, p, "from_device");
+      if ("kind" in decided) return decided;
+      const s = decided.session;
+      // PD-17: the attachment's id is chosen now; the device's PUT stores the bytes under it.
+      await insertRow(
+        tx,
+        p,
+        s,
+        { direction: "from_device", attachmentId: randomUUID(), sizeBytes: null, sha256: null },
+        p.limit.bytes,
+      );
+      const payload: SessionFileReadPayload = SessionFileReadPayloadSchema.parse({
+        path: p.path,
+        maxBytes: p.limit.bytes,
+      });
+      await hub.enqueue(tx, {
+        id: p.transferId,
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "session.file.read",
+        payload,
+      });
+      return { kind: "enqueued", transferId: p.transferId };
+    },
+
+    finish: finishTransfer as BotFiles["finish"],
+  };
 }
