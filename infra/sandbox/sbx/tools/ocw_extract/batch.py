@@ -470,8 +470,9 @@ class Batch:
         self.archive_rels.add(rel)
         entries = archives.list_archive(path, type_name, self.steps)
         problem = archives.check_caps(
-            entries, runner.room_bytes() - bounds.ARCHIVE_FREE_MARGIN_BYTES,
-            st.st_size if type_name in archives.TAR else None,
+            # The whole archive's size ratio for every type (07.17.1.1.1 review IN-02): many entries under 10 MiB, or a
+            # solid 7z with no packed sizes, are checked too.
+            entries, runner.room_bytes() - bounds.ARCHIVE_FREE_MARGIN_BYTES, st.st_size
         )
         if problem:
             raise bounds.CapsError(problem)

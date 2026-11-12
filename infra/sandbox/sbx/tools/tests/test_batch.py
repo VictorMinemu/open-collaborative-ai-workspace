@@ -602,6 +602,25 @@ class Caps(Base):
         for bad in ({}, {"OCW_DISK_ROOM_BYTES": "x"}, {"OCW_DISK_ROOM_BYTES": "-1"}):
             self.assertIsNone(bounds.workspace_room(bad), bad)
 
+    def test_the_size_ratio_covers_every_archive_type_and_many_small_entries(self):
+        """07.17.1.1.1 review IN-02: the 100:1 ratio applies to the whole archive for zip and 7z too, not only to one
+        entry over 10 MiB or to tar: three 9 MiB entries of zeros are refused."""
+        import zipfile
+
+        path = f"{WS}/many-small.zip"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            for i in range(3):
+                with z.open(f"z{i}.bin", "w") as f:
+                    for _ in range(9):
+                        f.write(b"\0" * (1024 * 1024))
+        try:
+            fresh(f"{WS}/extracted/many-small.zip")
+            rc, _out, err = cli("--batch", "many-small.zip")
+            self.assertEqual(rc, 6, err)
+            assert_reason(self, err, "caps: ratio")
+        finally:
+            os.unlink(path)
+
     def test_hostile_top_level_archives_exit_6(self):
         for name, needle in (("bomb.zip", "ratio"), ("traversal.zip", "path"), ("link.zip", "link")):
             with self.subTest(name=name):
