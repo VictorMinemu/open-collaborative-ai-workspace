@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
-import { connectWithProject, pairDevice, startSession } from "../../testing-workzone";
+import { connectWithProject, invite, pairDevice, startSession } from "../../testing-workzone";
 import { insertTransfer } from "./bot-files";
 
 /**
@@ -20,6 +20,9 @@ const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "c
 /** The source file's name: no log line may ever carry it (P1). */
 const FILE_NAME = "quarterly-plan-zebra.txt";
 const FILE_TEXT = "Ship the bot file exchange.\n".repeat(64);
+/** The busy test's source: big enough that a reader who never reads holds its stream open (socket buffers fill). */
+const BIG_NAME = "board-minutes-walrus.txt";
+const BIG_BYTES = 32 * 1024 * 1024;
 
 let storage: TestStorage;
 let stack: TestStack;
@@ -34,6 +37,13 @@ let sessionId: string;
 let general: string;
 let attachmentId: string;
 let attachmentSha: string;
+let bigId: string;
+/** Device B: another device of organization A, with its own valid JWT. */
+let jwtB: string;
+/** Organization B's device JWT. */
+let jwtOrgB: string;
+/** A device of organization A revoked after it got its JWT. */
+let jwtRevoked: string;
 const logs: string[] = [];
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -80,7 +90,7 @@ async function statusOf(id: string): Promise<{ status: string; failure: string |
 beforeAll(async () => {
   storage = await startTestStorage();
   stack = await startTestStack({
-    env: { ...storage.env, LOG_LEVEL: "info" },
+    env: { ...storage.env, LOG_LEVEL: "info", OCW_ATTACHMENT_MAX_BYTES: String(64 * 1024 * 1024) },
     logStream: { write: (line) => void logs.push(line) },
   });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
@@ -107,6 +117,36 @@ beforeAll(async () => {
   attachmentSha = sha256(bytes);
   attachmentId = await uploadAttachment(admin, general, { name: FILE_NAME, type: "text/plain", bytes });
   jwtA = await FakeDevice.exchange(stack.baseUrl, deviceAToken);
+  const big = new Uint8Array(BIG_BYTES).fill(0x61);
+  bigId = await uploadAttachment(admin, general, { name: BIG_NAME, type: "text/plain", bytes: big });
+
+  const b = await pairDevice(stack, admin, "Lab box");
+  jwtB = await FakeDevice.exchange(stack.baseUrl, b.token);
+  const c = await pairDevice(stack, admin, "Old laptop");
+  jwtRevoked = await FakeDevice.exchange(stack.baseUrl, c.token);
+  const revoked = await admin.request("DELETE", `/api/v1/devices/${c.deviceId}`);
+  expect(revoked.status, JSON.stringify(revoked.body)).toBe(200);
+
+  // Organization B: Eve leaves A and becomes the admin of her own organization (the 07.5 / 07.9 matrix pattern).
+  const { client: eve, userId: eveId } = await invite(stack, admin, "eve@example.test", "Eve", "developer");
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+    orgB,
+    `o-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [eveId]);
+  await su.query("delete from app.org_members where user_id = $1", [eveId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    eveId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, eveId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+  const eveDevice = await pairDevice(stack, eve, "Eve's box");
+  jwtOrgB = await FakeDevice.exchange(stack.baseUrl, eveDevice.token);
 }, 240_000);
 
 afterAll(async () => {
@@ -205,5 +245,107 @@ describe("tracer: a device GETs an attachment's bytes through its transfer, unde
     await viaJwt.close();
     await expect(FakeDevice.open(stack.baseUrl, "not-a-token")).rejects.toThrow("HTTP 401");
     expect(BOT_FILE_LIMITS.concurrentTransfersPerProcess).toBe(4);
+  });
+});
+
+describe("only the right device, once, in time; a busy server never burns the transfer (PD-05, E18)", () => {
+  it("another device of the organization gets 404 and the row is untouched", async () => {
+    const id = await transfer();
+    const res = await get(id, jwtB);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("not_found");
+    expect(await statusOf(id)).toEqual({ status: "pending", failure: null });
+  });
+
+  it("organization B's device gets 404 for organization A's transfer id (RLS hides it)", async () => {
+    const id = await transfer();
+    expect((await get(id, jwtOrgB)).status).toBe(404);
+    expect(await statusOf(id)).toEqual({ status: "pending", failure: null });
+  });
+
+  it("a row past expires_at and a row already failed answer 410, and stay as they were", async () => {
+    const late = await transfer({ expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect((await get(late, jwtA)).status).toBe(410);
+    expect(await statusOf(late)).toEqual({ status: "pending", failure: null });
+    const failed = await transfer({ status: "failed", failure: "transfer_timeout" });
+    expect((await get(failed, jwtA)).status).toBe(410);
+    expect(await statusOf(failed)).toEqual({ status: "failed", failure: "transfer_timeout" });
+  });
+
+  it("a revoked device's JWT and a JWT naming another organization for the device answer 401", async () => {
+    const id = await transfer();
+    expect((await get(id, jwtRevoked)).status).toBe(401);
+    // The device principal's `device.link` is decided in the JWT's organization: there, device A does not exist.
+    const elsewhere = await stack.built.core.identity.signDeviceAccessToken({
+      deviceId: deviceAId,
+      organizationId: randomUUID(),
+    });
+    expect((await get(id, elsewhere.token)).status).toBe(401);
+    expect(await statusOf(id)).toEqual({ status: "pending", failure: null });
+  });
+
+  it("a GET of a from_device row answers 404", async () => {
+    const id = await transfer({ direction: "from_device", sizeBytes: null, sha256: null });
+    expect((await get(id, jwtA)).status).toBe(404);
+    expect(await statusOf(id)).toEqual({ status: "pending", failure: null });
+  });
+
+  it("a source attachment no longer ready answers 410 and fails the row (not_found)", async () => {
+    const gone = await uploadAttachment(admin, general, {
+      name: "deleted-notes.txt",
+      type: "text/plain",
+      bytes: new TextEncoder().encode("soon gone"),
+    });
+    await su.query("update app.attachments set status = 'deleted' where id = $1", [gone]);
+    const id = await transfer({ attachmentId: gone });
+    expect((await get(id, jwtA)).status).toBe(410);
+    expect((await statusOf(id)).failure).toBe("not_found");
+  });
+
+  it("four slow streams make a fifth GET 503 busy with its row still pending; once one ends, the fifth streams", async () => {
+    const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
+    const big = { attachmentId: bigId, sizeBytes: BIG_BYTES, sha256: null };
+    const held: Array<{ id: string; res: Response; abort: AbortController }> = [];
+    try {
+      for (let i = 0; i < max; i++) {
+        const id = await transfer(big);
+        const abort = new AbortController();
+        const res = await fetch(fileUrl(id), {
+          headers: { authorization: `Bearer ${jwtA}` },
+          signal: abort.signal,
+        });
+        expect(res.status).toBe(200);
+        held.push({ id, res, abort });
+      }
+      for (const h of held) expect((await statusOf(h.id)).status).toBe("streaming");
+
+      const fifth = await transfer();
+      const refused = await get(fifth, jwtA);
+      expect(refused.status).toBe(503);
+      expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("busy");
+      expect(await statusOf(fifth)).toEqual({ status: "pending", failure: null });
+
+      const first = held.shift()!;
+      expect((await first.res.arrayBuffer()).byteLength).toBe(BIG_BYTES);
+      await eventually(async () => (await statusOf(first.id)).status === "streamed");
+
+      const retried = await get(fifth, jwtA);
+      expect(retried.status).toBe(200);
+      expect(sha256(new Uint8Array(await retried.arrayBuffer()))).toBe(attachmentSha);
+      await eventually(async () => (await statusOf(fifth)).status === "streamed");
+    } finally {
+      for (const h of held) h.abort.abort();
+    }
+    // A stream the reader dropped is over: its row is failed, never left streaming.
+    for (const h of held) {
+      await eventually(async () => (await statusOf(h.id)).failure === "transfer_failed");
+    }
+  });
+
+  it("no captured log line carries a source file name; the route logs ids and codes (P1)", () => {
+    const all = logs.join("");
+    expect(all).toContain('"code":"busy"');
+    expect(all).toContain('"code":"streamed"');
+    for (const name of [FILE_NAME, BIG_NAME, "deleted-notes.txt"]) expect(all).not.toContain(name);
   });
 });
