@@ -11,6 +11,7 @@ import {
   effectiveBotFileMaxBytes,
   fileSizeLabel,
   isSecretBasename,
+  isWindowsReservedName,
   parseSessionFileAck,
   RUNTIME_FILE_ROUTE,
   RuntimeFilePutAnswer,
@@ -109,6 +110,35 @@ describe("WorkSessionFilePath (07.17.1.1 D-02, D-03, principle 7)", () => {
     expect(ok(`a/${"x".repeat(256)}`)).toBe(false);
     expect(ok("a".repeat(1025))).toBe(false);
     expect(ok(`${"a/".repeat(511)}abc`)).toBe(false);
+  });
+
+  it("refuses NTFS stream names and 8.3 short names anywhere in the path (review CR-02)", () => {
+    const dotEnv = [".", "env"].join("");
+    for (const p of [
+      `${dotEnv}::$DATA`,
+      `${dotEnv}:secret`,
+      "docs/a:b.txt",
+      "a/b:",
+      "ENV~1",
+      "GIT~1/config",
+      "x/PROGRA~1/a.md",
+      "notes~2.md",
+    ]) {
+      expect(ok(p), p).toBe(false);
+    }
+    // A tilde not followed by a digit is an ordinary name; a leading one is still the home shortcut.
+    expect(ok("docs/notes~.md")).toBe(true);
+    expect(ok("docs/a~b.md")).toBe(true);
+    expect(ok("docs/~x")).toBe(true);
+  });
+
+  it("names the Windows device names, with any extension and in any case (review CR-02)", () => {
+    for (const name of ["CON", "con", "nul.txt", "Aux.c", "prn", "COM1", "com9.log", "LPT1", `COM${"¹"}`]) {
+      expect(isWindowsReservedName(name), name).toBe(true);
+    }
+    for (const name of ["console.log", "aux2", "nullable.ts", "com", "com10", "lpt0x", "docs"]) {
+      expect(isWindowsReservedName(name), name).toBe(false);
+    }
   });
 });
 

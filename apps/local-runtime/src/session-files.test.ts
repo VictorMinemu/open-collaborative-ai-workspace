@@ -133,6 +133,22 @@ describe("resolveSessionPath (PD-10)", () => {
     expect(existsSync(join(root, "up"))).toBe(false);
   });
 
+  it("refuses NTFS stream and short names, and on Windows a device name as any segment (review CR-02)", async () => {
+    for (const rel of [`${DOT_ENV}::$DATA`, "ENV~1", "GIT~1/config"]) {
+      expect(await codeOf(resolveSessionPath(root, rel, { create: false })), rel).toBe("invalid_path");
+    }
+    writeFileSync(join(root, "docs", "nul.txt"), "x");
+    for (const rel of ["docs/nul.txt", "CON/a.md", "docs/com1"]) {
+      expect(await codeOf(resolveSessionPath(root, rel, { create: true, windows: true })), rel).toBe(
+        "path_not_allowed",
+      );
+    }
+    expect(existsSync(join(root, "CON"))).toBe(false);
+    expect(await codeOf(resolveSessionPath(root, "docs/nul.txt", { create: false, windows: false }))).toBe(
+      "ok",
+    );
+  });
+
   it("the second check decides on the names as stored on the volume, the file's own included (review CR-01)", async () => {
     // A case-insensitive volume opens "DOCS/A.MD" as "docs/a.md"; the native realpath names the stored spelling.
     const r = await resolveSessionPath(root, "docs/a.md", { create: false });

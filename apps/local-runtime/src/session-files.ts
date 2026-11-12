@@ -23,6 +23,7 @@ import {
 } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import {
+  isWindowsReservedName,
   type SessionFileFailure,
   sessionFileAckError,
   WorkSessionFilePath,
@@ -39,6 +40,8 @@ export class SessionFileError extends Error {
     this.name = "SessionFileError";
   }
 }
+
+const IS_WINDOWS = process.platform === "win32";
 
 // Absent on Windows (no such flag there); the `lstat` check before `open` still refuses a link.
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -81,16 +84,20 @@ export interface ResolvedSessionPath {
  * Resolves `rel` inside the session's tree `root` (PD-10). `invalid_path` for anything `WorkSessionFilePath` refuses;
  * `path_not_allowed` for the deny list (on `rel` and on the real path), a parent that resolves outside the root, or a
  * folder that would have to be created under a link. With `create: true` missing folders are made one segment at a
- * time, each checked with `lstat` (never through a link); without it a missing folder is `not_found`.
+ * time, each checked with `lstat` (never through a link); without it a missing folder is `not_found`. On Windows
+ * (`windows`, default: this platform) a device name (`CON`, `NUL`, `COM1` …) as any segment is `path_not_allowed`.
  */
 export async function resolveSessionPath(
   root: string,
   rel: string,
-  opts: { create: boolean },
+  opts: { create: boolean; windows?: boolean },
 ): Promise<ResolvedSessionPath> {
   const parsed = WorkSessionFilePath.safeParse(rel);
   if (!parsed.success) throw new SessionFileError("invalid_path");
   if (workSessionFilePathRefusal(parsed.data) !== null) throw new SessionFileError("path_not_allowed");
+  if ((opts.windows ?? IS_WINDOWS) && parsed.data.split("/").some(isWindowsReservedName)) {
+    throw new SessionFileError("path_not_allowed");
+  }
   let realRoot: string;
   try {
     realRoot = await realpath(root);
@@ -164,6 +171,23 @@ export async function resolveSessionPath(
 }
 
 /**
+ * Review CR-02: the file at `target`, named as the volume stores it (the native realpath; on Windows the long name
+ * `GetFinalPathNameByHandle` reports, never an 8.3 alias), must still be inside `root` and off the deny list.
+ */
+async function recheckStoredName(root: string, target: string): Promise<void> {
+  let stored: string;
+  try {
+    stored = await realpath(target);
+  } catch {
+    throw new SessionFileError("not_found");
+  }
+  if (!inside(root, stored) || stored === root) throw new SessionFileError("path_not_allowed");
+  if (workSessionFilePathRefusal(toPosix(relative(root, stored))) !== null) {
+    throw new SessionFileError("path_not_allowed");
+  }
+}
+
+/**
  * Opens one regular file of the tree for reading (D-03, PD-10): `not_found`, `not_a_file` (a folder, a link as the
  * final component, a FIFO, a socket or a device), or `too_large` with the size as detail when it is over `maxBytes`,
  * before any byte moves. The caller closes the handle.
@@ -173,7 +197,7 @@ export async function openSessionFileForRead(
   rel: string,
   maxBytes: number,
 ): Promise<{ handle: FileHandle; size: number }> {
-  const { target } = await resolveSessionPath(root, rel, { create: false });
+  const { root: realRoot, target } = await resolveSessionPath(root, rel, { create: false });
   const st = await lstatOrNull(target);
   if (st === null) throw new SessionFileError("not_found");
   if (st.isSymbolicLink() || !st.isFile()) throw new SessionFileError("not_a_file");
@@ -188,6 +212,8 @@ export async function openSessionFileForRead(
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new SessionFileError("not_a_file");
+    // Review CR-02: the opened file, named as stored (Windows: its long name), is decided once more.
+    await recheckStoredName(realRoot, target);
     if (opened.size > maxBytes) throw new SessionFileError("too_large", String(opened.size));
     return { handle, size: opened.size };
   } catch (err) {
@@ -233,7 +259,7 @@ async function writeAll(handle: FileHandle, chunk: Uint8Array): Promise<void> {
  */
 export async function writeSessionFile(root: string, rel: string, p: WriteSessionFileParams): Promise<void> {
   if (!TRANSFER_ID.test(p.transferId)) throw new SessionFileError("transfer_failed");
-  const { parent, target } = await resolveSessionPath(root, rel, { create: true });
+  const { root: realRoot, parent, target } = await resolveSessionPath(root, rel, { create: true });
   const existing = await lstatOrNull(target);
   if (existing) {
     if (existing.isSymbolicLink() || !existing.isFile()) throw new SessionFileError("not_a_file");
@@ -287,6 +313,8 @@ export async function writeSessionFile(root: string, rel: string, p: WriteSessio
     } else {
       const now = await lstatOrNull(target);
       if (now && (now.isSymbolicLink() || !now.isFile())) throw new SessionFileError("not_a_file");
+      // Review CR-02: the file being replaced, named as stored, is decided once more.
+      if (now) await recheckStoredName(realRoot, target);
       await rename(tmp, target);
       tmpLeft = false;
     }

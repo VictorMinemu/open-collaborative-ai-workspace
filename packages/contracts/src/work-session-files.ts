@@ -78,16 +78,36 @@ function isSafeSegment(seg: string): boolean {
   return !seg.endsWith(" ") && !seg.endsWith(".");
 }
 
+/**
+ * An 8.3 short name's `~<digit>` (review CR-02): NTFS generates `ENV~1` for `.env` and `GIT~1` for `.git` (on by default
+ * on the system volume), and opening the short name opens the long one. Refused in any segment, on every platform.
+ */
+const SHORT_NAME = /~\d/;
+
 /** Safe as written AND in its folded form: a compatibility character never folds into `/`, `\`, `:` or `..`. */
 function isSafeSegmentBothForms(seg: string): boolean {
+  // Review CR-02: `:` names an NTFS stream (`.env::$DATA` reads `.env`); a short name aliases a long one.
+  if (seg.includes(":") || SHORT_NAME.test(seg)) return false;
   if (!isSafeSegment(seg)) return false;
   const folded = canonicalFileName(seg);
-  return isSafeSegment(folded) && !/[/\\:]/.test(folded);
+  return isSafeSegment(folded) && !/[/\\:]/.test(folded) && !SHORT_NAME.test(folded);
+}
+
+/** `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9` (superscript digits fold to plain ones), any extension. */
+const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/;
+
+/**
+ * True for a segment Windows opens as a device whatever folder it is in (review CR-02). The Windows daemon refuses it
+ * as any segment; elsewhere it is an ordinary name, so the shared path rule does not.
+ */
+export function isWindowsReservedName(segment: string): boolean {
+  return WINDOWS_DEVICE_NAME.test(canonicalFileName(segment).trimEnd());
 }
 
 /**
  * A file inside a session's working tree, named relative to it: 1 … 1 024 characters, `/`-separated; never absolute
- * (`/`), a home shortcut (`~`), a drive (`C:`), a backslash, a control or bidi character; every segment non-empty, not
+ * (`/`), a home shortcut (`~`), a drive (`C:`), a backslash, a control or bidi character, a `:` (an NTFS stream) or an
+ * 8.3 short name's `~<digit>` (review CR-02); every segment non-empty, not
  * `.` or `..`, at most 255 characters and not ending in a space or a dot (Windows would silently drop them), in both its
  * written and its folded form (`canonicalFileName`). The device re-checks it against the real tree (realpath
  * containment, no symlink escape).
