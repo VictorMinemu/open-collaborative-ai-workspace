@@ -39,6 +39,22 @@ RUN apt-get update \
 COPY --chmod=0644 policy.xml /etc/ImageMagick-6/policy.xml
 COPY --chmod=0644 ocw.xcd /usr/lib/libreoffice/share/registry/ocw.xcd
 
+# The toolkit's Python environment (07.17.1.1.1, D-01, D-03, PD-14): exactly the approved hash-locked wheels
+# (tools/requirements.lock; supply-chain evidence (a)-(e) in 07.17.1.1.1-02/03's SUMMARY, approved before merge at
+# 07.17.1.1.1-07) into a venv without pip, installed by the system pip with `--python`, hashes required, no
+# dependency resolution and no source build. The pandas and numpy test trees are pruned (size, PD-16). Only curated
+# links go to /opt/ocw-tools/bin (PD-05): never the venv's bin, whose `python` would shadow the system one.
+# (COPY --chmod also sets the mode of the folder it creates, hence the chmod 0755.)
+COPY --chmod=0644 tools/requirements.lock /opt/ocw-tools/requirements.lock
+RUN chmod 0755 /opt/ocw-tools \
+ && python3 -m venv --without-pip /opt/ocw-tools/venv \
+ && python3 -m pip --python /opt/ocw-tools/venv/bin/python install --no-cache-dir --disable-pip-version-check \
+      --require-hashes --no-deps --only-binary :all: -r /opt/ocw-tools/requirements.lock \
+ && rm -rf /opt/ocw-tools/venv/lib/python3.11/site-packages/pandas/tests \
+ && find /opt/ocw-tools/venv/lib/python3.11/site-packages/numpy -type d -name tests -prune -exec rm -rf {} + \
+ && mkdir -p /opt/ocw-tools/bin \
+ && ln -s /opt/ocw-tools/venv/bin/pdfplumber /opt/ocw-tools/bin/pdfplumber
+
 # The bot's user. /workspace exists and belongs to 10001 in the image, so a fresh named volume mounted there inherits
 # that owner (Pitfall 4). /opt/ocw-packages is the bot's packages volume (read-only in `sbx`, written only by an
 # installer run, 07.8-17, P-12); /staging is the scratch volume of a package review or installer run. Both belong to
@@ -55,6 +71,13 @@ RUN groupadd --gid 10001 ocw \
 # only way it touches workspace files (realpath-confined to /workspace, run as 10001; never the archive API).
 COPY --chmod=0755 ocw-run /usr/local/bin/ocw-run
 COPY --chmod=0755 ocw-files /usr/local/bin/ocw-files
+
+# `ocw-extract` (07.17.1.1.1, D-04, D-11, PD-06): the package, byte-compiled at build (the root is read-only at run
+# time), and its isolated launcher (`python3 -I`, a fixed sys.path entry), both root-owned and read-only for the bot.
+COPY --chmod=0755 tools/ocw_extract /opt/ocw-tools/lib/ocw_extract
+RUN chmod 0644 /opt/ocw-tools/lib/ocw_extract/*.py \
+ && /opt/ocw-tools/venv/bin/python3 -I -m compileall -q /opt/ocw-tools/lib
+COPY --chmod=0755 ocw-extract /usr/local/bin/ocw-extract
 
 # sandboxd sets the whole environment of every container it creates (spec.ts SHELL_ENV); this default only keeps a
 # hand-run container in the same order: the document toolkit (07.17.1.1.1, D-03) and then approved package bins after
