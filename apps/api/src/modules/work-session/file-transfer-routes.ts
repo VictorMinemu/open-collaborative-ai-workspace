@@ -17,14 +17,6 @@ import { authenticateDeviceJwt, bearerValue, type DeviceRef, looksLikeJwt } from
 import { createPermissionService } from "../organization";
 import { claimTransferForDevice, markTransfer, readTransferForDevice, type TransferRow } from "./bot-files";
 
-/**
- * Streams running in this API process (07.17.1.1 PD-05): at most `BOT_FILE_LIMITS.concurrentTransfersPerProcess`. A
- * request beyond that answers 503 `busy` BEFORE its row is claimed, so the row stays `pending` and the daemon's retry
- * (1 s, then 3 s) streams it. A slot is reserved before the claim and released when the stream ends (or the request
- * is refused), so two requests never both pass a check at three.
- */
-let active = 0;
-
 const TransferParams = z.object({ transferId: Id });
 
 /** Answers that never consume the row: the device's retry, or another device, still finds it as it was. */
@@ -89,6 +81,14 @@ export function registerFileTransferRoutes(
   const perms = createPermissionService(core);
   const deviceOnly = deviceJwtOnly(core, perms);
   const max = BOT_FILE_LIMITS.concurrentTransfersPerProcess;
+  /**
+   * Streams this app serves at once (07.17.1.1 PD-05): at most `BOT_FILE_LIMITS.concurrentTransfersPerProcess`. One
+   * counter per app (review IN-11), never shared by two apps built in one process. A request beyond that answers 503
+   * `busy` BEFORE its row is claimed, so the row stays `pending` and the daemon's retry (1 s, then 3 s) streams it. A
+   * slot is reserved before the claim and released when the stream ends (or the request is refused), so two requests
+   * never both pass a check at three.
+   */
+  let active = 0;
 
   /** Record how a claimed transfer's stream ended; a row the deadline sweep already closed is left alone. */
   async function settle(
