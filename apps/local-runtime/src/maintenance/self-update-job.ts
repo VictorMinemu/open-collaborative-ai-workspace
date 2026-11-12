@@ -192,6 +192,8 @@ export class SelfUpdate {
   private readonly locks: InstallLocks;
   private state: RuntimeSelfUpdateState = "idle";
   private job: Job | null = null;
+  /** The release of the last run's lock, which finishes just after that run is marked ended (see `run`). */
+  private releasing: Promise<void> = Promise.resolve();
   private lastRun: RuntimeSelfLastRun | null = null;
   private served: { version: string; sha256: string; minNode: number } | null = null;
   private checkedAt: number | null = null;
@@ -444,6 +446,9 @@ export class SelfUpdate {
         return;
       }
 
+      // A run that just ended releases its lock right after its `finished` frame: wait for that release, so a click
+      // (or check) right after a failed or timed-out run is not refused as "busy" by this daemon's own lock (CI p278).
+      await this.releasing;
       const held = await this.locks.acquire(runtimeDir(this.opts.ocwHome));
       if (job.ended) {
         if (held !== "busy") await held.release().catch(() => undefined);
@@ -596,11 +601,13 @@ export class SelfUpdate {
     const lock = job.lock;
     job.lock = null;
     if (!lock) return;
-    await lock
+    const release = lock
       .release()
       .catch((err: unknown) =>
         this.log.warn("could not release the self-update lock", { error: scrubHostPaths(errorMessage(err)) }),
       );
+    this.releasing = release;
+    await release;
   }
 
   /**

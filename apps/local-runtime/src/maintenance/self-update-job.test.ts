@@ -516,10 +516,47 @@ describe("SelfUpdate: never cut a turn (07.17.1, D-04, PD-09, E12)", () => {
     await untilIdleWith(r, 2);
     expect(r.frames[1]).toMatchObject({ phase: "finished", outcome: "failed", output: HOLD_TIMED_OUT });
     expect(gatesOpen(r)).toBe(true);
-    // Not the build's failure: the next check may run it again.
+    // Not the build's failure: the next check may run it again, right away (it waits for the timed-out run's own
+    // lock release instead of finding it busy, CI p278).
     r.turns.codex = 0;
     await r.su.onConfig();
     await untilExit(r);
+  });
+
+  it("a click right after a timed-out run waits for that run's lock release instead of answering busy (CI p278)", async () => {
+    let releases = 0;
+    let slowRelease: () => void = () => undefined;
+    const r = await makeRig({ maxHoldMs: 60_000 });
+    const real = new InstallLock(r.lockDir);
+    // The first run's release finishes only when the test lets it: the second click starts while it is pending.
+    const locks = {
+      acquire: async (root: string) => {
+        const held = await real.acquire(root);
+        if (held === "busy") return held;
+        return {
+          release: async () => {
+            releases += 1;
+            if (releases === 1) await new Promise<void>((resolve) => (slowRelease = resolve));
+            await held.release();
+          },
+        };
+      },
+    } as unknown as InstallLock;
+    r.su = new SelfUpdate(selfUpdateOptions(r, { maxHoldMs: 60_000, locks }));
+    r.turns.codex = 1;
+    expect(await r.su.request("manual", COMMAND_ID)).toEqual({ accepted: true });
+    await untilState(r, "waiting");
+    await r.clock.advance(61_000);
+    await untilIdleWith(r, 2);
+    expect(r.frames[1]).toMatchObject({ outcome: "failed", output: HOLD_TIMED_OUT });
+
+    r.turns.codex = 0;
+    expect(await r.su.request("manual", "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60")).toEqual({ accepted: true });
+    // Let the second run read the manifest and reach the lock while the first release is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    slowRelease();
+    await untilExit(r);
+    expect(r.frames.some((f) => f.output === SELF_UPDATE_REFUSALS.busy)).toBe(false);
   });
 
   it("a command admitted but not yet at its adapter counts as running: no switch until it is through", async () => {
