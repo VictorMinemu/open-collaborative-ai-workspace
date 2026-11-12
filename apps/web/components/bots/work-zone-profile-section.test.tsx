@@ -20,9 +20,13 @@ import { wzKeys } from "@/lib/workzone-queries";
 import { onRadioGroupKeyDown } from "../work-zone/new-session-sections";
 import {
   addable,
+  appliedFileLimitLine,
   FAST_MODE_OPTIONS,
+  FILE_LIMIT_COPY,
   fieldError,
+  fileMaxError,
   filterProjects,
+  initialDraft,
   LIMIT_FIELDS,
   newDraft,
   offerFrom,
@@ -715,7 +719,8 @@ describe("keyboard, touch and screen reader (Task 3)", () => {
     }
     const chip = html.match(/<button[^>]*aria-label="Remove GPT-5"[^>]*>/)?.[0] ?? "";
     expect(chip).toContain("max-md:size-11");
-    expect(html).toContain("grid grid-cols-1 gap-4 md:grid-cols-3");
+    // 07.17.1.1-09: four limits now; one column on a phone, two in the 36rem sheet.
+    expect(html).toContain("grid grid-cols-1 gap-4 sm:grid-cols-2");
     expect(html).toMatch(/<span[^>]*title="web-app"[^>]*>web-app<\/span>/);
     expect(html).toMatch(/<span[^>]*title="Customer portal"/);
     expect(SOURCE.match(/max-md:h-11|max-md:min-h-11/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
@@ -728,5 +733,136 @@ describe("keyboard, touch and screen reader (Task 3)", () => {
     for (const cls of SOURCE.match(/"[^"]*\btext-(?:amber|emerald)-\d{3}[^"]*"/g) ?? []) {
       expect(cls, cls).toMatch(/dark:text-(?:amber|emerald)-\d{3}/);
     }
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1.1-09: the bot's Largest file (D-07, PD-11)
+
+const MIB = 1024 * 1024;
+const LIMITS = { organizationFileMaxBytes: 25 * MIB, serverFileMaxBytes: 1024 * MIB };
+
+/** The saved profile as an API that knows the file limit answers it. */
+function withLimits(fileMaxBytes: number | null, v = active()): BotWorkZoneProfileView {
+  if (!v.profile) throw new Error("no profile");
+  v.profile = { ...v.profile, fileMaxBytes };
+  v.limits = { ...LIMITS };
+  return v;
+}
+
+describe("Largest file (07.17.1.1-09 Task 2)", () => {
+  it("empty means the organization's: placeholder, hint and the line naming the limit that applies", () => {
+    const html = editor(withLimits(null));
+    expect(tagsOf(html, "work-zone-file-max")).toHaveLength(1);
+    const input = tagsOf(html, "work-zone-file-max")[0] ?? "";
+    expect(input).toContain('value=""');
+    expect(input).toContain('type="number"');
+    expect(input).toContain('min="1"');
+    expect(input).toContain('max="25"');
+    expect(input).toContain('placeholder="Same as the organization (25 MB)"');
+    const t = text(html);
+    expect(t).toContain("Largest file");
+    expect(t).toContain("At most 25 MB, the organization's limit.");
+    expect(tagsOf(html, "work-zone-file-limit")).toHaveLength(1);
+    expect(text(from(html, "work-zone-file-limit"))).toContain(
+      "This bot moves files up to 25 MB (the organization's limit).",
+    );
+    // The line is body text, not faded.
+    expect(tagsOf(html, "work-zone-file-limit")[0]).toContain("text-foreground");
+    expect(tagsOf(html, "work-zone-file-limit")[0]).not.toContain("muted");
+    // The unit is part of the field's description; the label is tied to the input.
+    const id = input.match(/\sid="([^"]+)"/)?.[1] ?? "none";
+    expect(html).toContain(`for="${id}"`);
+    expect(input.match(/aria-describedby="([^"]+)"/)?.[1]?.split(" ")).toContain(`${id}-unit`);
+    expect(html).toMatch(new RegExp(`id="${id}-unit"[^>]*>MB<`));
+    // A draft from this view sends null: the organization's value.
+    const draft = initialDraft(withLimits(null), DEVICES);
+    expect(draft && toProfileInput(draft).fileMaxBytes).toBeNull();
+  });
+
+  it("a bot value is sent in bytes and named as this bot's limit; the input shows it in MB", () => {
+    const draft = initialDraft(withLimits(10 * MIB), DEVICES);
+    if (!draft) throw new Error("no draft");
+    expect(toProfileInput(draft).fileMaxBytes).toBe(10485760);
+    expect(toProfileInput({ ...draft, fileMaxBytes: null }).fileMaxBytes).toBeNull();
+    expect(appliedFileLimitLine(10 * MIB, LIMITS)).toBe(
+      "This bot moves files up to 10 MB (this bot's limit).",
+    );
+    expect(appliedFileLimitLine(null, LIMITS)).toBe(
+      "This bot moves files up to 25 MB (the organization's limit).",
+    );
+    // A server ceiling below the organization's is named as the server's.
+    expect(
+      appliedFileLimitLine(null, { organizationFileMaxBytes: 25 * MIB, serverFileMaxBytes: 10 * MIB }),
+    ).toBe("This bot moves files up to 10 MB (the server's limit).");
+    const html = editor(withLimits(10 * MIB));
+    expect(tagsOf(html, "work-zone-file-max")[0]).toContain('value="10"');
+    expect(text(from(html, "work-zone-file-limit"))).toContain("up to 10 MB (this bot's limit).");
+  });
+
+  it.each([
+    ["", null],
+    ["  ", null],
+    ["1", null],
+    ["25", null],
+    ["10", null],
+    ["26", "Enter a whole number from 1 to 25, or leave it empty."],
+    ["30", "Enter a whole number from 1 to 25, or leave it empty."],
+    ["0", "Enter a whole number from 1 to 25, or leave it empty."],
+    ["2.5", "Enter a whole number from 1 to 25, or leave it empty."],
+    ["abc", "Enter a whole number from 1 to 25, or leave it empty."],
+  ])("fileMaxError(%s) against the organization's 25 MB", (value, error) => {
+    expect(fileMaxError(value, 25 * MIB)).toBe(error);
+  });
+
+  it("above the organization's value it says so under the field and Save is off", () => {
+    const html = editor(withLimits(null), { fileMax: "30" });
+    expect(tagsOf(html, "work-zone-file-max")[0]).toContain('aria-invalid="true"');
+    expect(text(html)).toContain("Enter a whole number from 1 to 25, or leave it empty.");
+    expect(tagsOf(html, "work-zone-save")[0]).toMatch(/\sdisabled=""/);
+    expect(FILE_LIMIT_COPY.label).toBe("Largest file");
+  });
+
+  it("the API's 400 with field fileMaxBytes is shown under the field", () => {
+    const refused = new ApiRequestError(
+      400,
+      "invalid_work_zone_profile",
+      "At most 25 MB, the organization's limit",
+      {
+        field: "fileMaxBytes",
+      },
+    );
+    expect(fieldError(refused)).toEqual({
+      field: "fileMaxBytes",
+      message: "At most 25 MB, the organization's limit",
+    });
+    expect(SOURCE).toMatch(/const FIELDS = new Set<string>\(\[[^\]]*"fileMaxBytes",[^\]]*\]\)/);
+    const html = editor(withLimits(null), { errors: { fileMaxBytes: "Above the organization's limit" } });
+    expect(tagsOf(html, "work-zone-file-max")[0]).toContain('aria-invalid="true"');
+    expect(text(html)).toContain("Above the organization's limit");
+  });
+
+  it("an older API (no limits) renders the field without hint or line, and the body omits it", () => {
+    const html = editor(active());
+    expect(tagsOf(html, "work-zone-file-max")).toHaveLength(1);
+    expect(tagsOf(html, "work-zone-file-limit")).toHaveLength(0);
+    expect(text(html)).not.toContain("the organization's limit.");
+    const draft = initialDraft(active(), DEVICES);
+    if (!draft) throw new Error("no draft");
+    expect(toProfileInput(draft)).not.toHaveProperty("fileMaxBytes");
+  });
+
+  it("is the fourth limit, after the three existing ones, 44 px and full width on a phone", () => {
+    const html = editor(withLimits(null));
+    const order = ["maxConcurrent", "promptsPerHour", "wakesPerSessionDay"].map((k) =>
+      html.indexOf(`data-testid="work-zone-limit-${k}"`),
+    );
+    const file = html.indexOf('data-testid="work-zone-file-max"');
+    expect(order.every((at, i) => at > 0 && (i === 0 || at > (order[i - 1] ?? 0)))).toBe(true);
+    expect(file).toBeGreaterThan(order[2] ?? 0);
+    expect(html.indexOf('data-testid="work-zone-file-limit"')).toBeGreaterThan(file);
+    const input = tagsOf(html, "work-zone-file-max")[0] ?? "";
+    expect(input).toContain("w-full");
+    expect(input).toContain("max-md:h-11");
+    expect(input).not.toContain("placeholder:text-muted-foreground/70");
   });
 });
