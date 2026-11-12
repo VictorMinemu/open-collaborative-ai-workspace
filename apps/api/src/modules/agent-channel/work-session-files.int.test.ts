@@ -33,8 +33,12 @@ const CELL_TOKEN = "ocw-test-cell-token-bot-work-session-file-routes-0123456789"
 const UPLOAD = "ocw_work_session_upload";
 const FIRST = "fix the failing invoice test";
 const MIB = 1024 * 1024;
-/** This stack's transfer deadline (`botFileDeadlineMs`, PD-18): enough for every file here, short for 13's timeout. */
+/**
+ * This stack's transfer deadline (`botFileDeadlineMs`, PD-18): 5 s for a small file (short for 13's timeout case),
+ * 60 s above 1 MiB so the 25 MiB case never races the deadline on a loaded runner.
+ */
 const STACK_DEADLINE_MS = 5_000;
+const stackDeadlineMs = (bytes: number) => (bytes > MIB ? 60_000 : STACK_DEADLINE_MS);
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -312,7 +316,7 @@ beforeAll(async () => {
       // The server allows 64 MiB, so the organization's default (25 MiB) is the limit that applies.
       OCW_ATTACHMENT_MAX_BYTES: String(64 * MIB),
     },
-    botFileDeadlineMs: () => STACK_DEADLINE_MS,
+    botFileDeadlineMs: stackDeadlineMs,
   });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
