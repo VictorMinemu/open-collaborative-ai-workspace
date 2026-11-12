@@ -320,3 +320,83 @@ It is a later phase, not this one.
 
 AGENTS.md's "Bot sandboxes and browser" row names the toolkit, `ocw-extract` and the drift re-create, and cites this
 record next to ADR-0029.
+
+## Amendment (code review)
+
+**Date:** 2026-11-12. The phase's code review
+(`.planning/phases/07.17.1.1.1-sandbox-document-toolkit-bots-read-pdfs-incl-scanned-ocr-ima/07.17.1.1.1-REVIEW.md`,
+findings CR-01 to IN-08, fix log at its end) found places where the behaviour fell short of the text above. The
+decision stands. The points below change behaviour, and where they name a sentence above, they replace it.
+
+- **Exit codes.** They are now 0, 2 to 7 as before, **8** (a `--batch` run made no progress: do not run it again), and
+  75.
+- **The batch follows the real exec timeout (CR-01).**
+  - `ocw-run` exports `SBX_EXEC_DEADLINE_S`. `--batch` cuts its budget so a chunk ends 130 s (the longest step plus
+    10 s) before that deadline.
+  - It refuses to start, with exit 2 and a message naming `background true` and `timeoutSeconds 600`, when less than
+    130 s would be left. With the API's default 120 s, the bot therefore gets the way out at once instead of a
+    SIGKILL mid-chunk.
+  - This replaces § 3's "470 s plus the longest step … so `ocw-run` never kills a batch", which held only for a 600 s
+    timeout. The exec tool description now says `run it with background true and timeoutSeconds 600`.
+- **Every batch run moves on (CR-02).**
+  - `--budget` takes 130 to 470 s, so no budget is shorter than the step it waits for.
+  - Office files read through a PDF (writer documents with `--ocr always`, presentations other than a pptx) resume
+    per page like PDFs.
+  - When nothing moved in a run, the entry that used the whole budget is failed (`did not fit in one run`). A page
+    that alone does not fit is written as skipped, and its file goes on.
+  - A run that ends with the index it loaded exits 8, never 75. Steps run with their nominal timeout; the
+    "min(T, R)" of § 3 was never implemented.
+- **One batch per output folder (WR-07).** An exclusive lock on `_index.tsv.lock` is held for the whole run. A second
+  run on the same folder is refused with exit 2.
+- **Single files are time-bounded too (WR-05).**
+  - Under `ocw-run`, a single-file read ends 10 s before the deadline. A PDF or a document read through its PDF stops
+    at the last page read and says which pages are left. Anything else exits 7, naming a longer `timeoutSeconds`.
+  - In stdout mode, the read also stops once the capped output is full.
+- **Children and the kill (WR-01, IN-03).** This replaces § 3's "every child is an argv list in its own session, with
+  … a process-group kill".
+  - Children stay in `ocw-extract`'s process group, which is the group `ocw-run` records and kills. When
+    `ocw-extract` is killed, every grandchild dies with it, LibreOffice's `soffice.bin` included.
+  - A step timeout kills the child's whole tree, found through `/proc`. `ocw-extract` is a child subreaper, and it
+    kills the tree before it reaps the child.
+- **Images (WR-02).**
+  - The cap is really 128 MP: Pillow's warning band between 1 and 2 times the limit is an error.
+  - Every PNG, JPEG, TIFF, WEBP and BMP is probed frame by frame from its headers before tesseract sees it, and a
+    multi-page TIFF is OCR'd frame by frame, up to 50 frames.
+  - Images are reduced in place, never copied at full size.
+- **OOXML and ODF files (WR-03, WR-04).** The sentence "An OOXML part that declares a DTD or an entity is refused" is
+  now true for every part, whatever its name, its encoding or its length:
+  - lxml reads each part up to its first element, with entities, DTD loading and the network off.
+  - A part that starts like XML but cannot be parsed is scanned whole, in UTF-8, UTF-16 and UTF-32.
+  - Media and opaque blobs are skipped: printer settings may embed a plist with a doctype.
+  - docx is now checked before LibreOffice opens it.
+  - Before any parser, an OOXML or ODF zip meets the archive caps (ratio, entry count, links, paths) and a 512 MiB
+    uncompressed total (exit 6).
+- **Archives (WR-06, IN-02).**
+  - sandboxd tells every exec the room left under the bot's soft quota (`SBX_DISK_ROOM_BYTES`). The archive caps and
+    the size watcher use the smaller of the free space and that room, minus 64 MiB.
+  - The 100:1 ratio applies to the whole archive for every type, not only to tar.
+- **Scratch after a kill (WR-06).** This qualifies § 3's "Both are removed after every run".
+  - Scratch folders and LibreOffice profiles carry their run's pid and start time, and the next run removes those of
+    a run that is gone, at once.
+  - Over quota, once the shell has stopped, sandboxd removes `/workspace/.ocw-extract-tmp` through the files helper
+    and measures again.
+- **PYTHONPATH (WR-08).**
+  - § 2's "The toolkit comes after the system paths and before approved packages. An approved Python package with the
+    same name as a toolkit package is shadowed by the toolkit's copy" is replaced. The order is now
+    `/opt/ocw-packages/python:/opt/ocw-tools/venv/lib/python3.11/site-packages`, so an approved package and the
+    versions its approval pinned win.
+  - `ocw-extract` runs isolated and is unaffected. `PATH` is unchanged.
+  - Existing shells converge through the environment drift re-create of § 4.
+- **The kill switch on restart (WR-09).** The restart re-create checks the policy again after the create, and kills a
+  shell that started while the organization was killed, as `ensure` does. This adds to § 4's "checked again right
+  before removal".
+- **The files helper (IN-08).** An idle `files` helper built from an older image is created again before it is reused.
+- **Network wording (IN-01).** § 3's "LibreOffice and ImageMagick therefore have no network path at all" overstated
+  it, and is replaced:
+  - Children get no proxy variable. The only host the shell's network reaches is the egress proxy, by its
+    `/etc/hosts` name, and the proxy refuses origin-form requests and allows no host by default.
+  - The link and referer settings of `ocw.xcd` stay. `ocw.xcd` now also finalizes Calc's recalculation on load to
+    never, for OOXML and ODF, so a WEBSERVICE-style formula never runs.
+- **Text (IN-04).** `ocw-extract` also removes C1 controls and the bidi embeddings, overrides and isolates.
+- **The pypdfium2 exception (WR-10).** Its status in `scripts/guard/license-policy.json` records the approval of
+  2026-11-12 and the lock sha256.

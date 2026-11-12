@@ -105,14 +105,24 @@ Every bot's shell already has the tools to read documents, so a bot never needs 
 
   `ocw-extract --types` lists every supported type, and `--help` lists the exit codes.
 - **Batch and exit 75.** `--batch` writes one `.txt` per file, plus an `_index.tsv`, under `/workspace/extracted/`. It
-  never copies or changes the originals. One run stops before the 10-minute command limit. While files remain, it
-  exits **75**: the bot runs it again, as a background command, until it exits 0. Finished files are skipped, so a pack
-  of thousands of files is read in chunks.
+  never copies or changes the originals. The bot runs it as a background command with a 600 s timeout
+  (`timeoutSeconds 600`); each run sizes its chunk from that timeout and stops before it, and a shorter timeout (the
+  default is 120 s) is refused at once with a message saying so. While files remain, it exits **75**: the bot runs it
+  again until it exits 0. Finished files are skipped and long PDFs and Office files go on at the next page, so a pack
+  of thousands of files is read in chunks. A file that cannot be read within one run is marked failed (or its page
+  skipped) and the batch goes on; a run that made no progress at all exits **8** instead of looping. Only one batch
+  writes an output folder at a time.
+- **Long single files.** Reading one file stops 10 s before the command's timeout and prints what it read, with a
+  note naming the next pages (`--pages`), so a long scan never ends with nothing on screen.
 - **Size.** The shell image is about 1.1 GB on disk, up from about 0.4 GB (CI measured 1 087 MiB), and about 270 MB
   larger to download.
 - **Nothing is installed at runtime.** If a bot still tries `pip install` or `apt-get`, the proxy answers **403**,
-  which is expected: packages for every bot go through *Sandbox packages* above. An approved Python package with the
-  same name as a toolkit package (for example `pandas`) is shadowed by the toolkit's version.
+  which is expected: packages for every bot go through *Sandbox packages* above. An approved Python package, and the
+  versions its approval pinned (for example `numpy<2`), wins over the toolkit's copy of the same package: approved
+  packages come first on the shell's `PYTHONPATH`. `ocw-extract` itself always uses the toolkit's own versions.
+- **Disk quota.** An archive is extracted only within the room left under the bot's disk quota. If a killed run
+  leaves its scratch folder behind and the workspace goes over quota, sandboxd removes that folder once the sandbox
+  has stopped and measures again.
 - **Residual risk.** LibreOffice 7.4, poppler and ImageMagick on bookworm have open CVEs. The macro, link and network
   mitigations, the CVE list and the plan to move the image to Debian trixie are in
   [ADR-0043](../adr/0043-sandbox-document-toolkit.md). A hostile document stays inside that bot's own sandbox.
