@@ -231,17 +231,33 @@ async function refusedWith(
 }
 
 /**
- * A refusal decided before the claim: one denied `agent_tool_calls` row with the code, `bot.work_session_refused`, the
- * turn not counted, no ledger row and no device command.
+ * `times` refusals decided before the claim: as many denied `agent_tool_calls` rows with the code and
+ * `bot.work_session_refused` audits, the turn not counted, no ledger row and no device command. Returns the audits.
  */
-async function refusedBeforeClaim(eventId: string, workSessionId: string, code: BotWorkSessionRefusal) {
-  expect(await toolCallsOf(eventId)).toEqual([
-    { tool: UPLOAD, decision: "denied", reason: code, target: workSessionId },
-  ]);
-  const [refusal] = await auditsOf("bot.work_session_refused", eventId);
-  expect(refusal?.metadata).toMatchObject({ tool: UPLOAD, outcome: code, workSessionId });
+async function refusedBeforeClaim(
+  eventId: string,
+  workSessionId: string,
+  code: BotWorkSessionRefusal,
+  times = 1,
+): Promise<Json[]> {
+  expect(await toolCallsOf(eventId)).toEqual(
+    Array.from({ length: times }, () => ({
+      tool: UPLOAD,
+      decision: "denied",
+      reason: code,
+      target: workSessionId,
+    })),
+  );
+  const refusals = await auditsOf("bot.work_session_refused", eventId);
+  expect(refusals).toHaveLength(times);
+  for (const r of refusals) {
+    expect(r.metadata).toMatchObject({ tool: UPLOAD, outcome: code, workSessionId, sponsorUserId: victorId });
+    expect(r.user_id).toBe(anaId);
+  }
   expect((await turnRow(eventId)).tool_calls).toBe(0);
   expect(await ledgerOfTurn(eventId)).toEqual([]);
+  expect(await fileCommandsOf(workSessionId)).toEqual([]);
+  return refusals;
 }
 
 /** A bot's profile on the build server: billing-api, Claude Code, Opus only (the file limit is the organization's). */
@@ -504,5 +520,212 @@ describe("tracer: Ana's attachment reaches the bot's session through the upload 
     expect(unknown.map((u) => [u.organization_id, u.metadata.tool, u.metadata.reason])).toEqual([
       [orgB, UPLOAD, "unknown_turn"],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------- the upload's own refusals (Task 2)
+
+describe("the attachment rule: only a file this turn reads (D-02, E19, T-07.17.1.1-12-01)", () => {
+  /**
+   * Ana's turn in the session's thread names `attachmentId` (prepared by `setup`, before the turn unless `afterTurn`):
+   * `attachment_not_found` before the claim, with the id the bot sent and the path's length, never a file name.
+   */
+  async function notFoundFor(
+    setup: (ctx: { workSessionId: string; rootId: string }) => Promise<string>,
+    opts: { afterTurn?: boolean } = {},
+  ) {
+    const ctx = await idleSession();
+    let attachmentId = "";
+    if (!opts.afterTurn) attachmentId = await setup(ctx);
+    const { eventId } = await ask("put that file in the session", { threadRootId: ctx.rootId });
+    if (opts.afterTurn) attachmentId = await setup(ctx);
+    await refusedWith(
+      uploadCall({ eventId, workSessionId: ctx.workSessionId, attachmentId, path: "docs/spec.pdf" }),
+      "attachment_not_found",
+    );
+    const [audit] = await refusedBeforeClaim(eventId, ctx.workSessionId, "attachment_not_found");
+    expect(audit!.metadata).toMatchObject({ attachmentId, pathLength: 13 });
+    expect(JSON.stringify(audit!.metadata)).not.toContain(".pdf");
+  }
+
+  it("a file posted in the thread after the turn's own message (a later turn's) → attachment_not_found", async () => {
+    await notFoundFor(
+      async ({ rootId }) => {
+        const later = await chatFile(randomBytes(512), "later.pdf");
+        await post(ana, engId, "here it is", { threadRootId: rootId, attachmentIds: [later.id] });
+        return later.id;
+      },
+      { afterTurn: true },
+    );
+  });
+
+  it("a file of another thread of the same channel → attachment_not_found", async () => {
+    await notFoundFor(async () => {
+      const elsewhere = await chatFile(randomBytes(512), "elsewhere.pdf");
+      await post(ana, engId, "another topic", { attachmentIds: [elsewhere.id] });
+      return elsewhere.id;
+    });
+  });
+
+  it("the file of a deleted message of the thread → attachment_not_found", async () => {
+    await notFoundFor(async ({ rootId }) => {
+      const gone = await chatFile(randomBytes(512), "gone.pdf");
+      const message = await post(ana, engId, "a file I take back", {
+        threadRootId: rootId,
+        attachmentIds: [gone.id],
+      });
+      await ok(ana.request("DELETE", `/api/v1/messages/${message}`));
+      return gone.id;
+    });
+  });
+
+  it("a file of another conversation Ana reads (#ops) → attachment_not_found", async () => {
+    await notFoundFor(async () => {
+      const opsId = (
+        await ok(
+          victor.request("POST", "/api/v1/channels", {
+            name: `ops-${randomUUID().slice(0, 4)}`,
+            visibility: "public",
+          }),
+        )
+      ).id as string;
+      await ok(victor.request("POST", `/api/v1/channels/${opsId}/members`, { kind: "user", id: anaId }));
+      const other = await chatFile(randomBytes(512), "ops.pdf", opsId);
+      await post(ana, opsId, "for ops", { attachmentIds: [other.id] });
+      return other.id;
+    });
+  });
+
+  it("a Work Zone prompt's image, even in the turn's conversation → attachment_not_found", async () => {
+    await notFoundFor(async ({ workSessionId }) => {
+      // Never sent with a message, linked to the session's first prompt (what a prompt image is).
+      const image = await chatFile(randomBytes(512), "screen.png");
+      const [firstPrompt] = await rowsOf(
+        "select id from app.work_prompts where work_session_id = $1 order by created_at limit 1",
+        [workSessionId],
+      );
+      await su.query("update app.attachments set work_prompt_id = $2 where id = $1", [
+        image.id,
+        firstPrompt!.id,
+      ]);
+      return image.id;
+    });
+  });
+});
+
+describe("the size limit before any byte moves (D-07, E5, T-07.17.1.1-12-03)", () => {
+  it("a 30 MB file with the default limit → file_too_large naming the organization's limit; no ledger row", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const big = await chatFile(randomBytes(30 * MIB), "big.bin");
+    const eventId = await askWithFile(rootId, big.id);
+    const body = await refusedWith(
+      uploadCall({ eventId, workSessionId, attachmentId: big.id, path: "data/big.bin" }),
+      "file_too_large",
+      "That file is 30 MB. This bot moves files up to 25 MB (the organization's limit).",
+    );
+    expect(body).toMatchObject({ limit: { bytes: 26_214_400, source: "organization" }, sizeBytes: 30 * MIB });
+    const [audit] = await refusedBeforeClaim(eventId, workSessionId, "file_too_large");
+    expect(audit!.metadata).toMatchObject({
+      attachmentId: big.id,
+      bytes: 30 * MIB,
+      limitSource: "organization",
+      pathLength: 12,
+    });
+  });
+
+  it("a file of exactly 25 MiB moves", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const edge = await chatFile(randomBytes(25 * MIB), "edge.bin");
+    const eventId = await askWithFile(rootId, edge.id);
+    const { r, ack } = await uploadServed({
+      eventId,
+      workSessionId,
+      attachmentId: edge.id,
+      path: "data/edge.bin",
+    });
+    expect(ack).toEqual({ ok: true, error: null });
+    expect(r.body, JSON.stringify(r.body)).toEqual({
+      kind: "uploaded",
+      workSessionId,
+      path: "data/edge.bin",
+      sizeBytes: 25 * MIB,
+    });
+    expect((await auditsOf("bot.work_session_upload", eventId))[0]!.metadata).toMatchObject({
+      bytes: 25 * MIB,
+      sha256: edge.sha256,
+    });
+  });
+});
+
+describe("the shared deny list before the claim (D-09, E3, T-07.17.1.1-12-02)", () => {
+  // Secret-looking names are built at runtime (PD-03).
+  const dotEnv = `.${"env"}`;
+
+  it(".git/config, .claude/settings.json, .mcp.json, .env and deploy.pem → path_not_allowed, no transfer", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const file = await chatFile();
+    const eventId = await askWithFile(rootId, file.id);
+    const denied = [".git/config", ".claude/settings.json", ".mcp.json", dotEnv, `deploy${".pem"}`];
+    for (const path of denied) {
+      await refusedWith(
+        uploadCall({ eventId, workSessionId, attachmentId: file.id, path }),
+        "path_not_allowed",
+      );
+    }
+    const audits = await refusedBeforeClaim(eventId, workSessionId, "path_not_allowed", denied.length);
+    expect(audits.map((a) => a.metadata.pathLength)).toEqual(denied.map((p) => p.length));
+  });
+
+  it(".env.example is not a secrets file: it moves", async () => {
+    const { workSessionId, rootId } = await idleSession();
+    const file = await chatFile();
+    const eventId = await askWithFile(rootId, file.id);
+    const allowed = `${dotEnv}.example`;
+    const { r, cmd } = await uploadServed({ eventId, workSessionId, attachmentId: file.id, path: allowed });
+    expect(cmd.payload.path).toBe(allowed);
+    expect(r.body).toEqual({ kind: "uploaded", workSessionId, path: allowed, sizeBytes: file.sizeBytes });
+    expect((await turnRow(eventId)).tool_calls).toBe(1);
+  });
+});
+
+describe("the device's ack and the transfer route's own record race (found by the 25 MiB case)", () => {
+  /** The upload route call, its transfer row and the device's command (the device has not answered yet). */
+  async function enqueued() {
+    const { workSessionId, rootId } = await idleSession();
+    const file = await chatFile();
+    const eventId = await askWithFile(rootId, file.id);
+    const pending = uploadCall({ eventId, workSessionId, attachmentId: file.id, path: "docs/spec.pdf" });
+    const [transfer] = await eventually(async () => {
+      const r = await ledgerOfTurn(eventId);
+      return r.length > 0 ? r : undefined;
+    });
+    const cmd = await commandOf(transfer!.id as string);
+    return { workSessionId, eventId, file, pending, transferId: transfer!.id as string, cmd };
+  }
+
+  it("an ok ack while the row is still streaming (the GET's `streamed` not yet recorded) is uploaded", async () => {
+    const { workSessionId, eventId, file, pending, transferId, cmd } = await enqueued();
+    // The device claimed the transfer and read every byte; the route's after-response record has not committed yet.
+    await su.query("update app.bot_work_session_files set status = 'streaming' where id = $1", [transferId]);
+    server.ack(cmd.id);
+    const r = await pending;
+    expect(r.body, JSON.stringify(r.body)).toEqual({
+      kind: "uploaded",
+      workSessionId,
+      path: "docs/spec.pdf",
+      sizeBytes: file.sizeBytes,
+    });
+    expect((await ledgerOfTurn(eventId))[0]!.status).toBe("done");
+    expect(await auditsOf("bot.work_session_upload", eventId)).toHaveLength(1);
+  });
+
+  it("an ok ack for a transfer the device never fetched (still pending) is transfer_failed", async () => {
+    const { eventId, pending, cmd } = await enqueued();
+    server.ack(cmd.id);
+    await refusedWith(pending, "transfer_failed");
+    expect((await ledgerOfTurn(eventId))[0]!.status).toBe("failed");
+    expect(await auditsOf("bot.work_session_upload", eventId)).toEqual([]);
+    const [refusal] = await auditsOf("bot.work_session_refused", eventId);
+    expect(refusal!.metadata).toMatchObject({ tool: UPLOAD, outcome: "transfer_failed", pathLength: 13 });
   });
 });
