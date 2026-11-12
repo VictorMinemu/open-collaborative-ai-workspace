@@ -11,6 +11,7 @@ export * from "./automation-fan-out";
 export * from "./automations";
 export * from "./board";
 export * from "./bot-capabilities";
+export * from "./bot-tasks";
 export * from "./bot-work-zone";
 export * from "./chat";
 export * from "./common";

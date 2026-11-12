@@ -120,21 +120,32 @@ describe("07.17.1.1.2 tasks: text rules (D-01, D-07, T-07.17.1.1.2-01-02)", () =
 
 describe("07.17.1.1.2 tasks: the three bodies are strict (D-02, D-03, P6, T-07.17.1.1.2-01-01)", () => {
   const start = { eventId: EVENT, agentId: AGENT, goal: "Read the knowledge pack and summarise it" };
-  const cont = { eventId: EVENT, agentId: AGENT, progress: "Read 400 of 3030 files", nextStep: "Read the next 400" };
-  const finish = { eventId: EVENT, agentId: AGENT, summary: "Read every file.\nThe summary is below.", outcome: "done" };
+  const cont = {
+    eventId: EVENT,
+    agentId: AGENT,
+    progress: "Read 400 of 3030 files",
+    nextStep: "Read the next 400",
+  };
+  const finish = {
+    eventId: EVENT,
+    agentId: AGENT,
+    summary: "Read every file.\nThe summary is below.",
+    outcome: "done",
+  };
 
   it("ocw_task_start: the event, the bot and a one-line goal; nothing else", () => {
     expect(AgentChannelTaskStart.parse(start)).toEqual(start);
     for (const goal of ["", "   ", "g".repeat(201), "Read\nthe pack", `Read${String.fromCodePoint(0)}`]) {
       expect(AgentChannelTaskStart.safeParse({ ...start, goal }).success, JSON.stringify(goal)).toBe(false);
     }
-    expect(AgentChannelTaskStart.safeParse({ ...start, goal: `Read ${String.fromCodePoint(0x202e)}kcap` }).success).toBe(
-      false,
-    );
+    expect(
+      AgentChannelTaskStart.safeParse({ ...start, goal: `Read ${String.fromCodePoint(0x202e)}kcap` }).success,
+    ).toBe(false);
     for (const key of ["userId", "conversationId", "taskId", "maxTurns"]) {
-      expect(AgentChannelTaskStart.safeParse({ ...start, [key]: key === "maxTurns" ? 40 : TASK }).success, key).toBe(
-        false,
-      );
+      expect(
+        AgentChannelTaskStart.safeParse({ ...start, [key]: key === "maxTurns" ? 40 : TASK }).success,
+        key,
+      ).toBe(false);
     }
     expect(AgentChannelTaskStart.safeParse({ ...start, eventId: "not-a-uuid" }).success).toBe(false);
   });
@@ -149,7 +160,10 @@ describe("07.17.1.1.2 tasks: the three bodies are strict (D-02, D-03, P6, T-07.1
     const session = { ...cont, waitFor: { workSessionId: SESSION }, afterSeconds: 600 };
     expect(AgentChannelTaskContinue.parse(session)).toEqual(session);
     for (const afterSeconds of [-1, 3601, 1.5, 99999, "60"]) {
-      expect(AgentChannelTaskContinue.safeParse({ ...cont, afterSeconds }).success, String(afterSeconds)).toBe(false);
+      expect(
+        AgentChannelTaskContinue.safeParse({ ...cont, afterSeconds }).success,
+        String(afterSeconds),
+      ).toBe(false);
     }
     for (const waitFor of [
       {},
@@ -159,14 +173,19 @@ describe("07.17.1.1.2 tasks: the three bodies are strict (D-02, D-03, P6, T-07.1
       { workSessionId: "not-a-uuid" },
       { sessionId: SESSION },
     ]) {
-      expect(AgentChannelTaskContinue.safeParse({ ...cont, waitFor }).success, JSON.stringify(waitFor)).toBe(false);
+      expect(AgentChannelTaskContinue.safeParse({ ...cont, waitFor }).success, JSON.stringify(waitFor)).toBe(
+        false,
+      );
     }
     expect(AgentChannelTaskContinue.safeParse({ ...cont, progress: "p".repeat(501) }).success).toBe(false);
     expect(AgentChannelTaskContinue.safeParse({ ...cont, nextStep: "n".repeat(501) }).success).toBe(false);
     expect(AgentChannelTaskContinue.safeParse({ ...cont, nextStep: "a\nb" }).success).toBe(false);
     expect(AgentChannelTaskContinue.safeParse({ ...cont, progress: undefined }).success).toBe(false);
     for (const key of ["at", "userId", "conversationId", "taskId", "maxTurns"]) {
-      expect(AgentChannelTaskContinue.safeParse({ ...cont, [key]: key === "at" ? AT : TASK }).success, key).toBe(false);
+      expect(
+        AgentChannelTaskContinue.safeParse({ ...cont, [key]: key === "at" ? AT : TASK }).success,
+        key,
+      ).toBe(false);
     }
   });
 
@@ -197,8 +216,10 @@ describe("07.17.1.1.2 tasks: answers and refusals (D-02, PD-08)", () => {
     no_task: "There is no task of yours in this thread. Start one with ocw_task_start first.",
     not_requester: "This task runs for another person. Only their turns can continue or finish it.",
     task_busy: "Another turn of this task is running. Answer the person; the task goes on by itself.",
-    task_stopped: "This task was stopped or has ended. Do not continue it; tell the person briefly where you got to.",
-    budget_turns: "This task used all its turns, so it stopped. Tell the person what is done and what is left.",
+    task_stopped:
+      "This task was stopped or has ended. Do not continue it; tell the person briefly where you got to.",
+    budget_turns:
+      "This task used all its turns, so it stopped. Tell the person what is done and what is left.",
     budget_time: "This task ran out of time, so it stopped. Tell the person what is done and what is left.",
     policy_off: "Long tasks are turned off for this bot. Do what you can in this turn and tell the person.",
     org_cap:
@@ -227,25 +248,46 @@ describe("07.17.1.1.2 tasks: answers and refusals (D-02, PD-08)", () => {
     for (const [code, sentence] of Object.entries(BOT_TASK_SENTENCES)) {
       const refused = { ok: false, code, sentence };
       expect(BotTaskRefused.parse(refused)).toEqual(refused);
-      for (const answer of [AgentChannelTaskStartResponse, AgentChannelTaskContinueResponse, AgentChannelTaskFinishResponse]) {
+      for (const answer of [
+        AgentChannelTaskStartResponse,
+        AgentChannelTaskContinueResponse,
+        AgentChannelTaskFinishResponse,
+      ]) {
         expect(answer.parse(refused)).toEqual(refused);
       }
     }
     const unknown = { ok: false, code: "task_exploded", sentence: "No." };
-    for (const answer of [AgentChannelTaskStartResponse, AgentChannelTaskContinueResponse, AgentChannelTaskFinishResponse]) {
+    for (const answer of [
+      AgentChannelTaskStartResponse,
+      AgentChannelTaskContinueResponse,
+      AgentChannelTaskFinishResponse,
+    ]) {
       expect(answer.safeParse(unknown).success).toBe(false);
       expect(answer.safeParse({ ok: false, code: "no_task", sentence: "s".repeat(301) }).success).toBe(false);
     }
     expect(
-      AgentChannelTaskContinueResponse.safeParse({ ok: true, next: "later", at: null, turnsLeft: 1, quiet: false }).success,
+      AgentChannelTaskContinueResponse.safeParse({
+        ok: true,
+        next: "later",
+        at: null,
+        turnsLeft: 1,
+        quiet: false,
+      }).success,
     ).toBe(false);
     expect(
-      AgentChannelTaskContinueResponse.safeParse({ ok: true, next: "at", at: null, turnsLeft: -1, quiet: false }).success,
+      AgentChannelTaskContinueResponse.safeParse({
+        ok: true,
+        next: "at",
+        at: null,
+        turnsLeft: -1,
+        quiet: false,
+      }).success,
     ).toBe(false);
     expect(AgentChannelTaskFinishResponse.safeParse({ ok: true, status: "stopped" }).success).toBe(false);
-    expect(AgentChannelTaskStartResponse.safeParse({ ok: true, taskId: TASK, maxTurns: 0, deadlineAt: LATER }).success).toBe(
-      false,
-    );
+    expect(
+      AgentChannelTaskStartResponse.safeParse({ ok: true, taskId: TASK, maxTurns: 0, deadlineAt: LATER })
+        .success,
+    ).toBe(false);
   });
 });
 
@@ -277,17 +319,29 @@ describe("07.17.1.1.2 tasks: the turn's task block and process facts (D-03, PD-1
 
   it("TurnTask: a running or waiting task, at most ten finished processes", () => {
     expect(TurnTask.parse(task)).toEqual(task);
-    const fresh = { ...task, status: "running", progress: null, nextStep: null, turnsUsed: 1, waiting: null, finishedProcesses: [] };
+    const fresh = {
+      ...task,
+      status: "running",
+      progress: null,
+      nextStep: null,
+      turnsUsed: 1,
+      waiting: null,
+      finishedProcesses: [],
+    };
     expect(TurnTask.parse(fresh)).toEqual(fresh);
     expect(TurnTask.safeParse({ ...task, status: "done" }).success).toBe(false);
     expect(TurnTask.safeParse({ ...task, maxTurns: 0 }).success).toBe(false);
     expect(TurnTask.safeParse({ ...task, turnsUsed: -1 }).success).toBe(false);
     expect(TurnTask.safeParse({ ...task, finishedProcesses: Array(11).fill(exited) }).success).toBe(false);
-    expect(TurnTask.parse({ ...task, finishedProcesses: Array(10).fill(exited) }).finishedProcesses).toHaveLength(10);
-    expect(TurnTask.safeParse({ ...task, waiting: { kind: "forever", ref: null, until: null } }).success).toBe(false);
-    expect(TurnTask.safeParse({ ...task, waiting: { kind: "timer", ref: "r".repeat(65), until: null } }).success).toBe(
-      false,
-    );
+    expect(
+      TurnTask.parse({ ...task, finishedProcesses: Array(10).fill(exited) }).finishedProcesses,
+    ).toHaveLength(10);
+    expect(
+      TurnTask.safeParse({ ...task, waiting: { kind: "forever", ref: null, until: null } }).success,
+    ).toBe(false);
+    expect(
+      TurnTask.safeParse({ ...task, waiting: { kind: "timer", ref: "r".repeat(65), until: null } }).success,
+    ).toBe(false);
     expect(TurnTask.safeParse({ ...task, goal: "a\nb" }).success).toBe(false);
   });
 });

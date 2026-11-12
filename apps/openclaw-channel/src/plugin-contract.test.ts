@@ -4419,8 +4419,18 @@ describe("07.17.1.1.2 tasks", () => {
     const { tasks, m } = await load();
     const c = tasks as Record<string, Schema>;
     const start = { eventId: EVENT, agentId: AGENT, goal: "Read the knowledge pack and summarise it" };
-    const cont = { eventId: EVENT, agentId: AGENT, progress: "Read 400 of 3030 files", nextStep: "Read the next 400" };
-    const finish = { eventId: EVENT, agentId: AGENT, summary: "Read every file.\nSee below.", outcome: "done" };
+    const cont = {
+      eventId: EVENT,
+      agentId: AGENT,
+      progress: "Read 400 of 3030 files",
+      nextStep: "Read the next 400",
+    };
+    const finish = {
+      eventId: EVENT,
+      agentId: AGENT,
+      summary: "Read every file.\nSee below.",
+      outcome: "done",
+    };
     expect(m.AgentChannelTaskStart.parse(start)).toEqual(start);
     expect(m.AgentChannelTaskContinue.parse(cont)).toEqual(cont);
     expect(m.AgentChannelTaskFinish.parse(finish)).toEqual(finish);
@@ -4471,7 +4481,11 @@ describe("07.17.1.1.2 tasks", () => {
   it("every answer variant parses identically in both copies", async () => {
     const { tasks, m } = await load();
     const c = tasks as Record<string, Schema> & { BOT_TASK_SENTENCES: Record<string, string> };
-    const refusals = Object.entries(c.BOT_TASK_SENTENCES).map(([code, sentence]) => ({ ok: false, code, sentence }));
+    const refusals = Object.entries(c.BOT_TASK_SENTENCES).map(([code, sentence]) => ({
+      ok: false,
+      code,
+      sentence,
+    }));
     const cases: Array<[Schema, Schema, unknown[]]> = [
       [
         m.AgentChannelTaskStartResponse,

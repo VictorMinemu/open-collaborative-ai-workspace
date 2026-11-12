@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { TurnConsult } from "./agent-chains";
+import { TurnTask } from "./bot-tasks";
 import { TurnWorkZone } from "./bot-work-zone";
 import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
@@ -479,6 +480,12 @@ export const TurnContext = z.object({
    * the file limit. Absent on older payloads and for every bot without a profile (BWZ-06).
    */
   workZone: TurnWorkZone.optional(),
+  /**
+   * Phase 07.17.1.1.2 (D-02, PD-07, PD-16): present on every turn of the bot in a thread with its active task (its own
+   * turns of the task, and any other turn there, which may only read it): goal, notes, budget, times, the wait and the
+   * background commands that ended. Absent on older payloads, without an active task and in AI chats (D-10).
+   */
+  task: TurnTask.optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -588,7 +595,36 @@ export const BUILTIN_TOOLS = {
    * `APPROVABLE_BUILTINS`).
    */
   conversationOpen: "ocw_conversation_open",
+  /**
+   * 07.17.1.1.2 (D-02, ADR-0042): the bot's long tasks. `ocw_task_start` starts one in the turn's thread (one active
+   * task per bot per thread), `ocw_task_continue` schedules this bot's own next turn there for the same person,
+   * `ocw_task_finish` ends it, through `POST /tasks/start|continue|finish`, which decide, claim and audit each call from
+   * the stored turn and the task row. Turn-scoped (never in `GET /cell`), self-validated in the cell, never approvable
+   * (not in `APPROVABLE_BUILTINS`) and never on `/tool-calls`.
+   */
+  taskStart: "ocw_task_start",
+  taskContinue: "ocw_task_continue",
+  taskFinish: "ocw_task_finish",
 } as const;
+
+/** 07.17.1.1.2 (D-02): the three task tools, in this order (start, continue, finish). */
+export const TASK_TOOL_NAMES = [
+  BUILTIN_TOOLS.taskStart,
+  BUILTIN_TOOLS.taskContinue,
+  BUILTIN_TOOLS.taskFinish,
+] as const;
+export type TaskToolName = (typeof TASK_TOOL_NAMES)[number];
+
+/**
+ * 07.17.1.1.2 (D-08, D-13): the task tools only schedule this bot's own next turn for this person, within the task's
+ * budgets, and answer the platform's own ids and numbers: neither side-effecting nor untrusted output, so a tainted turn
+ * may still continue (budgets, not taint, bound a task). Not counted in `MAX_TOOL_CALLS_PER_TURN`.
+ */
+export const TASK_TOOL_FLAGS: Readonly<Record<TaskToolName, TurnToolFlags>> = {
+  ocw_task_start: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_continue: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_finish: { untrustedOutput: false, sideEffecting: false },
+};
 
 /**
  * 07.17.1.1 (D-01, PD-26): the two file tools, declared apart (the file routes and their tests name them on their own)

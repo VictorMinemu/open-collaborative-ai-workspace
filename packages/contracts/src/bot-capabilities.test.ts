@@ -901,7 +901,10 @@ describe("07.17.1.1.2 tasks: the three task tools, the turn's task and agent.tas
     expect(legacy).toEqual(turn);
     expect("task" in legacy).toBe(false);
     expect(AgentMentionEvent.parse({ ...mentionEvent, turn: offered }).turn).toEqual(offered);
-    const tooMany = TurnContext.safeParse({ ...turn, task: { ...task, finishedProcesses: Array(11).fill(exited) } });
+    const tooMany = TurnContext.safeParse({
+      ...turn,
+      task: { ...task, finishedProcesses: Array(11).fill(exited) },
+    });
     expect(tooMany.success).toBe(false);
     expect(tooMany.error?.issues[0]?.path).toEqual(["task", "finishedProcesses"]);
   });
@@ -920,7 +923,9 @@ describe("07.17.1.1.2 tasks: the three task tools, the turn's task and agent.tas
       const plain = { ...event, task: { taskId: TASK, reason } };
       expect(AgentTaskEvent.parse(plain)).toEqual(plain);
     }
-    expect(AgentTaskEvent.safeParse({ ...event, task: { taskId: TASK, reason: "session" } }).success).toBe(false);
+    expect(AgentTaskEvent.safeParse({ ...event, task: { taskId: TASK, reason: "session" } }).success).toBe(
+      false,
+    );
     expect(AgentTaskEvent.safeParse({ ...event, type: "agent.mention.v1" }).success).toBe(false);
     expect(AgentTaskEvent.safeParse({ ...event, task: undefined }).success).toBe(false);
     // An older consumer's mention schema refuses it only on its type, so the bridge skips it (PD-21).

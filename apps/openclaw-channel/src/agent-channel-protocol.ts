@@ -97,6 +97,11 @@ export const AgentChannelEventTypes = {
    * (`automationItem` carries the item as outside content and the escalation targets).
    */
   automationItem: "agent.automation_item.v1",
+  /**
+   * Phase 07.17.1.1.2 (D-02, D-03): the next turn of the bot's own task, delivered by the API in the task's thread
+   * (built like a mention on the task card; `task` says why it came).
+   */
+  task: "agent.task.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -1027,6 +1032,205 @@ export const AgentChannelWorkSessionReadResponse = z.discriminatedUnion("kind", 
 ]);
 export type AgentChannelWorkSessionReadResponse = z.infer<typeof AgentChannelWorkSessionReadResponse>;
 
+// ---------------------------------------------------------------- long-running bot tasks (07.17.1.1.2, mirror of
+// contracts bot-tasks.ts, the task names and flags of bot-capabilities.ts and `agent.task.v1` of agent-channel.ts;
+// parity: plugin-contract.test.ts "07.17.1.1.2 tasks"). The bot starts, continues and finishes its own task; the API is
+// the only scheduler. The bodies name the delivered turn and the bot only (never a person, a conversation, a task, a
+// budget or a time); goals and notes are the bot's own untrusted text.
+
+/** The limits the plugin needs (contracts `BOT_TASK_LIMITS`, same values). */
+export const BOT_TASK_LIMITS = {
+  goalChars: 200,
+  noteChars: 500,
+  summaryChars: 1000,
+  afterSecondsMax: 3600,
+  finishedProcessesMax: 10,
+} as const;
+
+/** Contracts `TASK_TOOL_NAMES` (`BUILTIN_TOOLS.taskStart|taskContinue|taskFinish`): turn-scoped, never in `GET /cell`. */
+export const TASK_TOOL_NAMES = ["ocw_task_start", "ocw_task_continue", "ocw_task_finish"] as const;
+export type TaskToolName = (typeof TASK_TOOL_NAMES)[number];
+/** Contracts `TASK_TOOL_FLAGS`: they only schedule the bot's own next turn, so neither side-effecting nor untrusted. */
+export const TASK_TOOL_FLAGS: Readonly<Record<TaskToolName, TurnToolFlags>> = {
+  ocw_task_start: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_continue: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_finish: { untrustedOutput: false, sideEffecting: false },
+};
+
+/** U+200E, U+200F, U+202A–U+202E, U+2066–U+2069 (contracts `hasForbiddenTaskChar`). */
+function isBidiControl(c: number): boolean {
+  return c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+}
+
+/** True when `s` holds U+0000–U+001F (a `\n` too unless `newlines`), U+007F or a bidi control. */
+export function hasForbiddenTaskChar(s: string, newlines: boolean): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x0a && newlines) continue;
+    if (c <= 0x1f || c === 0x7f || isBidiControl(c)) return true;
+  }
+  return false;
+}
+
+/** Checked before the trim, like the contracts, so a leading or trailing control character is refused too. */
+function taskText(max: number, newlines: boolean) {
+  return z
+    .string()
+    .refine((s) => !hasForbiddenTaskChar(s, newlines), {
+      message: newlines ? "no control or bidi characters" : "one line, no control or bidi characters",
+    })
+    .trim()
+    .min(1)
+    .max(max);
+}
+
+export const TaskGoal = taskText(BOT_TASK_LIMITS.goalChars, false);
+export const TaskNote = taskText(BOT_TASK_LIMITS.noteChars, false);
+export const TaskSummary = taskText(BOT_TASK_LIMITS.summaryChars, true);
+
+/** Contracts `SandboxProcessId`. */
+const TaskProcessId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "a process id");
+
+/** Exactly one of a background command or a Work Zone session this task started. */
+export const TaskWaitFor = z.union([
+  z.strictObject({ processId: TaskProcessId }),
+  z.strictObject({ workSessionId: Id }),
+]);
+export type TaskWaitFor = z.infer<typeof TaskWaitFor>;
+
+/** `POST /tasks/start` (`ocw_task_start`). */
+export const AgentChannelTaskStart = z.strictObject({ eventId: Id, agentId: Id, goal: TaskGoal });
+export type AgentChannelTaskStart = z.infer<typeof AgentChannelTaskStart>;
+
+/** `POST /tasks/continue` (`ocw_task_continue`): the API decides when the next turn comes, within the task's budgets. */
+export const AgentChannelTaskContinue = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  progress: TaskNote,
+  nextStep: TaskNote,
+  afterSeconds: z.number().int().min(0).max(BOT_TASK_LIMITS.afterSecondsMax).optional(),
+  waitFor: TaskWaitFor.optional(),
+});
+export type AgentChannelTaskContinue = z.infer<typeof AgentChannelTaskContinue>;
+
+/** `POST /tasks/finish` (`ocw_task_finish`). */
+export const AgentChannelTaskFinish = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  summary: TaskSummary,
+  outcome: z.enum(["done", "blocked"]),
+});
+export type AgentChannelTaskFinish = z.infer<typeof AgentChannelTaskFinish>;
+
+/** The contracts' refusal codes, in their order (`once_per_turn` is the plugin's own, never the API's). */
+export const BotTaskRefusal = z.enum([
+  "not_in_turn",
+  "task_active",
+  "no_task",
+  "not_requester",
+  "task_busy",
+  "task_stopped",
+  "budget_turns",
+  "budget_time",
+  "policy_off",
+  "org_cap",
+  "wait_unknown",
+  "once_per_turn",
+]);
+export type BotTaskRefusal = z.infer<typeof BotTaskRefusal>;
+
+/** The contracts' fixed sentence per code; the tools use them for the refusals they decide locally. */
+export const BOT_TASK_SENTENCES: Readonly<Record<BotTaskRefusal, string>> = {
+  not_in_turn: "Long tasks are not available on this turn.",
+  task_active:
+    "You already have a task running in this thread. Continue it with ocw_task_continue or end it with ocw_task_finish.",
+  no_task: "There is no task of yours in this thread. Start one with ocw_task_start first.",
+  not_requester: "This task runs for another person. Only their turns can continue or finish it.",
+  task_busy: "Another turn of this task is running. Answer the person; the task goes on by itself.",
+  task_stopped:
+    "This task was stopped or has ended. Do not continue it; tell the person briefly where you got to.",
+  budget_turns: "This task used all its turns, so it stopped. Tell the person what is done and what is left.",
+  budget_time: "This task ran out of time, so it stopped. Tell the person what is done and what is left.",
+  policy_off: "Long tasks are turned off for this bot. Do what you can in this turn and tell the person.",
+  org_cap:
+    "Too many tasks are running in this organization right now. Do what you can in this turn, or ask the person to try again later.",
+  wait_unknown:
+    "That is not a background command or a Work Zone session of this task. Wait on one this task started, or continue without waitFor.",
+  once_per_turn: "That task tool was already called in this turn.",
+};
+
+/** A refused call. A code from a newer API stays a string, so its sentence still reaches the model. */
+export const BotTaskRefused = z.object({
+  ok: z.literal(false),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u),
+  sentence: z.string().max(300),
+});
+export type BotTaskRefused = z.infer<typeof BotTaskRefused>;
+
+export const AgentChannelTaskStartResponse = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    taskId: Id,
+    maxTurns: z.number().int().positive(),
+    deadlineAt: z.string(),
+  }),
+  BotTaskRefused,
+]);
+export type AgentChannelTaskStartResponse = z.infer<typeof AgentChannelTaskStartResponse>;
+
+/** `quiet`: drop this turn's text (the card shows the progress, D-11). */
+export const AgentChannelTaskContinueResponse = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    next: z.enum(["after_turn", "at", "on_process", "on_session"]),
+    at: z.string().nullable(),
+    turnsLeft: z.number().int().nonnegative(),
+    quiet: z.boolean(),
+  }),
+  BotTaskRefused,
+]);
+export type AgentChannelTaskContinueResponse = z.infer<typeof AgentChannelTaskContinueResponse>;
+
+export const AgentChannelTaskFinishResponse = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), status: z.enum(["done", "failed"]) }),
+  BotTaskRefused,
+]);
+export type AgentChannelTaskFinishResponse = z.infer<typeof AgentChannelTaskFinishResponse>;
+
+/** Contracts `BotTaskWaitKind` and `BotTaskWakeReason`. */
+export const BotTaskWaitKind = z.enum(["turn", "timer", "process", "session", "nudge"]);
+export type BotTaskWaitKind = z.infer<typeof BotTaskWaitKind>;
+export const BotTaskWakeReason = z.enum(["continue", "timer", "process", "nudge"]);
+export type BotTaskWakeReason = z.infer<typeof BotTaskWakeReason>;
+
+/** A background command of the task that ended or was lost: ids and numbers only. */
+export const TaskProcessFact = z.object({
+  processId: TaskProcessId,
+  status: z.enum(["exited", "killed", "timed_out", "lost"]),
+  exitCode: z.number().int().nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
+});
+export type TaskProcessFact = z.infer<typeof TaskProcessFact>;
+
+/** `TurnContext.task`: the bot's active task in this thread (its own earlier notes, the platform's numbers). */
+export const TurnTask = z.object({
+  taskId: Id,
+  status: z.enum(["running", "waiting"]),
+  goal: TaskGoal,
+  progress: TaskNote.nullable(),
+  nextStep: TaskNote.nullable(),
+  turnsUsed: z.number().int().nonnegative(),
+  maxTurns: z.number().int().positive(),
+  startedAt: z.string(),
+  deadlineAt: z.string(),
+  requesterId: Id,
+  waiting: z
+    .object({ kind: BotTaskWaitKind, ref: z.string().max(64).nullable(), until: z.string().nullable() })
+    .nullable(),
+  finishedProcesses: z.array(TaskProcessFact).max(BOT_TASK_LIMITS.finishedProcessesMax),
+});
+export type TurnTask = z.infer<typeof TurnTask>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -1080,6 +1284,11 @@ export const TurnContext = z.object({
    * block reads as absent (the tools then list no projects), and the API decides every call anyway.
    */
   workZone: TurnWorkZone.optional().catch(undefined),
+  /**
+   * 07.17.1.1.2 (D-02, PD-16): the bot's active task in this thread. Informational: an invalid block reads as absent
+   * (the turn is kept; the "Your task" block is then missing), and the API decides every task call from its own row.
+   */
+  task: TurnTask.optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -1429,6 +1638,22 @@ export const AgentAutomationItemEvent = AgentMentionEvent.omit({ type: true }).e
   }),
 });
 export type AgentAutomationItemEvent = z.infer<typeof AgentAutomationItemEvent>;
+
+/**
+ * `agent.task.v1` (07.17.1.1.2 D-02, D-03, PD-11): built by the API like a mention of the bot on its task card:
+ * `message.author` is the person the task runs for, `message.text` a fixed server sentence, `turn` computed for that
+ * person with `turn.task`. `task.reason` says why the turn came (`process` carries the ended command); a malformed
+ * value fails the event (it is skipped).
+ */
+export const AgentTaskEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.task),
+  task: z.object({
+    taskId: Id,
+    reason: BotTaskWakeReason,
+    process: TaskProcessFact.optional(),
+  }),
+});
+export type AgentTaskEvent = z.infer<typeof AgentTaskEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
