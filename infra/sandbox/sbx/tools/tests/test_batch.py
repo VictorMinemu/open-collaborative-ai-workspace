@@ -194,13 +194,18 @@ class ExecDeadline(Base):
         import subprocess
 
         proc = subprocess.run(
-            [OCW_RUN, f"t{os.getpid()}env", "77", "--", "sh", "-c", 'printf %s "$OCW_EXEC_DEADLINE_S"'],
+            [OCW_RUN, f"t{os.getpid()}env", "77", "--", "sh", "-c", 'printf %s "$SBX_EXEC_DEADLINE_S"'],
             capture_output=True,
             timeout=30,
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout, b"77")
+        # The bot's environment never carries an OCW_ variable (the sandbox smoke's core rule): the deadline is SBX_.
+        proc = subprocess.run(
+            [OCW_RUN, f"t{os.getpid()}envall", "77", "--", "env"], capture_output=True, timeout=30, check=False
+        )
+        self.assertEqual([line for line in proc.stdout.decode().splitlines() if "OCW_" in line], [])
 
     def test_the_budget_follows_the_deadline(self):
         from ocw_extract import bounds
@@ -215,8 +220,8 @@ class ExecDeadline(Base):
                 bounds.batch_budget(450, deadline)
             self.assertIn("timeoutSeconds 600", ctx.exception.reason)
             self.assertIn("background true", ctx.exception.reason)
-        self.assertEqual(bounds.exec_deadline({"OCW_EXEC_DEADLINE_S": "600"}), 600)
-        for bad in ({}, {"OCW_EXEC_DEADLINE_S": ""}, {"OCW_EXEC_DEADLINE_S": "x"}, {"OCW_EXEC_DEADLINE_S": "-5"}):
+        self.assertEqual(bounds.exec_deadline({"SBX_EXEC_DEADLINE_S": "600"}), 600)
+        for bad in ({}, {"SBX_EXEC_DEADLINE_S": ""}, {"SBX_EXEC_DEADLINE_S": "x"}, {"SBX_EXEC_DEADLINE_S": "-5"}):
             self.assertIsNone(bounds.exec_deadline(bad), bad)
 
     def test_the_bots_default_120_s_is_a_clear_usage_error_never_a_kill(self):
@@ -617,24 +622,24 @@ class Caps(Base):
             self.assertEqual(os.path.getsize(os.path.join(dest, "big.bin")), 5 * 1024 * 1024)
 
     def test_the_archive_cap_respects_the_workspace_room_sandboxd_passes(self):
-        """07.17.1.1.1 review WR-06: the room left under the bot's soft quota (OCW_DISK_ROOM_BYTES, set by sandboxd on
+        """07.17.1.1.1 review WR-06: the room left under the bot's soft quota (SBX_DISK_ROOM_BYTES, set by sandboxd on
         every exec) caps an extraction, not only the disk's free space."""
         from test_ocw_extract import BOT_ENV
 
         from ocw_extract import bounds
 
         margin = bounds.ARCHIVE_FREE_MARGIN_BYTES
-        tight = dict(BOT_ENV, OCW_DISK_ROOM_BYTES=str(margin + 3 * 1024 * 1024))
+        tight = dict(BOT_ENV, SBX_DISK_ROOM_BYTES=str(margin + 3 * 1024 * 1024))
         fresh(f"{WS}/extracted/big.zip")
         rc, _out, err = cli("--batch", "fx/big.zip", env=tight)
         self.assertEqual(rc, 6, err)
         assert_reason(self, err, "caps: total size")
-        roomy = dict(BOT_ENV, OCW_DISK_ROOM_BYTES=str(margin + 64 * 1024 * 1024))
+        roomy = dict(BOT_ENV, SBX_DISK_ROOM_BYTES=str(margin + 64 * 1024 * 1024))
         fresh(f"{WS}/extracted/big.zip")
         rc, _out, err = cli("--batch", "fx/big.zip", env=roomy)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(bounds.workspace_room({"OCW_DISK_ROOM_BYTES": "123"}), 123)
-        for bad in ({}, {"OCW_DISK_ROOM_BYTES": "x"}, {"OCW_DISK_ROOM_BYTES": "-1"}):
+        self.assertEqual(bounds.workspace_room({"SBX_DISK_ROOM_BYTES": "123"}), 123)
+        for bad in ({}, {"SBX_DISK_ROOM_BYTES": "x"}, {"SBX_DISK_ROOM_BYTES": "-1"}):
             self.assertIsNone(bounds.workspace_room(bad), bad)
 
     def test_the_size_ratio_covers_every_archive_type_and_many_small_entries(self):

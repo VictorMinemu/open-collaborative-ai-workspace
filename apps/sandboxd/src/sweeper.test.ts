@@ -213,10 +213,12 @@ describe("soft quota (D-01, F-9, T-07.8-09-03)", () => {
     await t.sandboxes.ensure(target);
     const envOf = () => (t.docker.execCreates.at(-1)?.body as { Env?: string[] } | undefined)?.Env ?? [];
     await t.sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 1000, yieldMs: 0 });
-    expect(envOf().some((l) => l.startsWith("OCW_DISK_ROOM_BYTES="))).toBe(false);
+    expect(envOf().some((l) => l.startsWith("SBX_DISK_ROOM_BYTES="))).toBe(false);
     await t.quota.measure(target);
     await t.sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 1000, yieldMs: 0 });
-    expect(envOf()).toEqual([`OCW_DISK_ROOM_BYTES=${54 * MiB}`]);
+    expect(envOf()).toEqual([`SBX_DISK_ROOM_BYTES=${54 * MiB}`]);
+    // Never an OCW_ variable in the bot's environment (the sandbox smoke's core rule).
+    expect(envOf().filter((l) => l.includes("OCW_"))).toEqual([]);
   });
 
   it("measuring never counts as activity (the sweeper does not keep a sandbox awake)", async () => {

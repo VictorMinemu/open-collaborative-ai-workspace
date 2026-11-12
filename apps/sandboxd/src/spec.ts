@@ -22,8 +22,11 @@ export const OCW_FILES = "/usr/local/bin/ocw-files";
  * `ocw-files` names it: a run SIGKILLed mid-extraction leaves it behind (07.17.1.1.1 review WR-06).
  */
 export const EXTRACT_SCRATCH = ".ocw-extract-tmp";
-/** The room left under the soft quota, told to every exec (07.17.1.1.1 review WR-06; ocw-extract caps archives). */
-export const DISK_ROOM_ENV = "OCW_DISK_ROOM_BYTES";
+/**
+ * The room left under the soft quota, told to every exec (07.17.1.1.1 review WR-06; ocw-extract caps archives). SBX_,
+ * never OCW_: no OCW_ variable ever reaches a bot's environment.
+ */
+export const DISK_ROOM_ENV = "SBX_DISK_ROOM_BYTES";
 
 export interface ContainerLimits {
   nanoCpus: number;

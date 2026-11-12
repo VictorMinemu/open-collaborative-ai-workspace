@@ -488,9 +488,9 @@ class Deadline(Base):
         from ocw_extract import cli as cli_module
 
         out, err = io.BytesIO(), io.StringIO()
-        saved = os.environ.get("OCW_EXEC_DEADLINE_S")
+        saved = os.environ.get("SBX_EXEC_DEADLINE_S")
         if deadline is not None:
-            os.environ["OCW_EXEC_DEADLINE_S"] = str(deadline)
+            os.environ["SBX_EXEC_DEADLINE_S"] = str(deadline)
         try:
             with contextlib.redirect_stdout(io.TextIOWrapper(out, encoding="utf-8")) as wrapper, \
                     contextlib.redirect_stderr(err):
@@ -498,9 +498,9 @@ class Deadline(Base):
                 wrapper.flush()
         finally:
             if saved is None:
-                os.environ.pop("OCW_EXEC_DEADLINE_S", None)
+                os.environ.pop("SBX_EXEC_DEADLINE_S", None)
             else:
-                os.environ["OCW_EXEC_DEADLINE_S"] = saved
+                os.environ["SBX_EXEC_DEADLINE_S"] = saved
         return rc, out.getvalue().decode("utf-8"), err.getvalue()
 
     def dummy(self, name):
@@ -538,7 +538,7 @@ class Deadline(Base):
     def test_without_a_deadline_every_page_is_read(self):
         path = self.dummy("deadline-none.pdf")
         self.fake(pages=5)
-        os.environ.pop("OCW_EXEC_DEADLINE_S", None)
+        os.environ.pop("SBX_EXEC_DEADLINE_S", None)
         rc, out, err = self.main(path)
         self.assertEqual(rc, 0, err)
         self.assertIn("pages 1-5 of 5", out)

@@ -46,7 +46,7 @@ ARCHIVE_FREE_MARGIN_BYTES = 64 * 1024 * 1024
 ARCHIVE_WATCH_INTERVAL_S = 0.25
 # The room left under the bot's soft disk quota when the exec started (07.17.1.1.1 review WR-06): sandboxd sets it
 # from the organization's quota and its last measurement of the workspace; absent when it knows neither.
-DISK_ROOM_ENV = "OCW_DISK_ROOM_BYTES"
+DISK_ROOM_ENV = "SBX_DISK_ROOM_BYTES"
 
 # Batch (PD-08).
 BATCH_DEFAULT_BUDGET_S = 450
@@ -79,7 +79,8 @@ assert BATCH_MAX_BUDGET_S + STEP_TIMEOUT_MAX_S <= EXEC_TIMEOUT_MAX_S, "batch bud
 # The exec timeout this command really got (07.17.1.1.1 review CR-01): `ocw-run` exports it. A batch keeps its longest
 # step plus 10 s between the end of its budget and that deadline, and refuses to start when what is left is shorter
 # than one longest step plus 10 s (the API's default 120 s is: the bot is told to pass timeoutSeconds 600).
-EXEC_DEADLINE_ENV = "OCW_EXEC_DEADLINE_S"
+# Named SBX_, never OCW_: no OCW_ variable ever reaches a bot's environment (the sandbox smoke's core rule).
+EXEC_DEADLINE_ENV = "SBX_EXEC_DEADLINE_S"
 # A single-file run ends this long before that deadline with what it read (07.17.1.1.1 review WR-05); a step is
 # cut to the time left, and none starts with less than SINGLE_MIN_STEP_S left.
 SINGLE_END_MARGIN_S = 10
