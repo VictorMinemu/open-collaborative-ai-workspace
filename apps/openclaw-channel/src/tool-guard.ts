@@ -3,6 +3,7 @@ import {
   type AgentChannelToolCallRequest,
   ATTACHMENT_READ_LIMITS,
   ATTACHMENT_READ_SENTENCES,
+  BOT_TASK_SENTENCES,
   BOT_WORK_SESSION_SENTENCES,
   CONFINED_TOOL_FLAGS,
   CONNECTOR_SAFE_NAME,
@@ -29,6 +30,10 @@ import { recordTaintedSentence } from "./record-tool.js";
 import {
   BOARD_TOOL_NAME,
   CONVERSATION_OPEN_TOOL,
+  TASK_CONTINUE_TOOL,
+  TASK_FINISH_TOOL,
+  TASK_START_TOOL,
+  TASK_TOOL_NAMES,
   WORK_SESSION_DOWNLOAD_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_START_TOOL,
@@ -80,8 +85,30 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * turn or after a session read it reaches its routes, which exempt only a move or waiting change of the turn thread's
  * card that this bot's automation opened, with the profile's `actOnOutsideContent`; the board tool itself refuses
  * create and read on such a turn (the routes refuse them too).
+ * Long tasks (07.17.1.1.2 D-08, D-13, PD-08): `ocw_task_start|continue|finish` are self-validated by `/tasks/*`, take
+ * their static flags (never side-effecting, never approvable: they only schedule this bot's own next turn for this
+ * person, within the task's budgets), so a tainted or session-read turn still reaches the route; they are not counted
+ * against the cap of 8 (a turn that used its calls can still continue), and each runs once per turn (a second call is
+ * refused here with `once_per_turn`; a call that did not succeed frees its slot, `taskCallEnded`). The outcome of the
+ * turn's task calls (`ActiveTurn.task`) is what the bridge reads after the run (quiet turns, silent task turns).
  * Logs never include params, arguments or results.
  */
+
+/** 07.17.1.1.2 (PD-17): what this turn's task calls achieved (each set only by a successful answer). */
+export type TaskTurnOutcome = {
+  started: boolean;
+  continued: boolean;
+  finished: boolean;
+  /** The continue answered `quiet: true` and no finish followed: the turn's text is not posted (PD-10). */
+  quiet: boolean;
+};
+
+const noTaskOutcome = (): TaskTurnOutcome => ({
+  started: false,
+  continued: false,
+  finished: false,
+  quiet: false,
+});
 
 export interface ActiveTurn {
   eventId: string;
@@ -116,6 +143,10 @@ export interface ActiveTurn {
    * refused locally, as the API's claim refuses it.
    */
   sessionOutputRead: boolean;
+  /** 07.17.1.1.2 (PD-17): the turn's task outcome, set by the task tools through `taskCallEnded`. */
+  task: TaskTurnOutcome;
+  /** 07.17.1.1.2 (D-13): the task tools called (or in flight) this turn; each runs once per turn. */
+  taskCalls: Set<string>;
 }
 
 export type ToolCallEvent = {
@@ -176,7 +207,12 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   // 07.17 (PD-07): `/conversations/open` re-decides the turn, the tool on it, the automation, fan-out, the caps and the
   // outside-content rule, claims the call and audits it; never `/tool-calls` (it would count twice).
   CONVERSATION_OPEN_TOOL,
+  // 07.17.1.1.2 (PD-08): `/tasks/start|continue|finish` re-decide the turn, the tool on it, the task, the requester,
+  // the policy and the budgets, claim the call (not counted) and audit it; never `/tool-calls`.
+  ...TASK_TOOL_NAMES,
 ]);
+/** 07.17.1.1.2: the bot's own long-task tools (cap-exempt, once per turn, `TASK_TOOL_FLAGS`). */
+const TASK_TOOLS: ReadonlySet<string> = new Set(TASK_TOOL_NAMES);
 /** 07.16: the bot's own Work Zone session tools. */
 const WORK_SESSION_TOOLS: ReadonlySet<string> = new Set(WORK_SESSION_TOOL_NAMES);
 /**
@@ -403,6 +439,11 @@ function callFlags(
       sideEffecting: CONVERSATION_OPEN_FLAGS.sideEffecting || delivered?.sideEffecting === true,
     };
   }
+  if (TASK_TOOLS.has(tool)) {
+    // 07.17.1.1.2 (D-08, D-13): never side-effecting and never approvable, whatever a turn's flags say (the route
+    // decides, PD-08); a turn's flags may only add untrusted output (taint).
+    return { untrustedOutput: t.turn.toolFlags[tool]?.untrustedOutput === true, sideEffecting: false };
+  }
   if (tool === "ocw_http_request") {
     const method = typeof params?.method === "string" ? params.method.trim().toUpperCase() : "";
     const flags = HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
@@ -610,6 +651,8 @@ export function createToolGuard(
         attachmentReads: 0,
         tainted: tainted === true,
         sessionOutputRead: false,
+        task: noTaskOutcome(),
+        taskCalls: new Set(),
       });
       signal?.addEventListener(
         "abort",
@@ -632,6 +675,27 @@ export function createToolGuard(
 
     activeTurn(sessionKey: string): ActiveTurn | undefined {
       return state.turns.get(keyOf(sessionKey));
+    },
+
+    /**
+     * 07.17.1.1.2 (D-13, PD-17): a task tool's call ended. A successful answer records the turn's task outcome (a
+     * finish always posts, so it clears a quiet continue of the same turn); any other end frees the tool's once-per-turn
+     * slot, so the model may fix its call and try again.
+     */
+    taskCallEnded(t: ActiveTurn, tool: string, outcome: { ok: true; quiet?: boolean } | { ok: false }): void {
+      if (!outcome.ok) {
+        t.taskCalls.delete(tool);
+        return;
+      }
+      t.taskCalls.add(tool);
+      if (tool === TASK_START_TOOL) t.task.started = true;
+      else if (tool === TASK_CONTINUE_TOOL) {
+        t.task.continued = true;
+        t.task.quiet = outcome.quiet === true && !t.task.finished;
+      } else if (tool === TASK_FINISH_TOOL) {
+        t.task.finished = true;
+        t.task.quiet = false;
+      }
     },
 
     /**
@@ -688,7 +752,9 @@ export function createToolGuard(
       if (attachmentRead && t.attachmentReads >= maxReads) {
         return block(ATTACHMENT_READ_SENTENCES.cap_reached);
       }
-      if (!confined && !attachmentRead && t.calls >= t.turn.maxToolCalls) {
+      // 07.17.1.1.2 (D-13): the task tools are not counted, so a turn that used its 8 calls can still continue.
+      const taskTool = TASK_TOOLS.has(tool);
+      if (!confined && !attachmentRead && !taskTool && t.calls >= t.turn.maxToolCalls) {
         return block(
           `Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxToolCalls} tool calls.`,
         );
@@ -743,10 +809,16 @@ export function createToolGuard(
           return block(APPROVAL_SENTENCES.too_large_local(sentence));
         if (!callId) return block(APPROVAL_SENTENCES.no_call_id(sentence));
       }
+      // 07.17.1.1.2 (T-07.17.1.1.2-05-02): once each per turn, reserved before the tool runs so two concurrent calls
+      // cannot both pass; the tool frees the slot when its call did not succeed.
+      if (taskTool) {
+        if (t.taskCalls.has(tool)) return block(BOT_TASK_SENTENCES.once_per_turn);
+        t.taskCalls.add(tool);
+      }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
       if (confined) t.sandboxCalls++;
       else if (attachmentRead) t.attachmentReads++;
-      else t.calls++;
+      else if (!taskTool) t.calls++;
       if (web) t.webCalls++;
 
       if (!selfValidated) {

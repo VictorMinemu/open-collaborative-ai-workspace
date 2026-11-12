@@ -2238,6 +2238,9 @@ const PLUGIN_TOOLS = [
   "ocw_record_update",
   "ocw_consult_agent",
   "ocw_conversation_open",
+  "ocw_task_start",
+  "ocw_task_continue",
+  "ocw_task_finish",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
@@ -2340,6 +2343,9 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_work_session_upload",
         "ocw_work_session_download",
         "ocw_conversation_open",
+        "ocw_task_start",
+        "ocw_task_continue",
+        "ocw_task_finish",
       ],
     });
     const boardTurn = {

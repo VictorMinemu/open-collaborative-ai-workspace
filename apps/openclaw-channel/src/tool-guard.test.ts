@@ -1987,7 +1987,13 @@ describe("the task tools (07.17.1.1.2 D-08, D-13, PD-08, E17): self-validated, o
   const taskTurn = (over: Partial<TurnContext> = {}) =>
     turn({
       tools: ["web_search", "ocw_memory_save", START, CONTINUE, FINISH],
-      toolFlags: { web_search: WEB, ocw_memory_save: MEMORY, [START]: NONE, [CONTINUE]: NONE, [FINISH]: NONE },
+      toolFlags: {
+        web_search: WEB,
+        ocw_memory_save: MEMORY,
+        [START]: NONE,
+        [CONTINUE]: NONE,
+        [FINISH]: NONE,
+      },
       ...over,
     });
   const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = taskTurn(), tainted = false) =>
@@ -2074,9 +2080,7 @@ describe("the task tools (07.17.1.1.2 D-08, D-13, PD-08, E17): self-validated, o
     expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
     begin(g);
     active(g).sessionOutputRead = true;
-    expect(
-      await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "blocked" }), ctx()),
-    ).toBeUndefined();
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "blocked" }), ctx())).toBeUndefined();
   });
 
   it("takes its static flags: a turn saying side-effecting or approvable changes nothing; one saying untrusted only adds", async () => {

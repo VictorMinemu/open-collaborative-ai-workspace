@@ -122,6 +122,9 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_record_update",
       "ocw_consult_agent",
       "ocw_conversation_open",
+      "ocw_task_start",
+      "ocw_task_continue",
+      "ocw_task_finish",
     ];
     expect(tools("full")).toEqual(owned);
     for (const name of owned) expect(manifest.contracts?.tools, name).toContain(name);

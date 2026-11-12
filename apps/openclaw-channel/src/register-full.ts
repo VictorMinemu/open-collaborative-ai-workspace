@@ -13,6 +13,7 @@ import { registerMemoryFileTools } from "./memory-files-tool.js";
 import { registerMemoryTool } from "./memory-tool.js";
 import { registerRecordTool } from "./record-tool.js";
 import { registerSandboxTools } from "./sandbox-tools.js";
+import { registerTaskTools } from "./task-tools.js";
 import { sharedToolGuardClient, type ToolGuard, toolGuard } from "./tool-guard.js";
 import { registerWorkSessionTools } from "./work-session-tools.js";
 import { registerWorkZoneTools } from "./work-zone-tools.js";
@@ -27,7 +28,7 @@ import { registerWorkZoneTools } from "./work-zone-tools.js";
  * `ocw_attachment_read` (attachment-tool.ts), the 07.6 tools
  * `ocw_automation_propose` (automation-tool.ts) and `ocw_record_update` (record-tool.ts), the 07.7 consult tool
  * `ocw_consult_agent` (consult-tool.ts), the 07.17 fan-out tool `ocw_conversation_open` (conversation-open-tool.ts),
- * and the restart-loop breaker guard on
+ * the 07.17.1.1.2 long-task tools `ocw_task_start|continue|finish` (task-tools.ts), and the restart-loop breaker guard on
  * `gateway_start` (autostart-guard.ts; fired from the boot registry, which is "full"). OpenClaw resolves plugin tools
  * from the boot registry or a tool-discovery load, both of which run this. The call-time tool gate is NOT here: it
  * must also exist in the non-activated registry agent turns run with (register-capabilities.ts). Kept out of
@@ -53,5 +54,6 @@ export function registerFull(
   registerRecordTool(api, { guard, client });
   registerConsultTool(api, { guard, client });
   registerConversationOpenTool(api, { guard, client });
+  registerTaskTools(api, { guard, client });
   registerAutostartGuard(api, autostart);
 }

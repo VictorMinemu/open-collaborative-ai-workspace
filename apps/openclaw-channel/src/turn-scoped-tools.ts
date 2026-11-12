@@ -3,7 +3,8 @@
  * (07.1-13, 07.5-10, 07.6-20). `ocw_board_card` is offered only on a board channel's turns (07.1-10), the two Work Zone
  * proposal tools only on turns whose human holds `work_session.create` (07.5-08), the two 07.6 tools and the 07.7 consult
  * tool only where their own rules hold (below), the 07.16 Work Zone session tools only to a bot with an active Work Zone
- * profile, the 07.17 open tool only on a fan-out automation's run turns, so `GET /cell` (the bot's tools in
+ * profile, the 07.17 open tool only on a fan-out automation's run turns, the 07.17.1.1.2 task tools only where the
+ * bot may start or control its own long task, so `GET /cell` (the bot's tools in
  * any conversation, for no human) never lists them, while OpenClaw can only run a tool the bot's entry configures
  * (`alsoAllow`) and a turn may only narrow that list (`toolsAllow`).
  *
@@ -62,6 +63,16 @@ export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
  * mirror's `CONVERSATION_OPEN_TOOL` (agent-channel-protocol.ts), declared here without imports for the gate's sets.
  */
 export const CONVERSATION_OPEN_TOOL = "ocw_conversation_open";
+/**
+ * 07.17.1.1.2 (D-02, PD-07): the bot's own long-task tools. The API offers all three on a turn that may start a task
+ * (a person's mention, reply mode, a Work Zone wake or an automation item, outside AI chats, with "Allow long tasks"
+ * on) and continue and finish on its task's own turns; never in `GET /cell`. Same values as the mirror's
+ * `TASK_TOOL_NAMES` (agent-channel-protocol.ts), declared here without imports for the gate's sets.
+ */
+export const TASK_START_TOOL = "ocw_task_start";
+export const TASK_CONTINUE_TOOL = "ocw_task_continue";
+export const TASK_FINISH_TOOL = "ocw_task_finish";
+export const TASK_TOOL_NAMES = [TASK_START_TOOL, TASK_CONTINUE_TOOL, TASK_FINISH_TOOL] as const;
 const DELIVERED_TURN_TOOL = "ocw_agent_card";
 
 /** The bot's snapshot tools plus the turn-scoped ones it may be offered (only for a bot that is offered any tool). */
@@ -76,6 +87,7 @@ export function withTurnScopedTools(tools: readonly string[] | undefined): strin
     ATTACHMENT_TOOL_NAME,
     ...WORK_SESSION_TOOL_NAMES,
     CONVERSATION_OPEN_TOOL,
+    ...TASK_TOOL_NAMES,
   ]) {
     if (!list.includes(name)) list.push(name);
   }

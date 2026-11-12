@@ -46,6 +46,12 @@ import {
   type AgentChannelRuntimeReport,
   AgentChannelSentenceAnswer,
   type AgentChannelStatusReport,
+  type AgentChannelTaskContinue,
+  AgentChannelTaskContinueResponse,
+  type AgentChannelTaskFinish,
+  AgentChannelTaskFinishResponse,
+  type AgentChannelTaskStart,
+  AgentChannelTaskStartResponse,
   type AgentChannelToolCallApproval,
   AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
@@ -245,6 +251,12 @@ export const WORK_SESSION_FILE_REQUEST_TIMEOUT_MS = BOT_FILE_LIMITS.transferMaxM
 export const CONVERSATION_OPEN_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
+ * 07.17.1.1.2 (PD-08): a task call is one short transaction (a row lock, a card refresh, a job): 10 s like the other
+ * small writes, well under OpenClaw's per-tool budget.
+ */
+export const TASK_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
  * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
  * what the API answered, never "the workspace could not be reached" while the call completes anyway. A sandbox call
  * waits 85 s (contracts `SANDBOX_TIMEOUTS_MS`, CI p142/p164/p178: any first call may start the bot's shell, and a cold
@@ -323,6 +335,18 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       if (attempt < attempts - 1) await sleep(backoffDelayMs(attempt, opts.backoff), signal);
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  /** A task route's raw answer: a refusal carried by a 4xx body is the refusal (the consult rule). */
+  async function taskRequest(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+    try {
+      return await request("POST", path, body, signal, 1, TASK_REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
+      // The task answers bound the sentence at 300 characters (the generic refusal body allows 500).
+      if (answer?.code) return { ok: false, code: answer.code, sentence: answer.sentence.slice(0, 300) };
+      throw error;
+    }
   }
 
   return {
@@ -804,6 +828,32 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         CONVERSATION_OPEN_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelConversationOpenResponse.parse(raw);
+    },
+    /**
+     * `ocw_task_start|continue|finish` (07.17.1.1.2 D-02, PD-04, PD-08): the turn's ids and the bot's own fields only;
+     * the API takes the person, the conversation, the thread, the task and every budget from the stored turn and the
+     * task row, and decides when the next turn comes. One attempt each (a lost start answer must not read as
+     * `task_active`; a continue the model calls again only replaces the wait). A refusal is a 200 `{ok: false, code,
+     * sentence}`; a 4xx carrying that body resolves to it too; an ended turn throws (404 `unknown_turn`). Never logs a
+     * goal, a note or a summary.
+     */
+    async taskStart(
+      body: AgentChannelTaskStart,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelTaskStartResponse> {
+      return AgentChannelTaskStartResponse.parse(await taskRequest("/tasks/start", body, signal));
+    },
+    async taskContinue(
+      body: AgentChannelTaskContinue,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelTaskContinueResponse> {
+      return AgentChannelTaskContinueResponse.parse(await taskRequest("/tasks/continue", body, signal));
+    },
+    async taskFinish(
+      body: AgentChannelTaskFinish,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelTaskFinishResponse> {
+      return AgentChannelTaskFinishResponse.parse(await taskRequest("/tasks/finish", body, signal));
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

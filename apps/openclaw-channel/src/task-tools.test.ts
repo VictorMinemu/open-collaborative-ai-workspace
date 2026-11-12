@@ -22,13 +22,6 @@ import {
 import { type AgentChannelClient, AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 import {
-  FAKE_ERROR_CANARY,
-  FAKE_TASK_ID,
-  type FakeAgentChannelApi,
-  startFakeAgentChannelApi,
-} from "./testing/fake-agent-channel-api.js";
-import { loadRegistry, type PluginEntry } from "./testing/openclaw-host.js";
-import {
   registerTaskTools,
   renderTaskContinue,
   renderTaskFinish,
@@ -36,12 +29,19 @@ import {
   TASK_TOOL_SENTENCES,
   type TaskToolContext,
 } from "./task-tools.js";
+import {
+  FAKE_ERROR_CANARY,
+  FAKE_TASK_ID,
+  type FakeAgentChannelApi,
+  startFakeAgentChannelApi,
+} from "./testing/fake-agent-channel-api.js";
+import { loadRegistry, type PluginEntry } from "./testing/openclaw-host.js";
 import { createToolGuard, setToolGuardClient, toolGuard } from "./tool-guard.js";
 import {
+  TASK_TOOL_NAMES as SCOPED_TASK_TOOL_NAMES,
   TASK_CONTINUE_TOOL,
   TASK_FINISH_TOOL,
   TASK_START_TOOL,
-  TASK_TOOL_NAMES as SCOPED_TASK_TOOL_NAMES,
   withTurnScopedTools,
 } from "./turn-scoped-tools.js";
 
@@ -284,7 +284,9 @@ function setup(
   const registered: Array<{ factory: Factory; opts: { name: string } }> = [];
   const logs: string[] = [];
   registerTaskTools(
-    { registerTool: (factory: Factory, opts: { name: string }) => registered.push({ factory, opts }) } as never,
+    {
+      registerTool: (factory: Factory, opts: { name: string }) => registered.push({ factory, opts }),
+    } as never,
     { guard, client: () => client, logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) } },
   );
   const tool = (name: string) => {
@@ -316,7 +318,12 @@ describe("the task tools: schemas, renderings and local refusals", () => {
     expect(Object.keys(start.parameters.properties)).toEqual(["goal"]);
     expect(start.parameters.required).toEqual(["goal"]);
     expect(start.parameters.properties.goal?.maxLength).toBe(BOT_TASK_LIMITS.goalChars);
-    expect(Object.keys(cont.parameters.properties)).toEqual(["progress", "nextStep", "afterSeconds", "waitFor"]);
+    expect(Object.keys(cont.parameters.properties)).toEqual([
+      "progress",
+      "nextStep",
+      "afterSeconds",
+      "waitFor",
+    ]);
     expect(cont.parameters.required).toEqual(["progress", "nextStep"]);
     expect(cont.parameters.properties.progress?.maxLength).toBe(BOT_TASK_LIMITS.noteChars);
     expect(cont.parameters.properties.afterSeconds).toMatchObject({
@@ -363,7 +370,8 @@ describe("the task tools: schemas, renderings and local refusals", () => {
     ]);
     const all = logs.join("\n");
     expect(all).toContain(EVENT);
-    for (const secret of ["knowledge", "120 files", "200 more", "Line one"]) expect(all).not.toContain(secret);
+    for (const secret of ["knowledge", "120 files", "200 more", "Line one"])
+      expect(all).not.toContain(secret);
   });
 
   it("refuses locally, without a request: no turn, a turn not offering the tool, extra keys, a goal with a newline, bad notes, a wait out of range", async () => {
@@ -427,18 +435,27 @@ describe("the task tools: schemas, renderings and local refusals", () => {
   });
 
   it("a 4xx refusal body, an ended turn, a network failure and an unreadable answer are fixed sentences", async () => {
-    const answer = new AgentChannelHttpError(409, "/tasks/continue", "x", "task_stopped", undefined, undefined, {
-      ok: false,
-      code: "task_stopped",
-      sentence: "y",
-    });
+    const answer = new AgentChannelHttpError(
+      409,
+      "/tasks/continue",
+      "x",
+      "task_stopped",
+      undefined,
+      undefined,
+      {
+        ok: false,
+        code: "task_stopped",
+        sentence: "y",
+      },
+    );
     const refused = setup({ continue: async () => Promise.reject(answer) });
     refused.begin();
     expect(text(await refused.tool(TASK_CONTINUE_TOOL).execute("tc-1", CONTINUE))).toBe(
       BOT_TASK_SENTENCES.task_stopped,
     );
     const gone = setup({
-      finish: async () => Promise.reject(new AgentChannelHttpError(404, "/tasks/finish", "x", "unknown_turn")),
+      finish: async () =>
+        Promise.reject(new AgentChannelHttpError(404, "/tasks/finish", "x", "unknown_turn")),
     });
     gone.begin();
     expect(text(await gone.tool(TASK_FINISH_TOOL).execute("tc-1", { summary: "a", outcome: "done" }))).toBe(
@@ -467,7 +484,9 @@ describe("the task tools: schemas, renderings and local refusals", () => {
     );
     const cont = (next: "after_turn" | "at" | "on_process" | "on_session", quiet = false) =>
       text(renderTaskContinue({ ok: true, next, at: next === "at" ? AT : null, turnsLeft: 3, quiet }));
-    expect(cont("after_turn")).toBe("Continue scheduled: your next turn starts right after this one; 3 turns left.");
+    expect(cont("after_turn")).toBe(
+      "Continue scheduled: your next turn starts right after this one; 3 turns left.",
+    );
     expect(cont("at")).toBe(`Continue scheduled: your next turn starts at ${AT}; 3 turns left.`);
     expect(cont("on_process")).toBe(
       "Continue scheduled: your next turn starts when the background command ends; 3 turns left.",
