@@ -211,7 +211,7 @@ describe("soft quota (D-01, F-9, T-07.8-09-03)", () => {
   it("every exec tells the command the room left under the quota, once it is known (07.17.1.1.1 review WR-06)", async () => {
     const t = setup({ disk: 10 * MiB });
     await t.sandboxes.ensure(target);
-    const envOf = () => (t.docker.execCreates.at(-1)?.body as { Env?: string[] }).Env ?? [];
+    const envOf = () => (t.docker.execCreates.at(-1)?.body as { Env?: string[] } | undefined)?.Env ?? [];
     await t.sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 1000, yieldMs: 0 });
     expect(envOf().some((l) => l.startsWith("OCW_DISK_ROOM_BYTES="))).toBe(false);
     await t.quota.measure(target);
