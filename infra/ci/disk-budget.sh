@@ -16,9 +16,10 @@
 #     workflow, and a cached build gives a fresh tag an old creation date, so with others running these wait for the
 #     next housekeeping run.
 #   - Over budget, always: build cache down to OCW_CI_KEEP_CACHE_GB (BuildKit never drops records an active build uses).
-# Bot sandboxes (07.8-24): the images workflow keeps ocw-sandboxd/-sbx/-brw/-egress:ci (about 2 GB, the browser image
-# alone ~1.2 GB) and a killed smoke leaves its ocw-sandbox-*:smoke-<sha> images (also removed by the next run of its
-# slot, infra/ci/slot-reset.sh); the budget carries 2 GB more for them.
+# Bot sandboxes (07.8-24): the images workflow keeps ocw-sandboxd/-sbx/-brw/-egress:ci (about 2.3 GB, the browser image
+# alone ~1.2 GB; since 07.17.1.1.1 the `sbx` share is about 1.1 GB unpacked, with the document toolkit: LibreOffice,
+# tesseract, poppler, 7-Zip and the Python venv) and a killed smoke leaves its ocw-sandbox-*:smoke-<sha> images (also
+# removed by the next run of its slot, infra/ci/slot-reset.sh); the budget carries 2 GB more for them.
 set -eu
 . "$(dirname "$0")/wp-lib.sh"
 BUDGET_GB="${OCW_CI_DIND_BUDGET_GB:-62}"

@@ -20,14 +20,21 @@
 # `ocw-extract` (a scanned PDF through OCR, Office files, mail, an archive listing), resumes a batch, and checks that
 # every answer stays under the 16 KiB tail. There is no egress proxy here, so the shell has no way out: the section is
 # offline by construction. It runs on runc (every section) and under gVisor (`--only core,docs`), capped at 900 s.
+# The macro rule (D-08, PD-11): neither `ocw-extract` nor the bot's own `soffice --convert-to` runs a document's load
+# macro; on runc a positive control opens the same document in a test-only image without `ocw.xcd` with a low-security
+# profile (the macro writes its marker there, or the smoke says the control was not achieved) and the same open in the
+# real image (never a marker). The drift section (D-10, PD-10) rebuilds the image tag on real Docker: a stopped shell
+# is re-created on the new image with its workspace kept, a running one is left alone until it stops or restarts. It
+# runs last because it moves the image tag.
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart,docs]
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart,docs,drift]
 #   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart,
-#                          docs; default all
+#                          docs, drift; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
-# and on exit; the image tag is `ocw-sandbox-sbx:smoke-<sha>` and is removed on exit. It never prunes.
+# and on exit; the image tag is `ocw-sandbox-sbx:smoke-<sha>` and is removed on exit, with every image the docs and
+# drift sections build (by tag and by ID, all labelled the same). It never prunes.
 set -euo pipefail
 
 ONLY=all
@@ -47,7 +54,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files quota idle events restart docs"
+SECTIONS="core files quota idle events restart docs drift"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -63,6 +70,10 @@ cd "$ROOT"
 NS="${OCW_SMOKE_NS_PREFIX:-ocw-smoke}-$$"
 SHA="$(git rev-parse --short HEAD)"
 IMAGE="ocw-sandbox-sbx:smoke-${SHA}"
+# The docs section's positive-control image (runc only) and every image ID the run built (on_exit removes them by ID:
+# the drift section moves the $IMAGE tag, so the original smoke image is untagged by then).
+MACRO_IMAGE="${IMAGE}-macro-control"
+BUILT_IMAGES=""
 WORK="$(mktemp -d)"
 SANDBOXD_PID=""
 FAILURES=0
@@ -103,9 +114,12 @@ on_exit() {
     [ "$left" = "0" ] && break
     sleep 1
   done
-  docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
+  docker image rm -f "$IMAGE" "$MACRO_IMAGE" >/dev/null 2>&1 || true
+  local id
+  for id in $BUILT_IMAGES; do docker image rm -f "$id" >/dev/null 2>&1 || true; done
+  left=$((left + $(docker image ls -q --filter "label=ocw.namespace=${NS}" | sort -u | wc -l | tr -d ' ')))
   if [ "$left" != "0" ]; then
-    log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup"
+    log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup (containers, volumes, networks, images)"
     code=1
   fi
   if [ "$code" != "0" ] && [ -f "$WORK/sandboxd.log" ]; then
@@ -185,6 +199,7 @@ A="$(uuid)"
 
 log "building ${IMAGE} from infra/sandbox/sbx/Dockerfile"
 docker build -q --label "ocw.namespace=${NS}" -t "$IMAGE" -f infra/sandbox/sbx/Dockerfile infra/sandbox/sbx >/dev/null
+BUILT_IMAGES="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 
 # ---------------------------------------------------------------- D-14: a required runsc that is missing refuses to start
 if want core; then
@@ -1214,6 +1229,69 @@ download_sha() {
   ' "$WORK/body.json"
 }
 
+# macro_open <image>: in a throwaway container hardened like a bot's shell (run-sbx-image-tests.sh's flags, tmpfs
+# /workspace and /tmp, no network), generates macro.fodt with make_fixtures.py (streamed with tar), seeds a profile
+# whose MacroSecurityLevel is 0 (low: macros run without asking), opens the document the ordinary way (`soffice
+# --headless`, no conversion) for at most 60 s and prints `marker yes` or `marker no`.
+macro_open() {
+  local tar_opts=""
+  case "$(tar --version 2>/dev/null || true)" in
+    bsdtar*) tar_opts=--no-xattrs ;;
+  esac
+  # shellcheck disable=SC2086 # tar_opts is empty or one word
+  COPYFILE_DISABLE=1 tar $tar_opts -C infra/sandbox/sbx/tools/tests -cf - make_fixtures.py |
+    docker run -i --rm --label "ocw.namespace=${NS}" \
+      --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges:true --init \
+      --pids-limit 256 --memory 1g --memory-swap 1g --cpus 1 --network none \
+      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+      --tmpfs /workspace:rw,nosuid,nodev,size=512m,uid=10001,gid=10001 \
+      -e HOME=/workspace -e LC_ALL=C.UTF-8 \
+      "$1" sh -c '
+        mkdir -p /tmp/t && tar -x -C /tmp/t || exit 10
+        /opt/ocw-tools/venv/bin/python3 -I /tmp/t/make_fixtures.py /workspace/fx --only macro.fodt >/dev/null || exit 11
+        mkdir -p /tmp/pc/user || exit 12
+        cat >/tmp/pc/user/registrymodifications.xcu <<XCU
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>false</value></prop></item>
+</oor:items>
+XCU
+        timeout -k 5 60 soffice --headless --norestore -env:UserInstallation=file:///tmp/pc /workspace/fx/macro.fodt >/dev/null 2>&1 &
+        i=0
+        while [ "$i" -lt 60 ] && [ ! -e /workspace/fx/MACRO-RAN ] && kill -0 "$!" 2>/dev/null; do
+          sleep 1
+          i=$((i + 1))
+        done
+        if [ -e /workspace/fx/MACRO-RAN ]; then echo "marker yes"; else echo "marker no"; fi
+      '
+}
+
+# macro_control: the positive control (runc only; PD-11). A test-only image from $IMAGE without ocw.xcd must run the
+# load macro on an ordinary open with a low-security profile; the real image must not. When the control does not fire,
+# only the configuration proves the rule, and the smoke says so (D-08's permitted outcome, recorded in ADR-0043).
+macro_control() {
+  local control real
+  if printf 'FROM %s\nUSER 0:0\nRUN rm -f /usr/lib/libreoffice/share/registry/ocw.xcd\nUSER 10001:10001\n' "$IMAGE" |
+    docker build -q --label "ocw.namespace=${NS}" -t "$MACRO_IMAGE" - >/dev/null 2>"$WORK/macro-build.err"; then
+    BUILT_IMAGES="${BUILT_IMAGES} $(docker image inspect --format '{{.Id}}' "$MACRO_IMAGE")"
+    control="$(macro_open "$MACRO_IMAGE" 2>&1 || true)"
+  else
+    control="build failed: $(tail -n 3 "$WORK/macro-build.err" | tr '\n' ' ')"
+  fi
+  if [ "$control" = "marker yes" ]; then
+    ok "docs: macro positive control fired (without ocw.xcd, a low-security profile and an ordinary open write MACRO-RAN)"
+  else
+    log "     macro positive control not achieved (configuration-only proof): ${control:-no output}"
+  fi
+  real="$(macro_open "$IMAGE" 2>&1 || true)"
+  if [ "$real" = "marker no" ]; then
+    ok "docs: the same low-security open in the real image never runs the macro (ocw.xcd finalized)"
+  else
+    fail "docs: the real image with a low-security profile → ${real:-no output}"
+  fi
+}
+
 section_docs() {
   local docs_t0 t took code runs sha_before sha_after
   docs_t0=$(date +%s)
@@ -1333,6 +1411,25 @@ section_docs() {
     fail "docs: text.pdf sha256 ${sha_before:-none} → ${sha_after:-none}"
   fi
 
+  # ---------------------------------------------------------------- macros never run (D-08, PD-11, E18, E21)
+
+  # ocw-extract, then the bot's own conversion with its default profile (HOME=/workspace → /workspace/.config).
+  if run_long "$DO" "$DA" '["ocw-extract","fx/macro.fodt"]' 300 && [ "$(exit_code)" = 0 ] &&
+    stdout_has "Documento con macro de prueba" &&
+    run_long "$DO" "$DA" '["soffice","--headless","--norestore","--convert-to","pdf","--outdir","/workspace/fx/out","fx/macro.fodt"]' 300 &&
+    [ "$(exit_code)" = 0 ] &&
+    run_long "$DO" "$DA" '["sh","-c","test -s fx/out/macro.pdf || exit 2; test -e fx/MACRO-RAN && exit 1; exit 0"]' 60 &&
+    [ "$(exit_code)" = 0 ]; then
+    ok "docs: macro never runs under conversion (ocw-extract and the bot's own soffice --convert-to pdf, no MACRO-RAN)"
+  else
+    docs_fail "macro under conversion"
+  fi
+  if [ "${RUNTIME:-}" = gvisor ]; then
+    log "skip docs: macro control (tests LibreOffice configuration, not the runtime)"
+  else
+    macro_control
+  fi
+
   # ---------------------------------------------------------------- every answer under the 16 KiB tail, and the cap
 
   if [ -z "$DOCS_OVER" ] && [ "$DOCS_ANSWERS" -gt 0 ]; then
@@ -1348,6 +1445,101 @@ section_docs() {
   fi
 }
 
+# ================================================================ section: drift (07.17.1.1.1; D-10, PD-10, E20)
+
+# image_of <container>: the image ID it runs (Docker's top-level `.Image`).
+image_of() { docker inspect --format '{{.Image}}' "$1" 2>/dev/null || echo gone; }
+# tag_id: the image ID $IMAGE names now.
+tag_id() { docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo none; }
+
+# rebuild_image: moves the $IMAGE tag to a new image (FROM the current one plus a random label; the namespace label
+# kept) and records its ID for on_exit. Not in a subshell: BUILT_IMAGES must keep the ID.
+rebuild_image() {
+  printf 'FROM %s\nLABEL ocw.smoke.drift=%s\n' "$IMAGE" "$(uuid)" |
+    docker build -q --label "ocw.namespace=${NS}" -t "$IMAGE" - >/dev/null
+  BUILT_IMAGES="${BUILT_IMAGES} $(tag_id)"
+}
+
+# ensure_running <org> <agent>: ensure → 200 and running.
+ensure_running() {
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$1" "$2")}")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]
+}
+
+section_drift() {
+  local i1 i2 i3 p1 p2 p3 q1 q2
+  DRO="$(uuid)"
+  DP="$(uuid)"
+  DQ="$(uuid)"
+  status="$(push_policy "$DRO")"
+  [ "$status" = 200 ] || fail "drift: policy → ${status} $(cat "$WORK/body.json")"
+
+  # A stopped shell on the old image is re-created on the new one; its workspace volume stays.
+  i1="$(tag_id)"
+  ensure_running "$DRO" "$DP" || fail "drift: ensure P → ${status} $(cat "$WORK/body.json")"
+  p1="$(shell_of "$DP")"
+  if [ -n "$p1" ] && [ "$(image_of "$p1")" = "$i1" ]; then
+    ok "drift: ensure P → running on the smoke image"
+  else
+    fail "drift: P's shell ${p1:-none} runs $(image_of "${p1:-none}"), the tag names ${i1}"
+  fi
+  status="$(api POST /v1/files/write "$(path_json "$DRO" "$DP" drift/kept.txt '"content":"before the rebuild","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 200 ] || fail "drift: write → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/sandboxes/stop "{\"target\":$(target "$DRO" "$DP"),\"reason\":\"user\"}")"
+  [ "$status" = 200 ] && [ "$(running_of "$p1")" = false ] || fail "drift: stop P → ${status} running=$(running_of "$p1")"
+  rebuild_image
+  i2="$(tag_id)"
+  [ "$i2" != "$i1" ] || fail "drift: the rebuild left the tag on ${i1}"
+  ensure_running "$DRO" "$DP" || fail "drift: ensure P after the rebuild → ${status} $(cat "$WORK/body.json")"
+  p2="$(shell_of "$DP")"
+  if [ -n "$p2" ] && [ "$p2" != "$p1" ] && [ "$(image_of "$p2")" = "$i2" ] && [ "$(running_of "$p2")" = true ]; then
+    ok "drift: a stopped shell is re-created after its image tag is rebuilt (new container, .Image = the new image)"
+  else
+    fail "drift: P after the rebuild: ${p1} → ${p2:-none} on $(image_of "${p2:-none}"), want ${i2}"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DRO" "$DP" drift/kept.txt)")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "before the rebuild" ]; then
+    ok "drift: the workspace file written before the rebuild reads back through sandboxd (volumes kept)"
+  else
+    fail "drift: read kept.txt → ${status} $(cat "$WORK/body.json")"
+  fi
+
+  # A running shell is never touched by ensure; it moves at its next stop.
+  ensure_running "$DRO" "$DQ" || fail "drift: ensure Q → ${status} $(cat "$WORK/body.json")"
+  q1="$(shell_of "$DQ")"
+  rebuild_image
+  i3="$(tag_id)"
+  [ "$i3" != "$i2" ] || fail "drift: the second rebuild left the tag on ${i2}"
+  if ensure_running "$DRO" "$DQ" && [ -n "$q1" ] && [ "$(shell_of "$DQ")" = "$q1" ] &&
+    [ "$(running_of "$q1")" = true ] && [ "$(image_of "$q1")" = "$i2" ]; then
+    ok "drift: a running shell is untouched by ensure after another rebuild (same container, still running)"
+  else
+    fail "drift: Q after the second rebuild: ${q1:-none} → $(shell_of "$DQ") running=$(running_of "${q1:-none}")"
+  fi
+  status="$(api POST /v1/sandboxes/stop "{\"target\":$(target "$DRO" "$DQ"),\"reason\":\"user\"}")"
+  [ "$status" = 200 ] || fail "drift: stop Q → ${status}"
+  ensure_running "$DRO" "$DQ" || fail "drift: ensure Q after the stop → ${status} $(cat "$WORK/body.json")"
+  q2="$(shell_of "$DQ")"
+  if [ -n "$q2" ] && [ "$q2" != "$q1" ] && [ "$(image_of "$q2")" = "$i3" ]; then
+    ok "drift: after a stop, the next ensure re-creates the shell on the newest image"
+  else
+    fail "drift: Q after the stop: ${q1:-none} → ${q2:-none} on $(image_of "${q2:-none}"), want ${i3}"
+  fi
+
+  # restart re-creates a running shell that drifted (it stops the commands anyway; PD-10).
+  status="$(api POST /v1/sandboxes/restart "{\"target\":$(target "$DRO" "$DP")}")"
+  p3="$(shell_of "$DP")"
+  if [ "$status" = 200 ] && [ -n "$p3" ] && [ "$p3" != "$p2" ] && [ "$(image_of "$p3")" = "$i3" ] &&
+    [ "$(running_of "$p3")" = true ]; then
+    ok "drift: restart re-creates a running shell on an older image (new container on the newest image)"
+  else
+    fail "drift: restart P → ${status} ${p2:-none} → ${p3:-none} on $(image_of "${p3:-none}"), want ${i3} $(cat "$WORK/body.json")"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DRO" "$DP" drift/kept.txt)")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "before the rebuild" ] &&
+    ok "drift: the file is still there after the restart" || fail "drift: read after restart → ${status}"
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
@@ -1357,6 +1549,8 @@ if want idle; then section_idle; fi
 if want events; then section_events; fi
 if want restart; then section_restart; fi
 if want docs; then section_docs; fi
+# Last: it moves the $IMAGE tag.
+if want drift; then section_drift; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"
