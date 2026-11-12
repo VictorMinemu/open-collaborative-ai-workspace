@@ -16,12 +16,13 @@ import {
   lstat,
   mkdir,
   open,
+  readlink,
   realpath,
   rename,
   statfs,
   unlink,
 } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import {
   isWindowsReservedName,
   type SessionFileFailure,
@@ -191,13 +192,22 @@ async function recheckStoredName(root: string, target: string): Promise<void> {
  * Opens one regular file of the tree for reading (D-03, PD-10): `not_found`, `not_a_file` (a folder, a link as the
  * final component, a FIFO, a socket or a device), or `too_large` with the size as detail when it is over `maxBytes`,
  * before any byte moves. The caller closes the handle.
+ *
+ * Review WR-03: downloads run while the session's runtime may write the tree, so the opened file is decided on its
+ * handle: a file with a second hard link is `path_not_allowed` (`ln ~/.aws/config notes.txt` would pass every name
+ * check), the folder must still resolve to the real folder decided before the open (no swap for a link), the name
+ * must still name the very file opened (same `dev`/`ino`), and on Linux the descriptor's own path must be inside the
+ * root (`/proc/self/fd`).
  */
 export async function openSessionFileForRead(
   root: string,
   rel: string,
   maxBytes: number,
+  /** Tests only: runs between the path checks and the open (to swap a folder in that window). */
+  hooks: { afterResolve?: () => void | Promise<void> } = {},
 ): Promise<{ handle: FileHandle; size: number }> {
-  const { root: realRoot, target } = await resolveSessionPath(root, rel, { create: false });
+  const { root: realRoot, parent, target } = await resolveSessionPath(root, rel, { create: false });
+  await hooks.afterResolve?.();
   const st = await lstatOrNull(target);
   if (st === null) throw new SessionFileError("not_found");
   if (st.isSymbolicLink() || !st.isFile()) throw new SessionFileError("not_a_file");
@@ -212,8 +222,21 @@ export async function openSessionFileForRead(
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new SessionFileError("not_a_file");
+    // Review WR-03: a second name may live outside the tree (or be a secret's), and nothing tells which.
+    if (opened.nlink > 1) throw new SessionFileError("path_not_allowed");
     // Review CR-02: the opened file, named as stored (Windows: its long name), is decided once more.
     await recheckStoredName(realRoot, target);
+    // Review WR-03: the folder was not swapped since it was decided, and the name still names the opened file.
+    const parentNow = await realpath(dirname(target)).catch(() => null);
+    if (parentNow !== parent) throw new SessionFileError("path_not_allowed");
+    const named = await lstatOrNull(target);
+    if (!named || named.dev !== opened.dev || named.ino !== opened.ino) {
+      throw new SessionFileError("path_not_allowed");
+    }
+    if (process.platform === "linux") {
+      const fdPath = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+      if (fdPath === null || !inside(realRoot, fdPath)) throw new SessionFileError("path_not_allowed");
+    }
     if (opened.size > maxBytes) throw new SessionFileError("too_large", String(opened.size));
     return { handle, size: opened.size };
   } catch (err) {

@@ -4,12 +4,14 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -212,6 +214,28 @@ describe("openSessionFileForRead (PD-10)", () => {
     } catch (err) {
       expect(String((err as Error).message)).not.toContain(base);
     }
+  });
+
+  it("a hard link to a file outside the tree is path_not_allowed; so is any file with a second link (review WR-03)", async () => {
+    linkSync(join(outside, "secret.txt"), join(root, "docs", "notes.txt"));
+    expect(await codeOf(openSessionFileForRead(root, "docs/notes.txt", 1024))).toBe("path_not_allowed");
+    // A second name inside the tree cannot be told from one outside it: refused too.
+    linkSync(join(root, "docs", "a.md"), join(root, "docs", "b.md"));
+    expect(await codeOf(openSessionFileForRead(root, "docs/b.md", 1024))).toBe("path_not_allowed");
+    // A file with one name still reads.
+    writeFileSync(join(root, "docs", "c.md"), "solo");
+    expect(await codeOf(openSessionFileForRead(root, "docs/c.md", 1024))).toBe("ok");
+  });
+
+  it("a folder swapped for a link to outside the tree between the checks and the open is path_not_allowed (review WR-03)", async () => {
+    writeFileSync(join(outside, "a.md"), "outside bytes");
+    const swap = () => {
+      renameSync(join(root, "docs"), join(root, "docs-old"));
+      symlinkSync(outside, join(root, "docs"));
+    };
+    expect(await codeOf(openSessionFileForRead(root, "docs/a.md", 1024, { afterResolve: swap }))).toBe(
+      "path_not_allowed",
+    );
   });
 });
 
