@@ -334,11 +334,11 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
         "--only-binary :all:",
         "",
         "Alpha_Lib==1.2.0 \\",
-        "    --hash=sha256:" + "a".repeat(64) + " \\",
-        "    --hash=sha256:" + "b".repeat(64),
+        `    --hash=sha256:${"a".repeat(64)} \\`,
+        `    --hash=sha256:${"b".repeat(64)}`,
         "    # via -r requirements.in",
-        "zope.Thing==5.0 ; python_version >= \"3.8\" \\",
-        "    --hash=sha256:" + "c".repeat(64),
+        'zope.Thing==5.0 ; python_version >= "3.8" \\',
+        `    --hash=sha256:${"c".repeat(64)}`,
         "    # via",
         "    #   -r requirements.in",
         "    #   alpha-lib",
@@ -349,8 +349,20 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
     put(
       MANIFEST,
       JSON.stringify([
-        { name: "alpha.lib", version: "1.2.0", license: "MIT", source: "pypi", repo: "https://example.org/a" },
-        { name: "Zope_Thing", version: "5.0", license: "BSD-3-Clause", source: "pypi", repo: "https://example.org/z" },
+        {
+          name: "alpha.lib",
+          version: "1.2.0",
+          license: "MIT",
+          source: "pypi",
+          repo: "https://example.org/a",
+        },
+        {
+          name: "Zope_Thing",
+          version: "5.0",
+          license: "BSD-3-Clause",
+          source: "pypi",
+          repo: "https://example.org/z",
+        },
       ]),
     );
     assert.deepEqual(collectPythonLock(root, PYTHON_LOCKS[0]), [

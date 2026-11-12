@@ -1,5 +1,5 @@
 {
-  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in the npm lockfiles of infra/mcp-sandbox and infra/sandbox/browser (NPM_LOCKFILES in licenses.mjs) must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run.",
+  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in the npm lockfiles of infra/mcp-sandbox and infra/sandbox/browser (NPM_LOCKFILES in licenses.mjs), and every pin of the sbx document toolkit's Python lock infra/sandbox/sbx/tools/requirements.lock with the license its infra/sandbox/sbx/tools/licenses.json records (PYTHON_LOCKS; 07.17.1.1.1 D-09), must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run; one with a `version` admits only that version.",
   "allow": [
     "MIT",
     "MIT-0",
@@ -20,7 +20,9 @@
     "AGPL-3.0-only",
     "AGPL-3.0-or-later",
     "CC-BY-4.0",
-    "WTFPL"
+    "WTFPL",
+    "MIT-CMU",
+    "PSF-2.0"
   ],
   "deny": ["GPL-2.0-only", "SSPL-*", "BUSL-*", "Elastic-2.0", "CC-BY-NC-*", "UNLICENSED", "Unknown"],
   "clarifications": [
@@ -40,6 +42,28 @@
       "reason": "Work Zone Claude Code adapter in the Local Runtime (prod dependency of apps/local-runtime); Anthropic commercial terms",
       "adr": "docs/adr/0034-public-releases-and-bundled-claude-agent-sdk.md",
       "status": "owner-confirmed 2026-11-05 for the desktop app release"
+    },
+    {
+      "name": "pypdfium2",
+      "match": ["pypdfium2"],
+      "version": "5.15.2",
+      "declared": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "license": "Apache-2.0 AND BSD-3-Clause AND CC-BY-4.0 AND BSD-2-Clause AND MIT AND Apache-2.0 WITH LLVM-exception AND Zlib AND IJG AND libpng-2.0 AND libtiff AND Unicode-3.0 AND MIT-Modern-Variant AND (FTL OR GPL-2.0-or-later) AND LicenseRef-AGG-2.3",
+      "source": "https://github.com/pypdfium2-team/pypdfium2/tree/main/BUILD_LICENSES",
+      "reason": "sbx document toolkit (07.17.1.1.1 D-03), a pdfplumber dependency in infra/sandbox/sbx/tools/requirements.lock; the wheel bundles PDFium and its dependencies, whose texts it ships under dist-info/licenses (LICENSES/ and BUILD_LICENSES/, read by tools/lock.sh). Every bundled license is permissive and none is copyleft-only, but FreeType (FTL, or GPL-2.0-or-later), ICU (Unicode-3.0), libjpeg-turbo (IJG), libpng (libpng-2.0), libtiff, HarfBuzz (MIT-Modern-Variant) and AGG 2.3 are outside the allow list. The expression covers the glibc manylinux wheels the image installs; the android/, cibw_musl/ (libgcc runtime exception), pbin_musl/ and v8_xfa/ texts belong to other builds",
+      "adr": "docs/adr/0043-sandbox-document-toolkit.md",
+      "status": "pending approval before merge (07.17.1.1.1-07 T3)"
+    },
+    {
+      "name": "xlrd",
+      "match": ["xlrd"],
+      "version": "2.0.2",
+      "declared": "BSD",
+      "license": "BSD-3-Clause AND LicenseRef-xlrd-Giffin-advertising",
+      "source": "https://github.com/python-excel/xlrd/blob/master/LICENSE",
+      "reason": "sbx document toolkit (07.17.1.1.1 D-03, D-09) reads legacy .xls through pandas; its LICENSE states two licenses: BSD-3-Clause (Stephen John Machin, Lingfo) and, for earlier work, a four-clause BSD-style text by David Giffin whose advertising and acknowledgment clauses make it neither BSD-3-Clause nor an allowed id. Permissive, not copyleft; installed as a separate program in the bot sandbox image, never linked into OCW code. The alternative is dropping xlrd and reading .xls through LibreOffice",
+      "adr": "docs/adr/0043-sandbox-document-toolkit.md",
+      "status": "pending approval before merge (07.17.1.1.1-07 T3)"
     }
   ]
 }

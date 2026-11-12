@@ -2,8 +2,10 @@
 //   evaluate(spdxExpr, policy)        → "allow" | "deny"   (OR: any operand allowed; AND: all; unparseable: deny)
 //   checkGraph(entries, policy, notes) → failures[]         (entries: { name, version, license, source })
 //   checkFields(packages)             → failures[]         (packages: { dir, json, hasLicenseFile })
-//   collectGraph(root)                → entries            (full pnpm graph + every NPM_LOCKFILES lockfile)
+//   collectGraph(root)                → entries            (full pnpm graph + every NPM_LOCKFILES lockfile + every
+//                                                           PYTHON_LOCKS pin)
 //   collectLockfile(root, rel)        → entries            (one npm package-lock.json outside the pnpm graph)
+//   collectPythonLock(root, spec)     → entries            (one pip-compile lock joined with its licenses.json)
 //   collectPackages(root)             → packages           (root, apps/*, packages/*, infra/* package.json)
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -108,8 +110,11 @@ export function checkGraph(entries, policy, notes = []) {
     );
     const license = clarified ? clarified.license : entry.license;
     if (evaluate(license, policy) === "allow") continue;
-    const exception = (policy.exceptions ?? []).find((x) =>
-      x.match.some((m) => globToRegExp(m).test(entry.name)),
+    // An exception with a `version` admits only that version: a bump re-opens the review.
+    const exception = (policy.exceptions ?? []).find(
+      (x) =>
+        x.match.some((m) => globToRegExp(m).test(entry.name)) &&
+        (x.version === undefined || x.version === entry.version),
     );
     if (exception) {
       if (!used.has(exception)) used.set(exception, []);
@@ -172,6 +177,7 @@ export function collectGraph(root) {
     }
   }
   for (const rel of NPM_LOCKFILES) entries.push(...collectLockfile(root, rel));
+  for (const spec of PYTHON_LOCKS) entries.push(...collectPythonLock(root, spec));
   return entries;
 }
 
@@ -196,6 +202,67 @@ export function collectLockfile(root, rel) {
     entries.push({ name, version: pkg.version, license, source: rel });
   }
   return entries;
+}
+
+/**
+ * Python locks installed into images (`pip install --require-hashes --no-deps --only-binary :all:`), each joined with
+ * a license manifest `[{ name, version, license, source, repo }]` (SPDX in `license`, read from the wheel metadata by
+ * the lock's own script): the sbx document toolkit (07.17.1.1.1 D-03, D-09, PD-15; `tools/lock.sh`).
+ */
+export const PYTHON_LOCKS = [
+  {
+    lock: "infra/sandbox/sbx/tools/requirements.lock",
+    manifest: "infra/sandbox/sbx/tools/licenses.json",
+  },
+];
+
+/** PEP 503 name normalization: lowercase, every run of `-`, `_` and `.` becomes one `-`. */
+export const normalizePythonName = (name) => name.toLowerCase().replace(/[-_.]+/g, "-");
+
+/**
+ * The `name==version` pins of a pip-compile lock. Comments, `# via` blocks, `--hash=` continuation lines and option
+ * lines are skipped; extras and environment markers after the version are dropped.
+ */
+export function parsePythonPins(text) {
+  const pins = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==([^\s;\\]+)/.exec(line);
+    if (m) pins.push({ name: normalizePythonName(m[1]), version: m[2] });
+  }
+  return pins;
+}
+
+/** The manifest's entries, or null when it is absent or not a JSON array (checkPythonManifests reports that). */
+function readPythonManifest(root, rel) {
+  const file = join(root, ...rel.split("/"));
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One entry per pin of `spec.lock`; a pin without a manifest record gets license "Unknown", so checkGraph fails it. */
+export function collectPythonLock(root, spec) {
+  const lockPath = join(root, ...spec.lock.split("/"));
+  if (!existsSync(lockPath)) return [];
+  const records = new Map();
+  for (const r of readPythonManifest(root, spec.manifest) ?? []) {
+    if (r && typeof r.name === "string" && typeof r.version === "string") {
+      records.set(`${normalizePythonName(r.name)}==${r.version}`, r);
+    }
+  }
+  return parsePythonPins(readFileSync(lockPath, "utf8")).map(({ name, version }) => {
+    const license = records.get(`${name}==${version}`)?.license;
+    return {
+      name,
+      version,
+      license: typeof license === "string" && license !== "" ? license : "Unknown",
+      source: spec.lock,
+    };
+  });
 }
 
 export function collectPackages(root) {
