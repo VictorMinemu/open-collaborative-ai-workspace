@@ -1228,7 +1228,7 @@ ejecución en segundo plano".
   5. Integration tests (single delivery, budgets, safety, tenant isolation), the cell smoke and an e2e spec pass on
      desktop and mobile; ADR-0042 records the decisions
 
-**Plans:** 12 plans
+**Plans:** 14 plans
 
 Plans:
 
@@ -1236,14 +1236,16 @@ Plans:
 - [ ] 07.17.1.1.2-02-PLAN.md — Wave 1: ADR-0042, the AGENTS.md row in place, the BTASK requirements
 - [ ] 07.17.1.1.2-03-PLAN.md — Wave 1: The migration (`bot_tasks`, `bot_task_processes`, `task_id` columns, policy limits, card kind, tick lister, two queues)
 - [ ] 07.17.1.1.2-04-PLAN.md — Wave 2: Policy and capability ("Allow long tasks", limits, `loadTaskPolicy`, Settings and the capabilities row)
-- [ ] 07.17.1.1.2-05-PLAN.md — Wave 2: The plugin (three tools, gate, bridge quiet/done, "Your task" block, persona paragraph, real-cell smoke)
-- [ ] 07.17.1.1.2-06-PLAN.md — Wave 3: The offer (`taskOfferFor`, the `task` trigger, task tools, `turn.task`, ledger link)
-- [ ] 07.17.1.1.2-07-PLAN.md — Wave 4: The cell routes and Stop (state machine, card, org cap, audit; the phase's API end to end, start)
-- [ ] 07.17.1.1.2-08-PLAN.md — Wave 5: The continuation (three transactions, turn-done hook, tick, budgets, nudge, safety; API end to end, continuation)
-- [ ] 07.17.1.1.2-09-PLAN.md — Wave 5: The card's task link, `viewerCan.stop` and the web task card with Stop
-- [ ] 07.17.1.1.2-10-PLAN.md — Wave 6: Wake sources (sandboxd `process` event → task; Work Zone wakes as task turns)
-- [ ] 07.17.1.1.2-11-PLAN.md — Wave 7: The browser journey e2e (fake cell task tools; desktop and mobile, axe)
-- [ ] 07.17.1.1.2-12-PLAN.md — Wave 8: Docs and v0.3.2 notes, guard (Semgrep rule, CODEOWNERS), security walk, phase gate and owner UAT
+- [ ] 07.17.1.1.2-05-PLAN.md — Wave 2: The plugin (three tools, gate, bridge quiet/done, "Your task" block, persona paragraph)
+- [ ] 07.17.1.1.2-06-PLAN.md — Wave 3: The real-cell smoke (scenario `bot_tasks`, every scenario's tool lists)
+- [ ] 07.17.1.1.2-07-PLAN.md — Wave 3: The offer (`taskOfferFor`, the `task` trigger, task tools, `turn.task`, ledger link)
+- [ ] 07.17.1.1.2-08-PLAN.md — Wave 4: The cell routes and Stop (state machine, card, org cap, audit; the phase's API end to end, start)
+- [ ] 07.17.1.1.2-09-PLAN.md — Wave 5: The continuation (three transactions, turn-done hook, tick, budgets, nudge, safety; API end to end, continuation)
+- [ ] 07.17.1.1.2-10-PLAN.md — Wave 5: The card's task link, `viewerCan.stop` and the web task card with Stop
+- [ ] 07.17.1.1.2-11-PLAN.md — Wave 6: Sandbox process wake-ups (fake and real sandboxd `process` event → tolerant consumer → task)
+- [ ] 07.17.1.1.2-12-PLAN.md — Wave 6: Work Zone session wake-ups (`bot_work_sessions.task_id`, the wake as a task turn)
+- [ ] 07.17.1.1.2-13-PLAN.md — Wave 7: The browser journey e2e (fake cell task tools; desktop and mobile, axe)
+- [ ] 07.17.1.1.2-14-PLAN.md — Wave 8: Docs and v0.3.2 notes, guard (Semgrep rule, CODEOWNERS), security walk, phase gate and owner UAT
 
 ### Phase 07.17.1.1.1: Sandbox document toolkit: bots read PDFs (incl. scanned, OCR), images, Office files and archives with tools baked into the sbx image (INSERTED)
 
