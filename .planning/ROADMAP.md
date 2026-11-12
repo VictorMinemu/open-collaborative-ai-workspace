@@ -1277,7 +1277,7 @@ resumable chunks; the bot is told the toolkit exists, and existing bots get it a
   5. The bot's exec tool and attachments how-to name the toolkit; ADR-0043 records the decisions and the
      LibreOffice residual risk; the owner's UAT: Gertru reads the knowledge pack's 589 PDFs, scans included
 
-**Plans:** 4/7 plans executed
+**Plans:** 5/7 plans executed
 
 Plans:
 
@@ -1285,7 +1285,7 @@ Plans:
 - [x] 07.17.1.1.1-02-PLAN.md — Wave 1: The Python supply chain: hash lock, license records, guard for Python locks, scripted pre-install evidence (age ≥ 14 days, yanked, OSV, legitimacy, closure)
 - [x] 07.17.1.1.1-03-PLAN.md — Wave 2: The venv layer and `ocw-extract` (every type, OCR, bounds, batch with resume and archive caps; TDD in the image)
 - [x] 07.17.1.1.1-04-PLAN.md — Wave 2: sandboxd re-creates a stopped shell on image or env drift (fake Docker)
-- [ ] 07.17.1.1.1-05-PLAN.md — Wave 3: Real-Docker smokes: `docs` through sandboxd on runc and gVisor (the phase end to end), the macro control, `drift`
+- [x] 07.17.1.1.1-05-PLAN.md — Wave 3: Real-Docker smokes: `docs` through sandboxd on runc and gVisor (the phase end to end), the macro control, `drift`
 - [ ] 07.17.1.1.1-06-PLAN.md — Wave 3: The bot is told (exec tool description, attachments clause)
 - [ ] 07.17.1.1.1-07-PLAN.md — Wave 4: ADR-0043, requirements, AGENTS.md row, docs, v0.3.2 notes, signed VALIDATION, phase gate with the supply-chain approval before merge (blocking, on evidence) and the owner's UAT
 
