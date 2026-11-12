@@ -226,8 +226,13 @@ describe("ObjectStorage.putStream (multipart, bounded)", () => {
 
   it("exactly one part, and an empty body, are still one PutObject each", async () => {
     reset();
-    expect((await store.putStream("k", chunked(new Uint8Array(PART)), { contentType: octets, maxBytes: PART })).bytes).toBe(PART);
-    expect((await store.putStream("k", chunked(new Uint8Array(0)), { contentType: octets, maxBytes: 1 })).bytes).toBe(0);
+    expect(
+      (await store.putStream("k", chunked(new Uint8Array(PART)), { contentType: octets, maxBytes: PART }))
+        .bytes,
+    ).toBe(PART);
+    expect(
+      (await store.putStream("k", chunked(new Uint8Array(0)), { contentType: octets, maxBytes: 1 })).bytes,
+    ).toBe(0);
     expect(calls.map((c) => [c.op, c.bytes])).toEqual([
       ["PutObject", PART],
       ["PutObject", 0],
