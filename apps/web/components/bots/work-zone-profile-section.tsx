@@ -162,14 +162,12 @@ export function draftFromProfile(p: BotWorkZoneProfile): ProfileDraft {
 }
 
 /**
- * The form's first state for a view: the stored profile, or a new one on the first usable device. 07.17.1.1 (D-07): an
- * API that sends `limits` knows the Largest file, so the draft carries it (null = the organization's value); an older
- * API's view leaves it out, and so does the body.
+ * The form's first state for a view: the stored profile, or a new one on the first usable device. 07.17.1.1 (D-07,
+ * review WR-04): the Largest file is left out of the draft until the person edits it, so an unrelated save never sends
+ * it and the API keeps the stored value, even one above an organization limit lowered since.
  */
 export function initialDraft(view: BotWorkZoneProfileView, devices: readonly Device[]): ProfileDraft | null {
-  const base = view.profile ? draftFromProfile(view.profile) : newDraft(devices);
-  if (!base || !view.limits) return base;
-  return { ...base, fileMaxBytes: view.profile?.fileMaxBytes ?? null };
+  return view.profile ? draftFromProfile(view.profile) : newDraft(devices);
 }
 
 /** The PUT body: every field, nothing else (the contract is strict). */
@@ -424,6 +422,8 @@ export const FILE_LIMIT_COPY = {
   hint: (org: string) => `At most ${org}, the organization's limit.`,
   invalid: (n: number) => `Enter a whole number from 1 to ${n}, or leave it empty.`,
   line: (limit: string, source: string) => `This bot moves files up to ${limit} (${source}).`,
+  above: (bot: string, org: string) =>
+    `This bot's ${bot} is above the organization's ${org}, so ${org} applies.`,
 } as const;
 
 /** The organization's value in whole MB: the field's maximum. */
@@ -620,7 +620,10 @@ export function WorkZoneProfileEditor({
     const bytes = view.profile?.fileMaxBytes;
     return bytes === null || bytes === undefined ? "" : String(Math.floor(bytes / MIB));
   });
-  const fileInvalid = view.limits ? fileMaxError(fileMax, view.limits.organizationFileMaxBytes) : null;
+  // Review WR-04: decided only once the person edited the field, as the API decides it only when the body sends it.
+  const [fileTouched, setFileTouched] = useState(initial?.fileMax !== undefined);
+  const fileInvalid =
+    view.limits && fileTouched ? fileMaxError(fileMax, view.limits.organizationFileMaxBytes) : null;
   const [errors, setErrors] = useState<Record<string, string>>(initial?.errors ?? {});
   const [removed, setRemoved] = useState<string[]>(initial?.removed ?? []);
   const [formError, setFormError] = useState<string | null>(null);
@@ -672,6 +675,14 @@ export function WorkZoneProfileEditor({
     setFormError(null);
   };
   const change = (patch: Partial<ProfileDraft>) => set({ ...draft, ...patch });
+  // Review WR-04: the bot's limit as it stands (an edit, else the stored one), and a note, not an error, when the
+  // stored one is above an organization limit lowered since (the lower one applies until someone changes it).
+  const fileBytes =
+    draft.fileMaxBytes !== undefined ? draft.fileMaxBytes : (view.profile?.fileMaxBytes ?? null);
+  const fileAbove =
+    view.limits && !fileTouched && fileBytes !== null && fileBytes > view.limits.organizationFileMaxBytes
+      ? FILE_LIMIT_COPY.above(fileSizeLabel(fileBytes), fileSizeLabel(view.limits.organizationFileMaxBytes))
+      : null;
 
   function pickDevice(deviceId: string) {
     const next = usable.find((d) => d.id === deviceId);
@@ -692,6 +703,7 @@ export function WorkZoneProfileEditor({
 
   function changeFileMax(value: string) {
     setFileMax(value);
+    setFileTouched(true);
     if (!view.limits || fileMaxError(value, view.limits.organizationFileMaxBytes) !== null) return;
     const v = value.trim();
     change({ fileMaxBytes: v === "" ? null : Number(v) * MIB });
@@ -950,7 +962,12 @@ export function WorkZoneProfileEditor({
         </div>
         {view.limits ? (
           <p className="text-[13px] text-foreground leading-snug" data-testid="work-zone-file-limit">
-            {appliedFileLimitLine(draft.fileMaxBytes, view.limits)}
+            {appliedFileLimitLine(fileBytes, view.limits)}
+          </p>
+        ) : null}
+        {fileAbove ? (
+          <p className="text-[13px] text-foreground leading-snug" data-testid="work-zone-file-limit-note">
+            {fileAbove}
           </p>
         ) : null}
       </Group>

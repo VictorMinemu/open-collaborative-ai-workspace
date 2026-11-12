@@ -774,15 +774,19 @@ describe("Largest file (07.17.1.1-09 Task 2)", () => {
     expect(html).toContain(`for="${id}"`);
     expect(input.match(/aria-describedby="([^"]+)"/)?.[1]?.split(" ")).toContain(`${id}-unit`);
     expect(html).toMatch(new RegExp(`id="${id}-unit"[^>]*>MB<`));
-    // A draft from this view sends null: the organization's value.
+    // An untouched field is not sent (review WR-04): the API keeps the stored value.
     const draft = initialDraft(withLimits(null), DEVICES);
-    expect(draft && toProfileInput(draft).fileMaxBytes).toBeNull();
+    if (!draft) throw new Error("no draft");
+    expect(toProfileInput(draft)).not.toHaveProperty("fileMaxBytes");
+    // Cleared by the person: null, the organization's value.
+    expect(toProfileInput({ ...draft, fileMaxBytes: null }).fileMaxBytes).toBeNull();
   });
 
-  it("a bot value is sent in bytes and named as this bot's limit; the input shows it in MB", () => {
+  it("a bot value is sent in bytes once edited and named as this bot's limit; the input shows it in MB", () => {
     const draft = initialDraft(withLimits(10 * MIB), DEVICES);
     if (!draft) throw new Error("no draft");
-    expect(toProfileInput(draft).fileMaxBytes).toBe(10485760);
+    expect(toProfileInput(draft)).not.toHaveProperty("fileMaxBytes");
+    expect(toProfileInput({ ...draft, fileMaxBytes: 10 * MIB }).fileMaxBytes).toBe(10485760);
     expect(toProfileInput({ ...draft, fileMaxBytes: null }).fileMaxBytes).toBeNull();
     expect(appliedFileLimitLine(10 * MIB, LIMITS)).toBe(
       "This bot moves files up to 10 MB (this bot's limit).",
@@ -820,6 +824,34 @@ describe("Largest file (07.17.1.1-09 Task 2)", () => {
     expect(text(html)).toContain("Enter a whole number from 1 to 25, or leave it empty.");
     expect(tagsOf(html, "work-zone-save")[0]).toMatch(/\sdisabled=""/);
     expect(FILE_LIMIT_COPY.label).toBe("Largest file");
+  });
+
+  it("a stored value above a lowered organization limit blocks nothing: the limit that applies and a note (review WR-04)", () => {
+    // The bot saved 50 MB; the organization later lowered its limit to 25 MB.
+    const view = withLimits(50 * MIB);
+    const html = editor(view);
+    const input = tagsOf(html, "work-zone-file-max")[0] ?? "";
+    expect(input).toContain('value="50"');
+    expect(input).not.toContain('aria-invalid="true"');
+    expect(text(html)).not.toContain("Enter a whole number from 1 to 25, or leave it empty.");
+    expect(tagsOf(html, "work-zone-save")[0]).not.toMatch(/\sdisabled=""/);
+    expect(text(from(html, "work-zone-file-limit"))).toContain(
+      "This bot moves files up to 25 MB (the organization's limit).",
+    );
+    expect(text(from(html, "work-zone-file-limit-note"))).toContain(
+      "This bot's 50 MB is above the organization's 25 MB, so 25 MB applies.",
+    );
+    expect(tagsOf(html, "work-zone-file-limit-note")[0]).not.toContain('role="alert"');
+    // The untouched field is not sent, so an unrelated save keeps the stored value and the API accepts it.
+    const draft = initialDraft(view, DEVICES);
+    if (!draft) throw new Error("no draft");
+    expect(toProfileInput({ ...draft, maxConcurrent: 2 })).not.toHaveProperty("fileMaxBytes");
+    // Once the person edits the field, the organization's bound applies again (as the API decides it).
+    const edited = editor(view, { fileMax: "50" });
+    expect(tagsOf(edited, "work-zone-file-max")[0]).toContain('aria-invalid="true"');
+    expect(tagsOf(edited, "work-zone-save")[0]).toMatch(/\sdisabled=""/);
+    // Within the limit, no note.
+    expect(tagsOf(editor(withLimits(10 * MIB)), "work-zone-file-limit-note")).toHaveLength(0);
   });
 
   it("the API's 400 with field fileMaxBytes is shown under the field", () => {
