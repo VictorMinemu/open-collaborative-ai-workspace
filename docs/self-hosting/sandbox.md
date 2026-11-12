@@ -72,6 +72,51 @@ refreshed; after approval, the install is refused, nothing is written, and the r
 review and approve it again. Native OpenClaw plugins with shell, file or browser tools stay refused in the Marketplace:
 they would run inside the bot runtime, not a sandbox.
 
+## Documents in the sandbox
+
+Every bot's shell already has the tools to read documents, so a bot never needs to install anything for it
+([ADR-0043](../adr/0043-sandbox-document-toolkit.md)):
+
+- **What is installed.**
+  - From Debian bookworm `main`:
+    - poppler (`pdftotext`, `pdftoppm`, `pdfinfo`, `pdfimages`) and `qpdf`;
+    - tesseract OCR with English and Spanish;
+    - LibreOffice 7.4 without a GUI (Writer, Calc, Impress);
+    - ImageMagick, limited to raster image formats;
+    - 7-Zip, `file`, exiftool, catdoc, unrtf and `msgconvert` (Outlook `.msg`).
+  - A hash-locked Python environment in `/opt/ocw-tools`: pypdf, pdfplumber, python-docx, openpyxl, python-pptx,
+    pandas, Pillow, pytesseract, charset-normalizer, beautifulsoup4, lxml and defusedxml. The bot's `python3` imports
+    them directly.
+- **`ocw-extract`.** This one command turns a file into bounded UTF-8 text. It reads:
+  - PDFs, scanned PDFs included;
+  - images (PNG, JPEG, GIF, WEBP, TIFF, BMP, AVIF, HEIC), with OCR;
+  - Word, Excel, PowerPoint and OpenDocument files;
+  - CSV, JSON, XML and HTML;
+  - `.eml` and `.msg` e-mails;
+  - zip, 7z and tar archives.
+
+  The bot runs, for example:
+
+  ```bash
+  ocw-extract informe.pdf                          # the text, at most 16 KiB on screen
+  ocw-extract escaneo.pdf --pages 1-5 -o escaneo.txt   # OCR of five pages into a file
+  ocw-extract --batch paquete/                     # a whole folder into /workspace/extracted/paquete/
+  ```
+
+  `ocw-extract --types` lists every supported type, and `--help` lists the exit codes.
+- **Batch and exit 75.** `--batch` writes one `.txt` per file, plus an `_index.tsv`, under `/workspace/extracted/`. It
+  never copies or changes the originals. One run stops before the 10-minute command limit. While files remain, it
+  exits **75**: the bot runs it again, as a background command, until it exits 0. Finished files are skipped, so a pack
+  of thousands of files is read in chunks.
+- **Size.** The shell image is about 1.1 GB on disk, up from about 0.4 GB (CI measured 1 087 MiB), and about 270 MB
+  larger to download.
+- **Nothing is installed at runtime.** If a bot still tries `pip install` or `apt-get`, the proxy answers **403**,
+  which is expected: packages for every bot go through *Sandbox packages* above. An approved Python package with the
+  same name as a toolkit package (for example `pandas`) is shadowed by the toolkit's version.
+- **Residual risk.** LibreOffice 7.4, poppler and ImageMagick on bookworm have open CVEs. The macro, link and network
+  mitigations, the CVE list and the plan to move the image to Debian trixie are in
+  [ADR-0043](../adr/0043-sandbox-document-toolkit.md). A hostile document stays inside that bot's own sandbox.
+
 ## Signing in for a bot
 
 When a page needs an account, the bot posts a **Sign in needed** card. Only the person who asked sees **Open and sign
@@ -94,6 +139,10 @@ in**: they take control of the page in the live view, sign in themselves and **H
   hard limit, use XFS project quotas (infra/sandbox/README.md). The packages volume has no quota of its own.
 - **Proxy restarts:** a running sandbox keeps the proxy's old address until its next start or restart, and has no
   internet until then (it fails closed).
+- **Upgrading the sandbox image:** existing sandboxes get the new image, and with it the document toolkit, at their
+  next start. A sandbox left alone picks it up after its 15-minute idle stop. **Restart** on the bot's **Sandbox** tab re-creates a
+  running sandbox on the new image at once, and so stops what it was running. A bot's files and packages are kept.
+  Afterwards, `docker image prune` removes the old image.
 - **Removing it:** `docker compose down` does not remove bot containers, because sandboxd created them. They go when a
   bot is deleted; to remove them all, filter by `label=ocw.namespace=<project>` (INSTALL.md).
 - Not available: CAPTCHA solving, sharing a sign-in between people, recording sessions, desktop computer use.
