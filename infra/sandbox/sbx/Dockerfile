@@ -4,6 +4,11 @@
 # noexec, the bot's named volume at /workspace, the bot's own internal network). Build from this directory:
 #   docker build -f infra/sandbox/sbx/Dockerfile -t ocw-sandbox-sbx:local infra/sandbox/sbx
 # Never run it by hand with extra privileges: sandboxd is the only creator (apps/sandboxd/src/spec.ts).
+#
+# Phase 07.17.1.1.1 (D-01, D-02, D-09; ADR-0043) adds the document toolkit: a bot reads PDFs (text and scanned, OCR in
+# Spanish and English), images, Office and OpenDocument files, mail and archives without installing anything. The
+# Debian set is approved before merge (07.17.1.1.1-07, PD-13) on the evidence `infra/sandbox/test/run-sbx-image-tests.sh`
+# prints (the `dpkg-query -W` dump, bookworm `main` only); the root filesystem stays at most 1300 MiB (PD-16).
 
 # Base and packages approved at the 07.8-04 image gate (C-04, P-15): the digest-pinned Docker Official Image, the
 # same base as the cell and the spikes, and Debian bookworm / bookworm-security packages only (DFSG-free).
@@ -13,6 +18,25 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq python3 python3-pip python3-venv unzip xz-utils \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+
+# The document toolkit (07.17.1.1.1, D-02, PD-13), bookworm / bookworm-security `main` only, no recommends, in a layer
+# before the setuid strip below so the strip and its assert cover it. In: poppler (pdftotext, pdftoppm, pdfinfo,
+# pdfimages), qpdf, tesseract with eng + spa, LibreOffice Writer/Calc/Impress without a GUI, ImageMagick 6, 7-Zip,
+# file, exiftool, catdoc, unrtf, msgconvert (.msg -> .eml) and metric-compatible fonts. Never: ghostscript, pandoc,
+# Java, the Firebird or hsqldb connectors, a GStreamer backend (D-05, D-09; asserted by the image tests).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      poppler-utils qpdf tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa \
+      libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
+      imagemagick 7zip file libimage-exiftool-perl catdoc unrtf libemail-outlook-message-perl \
+      fonts-dejavu-core fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+
+# Hardening of the toolkit (D-05, D-08, PD-11, PD-12), root-owned and read-only for the bot: ImageMagick reads and
+# writes raster images only (deny-all coders, no delegate, no `@file`), and LibreOffice's finalized defaults (macros
+# never run, links never update) win over any user profile, including the one a bot's own `soffice` call creates.
+COPY policy.xml /etc/ImageMagick-6/policy.xml
+COPY ocw.xcd /usr/lib/libreoffice/share/registry/ocw.xcd
 
 # The bot's user. /workspace exists and belongs to 10001 in the image, so a fresh named volume mounted there inherits
 # that owner (Pitfall 4). /opt/ocw-packages is the bot's packages volume (read-only in `sbx`, written only by an

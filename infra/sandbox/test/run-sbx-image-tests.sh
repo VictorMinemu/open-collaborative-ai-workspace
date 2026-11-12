@@ -42,8 +42,14 @@ fi
 echo "image tests: $IMAGE with $PY"
 
 STATUS=0
-# COPYFILE_DISABLE keeps macOS tar from adding AppleDouble files; GNU and BusyBox tar ignore it.
-if COPYFILE_DISABLE=1 tar -C "$TOOLS" -cf - tests | docker run -i --rm --label "$LABEL" \
+# macOS bsdtar would add AppleDouble files and extended-attribute headers (COPYFILE_DISABLE, --no-xattrs); GNU and
+# BusyBox tar (CI) need neither, and BusyBox has no --no-xattrs.
+TAR_OPTS=
+case "$(tar --version 2>/dev/null || true)" in
+  bsdtar*) TAR_OPTS=--no-xattrs ;;
+esac
+# shellcheck disable=SC2086 # TAR_OPTS is empty or one word
+if COPYFILE_DISABLE=1 tar $TAR_OPTS -C "$TOOLS" -cf - tests | docker run -i --rm --label "$LABEL" \
   --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges:true --init \
   --pids-limit 256 --memory 1g --memory-swap 1g --cpus 1 --network none \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
