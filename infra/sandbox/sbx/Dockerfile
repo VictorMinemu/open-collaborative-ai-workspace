@@ -35,8 +35,9 @@ RUN apt-get update \
 # Hardening of the toolkit (D-05, D-08, PD-11, PD-12), root-owned and read-only for the bot: ImageMagick reads and
 # writes raster images only (deny-all coders, no delegate, no `@file`), and LibreOffice's finalized defaults (macros
 # never run, links never update) win over any user profile, including the one a bot's own `soffice` call creates.
-COPY policy.xml /etc/ImageMagick-6/policy.xml
-COPY ocw.xcd /usr/lib/libreoffice/share/registry/ocw.xcd
+# --chmod pins 0644: the CI build context keeps the checkout's group/other write bits (the image gate caught 0666).
+COPY --chmod=0644 policy.xml /etc/ImageMagick-6/policy.xml
+COPY --chmod=0644 ocw.xcd /usr/lib/libreoffice/share/registry/ocw.xcd
 
 # The bot's user. /workspace exists and belongs to 10001 in the image, so a fresh named volume mounted there inherits
 # that owner (Pitfall 4). /opt/ocw-packages is the bot's packages volume (read-only in `sbx`, written only by an
