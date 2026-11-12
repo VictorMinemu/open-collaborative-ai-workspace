@@ -14,11 +14,15 @@ mirror tree plus `_index.tsv` under /workspace/extracted/<name>, in chunks that 
   a PDF resume per page like PDFs. When nothing moved in a run, the entry that used the whole budget is failed
   (`did not fit in one run`), or its page is written as skipped and the entry goes on, so every run moves the batch
   on. A run that still ends with the index it loaded exits 8 (no progress), never 75.
+- One run at a time per output folder (07.17.1.1.1 review WR-07): an exclusive lock on `_index.tsv.lock` for the
+  whole run; a second run on the same folder is refused (exit 2) instead of interleaving `.partial` files.
 - Archives (PD-09): listed and checked against every cap, extracted into the scratch folder under the size watcher,
   each member mirrored under `<rel>.d/` with a `<rel>!<member>` row; a nested archive is listed, not extracted. A
   top-level archive that breaks a cap exits 6.
 """
 
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -29,6 +33,7 @@ import time
 from . import archives, bounds, detect, office, pdf, runner
 
 INDEX = "_index.tsv"
+LOCK = "_index.tsv.lock"
 COLUMNS = ("path", "size", "mtime_ns", "type", "method", "pages", "next_page", "chars", "status", "note")
 HEADER = "\t".join(COLUMNS)
 FINAL = ("done", "failed", "unsupported", "skipped")
@@ -129,7 +134,6 @@ class Batch:
         self.loaded = {}
         self.loaded_lines = []
         self.moved = False
-        self.load()
 
     # --- index -------------------------------------------------------------------------------------------------
 
@@ -514,6 +518,29 @@ class Batch:
 
     def run(self):
         os.makedirs(self.out, exist_ok=True)
+        with self.locked():
+            self.load()
+            return self.run_locked()
+
+    @contextlib.contextmanager
+    def locked(self):
+        """One batch at a time per output folder (07.17.1.1.1 review WR-07): an exclusive `flock` on
+        `_index.tsv.lock`, held for the whole run (the kernel drops it when the process dies, even on SIGKILL). A
+        second run is refused at once instead of appending the same pages and overwriting the other's index."""
+        fd = os.open(os.path.join(self.out, LOCK), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise bounds.UsageError(
+                    f"another ocw-extract --batch is writing {self.out}: wait for it to end (ocw_sandbox_process), "
+                    "then run this again"
+                ) from None
+            yield
+        finally:
+            os.close(fd)
+
+    def run_locked(self):
         with runner.scratch():
             entries = list(self.walk())
             self.order = [e.rel for e in entries]

@@ -390,6 +390,38 @@ class BudgetRule(Base):
         self.assertRegex(out.splitlines()[0], SUMMARY)
 
 
+class Lock(Base):
+    """07.17.1.1.1 review WR-07: one batch at a time writes an output folder; a second is refused, never interleaved."""
+
+    def test_a_second_batch_on_the_same_output_folder_is_refused(self):
+        import fcntl
+        import subprocess
+
+        src = copy_fixtures(f"{WS}/locked", ["latin1.csv"])
+        out_root = fresh(f"{WS}/extracted/locked")
+        os.makedirs(out_root)
+        holder = subprocess.Popen(
+            [sys.executable, "-I", "-c",
+             "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+             "print('held', flush=True); time.sleep(60)", f"{out_root}/_index.tsv.lock"],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), b"held")
+            rc, _out, err = cli("--batch", src)
+            self.assertEqual(rc, 2, err)
+            assert_reason(self, err, "another ocw-extract --batch", out_root)
+            self.assertFalse(os.path.exists(f"{out_root}/_index.tsv"))
+        finally:
+            holder.kill()
+            holder.wait()
+        rc, _out, err = cli("--batch", src)
+        self.assertEqual(rc, 0, err)
+        # The lock is held for the whole run and released at its end: the next run takes it at once.
+        with open(f"{out_root}/_index.tsv.lock", "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 class VirtualSteps:
     """A step runner on a virtual clock (07.17.1.1.1 review CR-02): each step takes `seconds(tool, argv)` virtual
     seconds, no real time. It answers like the real tools: `file` from the extension, soffice writes a PDF, pdfinfo
