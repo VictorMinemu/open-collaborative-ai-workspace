@@ -780,6 +780,12 @@ test("Ana's file goes into Atlas's session and shows in its changes; the README 
     await reply.scrollIntoViewIfNeeded();
     await checkScreen(page, "071711-exchange", THREAD, [card]);
     await captureReview(page, `071711-exchange-${w}`);
+    if (mobile) {
+      // Review WR-06: the way people get a downloaded file is a 44 px touch target on a phone.
+      const box = await file.getByTestId("file-download").boundingBox();
+      expect(box?.height ?? 0, "file-download height").toBeGreaterThanOrEqual(44);
+      expect(box?.width ?? 0, "file-download width").toBeGreaterThanOrEqual(44);
+    }
     const downloading = page.waitForEvent("download");
     await file.getByTestId("file-download").click();
     const download = await downloading;
