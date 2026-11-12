@@ -154,12 +154,15 @@ class BudgetReached(Exception):
     """The remaining batch budget is shorter than the next step's timeout: stop before starting it (PD-08)."""
 
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0 and C1 controls (CSI U+009B included) but tab and newline, and the bidi embeddings, overrides and isolates
+# (07.17.1.1.1 review IN-04): none reaches the model or a person's activity view.
+_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
 def clean_text(text):
-    """UTF-8-ready text: NFC, no BOM, `\\n` line ends, no control characters other than tab and newline."""
-    text = text.replace("﻿", "").replace("\r\n", "\n").replace("\r", "\n")
+    """UTF-8-ready text: NFC, no BOM, `\\n` line ends, no control characters other than tab and newline, no bidi
+    embedding, override or isolate."""
+    text = text.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
     text = _CONTROL.sub("", text)
     return unicodedata.normalize("NFC", text)
 

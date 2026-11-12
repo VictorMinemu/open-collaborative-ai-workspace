@@ -100,7 +100,7 @@ def via_csv(path, steps):
         name = os.path.splitext(os.path.basename(csv_path))[0]
         sheet = name[len(stem) + 1 :] if name.startswith(stem + "-") else name
         with open(csv_path, "rb") as f:
-            parts.append(f"### sheet: {sheet}\n" + f.read().decode("utf-8", "replace").replace("﻿", ""))
+            parts.append(f"### sheet: {sheet}\n" + f.read().decode("utf-8", "replace").replace("\ufeff", ""))
     if not parts:
         raise bounds.ConversionError(f"LibreOffice exported no sheet from {os.path.basename(path)}")
     return "\n".join(parts)

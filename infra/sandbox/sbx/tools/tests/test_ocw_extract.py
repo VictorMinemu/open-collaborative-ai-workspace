@@ -112,7 +112,7 @@ class Base(unittest.TestCase):
     def assertBounded(self, out):
         self.assertLessEqual(len(out), STDOUT_MAX_BYTES)
         out.decode("utf-8")  # valid UTF-8 always
-        self.assertNotIn("﻿", out.decode("utf-8"))
+        self.assertNotIn("\ufeff", out.decode("utf-8"))
         self.assertNotIn("�", out.decode("utf-8"))
 
     def tearDown(self):
@@ -319,6 +319,15 @@ class Runner(Base):
                 shutil.rmtree(path, ignore_errors=True)
             with contextlib.suppress(OSError):
                 os.rmdir(root)
+
+    def test_clean_text_drops_c1_controls_and_bidi_overrides(self):
+        """07.17.1.1.1 review IN-04: C1 controls (CSI U+009B included) and the bidi embeddings, overrides and isolates
+        never reach the model or a person's activity view; tab, newline and ordinary text stay."""
+        from ocw_extract import bounds
+
+        hostile = "a\x85b\x9b31mc\u202ad\u202ee\u2066f\u2069g\u200bh"
+        self.assertEqual(bounds.clean_text(hostile), "ab31mcdefg\u200bh")
+        self.assertEqual(bounds.clean_text("uno\tdos\ntr\u00e9s \u00e9\u05d0"), "uno\tdos\ntr\u00e9s \u00e9\u05d0")
 
     def test_argv_is_never_a_string(self):
         from ocw_extract import runner
