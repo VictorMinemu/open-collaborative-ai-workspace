@@ -24,9 +24,10 @@ import {
   invite,
   pairDevice,
 } from "../../testing-workzone";
+import { storeServerAttachment } from "../artifact";
 import type { BotFiles } from "./bot-files";
 import { loadBotProfile } from "./bot-profile";
-import { ownBotSession } from "./bot-sessions";
+import { auditBotWorkSession, ownBotSession } from "./bot-sessions";
 
 /**
  * 07.17.1.1-11 (D-02 … D-07, D-13; PD-06 … PD-08, PD-12, PD-13, PD-15 … PD-18): the work-session module's file service.
@@ -780,6 +781,190 @@ describe("uploads into an idle session, and every device answer mapped to its re
     expect(row).toMatchObject({ status: "failed", failure: "transfer_failed" });
     const [att] = await rowsOf("select status from app.attachments where id = $1", [row!.attachment_id]);
     expect(att!.status).toBe("rejected");
+  });
+});
+
+// ---------------------------------------------------------------- budgets under the bot's lock, audit (Task 3)
+
+const turnRows = async (eventId: string, direction: string) =>
+  Number(
+    (
+      await rowsOf(
+        "select count(*)::int as n from app.bot_work_session_files where event_id = $1 and direction = $2",
+        [eventId, direction],
+      )
+    )[0]!.n,
+  );
+
+describe("budgets under the bot's lock (PD-12), and the two audit actions (PD-16)", () => {
+  it("moves share the hour's prompt budget: two moves and a prompt spend 3, then a move and a prompt are prompt_rate (E9)", async () => {
+    await su.query("update app.bot_work_zone_profiles set prompts_per_hour = 3 where agent_id = $1", [
+      atlasId,
+    ]);
+    try {
+      // The start's own prompt is the first unit of the hour.
+      const { workSessionId } = await idleSession();
+      expect((await download(await nextTurn(workSessionId))).prepared.kind).toBe("enqueued");
+      expect((await download(await nextTurn(workSessionId))).prepared.kind).toBe("enqueued");
+      await refusedBefore(download(await nextTurn(workSessionId)), "prompt_rate");
+      const ctx = await nextTurn(workSessionId);
+      const prompted = await asSponsor((tx) =>
+        stack.built.workSession.bots.prompt(tx, {
+          turn: ctx.turn,
+          profile: ctx.profile,
+          workSessionId,
+          prompt: "now run the tests",
+          tainted: false,
+        }),
+      );
+      expect(prompted).toMatchObject({ kind: "refused", code: "prompt_rate" });
+      await refusedBefore(upload(ctx, await chatFile()), "prompt_rate");
+    } finally {
+      await su.query("update app.bot_work_zone_profiles set prompts_per_hour = 120 where agent_id = $1", [
+        atlasId,
+      ]);
+    }
+  });
+
+  it("a prompt after moves spent the budget is prompt_rate too", async () => {
+    await su.query("update app.bot_work_zone_profiles set prompts_per_hour = 2 where agent_id = $1", [
+      atlasId,
+    ]);
+    try {
+      const { workSessionId } = await idleSession();
+      expect((await download(await nextTurn(workSessionId))).prepared.kind).toBe("enqueued");
+      const ctx = await nextTurn(workSessionId);
+      const prompted = await asSponsor((tx) =>
+        stack.built.workSession.bots.prompt(tx, {
+          turn: ctx.turn,
+          profile: ctx.profile,
+          workSessionId,
+          prompt: "now run the tests",
+          tainted: false,
+        }),
+      );
+      expect(prompted).toMatchObject({ kind: "refused", code: "prompt_rate" });
+    } finally {
+      await su.query("update app.bot_work_zone_profiles set prompts_per_hour = 120 where agent_id = $1", [
+        atlasId,
+      ]);
+    }
+  });
+
+  it("five uploads of one turn: the sixth is file_cap_reached, a download of the same turn still passes (E8)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    for (let i = 0; i < 5; i++) {
+      expect((await upload(ctx, file, { path: `docs/f${i}.pdf` })).prepared.kind).toBe("enqueued");
+    }
+    await refusedBefore(upload(ctx, file, { path: "docs/f5.pdf" }), "file_cap_reached");
+    expect(await turnRows(ctx.eventId, "to_device")).toBe(5);
+    expect((await download(ctx)).prepared.kind).toBe("enqueued");
+  });
+
+  it("ten pending files on the turn, or nine and one download in flight: a download is file_cap_reached (E24)", async () => {
+    const ctx = await idleSession();
+    const store = (i: number) =>
+      stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        storeServerAttachment(tx, stack.built.storage!, {
+          conversationId: engId,
+          uploaderAgentId: atlasId,
+          eventId: ctx.eventId,
+          name: `shared-${i}.txt`,
+          bytes: new TextEncoder().encode(`file ${i}`),
+        }),
+      );
+    for (let i = 0; i < 9; i++) await store(i);
+    // The ninth pending file plus one download not yet stored: the turn's reply would carry ten.
+    expect((await download(ctx)).prepared.kind).toBe("enqueued");
+    await refusedBefore(download(ctx), "file_cap_reached");
+
+    const other = await nextTurn(ctx.workSessionId);
+    for (let i = 0; i < 10; i++) {
+      await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        storeServerAttachment(tx, stack.built.storage!, {
+          conversationId: engId,
+          uploaderAgentId: atlasId,
+          eventId: other.turn.eventId,
+          name: `other-${i}.txt`,
+          bytes: new TextEncoder().encode(`other ${i}`),
+        }),
+      );
+    }
+    await refusedBefore(download(other), "file_cap_reached");
+    // Uploads do not add files to the reply.
+    expect((await upload(other, await chatFile())).prepared.kind).toBe("enqueued");
+  });
+
+  it("two concurrent uploads of one bot with one slot left: exactly one inserts a row (T-07.17.1.1-11-03)", async () => {
+    const ctx = await idleSession();
+    const file = await chatFile();
+    for (let i = 0; i < 4; i++) {
+      expect((await upload(ctx, file, { path: `docs/c${i}.pdf` })).prepared.kind).toBe("enqueued");
+    }
+    const [a, b] = await Promise.all([
+      upload(ctx, file, { path: "docs/x.pdf" }),
+      upload(ctx, file, { path: "docs/y.pdf" }),
+    ]);
+    const kinds = [a.prepared.kind, b.prepared.kind].sort();
+    expect(kinds).toEqual(["enqueued", "refused"]);
+    const refused = a.prepared.kind === "refused" ? a.prepared : b.prepared;
+    expect(refused).toMatchObject({ code: "file_cap_reached" });
+    expect(await turnRows(ctx.eventId, "to_device")).toBe(5);
+  });
+
+  it("auditBotWorkSession records a download with ids, size, sha256, direction and the path's length only", async () => {
+    const ctx = await idleSession();
+    const sha = "a".repeat(64);
+    const attachmentId = randomUUID();
+    const sessionId = randomUUID();
+    await asSponsor((tx) =>
+      auditBotWorkSession(tx, stack.built.core, {
+        action: "bot.work_session_download",
+        turn: ctx.turn,
+        auditBase: { clientKind: "agent", sessionId },
+        outcome: "downloaded",
+        sponsorUserId: victorId,
+        projectId: billingId,
+        deviceId: serverId,
+        workSessionId: ctx.workSessionId,
+        attachmentId,
+        bytes: 64,
+        sha256: sha,
+        direction: "from_device",
+        pathLength: "docs/README.md".length,
+      }),
+    );
+    const rows = await rowsOf(
+      "select actor_kind, actor_id, agent_id, user_id, device_id, session_id, resource_type, resource_id, result, metadata from app.audit_events where action = 'bot.work_session_download' and metadata->>'eventId' = $1",
+      [ctx.eventId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      actor_kind: "agent",
+      actor_id: atlasId,
+      agent_id: atlasId,
+      device_id: serverId,
+      session_id: ctx.workSessionId,
+      resource_type: "work_session",
+      resource_id: ctx.workSessionId,
+      result: "success",
+    });
+    expect(rows[0]!.metadata).toEqual({
+      eventId: ctx.eventId,
+      sponsorUserId: victorId,
+      projectId: billingId,
+      workSessionId: ctx.workSessionId,
+      outcome: "downloaded",
+      attachmentId,
+      bytes: 64,
+      sha256: sha,
+      direction: "from_device",
+      pathLength: 14,
+    });
+    const values = Object.values(rows[0]!.metadata as Json).map(String);
+    expect(values).not.toContain("docs/README.md");
+    expect(values).not.toContain("README.md");
   });
 });
 
