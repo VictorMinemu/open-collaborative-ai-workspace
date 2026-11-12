@@ -14,9 +14,16 @@
 # forgotten) and a killed organization stays killed: `policy_missing` until the policy is pushed again, `killed` after,
 # its container never started, while a live organization runs again after one push.
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart]
-#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart;
-#                          default all
+# 07.17.1.1.1 (D-03 … D-08, PD-18) adds the docs section: the document toolkit through the bot's real path, sandboxd's
+# API only (people's file write, exec as 10001 with background polling, never `docker exec`). It writes
+# make_fixtures.py into a bot's workspace, generates the fixtures in the bot's shell and reads every common type with
+# `ocw-extract` (a scanned PDF through OCR, Office files, mail, an archive listing), resumes a batch, and checks that
+# every answer stays under the 16 KiB tail. There is no egress proxy here, so the shell has no way out: the section is
+# offline by construction. It runs on runc (every section) and under gVisor (`--only core,docs`), capped at 900 s.
+#
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart,docs]
+#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart,
+#                          docs; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
@@ -40,7 +47,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files quota idle events restart"
+SECTIONS="core files quota idle events restart docs"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -1120,6 +1127,227 @@ section_restart() {
   fi
 }
 
+# ================================================================ section: docs (07.17.1.1.1; D-03 … D-08, PD-18)
+
+# The section's cap (W7): a slow runtime is fixed by doing less work, never by raising this without a recorded reason.
+DOCS_CAP_S=900
+# Every exec answer of the section (D-03): how many, and the stdout sizes over the 16 KiB tail.
+DOCS_ANSWERS=0
+DOCS_OVER=""
+# The fixtures the section checks, and only those (make_fixtures.py builds what they derive from).
+DOCS_FIXTURES="scan.pdf,text.pdf,sign.png,plan.docx,ventas.xlsx,slides.pptx,plan.odt,pedido.eml,pack.zip,blob.bin,macro.fodt"
+
+# note_answer: counts the exec answer in $WORK/body.json and records its stdout size when it is over 16 384 bytes.
+note_answer() {
+  local n
+  n="$(node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(String(Buffer.byteLength(j.stdout ?? "")));
+  ' "$WORK/body.json" 2>/dev/null || echo 0)"
+  DOCS_ANSWERS=$((DOCS_ANSWERS + 1))
+  if [ "$n" -gt 16384 ]; then DOCS_OVER="${DOCS_OVER} ${n}"; fi
+}
+
+# run_long <org> <agent> <argv json> <deadline s>: exec with the 25 s yield and the 600 s command budget; a command still
+# running is polled every 5 s until it exits or the deadline passes (then it is killed and the call fails). Succeeds
+# when the command exited, whatever its code; the final answer is in $WORK/body.json.
+run_long() {
+  local org="$1" agent="$2" argv="$3" deadline="$4" t0 pid status
+  t0=$(date +%s)
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$org" "$agent" "$argv" 600000 25000)")"
+  [ "$status" = 200 ] || return 1
+  note_answer
+  pid="$(jfield "$WORK/body.json" processId)"
+  while [ "$(jfield "$WORK/body.json" status)" = running ]; do
+    if [ $(($(date +%s) - t0)) -ge "$deadline" ]; then
+      api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$org" "$agent")" "$pid")" >/dev/null || true
+      return 1
+    fi
+    sleep 5
+    status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"poll"}' "$(target "$org" "$agent")" "$pid")")"
+    [ "$status" = 200 ] || return 1
+    note_answer
+  done
+  [ "$(jfield "$WORK/body.json" status)" = exited ]
+}
+
+# stdout_has <needle>...: the answer's stdout holds every needle, accents and case ignored (OCR may drop an accent).
+stdout_has() {
+  node -e '
+    const fold = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+    const out = fold(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stdout ?? "");
+    process.exit(process.argv.slice(2).every((n) => out.includes(fold(n))) ? 0 : 1);
+  ' "$WORK/body.json" "$@"
+}
+
+# stdout_line <regex>: some line of the answer's stdout matches.
+stdout_line() {
+  node -e '
+    const out = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stdout ?? "";
+    process.exit(new RegExp(process.argv[2], "m").test(out) ? 0 : 1);
+  ' "$WORK/body.json" "$1"
+}
+
+exit_code() { jfield "$WORK/body.json" exitCode; }
+docs_fail() { fail "docs: $1 → $(head -c 1500 "$WORK/body.json")"; }
+
+# docs_extract <label> <file> <exit code> [needle...]: `ocw-extract <file>` in bot X's shell through sandboxd.
+docs_extract() {
+  local label="$1" file="$2" want="$3"
+  shift 3
+  if run_long "$DO" "$DA" "[\"ocw-extract\",\"${file}\"]" 300 && [ "$(exit_code)" = "$want" ] &&
+    { [ "$#" = 0 ] || stdout_has "$@"; }; then
+    ok "docs: ${label}"
+  else
+    docs_fail "$label"
+  fi
+}
+
+# download_sha <org> <agent> <path>: the sha256 of the file's bytes as people download them through sandboxd.
+download_sha() {
+  local status
+  status="$(api POST /v1/files/download "$(path_json "$1" "$2" "$3")")"
+  [ "$status" = 200 ] || return 1
+  node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(require("crypto").createHash("sha256").update(Buffer.from(j.data ?? "", "base64")).digest("hex"));
+  ' "$WORK/body.json"
+}
+
+section_docs() {
+  local docs_t0 t took code runs sha_before sha_after
+  docs_t0=$(date +%s)
+  DO="$(uuid)"
+  DA="$(uuid)"
+  status="$(push_policy "$DO")"
+  [ "$status" = 200 ] || fail "docs: policy → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$DO" "$DA")}")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
+    ok "docs: ensure X → running"
+  else
+    fail "docs: ensure X → ${status} $(cat "$WORK/body.json")"
+    return
+  fi
+
+  # ---------------------------------------------------------------- the fixtures, generated in the bot's shell
+
+  # People's file write (base64 from the repository file), then the bot's own python3 with the toolkit PYTHONPATH.
+  node -e '
+    const [org, agent, file] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({
+      target: { orgId: org, agentId: agent },
+      path: "fxgen/make_fixtures.py",
+      content: require("fs").readFileSync(file).toString("base64"),
+      encoding: "base64",
+      mode: "create",
+    }));
+  ' "$DO" "$DA" infra/sandbox/sbx/tools/tests/make_fixtures.py >"$WORK/fxgen.json"
+  status="$(api_file POST /v1/files/write "$WORK/fxgen.json")"
+  [ "$status" = 200 ] && ok "docs: make_fixtures.py written to fxgen/ through the files API" ||
+    fail "docs: write make_fixtures.py → ${status} $(cat "$WORK/body.json")"
+  t=$(date +%s)
+  if run_long "$DO" "$DA" "[\"python3\",\"fxgen/make_fixtures.py\",\"/workspace/fx\",\"--only\",\"${DOCS_FIXTURES}\"]" 600 &&
+    [ "$(exit_code)" = 0 ]; then
+    ok "docs: the bot's shell generated the fixtures it checks in $(($(date +%s) - t)) s (no network)"
+  else
+    docs_fail "generate fixtures"
+    return
+  fi
+
+  # ---------------------------------------------------------------- one check per type (D-03, D-06)
+
+  docs_extract "scanned PDF OCR → (ocr) pages with \"Política de devoluciones\"" fx/scan.pdf 0 "(ocr)" "politica de devoluciones"
+  docs_extract "text PDF → \"facturación\"" fx/text.pdf 0 "facturación"
+  docs_extract "Spanish PNG OCR → \"emergencia\"" fx/sign.png 0 "emergencia"
+  docs_extract "docx → \"Región Norte\"" fx/plan.docx 0 "Región Norte"
+  docs_extract "xlsx → ### sheet: Ventas with Norte,1200" fx/ventas.xlsx 0 "### sheet: Ventas" "Norte,1200"
+  docs_extract "pptx → \"Plan de acción\"" fx/slides.pptx 0 "Plan de acción"
+  docs_extract "odt → \"Plan anual 2026\"" fx/plan.odt 0 "Plan anual 2026"
+  docs_extract ".eml → \"Pedido 42\" and ### attachment: factura.pdf" fx/pedido.eml 0 "Pedido 42" "### attachment: factura.pdf"
+  if run_long "$DO" "$DA" '["ocw-extract","fx/pack.zip"]' 300 && [ "$(exit_code)" = 0 ] &&
+    stdout_line '(^|/)a\.txt · [0-9]+ bytes$'; then
+    ok "docs: zip → a listing line for a.txt (listed, never extracted)"
+  else
+    docs_fail "zip listing"
+  fi
+  docs_extract "unknown binary → exit 3" fx/blob.bin 3
+
+  # ---------------------------------------------------------------- the shell's environment (PD-05)
+
+  if run_long "$DO" "$DA" '["sh","-c","for t in ocw-extract pdftotext tesseract soffice 7zz; do command -v \"$t\" || exit 1; done"]' 60 &&
+    [ "$(exit_code)" = 0 ] &&
+    [ "$(jfield "$WORK/body.json" stdout | grep -c '^/')" = 5 ]; then
+    ok "docs: ocw-extract, pdftotext, tesseract, soffice and 7zz are on the shell's PATH"
+  else
+    docs_fail "tools on PATH"
+  fi
+  if run_long "$DO" "$DA" '["python3","-c","import pandas, openpyxl, pdfplumber, docx; print(\"ok\")"]' 120 &&
+    [ "$(exit_code)" = 0 ] && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf 'ok\n')" ]; then
+    ok "docs: the bot's python3 imports pandas, openpyxl, pdfplumber and docx"
+  else
+    docs_fail "python3 imports"
+  fi
+  if run_long "$DO" "$DA" '["id","-u"]' 60 && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf '10001\n')" ]; then
+    ok "docs: the toolkit runs as uid 10001"
+  else
+    docs_fail "id -u"
+  fi
+
+  # ---------------------------------------------------------------- batch: chunks, resume, originals untouched (D-04)
+
+  sha_before="$(download_sha "$DO" "$DA" fx/text.pdf || true)"
+  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx","--budget","1"]' 120 && [ "$(exit_code)" = 75 ]; then
+    ok "docs: ocw-extract --batch with --budget 1 → exit 75 (run again)"
+  else
+    docs_fail "batch --budget 1"
+  fi
+  runs=0
+  code=""
+  t=$(date +%s)
+  while [ "$runs" -lt 5 ]; do
+    runs=$((runs + 1))
+    run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx"]' 620 || break
+    code="$(exit_code)"
+    [ "$code" = 75 ] || break
+  done
+  if [ "$code" = 0 ]; then
+    ok "docs: batch reruns with the default budget → exit 0 after ${runs} run(s), $(($(date +%s) - t)) s"
+  else
+    docs_fail "batch reruns (run ${runs}, exit ${code:-none})"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DO" "$DA" extracted/fx/_index.tsv)")"
+  if [ "$status" = 200 ] && node -e '
+    const lines = (JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).content ?? "").split("\n");
+    const rows = lines.slice(1).map((l) => l.split("\t"));
+    const ok = lines[0].startsWith("path\tsize\t") && rows.some((c) => /(^|\/)scan\.pdf$/.test(c[0]) && c[8] === "done");
+    process.exit(ok ? 0 : 1);
+  ' "$WORK/body.json"; then
+    ok "docs: extracted/fx/_index.tsv read through sandboxd, scan.pdf done"
+  else
+    fail "docs: _index.tsv → ${status} $(head -c 1500 "$WORK/body.json")"
+  fi
+  sha_after="$(download_sha "$DO" "$DA" fx/text.pdf || true)"
+  if [ -n "$sha_before" ] && [ "$sha_before" = "$sha_after" ]; then
+    ok "docs: fx/text.pdf has the same sha256 before and after the batch"
+  else
+    fail "docs: text.pdf sha256 ${sha_before:-none} → ${sha_after:-none}"
+  fi
+
+  # ---------------------------------------------------------------- every answer under the 16 KiB tail, and the cap
+
+  if [ -z "$DOCS_OVER" ] && [ "$DOCS_ANSWERS" -gt 0 ]; then
+    ok "docs: every exec answer's stdout is at most 16384 bytes (${DOCS_ANSWERS} answers)"
+  else
+    fail "docs: exec answers over 16384 bytes:${DOCS_OVER} (of ${DOCS_ANSWERS})"
+  fi
+  took=$(($(date +%s) - docs_t0))
+  if [ "$took" -le "$DOCS_CAP_S" ]; then
+    ok "docs: section took ${took} s (cap ${DOCS_CAP_S} s, runtime ${RUNTIME:-unknown})"
+  else
+    fail "docs: section took ${took} s, over the ${DOCS_CAP_S} s cap (runtime ${RUNTIME:-unknown})"
+  fi
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
@@ -1128,6 +1356,7 @@ if want quota; then section_quota; fi
 if want idle; then section_idle; fi
 if want events; then section_events; fi
 if want restart; then section_restart; fi
+if want docs; then section_docs; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

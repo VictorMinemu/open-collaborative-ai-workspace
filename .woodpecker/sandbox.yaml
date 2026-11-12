@@ -108,6 +108,10 @@ steps:
 
   # gVisor (D-14): a nested daemon with runsc; `auto` picks runsc for `sbx`, and the step fails unless the smoke
   # reports it. The daemon stays up for gvisor-browser; gvisor-browser and cleanup take it down.
+  # 07.17.1.1.1 (D-05, PD-18, A-01): the docs section proves the document toolkit (LibreOffice, tesseract, pdftoppm,
+  # ImageMagick) under runsc through sandboxd, capped at 900 s by the smoke; the step also needs the OCR line and
+  # prints its own wall time. No docs check is skipped here (only the macro control, which tests LibreOffice's
+  # configuration, not the runtime, and says so).
   - name: gvisor-smoke
     image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
@@ -118,8 +122,12 @@ steps:
       - sock="$$(sh infra/ci/gvisor-dind.sh up)"
       - export DOCKER_HOST="unix://$${sock}" DOCKER_SOCKET="$${sock}"
       - docker info --format '{{range $$k, $$v := .Runtimes}}{{$$k}} {{end}}'
-      - bash -c 'set -o pipefail; bash infra/sandbox/test/run-sandbox-smoke.sh --only core 2>&1 | tee "$$TMPDIR/gvisor-sbx.log"'
+      - start=$$(date +%s)
+      - rc=0; bash -c 'set -o pipefail; bash infra/sandbox/test/run-sandbox-smoke.sh --only core,docs 2>&1 | tee "$$TMPDIR/gvisor-sbx.log"' || rc=1
+      - echo "gvisor-smoke took $$(( $$(date +%s) - start )) s"
+      - test "$${rc}" = 0
       - grep -q "runtime gvisor" "$${TMPDIR}/gvisor-sbx.log"
+      - 'grep -q "ok   docs: scanned PDF OCR" "$${TMPDIR}/gvisor-sbx.log"'
 
   # The browser under gVisor: Chromium keeps its own sandbox on (`chromium+gvisor`, asserted), and every navigation and
   # shell request goes through the egress proxy. runsc does not answer Docker's embedded DNS (127.0.0.11) on the
