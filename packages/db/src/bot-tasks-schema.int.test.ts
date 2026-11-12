@@ -533,8 +533,8 @@ describe("the tick's lister app.due_bot_tasks (07.17.1.1.2, PD-06, PD-09)", () =
     const listed = new Map(res.rows.map((r) => [r.id as string, r.organization_id as string]));
     for (const [name, id] of Object.entries(due)) expect(listed.has(id), `${name} listed`).toBe(true);
     for (const [name, id] of Object.entries(notDue)) expect(listed.has(id), `${name} not listed`).toBe(false);
-    expect(listed.get(due.waitingPastWake)).toBe(A.id);
-    expect(listed.get(due.runningLost)).toBe(B.id);
+    expect(listed.get(due.waitingPastWake ?? "")).toBe(A.id);
+    expect(listed.get(due.runningLost ?? "")).toBe(B.id);
     // The app role still reads no task row itself without a tenant.
     expect((await app.query("select count(*)::int as n from app.bot_tasks")).rows[0].n).toBe(0);
   });
