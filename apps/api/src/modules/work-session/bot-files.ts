@@ -444,7 +444,32 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     });
   }
 
+  /**
+   * The move's outcome, then (review IN-01) the command row forgets the path: it was the one durable copy (ADR-0041
+   * §14), and nothing reads it once the move is decided (the PUT read it at its claim; the command is acked or failed,
+   * so it is never delivered again).
+   */
   async function finishTransfer(
+    tx: Tx,
+    p: BotFileFinishParams<TransferDirection>,
+  ): Promise<
+    BotFileFinished<AgentChannelWorkSessionUploadResponse | AgentChannelWorkSessionDownloadResponse>
+  > {
+    const finished = await decideFinish(tx, p);
+    await tx
+      .update(deviceCommands)
+      .set({ payload: {} })
+      .where(
+        and(
+          eq(deviceCommands.id, p.transferId),
+          inArray(deviceCommands.kind, [COMMAND_KIND.to_device, COMMAND_KIND.from_device]),
+          inArray(deviceCommands.status, ["acked", "failed"]),
+        ),
+      );
+    return finished;
+  }
+
+  async function decideFinish(
     tx: Tx,
     p: BotFileFinishParams<TransferDirection>,
   ): Promise<

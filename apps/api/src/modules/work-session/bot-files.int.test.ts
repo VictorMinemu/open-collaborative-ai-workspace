@@ -349,6 +349,9 @@ describe("tracer: a download prepared as the sponsor reaches the device, which P
       [row!.attachment_id],
     );
     expect(att).toEqual({ status: "pending", event_id: eventId, uploader_id: atlasId, message_id: null });
+    // Review IN-01: once the move is decided, the command row no longer keeps the path.
+    const [kept] = await rowsOf("select payload from app.device_commands where id = $1", [transferId]);
+    expect(kept).toEqual({ payload: {} });
   });
 
   it("an aborted wait resolves null at once and leaves no Redis subscription", async () => {
@@ -740,10 +743,11 @@ describe("uploads into an idle session, and every device answer mapped to its re
       code: "transfer_timeout",
       sentence: BOT_WORK_SESSION_SENTENCES.transfer_timeout,
     });
-    const [command] = await rowsOf("select status, error from app.device_commands where id = $1", [
+    const [command] = await rowsOf("select status, error, payload from app.device_commands where id = $1", [
       transferId,
     ]);
-    expect(command).toEqual({ status: "failed", error: "timeout" });
+    // Review IN-01: a failed move drops the path from the command row too.
+    expect(command).toEqual({ status: "failed", error: "timeout", payload: {} });
     expect((await ledgerOf(transferId))[0]).toMatchObject({ status: "failed", failure: "timeout" });
     const late = await fetch(`${stack.baseUrl}${RUNTIME_FILE_ROUTE}/${transferId}`, {
       headers: { authorization: `Bearer ${server.jwt}` },
