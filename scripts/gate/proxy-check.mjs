@@ -12,9 +12,12 @@
 // 127.0.0.1 only like every other gate port. Checks (one step each in the JSON summary on stdout; exit 0 = all ok):
 //   proxy-enabled, ports-loopback, tls-trust, web-login, api-health, docs, ws-upgrade (Task 1)
 //   presign-put-get, presign-tampered-403, presign-unsigned-403, xff-ignored, secure-cookie, agent-channel-404 (Task 2)
+//   runtime-files-body: a 30 MiB PUT on /api/v1/runtime/files/<uuid> reaches the API uncut (07.17.1.1-15, A-02)
 // The forged client IP is 203.0.113.77 (SPOOFED_IP); presigned URLs are never printed, only their origin.
 import { spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { networkInterfaces } from "node:os";
@@ -44,6 +47,103 @@ const PNG = Buffer.from(
   "base64",
 );
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+// ---- 07.17.1.1-15 (A-02): runtime file bodies are not limited by the proxy.
+/** The body the step sends: above the 25 MiB default limit, below Cloudflare's 100 MB (reverse-proxy.md rule 5). */
+export const RUNTIME_FILE_BODY_BYTES = 30 * 1024 * 1024;
+const BODY_CHUNK_BYTES = 1024 * 1024;
+
+/** `total` zero bytes as chunks of at most 1 MiB, one shared buffer: the body is streamed, never held whole. */
+export function* bodyChunks(total, chunkBytes = BODY_CHUNK_BYTES) {
+  const chunk = Buffer.alloc(Math.min(chunkBytes, total));
+  for (let sent = 0; sent < total; sent += chunk.length) {
+    const n = Math.min(chunk.length, total - sent);
+    yield n === chunk.length ? chunk : chunk.subarray(0, n);
+  }
+}
+
+/**
+ * `PUT <origin>/api/v1/runtime/files/<random uuid>` with a declared `content-length` of `bytes`, octet-stream and no
+ * authorization, the body streamed with backpressure. Resolves with the answer (status, content type, body text) and
+ * the bytes written. The API answers 401 before reading the body, so the write may end early once the answer is in;
+ * a write error after the answer is reported, not fatal. TLS uses the process's default CAs (tls-trust adds Caddy's).
+ */
+export function putRuntimeFileBody(origin, { bytes = RUNTIME_FILE_BODY_BYTES, timeoutMs = 120_000 } = {}) {
+  const url = new URL(`/api/v1/runtime/files/${randomUUID()}`, origin);
+  const client = url.protocol === "https:" ? https : http;
+  return new Promise((resolve) => {
+    let sentBytes = 0;
+    let answer = null;
+    let writeError = null;
+    let settled = false;
+    const finish = (extra = {}) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ...(answer ?? { status: null, contentType: null, body: "" }),
+        sentBytes,
+        writeError,
+        ...extra,
+      });
+      req.destroy();
+    };
+    const req = client.request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream", "content-length": String(bytes) },
+    });
+    const timer = setTimeout(() => finish({ error: `no answer within ${timeoutMs} ms` }), timeoutMs);
+    req.on("response", (res) => {
+      const parts = [];
+      res.on("data", (c) => parts.push(c));
+      res.on("end", () => {
+        answer = {
+          status: res.statusCode,
+          contentType: res.headers["content-type"] ?? null,
+          body: Buffer.concat(parts).toString("utf8").slice(0, 2000),
+        };
+        finish();
+      });
+      res.on("error", (err) => finish({ error: String(err.code ?? err.message) }));
+    });
+    req.on("error", (err) => {
+      // After the answer started, a reset is the server closing a body it will not read: not the step's failure.
+      writeError = String(err.code ?? err.message);
+      if (answer === null && !req.res) finish({ error: writeError });
+    });
+    (async () => {
+      for (const chunk of bodyChunks(bytes)) {
+        if (settled || req.destroyed) return;
+        const more = req.write(chunk);
+        sentBytes += chunk.length;
+        if (!more) await once(req, "drain").catch(() => {});
+      }
+      if (!settled && !req.destroyed) req.end();
+    })();
+  });
+}
+
+/**
+ * What the proxy did with the 30 MiB body. Only the API's own JSON 401 (`unauthorized`, from the device-JWT check
+ * that runs before the body is read) proves the request reached it uncut; a proxy's 413 (body limit), 502 or 504, its
+ * own 401 page, or no answer at all fails the step.
+ */
+export function runtimeFileBodyVerdict({ status, contentType, body }) {
+  if (status === null || status === undefined) return { ok: false, reason: "no_answer" };
+  if (status === 413) return { ok: false, reason: "proxy_body_limit" };
+  if (status === 502 || status === 503 || status === 504) return { ok: false, reason: "proxy_error" };
+  if (status !== 401) return { ok: false, reason: "unexpected_status" };
+  if (!/^application\/json\b/i.test(contentType ?? "")) return { ok: false, reason: "not_json" };
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, reason: "not_json" };
+  }
+  return parsed?.error?.code === "unauthorized"
+    ? { ok: true, reason: "api_401" }
+    : { ok: false, reason: "not_api" };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -616,6 +716,25 @@ export async function run(ctx) {
       bodyBytes: body.length,
       bare: bare.status,
       directOnLoopback: direct.status,
+    };
+  });
+
+  // ---- 07.17.1.1-15 (A-02): runtime file bodies are not limited by the proxy. A device PUTs the file a bot downloads
+  // to /api/v1/runtime/files/<id>, streamed, up to the organization's limit; a proxy body limit (nginx's 1 MB default)
+  // or a buffering proxy would cut it. Without a token the API answers its JSON 401 before reading the body.
+  await check("runtime-files-body", async () => {
+    const res = await putRuntimeFileBody(origin, { bytes: RUNTIME_FILE_BODY_BYTES });
+    const verdict = runtimeFileBodyVerdict(res);
+    return {
+      ok: verdict.ok,
+      reason: verdict.reason,
+      status: res.status,
+      contentType: res.contentType,
+      declaredBytes: RUNTIME_FILE_BODY_BYTES,
+      sentBytes: res.sentBytes,
+      ...(verdict.ok ? {} : { body: res.body.slice(0, 200) }),
+      ...(res.writeError ? { writeError: res.writeError } : {}),
+      ...(res.error ? { error: res.error } : {}),
     };
   });
 

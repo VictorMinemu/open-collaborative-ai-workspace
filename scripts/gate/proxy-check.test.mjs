@@ -152,12 +152,13 @@ describe("putRuntimeFileBody", () => {
     }
   });
 
-  it("a proxy that limits bodies (413 on the declared length, connection closed) fails the verdict", async () => {
+  it("a proxy that limits bodies (413 on the declared length, body discarded) fails the verdict", async () => {
     const srv = await server((req, res) => {
       if (Number(req.headers["content-length"]) > 1024 * 1024) {
-        res.writeHead(413, { "content-type": "text/html", connection: "close" });
+        // nginx answers 413 from the declared length and discards the rest (lingering close).
+        res.writeHead(413, { "content-type": "text/html" });
         res.end("<html><body>413 Request Entity Too Large</body></html>");
-        req.socket.end();
+        req.resume();
         return;
       }
       res.writeHead(401, { "content-type": JSON_TYPE });
