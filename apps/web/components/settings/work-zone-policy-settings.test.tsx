@@ -149,7 +149,9 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
     expect(toDraft(policy()).botFileMaxMb).toBe(25);
     expect(toDraft(policy({ botFileMaxBytes: 41943040 })).botFileMaxMb).toBe(40);
     // A server ceiling below the stored value: the field shows what applies (the lower of the two wins anyway).
-    expect(toDraft(policy({ botFileMaxBytes: 25 * MIB, serverFileMaxBytes: 10 * MIB })).botFileMaxMb).toBe(10);
+    expect(toDraft(policy({ botFileMaxBytes: 25 * MIB, serverFileMaxBytes: 10 * MIB })).botFileMaxMb).toBe(
+      10,
+    );
   });
 
   it.each([
@@ -236,7 +238,9 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
 
   it("the API's 400 for the field is shown under it", () => {
     const message = "Bots can move files up to 10 MB on this server";
-    const refused = new ApiRequestError(400, "invalid_work_zone_policy", message, { field: "botFileMaxBytes" });
+    const refused = new ApiRequestError(400, "invalid_work_zone_policy", message, {
+      field: "botFileMaxBytes",
+    });
     expect(policyFieldError(refused)).toEqual({ field: "botFileMaxBytes", message });
     expect(policyFieldError(new ApiRequestError(500, "internal", "boom"))).toBeNull();
     const html = render(policy({ serverFileMaxBytes: GIB }), { botFileMaxError: message });

@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  BOT_FILE_LIMITS,
   BOT_WORK_ZONE_LIMITS,
   EFFORT_LABELS,
+  fileSizeLabel,
   KNOWN_EFFORTS,
   type PermissionMode,
   type RuntimeId,
@@ -14,6 +16,7 @@ import {
   Bot,
   ClipboardList,
   FilePen,
+  FileUp,
   Hand,
   type LucideIcon,
   RefreshCw,
@@ -32,14 +35,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, isApiError } from "@/lib/api";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { useUpdateWorkZonePolicy, useWorkZonePolicy } from "@/lib/workzone-policy-queries";
 
-type Draft = Omit<WorkZonePolicyView, "updatedAt" | "knownModels" | "botSessionsMax"> & {
+type Draft = Omit<WorkZonePolicyView, "updatedAt" | "knownModels" | "botSessionsMax" | "botFileMaxBytes"> & {
   /** 07.16 (D-15, PD-22): always a number in the form (absent on the API = the default). */
   botSessionsMax: number;
+  /**
+   * 07.17.1.1 (D-07, PD-11): "Largest file a bot moves" in MB (MiB), always a number in the form (absent = 25). The
+   * view's `serverFileMaxBytes` stays in the draft read-only: it is the field's ceiling and never sent.
+   */
+  botFileMaxMb: number;
 };
 type GovernedMode = Draft["allowedPermissionModes"][number];
 type Restrict = Record<RuntimeId, boolean>;
@@ -101,9 +109,25 @@ const RUNTIME_UPDATE_LEVELS: Array<{ value: RuntimeUpdatesLevel; label: string; 
   { value: "off", label: "Off", description: "Devices don't check for new versions." },
 ];
 
-export const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => ({
+const MIB = 1024 * 1024;
+
+/** The field's ceiling in whole MB: the server's `OCW_ATTACHMENT_MAX_BYTES`, or 1 GiB when an older API says none. */
+const fileCeilingMb = (serverBytes: number | undefined) =>
+  Math.max(1, Math.floor((serverBytes ?? BOT_FILE_LIMITS.ceilingMaxBytes) / MIB));
+
+export const toDraft = ({
+  updatedAt: _u,
+  knownModels: _k,
+  botFileMaxBytes,
+  ...rest
+}: WorkZonePolicyView): Draft => ({
   ...rest,
   botSessionsMax: rest.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
+  // A server ceiling below the stored value shows what applies: the lower of the two wins at every call (PD-11).
+  botFileMaxMb: Math.min(
+    fileCeilingMb(rest.serverFileMaxBytes),
+    Math.max(1, Math.floor((botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes) / MIB)),
+  ),
 });
 
 /** 07.16 (D-15, PD-22): the organization's cap on bot-started sessions. */
@@ -120,14 +144,45 @@ export function botSessionsError(value: string): string | null {
   return Number(v) <= BOT_WORK_ZONE_LIMITS.orgSessionsMax ? null : BOT_SESSIONS_COPY.invalid;
 }
 
-/** The Save body: the whole draft, a runtime left on "any model" sending no list. */
+/** 07.17.1.1 (D-07, PD-20): the organization's per-file limit for files bots move. */
+export const BOT_FILE_MAX_COPY = {
+  label: "Largest file a bot moves",
+  unit: "MB",
+  applies: "Applies to files bots upload into or download from their Work Zone sessions.",
+  hint: (ceiling: string) =>
+    `Up to ${ceiling} on this server. Applies to files bots upload into or download from their Work Zone sessions.`,
+  invalid: (n: number) => `Enter a whole number from 1 to ${n}.`,
+} as const;
+
+/** What the API would refuse (a whole number of MB from 1 to the server's ceiling); null when the value is fine. */
+export function botFileMaxError(value: string, ceilingBytes: number | undefined): string | null {
+  const max = fileCeilingMb(ceilingBytes);
+  const v = value.trim();
+  if (!/^\d+$/.test(v)) return BOT_FILE_MAX_COPY.invalid(max);
+  const n = Number(v);
+  return n >= 1 && n <= max ? null : BOT_FILE_MAX_COPY.invalid(max);
+}
+
+/** A refused save that names a field of the form (400 `invalid_work_zone_policy` with `details.field`). */
+export function policyFieldError(err: unknown): { field: string; message: string } | null {
+  if (!isApiError(err, 400) || err.code !== "invalid_work_zone_policy") return null;
+  const field = (err.details as { field?: unknown } | null | undefined)?.field;
+  return typeof field === "string" ? { field, message: err.message } : null;
+}
+
+/**
+ * The Save body: the whole draft, a runtime left on "any model" sending no list. The bot file limit goes in bytes,
+ * and only to an API that reported its ceiling (an older one does not know the field).
+ */
 export function toPolicyBody(draft: Draft, restrict: Restrict): UpdateWorkZonePolicyRequest {
+  const { botFileMaxMb, serverFileMaxBytes, ...rest } = draft;
   return {
-    ...draft,
+    ...rest,
     allowedModels: {
       "claude-code": restrict["claude-code"] ? draft.allowedModels["claude-code"] : [],
       codex: restrict.codex ? draft.allowedModels.codex : [],
     },
+    ...(serverFileMaxBytes !== undefined ? { botFileMaxBytes: botFileMaxMb * MIB } : {}),
   };
 }
 const restrictOf = (d: Draft): Restrict => ({
@@ -195,7 +250,7 @@ export function PolicyForm({
   initial,
 }: {
   policy: WorkZonePolicyView;
-  initial?: { botSessions?: string } | undefined;
+  initial?: { botSessions?: string; botFileMax?: string; botFileMaxError?: string } | undefined;
 }) {
   const save = useUpdateWorkZonePolicy();
   const saved = toDraft(policy);
@@ -205,11 +260,16 @@ export function PolicyForm({
   // The field's text, so an out-of-range value stays visible with its error; the draft keeps the last valid number.
   const [botSessions, setBotSessions] = useState(initial?.botSessions ?? String(saved.botSessionsMax));
   const botError = botSessionsError(botSessions);
+  // 07.17.1.1 (D-07): the same pattern for the bot file limit, plus the API's own refusal of the field.
+  const [botFileMax, setBotFileMax] = useState(initial?.botFileMax ?? String(saved.botFileMaxMb));
+  const [botFileMaxRefused, setBotFileMaxRefused] = useState<string | null>(initial?.botFileMaxError ?? null);
+  const fileError = botFileMaxError(botFileMax, policy.serverFileMaxBytes);
   const savedRestrict = restrictOf(saved);
   const dirty =
     canonical(draft) !== canonical(saved) ||
     RUNTIME_IDS.some((rt) => restrict[rt] !== savedRestrict[rt]) ||
-    botSessions.trim() !== String(saved.botSessionsMax);
+    botSessions.trim() !== String(saved.botSessionsMax) ||
+    botFileMax.trim() !== String(saved.botFileMaxMb);
   const noModes = draft.allowedPermissionModes.length === 0;
 
   // Leaving the page with unsaved changes asks first.
@@ -245,11 +305,21 @@ export function PolicyForm({
     setRestrict(savedRestrict);
     setModelErrors({});
     setBotSessions(String(saved.botSessionsMax));
+    setBotFileMax(String(saved.botFileMaxMb));
+    setBotFileMaxRefused(null);
   }
 
   function changeBotSessions(value: string) {
     setBotSessions(value);
     if (botSessionsError(value) === null) setDraft((d) => ({ ...d, botSessionsMax: Number(value.trim()) }));
+  }
+
+  function changeBotFileMax(value: string) {
+    setBotFileMax(value);
+    setBotFileMaxRefused(null);
+    if (botFileMaxError(value, policy.serverFileMaxBytes) === null) {
+      setDraft((d) => ({ ...d, botFileMaxMb: Number(value.trim()) }));
+    }
   }
 
   async function submit() {
@@ -260,18 +330,22 @@ export function PolicyForm({
       }
     }
     setModelErrors(errors);
-    if (noModes || botError || Object.keys(errors).length > 0) return;
+    if (noModes || botError || fileError || Object.keys(errors).length > 0) return;
     try {
       const updated = await save.mutateAsync(toPolicyBody(draft, restrict));
       const next = toDraft(updated);
       setDraft(next);
       setRestrict(restrictOf(next));
       setBotSessions(String(next.botSessionsMax));
+      setBotFileMax(String(next.botFileMaxMb));
+      setBotFileMaxRefused(null);
       toast.success("Work Zone policy saved", {
         description: "Every Work Zone session follows it from its next turn.",
       });
     } catch (err) {
-      toast.error("Could not save the Work Zone policy", { description: errorMessage(err) });
+      const refused = policyFieldError(err);
+      if (refused?.field === "botFileMaxBytes") setBotFileMaxRefused(refused.message);
+      else toast.error("Could not save the Work Zone policy", { description: errorMessage(err) });
     }
   }
 
@@ -449,9 +523,15 @@ export function PolicyForm({
 
       <Section
         title="Bots"
-        description="How many Work Zone sessions bots may run at the same time across the organization."
+        description="How many Work Zone sessions bots may run at once, and the largest file they move."
       >
         <BotSessionsField value={botSessions} error={botError} onChange={changeBotSessions} />
+        <BotFileMaxField
+          value={botFileMax}
+          serverFileMaxBytes={policy.serverFileMaxBytes}
+          error={fileError ?? botFileMaxRefused}
+          onChange={changeBotFileMax}
+        />
       </Section>
 
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t bg-background/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
@@ -472,7 +552,7 @@ export function PolicyForm({
         </Button>
         <Button
           onClick={submit}
-          disabled={!dirty || noModes || !!botError || save.isPending}
+          disabled={!dirty || noModes || !!botError || !!fileError || save.isPending}
           data-testid="save-policy"
         >
           {save.isPending ? <Spinner /> : <Save />}
@@ -740,6 +820,71 @@ function BotSessionsField({
           </span>
           {error ? (
             <p role="alert" className="text-[13px] text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The organization's "Largest file a bot moves" (D-07, PD-11, PD-20): per file, for bot uploads into and downloads from
+ * their Work Zone sessions, in MB, at most the server's attachment limit. Each bot may only lower it in its profile.
+ */
+function BotFileMaxField({
+  value,
+  serverFileMaxBytes,
+  error,
+  onChange,
+}: {
+  value: string;
+  serverFileMaxBytes: number | undefined;
+  error: string | null;
+  onChange: (v: string) => void;
+}) {
+  const id = useId();
+  const hint =
+    serverFileMaxBytes === undefined
+      ? BOT_FILE_MAX_COPY.applies
+      : BOT_FILE_MAX_COPY.hint(fileSizeLabel(serverFileMaxBytes));
+  const describedBy = [`${id}-unit`, `${id}-hint`, error ? `${id}-error` : null].filter(Boolean).join(" ");
+  return (
+    <div className="rounded-2xl border bg-card p-4 shadow-xs">
+      <div className="flex items-start gap-3">
+        <IconTile icon={FileUp} warn={false} />
+        <div className="grid min-w-0 flex-1 gap-1.5">
+          <label htmlFor={id} className="font-medium text-sm">
+            {BOT_FILE_MAX_COPY.label}
+          </label>
+          <div className="relative w-full sm:w-32">
+            <Input
+              id={id}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={fileCeilingMb(serverFileMaxBytes)}
+              step={1}
+              value={value}
+              onChange={(e) => onChange(e.target.value)}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={describedBy}
+              data-testid="bot-file-max"
+              className="w-full pr-11 tabular-nums max-lg:h-11"
+            />
+            <span
+              id={`${id}-unit`}
+              className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-foreground text-sm"
+            >
+              {BOT_FILE_MAX_COPY.unit}
+            </span>
+          </div>
+          <span id={`${id}-hint`} className="text-muted-foreground text-xs leading-relaxed">
+            {hint} Each bot can lower it in its Work Zone profile.
+          </span>
+          {error ? (
+            <p id={`${id}-error`} role="alert" className="text-[13px] text-destructive">
               {error}
             </p>
           ) : null}
