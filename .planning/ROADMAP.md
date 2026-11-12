@@ -1228,11 +1228,11 @@ ejecución en segundo plano".
   5. Integration tests (single delivery, budgets, safety, tenant isolation), the cell smoke and an e2e spec pass on
      desktop and mobile; ADR-0042 records the decisions
 
-**Plans:** 14 plans
+**Plans:** 1/14 plans executed
 
 Plans:
 
-- [ ] 07.17.1.1.2-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, bodies, `TurnTask`, `agent.task.v1`, task card, sandboxd `process` event) + the phase hub
+- [x] 07.17.1.1.2-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, bodies, `TurnTask`, `agent.task.v1`, task card, sandboxd `process` event) + the phase hub
 - [ ] 07.17.1.1.2-02-PLAN.md — Wave 1: ADR-0042, the AGENTS.md row in place, the BTASK requirements
 - [ ] 07.17.1.1.2-03-PLAN.md — Wave 1: The migration (`bot_tasks`, `bot_task_processes`, `task_id` columns, policy limits, card kind, tick lister, two queues)
 - [ ] 07.17.1.1.2-04-PLAN.md — Wave 2: Policy and capability ("Allow long tasks", limits, `loadTaskPolicy`, Settings and the capabilities row)
