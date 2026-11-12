@@ -11,6 +11,7 @@ import {
   Container,
   Gauge,
   Globe,
+  ListChecks,
   Lock,
   type LucideIcon,
   Megaphone,
@@ -32,7 +33,7 @@ import { reasonText } from "./capability-reason";
 import { ToolsSection } from "./tools-section";
 import { UsageMeter } from "./usage-meter";
 
-type Toggle = "internet" | "memory" | "dateTime";
+type Toggle = "internet" | "memory" | "dateTime" | "longTasks";
 
 const TOGGLES: Array<{ name: Toggle; label: string; description: string; icon: LucideIcon }> = [
   {
@@ -48,6 +49,13 @@ const TOGGLES: Array<{ name: Toggle; label: string; description: string; icon: L
     icon: NotebookPen,
   },
   { name: "dateTime", label: "Date & time", description: "Knows your local date and time", icon: Clock },
+  // 07.17.1.1.2 (D-04): a bot keeps working on a long request across turns, within the organization's limits.
+  {
+    name: "longTasks",
+    label: "Long tasks",
+    description: "Keeps working on long requests by itself",
+    icon: ListChecks,
+  },
 ];
 
 type Confined = "sandbox" | "browser";
@@ -153,15 +161,16 @@ export function CapabilitiesPanel({
     <div className={cn("grid gap-3", className)} data-testid="capabilities-panel">
       <div className="divide-y overflow-hidden rounded-lg border bg-card">
         {TOGGLES.map((t) => {
-          const eff = view.effective[t.name];
-          const denied = eff.reason !== null;
+          // `longTasks` is absent on an older API: the row then follows the bot's own switch, with no reason.
+          const reason = view.effective[t.name]?.reason ?? null;
+          const denied = reason !== null;
           return (
             <Row
               key={t.name}
               icon={t.icon}
               label={t.label}
               description={t.description}
-              reason={eff.reason}
+              reason={reason}
               reasonFor={t.name}
               htmlFor={`cap-${agentId}-${t.name}`}
             >

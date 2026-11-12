@@ -15,7 +15,10 @@ const AGENT = "00000000-0000-4000-8000-0000000000aa";
 const on: ConfinedCapabilityState = { enabled: false, available: true, reason: null };
 const eff = { enabled: true, effective: true, reason: null };
 
-function view(confined?: BotCapabilityView["confined"]): BotCapabilityView {
+function view(
+  confined?: BotCapabilityView["confined"],
+  longTasks?: BotCapabilityView["effective"]["longTasks"],
+): BotCapabilityView {
   return {
     agentId: AGENT,
     scope: "team",
@@ -29,7 +32,13 @@ function view(confined?: BotCapabilityView["confined"]): BotCapabilityView {
       browser: false,
       longTasks: true,
     },
-    effective: { internet: eff, memory: eff, dateTime: eff, replyModeAll: eff },
+    effective: {
+      internet: eff,
+      memory: eff,
+      dateTime: eff,
+      replyModeAll: eff,
+      ...(longTasks ? { longTasks } : {}),
+    },
     tools: [],
     usage: { today: 0, limit: 100, resetsAt: new Date().toISOString() },
     dailyLimitMax: 1000,
@@ -88,5 +97,38 @@ describe("CapabilitiesPanel › Sandbox and Browser", () => {
     const old = render(view(undefined));
     expect(old).not.toContain('data-testid="capability-sandbox"');
     expect(old).not.toContain('data-testid="capability-browser"');
+  });
+});
+
+describe("CapabilitiesPanel › Long tasks (07.17.1.1.2 D-04)", () => {
+  it("lists Long tasks right after Date & time, before Sandbox, on and switchable", () => {
+    const html = render(view({ sandbox: on, browser: on }, eff));
+    expect(html).toContain("Keeps working on long requests by itself");
+    const at = html.indexOf(">Long tasks<");
+    expect(at).toBeGreaterThan(html.indexOf("Date &amp; time"));
+    expect(at).toBeLessThan(html.indexOf(">Sandbox<"));
+    const toggle = switchOf(html, "longTasks");
+    expect(toggle).toContain('aria-label="Long tasks"');
+    expect(toggle).toContain('aria-checked="true"');
+    expect(toggle).not.toContain("aria-disabled");
+    expect(html).not.toContain('data-testid="capability-reason-longTasks"');
+  });
+
+  it("turned off by the organization: the existing reason line, and the toggle refused", () => {
+    const html = render(view(undefined, { enabled: true, effective: false, reason: "org_policy" }));
+    expect(html).toContain('data-testid="capability-reason-longTasks"');
+    expect(html).toContain("Turned off by your organization");
+    const toggle = switchOf(html, "longTasks");
+    expect(toggle).toContain('aria-disabled="true"');
+    expect(toggle).toContain('aria-checked="false"');
+  });
+
+  it("an API without effective.longTasks renders the row from the bot's own switch, without a reason", () => {
+    const base = view(undefined);
+    const html = render({ ...base, capabilities: { ...base.capabilities, longTasks: false } });
+    const toggle = switchOf(html, "longTasks");
+    expect(toggle).toContain('aria-checked="false"');
+    expect(toggle).not.toContain("aria-disabled");
+    expect(html).not.toContain('data-testid="capability-reason-longTasks"');
   });
 });
