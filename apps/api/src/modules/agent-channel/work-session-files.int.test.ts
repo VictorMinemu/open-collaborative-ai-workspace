@@ -1,5 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  AgentChannelWorkSessionDownloadResponse,
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionUploadResponse,
   BOT_WORK_SESSION_SENTENCES,
@@ -8,7 +12,7 @@ import {
 } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { eventually, FakeDevice, type Frame } from "../../testing-device";
 import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
 import {
@@ -31,6 +35,8 @@ import {
 
 const CELL_TOKEN = "ocw-test-cell-token-bot-work-session-file-routes-0123456789";
 const UPLOAD = "ocw_work_session_upload";
+const DOWNLOAD = "ocw_work_session_download";
+type FileTool = typeof UPLOAD | typeof DOWNLOAD;
 const FIRST = "fix the failing invoice test";
 const MIB = 1024 * 1024;
 /**
@@ -57,6 +63,13 @@ let engId: string;
 let server: FakeDevice;
 let serverId: string;
 let billingId: string;
+let echoId: string;
+let opsId: string;
+/** The device's scratch working tree (its absolute path must never reach the API, P1) and its 64-byte README. */
+let scratch: string;
+let readme: Uint8Array;
+/** Every API log line (LOG_LEVEL debug): the record sweep reads them (P1). */
+const logs: string[] = [];
 
 async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
   const r = await res;
@@ -96,12 +109,12 @@ async function post(
   return msg.id as string;
 }
 
-/** Atlas's delivered turn for one message: its event id. */
-async function turnOf(messageId: string): Promise<string> {
+/** The bot's (Atlas by default) delivered turn for one message: its event id. */
+async function turnOf(messageId: string, agentId = atlasId): Promise<string> {
   const rows = await eventually(async () => {
     const r = await rowsOf(
       "select payload from app.stream_events where type = 'agent.mention.v1' and payload->'message'->>'id' = $1 and payload->'agent'->>'id' = $2",
-      [messageId, atlasId],
+      [messageId, agentId],
     );
     return r.length > 0 ? r : undefined;
   });
@@ -109,20 +122,36 @@ async function turnOf(messageId: string): Promise<string> {
   return rows[0]!.payload.eventId as string;
 }
 
-/** Ana asks Atlas in #eng (a thread reply when `threadRootId` is set); the message and the turn's event id. */
+/** A bot of this suite: its id and its handle. */
+type Bot = { id: string; handle: string };
+
+/**
+ * Ana asks a bot (Atlas unless `bot`) in `conv` (#eng unless given; a thread reply when `threadRootId` is set); the
+ * message and the turn's event id.
+ */
 async function ask(
   text: string,
-  opts: { threadRootId?: string; attachmentIds?: string[] } = {},
+  opts: { threadRootId?: string; attachmentIds?: string[]; bot?: Bot; conv?: string } = {},
 ): Promise<{ messageId: string; eventId: string }> {
   // The bot's daily usage budget never stops a turn of this suite.
   await su.query("delete from app.agent_usage_daily");
-  const messageId = await post(ana, engId, `@atlas ${text} ${randomUUID().slice(0, 6)}`, opts);
-  return { messageId, eventId: await turnOf(messageId) };
+  const bot = opts.bot ?? { id: atlasId, handle: "atlas" };
+  const { threadRootId, attachmentIds } = opts;
+  const messageId = await post(ana, opts.conv ?? engId, `@${bot.handle} ${text} ${randomUUID().slice(0, 6)}`, {
+    ...(threadRootId ? { threadRootId } : {}),
+    ...(attachmentIds ? { attachmentIds } : {}),
+  });
+  return { messageId, eventId: await turnOf(messageId, bot.id) };
 }
 
 /** Ana's file in `conv`, uploaded and ready, not yet sent with a message. */
-async function chatFile(bytes: Uint8Array = randomBytes(2048), name = "spec.pdf", conv = engId) {
-  const id = await uploadAttachment(ana, conv, { name, type: "application/pdf", bytes });
+async function chatFile(
+  bytes: Uint8Array = randomBytes(2048),
+  name = "spec.pdf",
+  conv = engId,
+  type = "application/pdf",
+) {
+  const id = await uploadAttachment(ana, conv, { name, type, bytes });
   const [row] = await rowsOf("select size_bytes, sha256 from app.attachments where id = $1", [id]);
   return { id, sizeBytes: Number(row!.size_bytes), sha256: row!.sha256 as string, bytes };
 }
@@ -132,14 +161,21 @@ const commandOf = (id: string) =>
   server.next((f) => f.type === "command" && f.id === id) as Promise<Frame & Cmd>;
 
 /**
- * Atlas starts a session on billing-api from Ana's thread root in #eng; the device takes it and its first prompt, the
- * runtime finishes that turn and the session is idle with nothing in its queue.
+ * A bot (Atlas unless `bot`) starts a session on billing-api from Ana's message in `conv` (#eng unless given), the root
+ * of the session's thread; the device takes it and its first prompt, the runtime finishes that turn and the session is
+ * idle with nothing in its queue. With `running`, the runtime only starts that turn: the session stays `running`.
  */
-async function idleSession(): Promise<{ workSessionId: string; rootId: string }> {
-  const { messageId: rootId, eventId } = await ask("please fix the invoice test");
+async function idleSession(
+  opts: { bot?: Bot; conv?: string; running?: boolean } = {},
+): Promise<{ workSessionId: string; rootId: string }> {
+  const bot = opts.bot ?? { id: atlasId, handle: "atlas" };
+  const { messageId: rootId, eventId } = await ask("please fix the invoice test", {
+    bot,
+    ...(opts.conv ? { conv: opts.conv } : {}),
+  });
   const r = await cell("/work-sessions/start", {
     eventId,
-    agentId: atlasId,
+    agentId: bot.id,
     projectId: billingId,
     prompt: FIRST,
   });
@@ -159,6 +195,15 @@ async function idleSession(): Promise<{ workSessionId: string; rootId: string }>
   server.event(id, { type: "session.state", status: "idle" });
   const first = (await server.command("prompt", id)) as Cmd;
   server.ack(first.id);
+  if (opts.running) {
+    // The runtime is working on the first prompt: the session stays busy (the turn never completes here).
+    server.event(id, { type: "prompt.started", promptId: first.payload.promptId as string });
+    await eventually(async () => {
+      const [s] = await rowsOf("select status from app.work_sessions where id = $1", [id]);
+      return s?.status === "running";
+    });
+    return { workSessionId: id, rootId };
+  }
   server.emitTurn(id, { promptId: first.payload.promptId as string, text: "done" });
   await eventually(async () => {
     const [p] = await rowsOf("select status from app.work_prompts where id = $1", [first.payload.promptId]);
@@ -179,41 +224,73 @@ const uploadCall = (
   token = CELL_TOKEN,
 ) => cell("/work-sessions/upload", { agentId: atlasId, ...body }, token);
 
+const downloadCall = (body: { eventId: string; workSessionId: string; path: string }, token = CELL_TOKEN) =>
+  cell("/work-sessions/download", { agentId: atlasId, ...body }, token);
+
+/**
+ * A move the device handles: the route call starts, the transfer row it creates for the turn appears (a new one, so
+ * several moves of one turn never mix), the FakeDevice receives its command and `serve`s it; then the route's answer.
+ */
+async function served(
+  eventId: string,
+  call: () => Promise<{ status: number; body: Json }>,
+  serve: (cmd: Frame & Cmd) => Promise<{ ok: boolean; error: string | null }>,
+) {
+  const seen = new Set((await ledgerOfTurn(eventId)).map((r) => r.id as string));
+  const pending = call();
+  const transferId = await eventually(async () => {
+    const fresh = (await ledgerOfTurn(eventId)).find((r) => !seen.has(r.id as string));
+    return fresh?.id as string | undefined;
+  });
+  const cmd = await commandOf(transferId);
+  const ack = await serve(cmd);
+  const r = await pending;
+  return { r, cmd, ack, transferId };
+}
+
 /**
  * An upload the device serves: the route call starts, the FakeDevice receives `session.file.write`, GETs the bytes
  * from the transfer route and acks; then the route's answer.
  */
-async function uploadServed(body: Parameters<typeof uploadCall>[0]) {
-  const pending = uploadCall(body);
-  const [transfer] = await eventually(async () => {
-    const r = await rowsOf(
-      "select id from app.bot_work_session_files where event_id = $1 order by created_at desc",
-      [body.eventId],
-    );
-    return r.length > 0 ? r : undefined;
-  });
-  const cmd = await commandOf(transfer!.id as string);
-  const ack = await server.serveFileCommand(cmd);
-  const r = await pending;
-  return { r, cmd, ack, transferId: transfer!.id as string };
-}
+const uploadServed = (body: Parameters<typeof uploadCall>[0]) =>
+  served(
+    body.eventId,
+    () => uploadCall(body),
+    (cmd) => server.serveFileCommand(cmd),
+  );
+
+/**
+ * A download the device serves: the FakeDevice receives `session.file.read`, PUTs `bytes` (the session file, the
+ * scratch tree's README by default) to the transfer route and acks; then the route's answer.
+ */
+const downloadServed = (body: Parameters<typeof downloadCall>[0], bytes: Uint8Array = readme) =>
+  served(
+    body.eventId,
+    () => downloadCall(body),
+    (cmd) => server.serveFileCommand(cmd, { body: bytes }),
+  );
 
 const turnRow = async (eventId: string) =>
   (await rowsOf("select tool_calls, tainted from app.agent_turns where event_id = $1", [eventId]))[0]!;
 
-const toolCallsOf = (eventId: string) =>
+const toolCallsOf = (eventId: string, tool: FileTool = UPLOAD) =>
   rowsOf(
     "select tool, decision, reason, target from app.agent_tool_calls where event_id = $1 and tool = $2 order by created_at",
-    [eventId, UPLOAD],
+    [eventId, tool],
   );
 
-const ledgerOfTurn = (eventId: string) =>
-  rowsOf("select id, status, path_length from app.bot_work_session_files where event_id = $1", [eventId]);
+function ledgerOfTurn(eventId: string) {
+  return rowsOf(
+    "select id, status, path_length, direction from app.bot_work_session_files where event_id = $1 order by created_at",
+    [eventId],
+  );
+}
 
 const fileCommandsOf = (workSessionId: string) =>
-  rowsOf("select id from app.device_commands where work_session_id = $1 and kind = 'session.file.write'", [
-    workSessionId,
-  ]);
+  rowsOf(
+    "select id from app.device_commands where work_session_id = $1 and kind in ('session.file.write', 'session.file.read')",
+    [workSessionId],
+  );
 
 const auditsOf = (action: string, eventId: string) =>
   rowsOf(
@@ -243,10 +320,12 @@ async function refusedBeforeClaim(
   workSessionId: string,
   code: BotWorkSessionRefusal,
   times = 1,
+  tool: FileTool = UPLOAD,
+  sponsorUserId = victorId,
 ): Promise<Json[]> {
-  expect(await toolCallsOf(eventId)).toEqual(
+  expect(await toolCallsOf(eventId, tool)).toEqual(
     Array.from({ length: times }, () => ({
-      tool: UPLOAD,
+      tool,
       decision: "denied",
       reason: code,
       target: workSessionId,
@@ -255,7 +334,7 @@ async function refusedBeforeClaim(
   const refusals = await auditsOf("bot.work_session_refused", eventId);
   expect(refusals).toHaveLength(times);
   for (const r of refusals) {
-    expect(r.metadata).toMatchObject({ tool: UPLOAD, outcome: code, workSessionId, sponsorUserId: victorId });
+    expect(r.metadata).toMatchObject({ tool, outcome: code, workSessionId, sponsorUserId });
     expect(r.user_id).toBe(anaId);
   }
   expect((await turnRow(eventId)).tool_calls).toBe(0);
@@ -306,7 +385,16 @@ async function quiesce() {
   );
 }
 
+/** Víctor re-saves Atlas's profile (he stays its sponsor) with `over`; no argument restores the suite's profile. */
+const saveProfile = (over: Partial<BotWorkZoneProfileInput> = {}) =>
+  createBotProfile(victor, atlasId, profile(over));
+
 beforeAll(async () => {
+  // The device's working tree: the FakeDevice reads the session's README from here (only its bytes cross the wire).
+  scratch = await mkdtemp(join(tmpdir(), "ocw-bot-files-"));
+  await writeFile(join(scratch, "README.md"), `# billing-api\n\nInvoices, ledgers and the tests for all of them.\n`);
+  readme = new Uint8Array(await readFile(join(scratch, "README.md")));
+  expect(readme.length).toBe(64);
   storage = await startTestStorage();
   stack = await startTestStack({
     env: {
@@ -315,7 +403,9 @@ beforeAll(async () => {
       OCW_MODEL_PROVIDER: "mock",
       // The server allows 64 MiB, so the organization's default (25 MiB) is the limit that applies.
       OCW_ATTACHMENT_MAX_BYTES: String(64 * MIB),
+      LOG_LEVEL: "debug",
     },
+    logStream: { write: (line: string) => void logs.push(line) },
     botFileDeadlineMs: stackDeadlineMs,
   });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
@@ -346,8 +436,26 @@ beforeAll(async () => {
   await su.query("update app.agents set status = 'ready' where id = $1", [atlasId]);
   engId = (await ok(victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" })))
     .id as string;
-  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: atlasId }));
-  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: anaId }));
+  // Echo: another team bot with its own profile on the same server (its sessions are never Atlas's).
+  const echo = await ok(
+    victor.request("POST", "/api/v1/agents", {
+      name: "Echo",
+      username: "echo",
+      instructions: "You are Echo.",
+      modelProvider: "mock",
+      modelId: "mock-1",
+    }),
+  );
+  echoId = echo.id as string;
+  await su.query("update app.agents set status = 'ready' where id = $1", [echoId]);
+  // #ops: another channel where Ana and Atlas meet (a session started there never takes #eng's files, D-12).
+  opsId = (await ok(victor.request("POST", "/api/v1/channels", { name: "ops", visibility: "public" })))
+    .id as string;
+  for (const conv of [engId, opsId]) {
+    await ok(victor.request("POST", `/api/v1/channels/${conv}/members`, { kind: "agent", id: atlasId }));
+    await ok(victor.request("POST", `/api/v1/channels/${conv}/members`, { kind: "user", id: anaId }));
+  }
+  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: echoId }));
 
   await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true }));
   const paired = await pairDevice(stack, victor, "billing-server");
@@ -374,7 +482,9 @@ beforeAll(async () => {
   billingId = list.find((p) => p.name === "billing-api")!.id as string;
   // Víctor (admin) gives Atlas its profile (he is its sponsor); the server allows it.
   await createBotProfile(victor, atlasId, profile());
+  await createBotProfile(victor, echoId, profile());
   await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+  await grantBotConsent(victor, serverId, echoId, { allowFullAccess: true });
 }, 240_000);
 
 afterAll(async () => {
@@ -382,6 +492,7 @@ afterAll(async () => {
   await su?.end();
   await stack?.stop();
   await storage?.stop();
+  if (scratch) await rm(scratch, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
@@ -428,7 +539,9 @@ describe("tracer: Ana's attachment reaches the bot's session through the upload 
     ]);
     expect((await turnRow(eventId)).tool_calls).toBe(1);
     // The ledger row is done; it stores the path's length only.
-    expect(await ledgerOfTurn(eventId)).toEqual([{ id: transferId, status: "done", path_length: 13 }]);
+    expect(await ledgerOfTurn(eventId)).toEqual([
+      { id: transferId, status: "done", path_length: 13, direction: "to_device" },
+    ]);
 
     // One success audit: the bot, Ana, the device, the session, the attachment, its size and sha256, no path.
     const audits = await auditsOf("bot.work_session_upload", eventId);
@@ -731,5 +844,198 @@ describe("the device's ack and the transfer route's own record race (found by th
     expect(await auditsOf("bot.work_session_upload", eventId)).toEqual([]);
     const [refusal] = await auditsOf("bot.work_session_refused", eventId);
     expect(refusal!.metadata).toMatchObject({ tool: UPLOAD, outcome: "transfer_failed", pathLength: 13 });
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1.1-13 tracer: the download end to end
+
+/** The attachment download as a reader asks for it (302 to a presigned URL, or 404); never followed. */
+const personDownload = (who: TestClient, attachmentId: string) =>
+  fetch(`${stack.baseUrl}/api/v1/attachments/${attachmentId}/download`, {
+    redirect: "manual",
+    headers: { origin: WEB_ORIGIN, cookie: who.cookieHeader },
+  });
+
+/** Atlas's reply for the turn `eventId` in the thread of `rootId` (it links the turn's pending files). */
+const replyFor = (eventId: string, rootId: string) =>
+  cell("/messages", {
+    agentId: atlasId,
+    conversationId: engId,
+    threadRootMessageId: rootId,
+    eventId,
+    text: "Here is the file you asked for.",
+    idempotencyKey: `reply-${randomUUID()}`,
+  });
+
+/** A download answer that must be `downloaded`. */
+function downloadedBody(r: { status: number; body: Json }) {
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  const body = AgentChannelWorkSessionDownloadResponse.parse(r.body);
+  if (body.kind !== "downloaded") throw new Error(`not downloaded: ${JSON.stringify(r.body)}`);
+  return body;
+}
+
+const attachmentRow = async (id: string) =>
+  (
+    await rowsOf(
+      "select status, uploader_id, event_id, message_id, conversation_id, size_bytes, sha256, content_type, filename from app.attachments where id = $1",
+      [id],
+    )
+  )[0];
+
+/** Atlas's idle session and a turn of Ana in its thread asking for the README back. */
+async function askForReadme(opts: { running?: boolean } = {}) {
+  const { workSessionId, rootId } = await idleSession(opts);
+  const { eventId } = await ask("send me the README back", { threadRootId: rootId });
+  return { workSessionId, rootId, eventId };
+}
+
+describe("tracer: a session file comes back as the bot's reply attachment, which Ana downloads (D-03, PD-17)", () => {
+  it("the device PUTs README.md and acks; the answer is downloaded with a new attachment; one audit without the path", async () => {
+    const { workSessionId, eventId } = await askForReadme();
+    const { r, cmd, ack, transferId } = await downloadServed({ eventId, workSessionId, path: "README.md" });
+    expect(cmd.kind).toBe("session.file.read");
+    expect(cmd.sessionId).toBe(workSessionId);
+    // The repo-relative path and the bound only: no bytes, no URL, no absolute path (P2).
+    expect(cmd.payload).toEqual({ path: "README.md", maxBytes: 26_214_400 });
+    expect(ack).toEqual({ ok: true, error: null });
+
+    const body = downloadedBody(r);
+    const sha256 = createHash("sha256").update(readme).digest("hex");
+    expect(body).toEqual({
+      kind: "downloaded",
+      workSessionId,
+      attachmentId: expect.any(String),
+      name: "README.md",
+      sizeBytes: 64,
+      contentType: expect.any(String),
+    });
+    // The bot's own pending file of this turn, in the turn's conversation, until its reply links it.
+    expect(await attachmentRow(body.attachmentId)).toMatchObject({
+      status: "pending",
+      uploader_id: atlasId,
+      event_id: eventId,
+      message_id: null,
+      conversation_id: engId,
+      size_bytes: "64",
+      sha256,
+      filename: "README.md",
+      content_type: body.contentType,
+    });
+
+    expect(await toolCallsOf(eventId, DOWNLOAD)).toEqual([
+      { tool: DOWNLOAD, decision: "allowed", reason: null, target: workSessionId },
+    ]);
+    expect((await turnRow(eventId)).tool_calls).toBe(1);
+    expect(await ledgerOfTurn(eventId)).toEqual([
+      { id: transferId, status: "done", path_length: 9, direction: "from_device" },
+    ]);
+
+    const audits = await auditsOf("bot.work_session_download", eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actor_kind: "agent",
+      actor_id: atlasId,
+      agent_id: atlasId,
+      user_id: anaId,
+      device_id: serverId,
+      resource_type: "work_session",
+      resource_id: workSessionId,
+      result: "success",
+    });
+    expect(audits[0]!.metadata).toEqual({
+      eventId,
+      sponsorUserId: victorId,
+      projectId: billingId,
+      workSessionId,
+      attachmentId: body.attachmentId,
+      bytes: 64,
+      sha256,
+      direction: "from_device",
+      pathLength: 9,
+      outcome: "downloaded",
+    });
+    expect(await auditsOf("bot.work_session_refused", eventId)).toEqual([]);
+  });
+
+  it("nobody reads it before the reply; the reply for the turn links it and Ana downloads its 64 bytes (E24)", async () => {
+    const { workSessionId, rootId, eventId } = await askForReadme();
+    const body = downloadedBody((await downloadServed({ eventId, workSessionId, path: "README.md" })).r);
+    // Pending: Ana, who asked, cannot open it yet; neither can Víctor.
+    expect((await personDownload(ana, body.attachmentId)).status).toBe(404);
+    expect((await personDownload(victor, body.attachmentId)).status).toBe(404);
+
+    const posted = await ok(replyFor(eventId, rootId));
+    expect(await attachmentRow(body.attachmentId)).toMatchObject({
+      status: "ready",
+      message_id: posted.messageId,
+    });
+    const res = await personDownload(ana, body.attachmentId);
+    expect(res.status).toBe(302);
+    const bytes = new Uint8Array(await (await fetch(res.headers.get("location") as string)).arrayBuffer());
+    expect(Buffer.from(bytes).equals(Buffer.from(readme))).toBe(true);
+  });
+});
+
+describe("the download's own rules (D-07, D-13, PD-08, PD-12; E6, E14, E24)", () => {
+  it("a running session still answers a download; an upload into it is session_busy (only uploads need idle)", async () => {
+    const { workSessionId, rootId, eventId } = await askForReadme({ running: true });
+    const { r } = await downloadServed({ eventId, workSessionId, path: "README.md" });
+    expect(downloadedBody(r).sizeBytes).toBe(64);
+
+    const file = await chatFile();
+    const uploadTurn = await askWithFile(rootId, file.id);
+    await refusedWith(
+      uploadCall({ eventId: uploadTurn, workSessionId, attachmentId: file.id, path: "docs/spec.pdf" }),
+      "session_busy",
+    );
+    expect(await ledgerOfTurn(uploadTurn)).toEqual([]);
+    const [refusal] = await auditsOf("bot.work_session_refused", uploadTurn);
+    expect(refusal!.metadata).toMatchObject({ tool: UPLOAD, outcome: "session_busy", pathLength: 13 });
+  });
+
+  it("the device reports 12 MB with the bot at 10 MB → file_too_large naming this bot's limit; no attachment", async () => {
+    await saveProfile({ fileMaxBytes: 10 * MIB });
+    try {
+      const { workSessionId, eventId } = await askForReadme();
+      const { r, cmd, ack } = await downloadServed(
+        { eventId, workSessionId, path: "data/dump.bin" },
+        new Uint8Array(12 * MIB),
+      );
+      expect(cmd.payload).toEqual({ path: "data/dump.bin", maxBytes: 10 * MIB });
+      // The device refused before any byte moved (the FakeDevice, like the daemon, never PUTs).
+      expect(ack).toEqual({ ok: false, error: `too_large: ${12 * MIB}` });
+      const body = await refusedWith(
+        Promise.resolve(r),
+        "file_too_large",
+        "That file is 12 MB. This bot moves files up to 10 MB (this bot's limit).",
+      );
+      expect(body).toMatchObject({ limit: { bytes: 10_485_760, source: "bot" }, sizeBytes: 12_582_912 });
+      expect(await rowsOf("select id from app.attachments where event_id = $1", [eventId])).toEqual([]);
+      const [refusal] = await auditsOf("bot.work_session_refused", eventId);
+      expect(refusal!.metadata).toMatchObject({
+        tool: DOWNLOAD,
+        outcome: "file_too_large",
+        bytes: 12 * MIB,
+        limitSource: "bot",
+        pathLength: 13,
+      });
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("ten files already waiting for the turn's reply → file_cap_reached; no transfer, no command", async () => {
+    const { workSessionId, eventId } = await askForReadme();
+    // Ten files the bot shared in this turn (e.g. from its sandbox), all waiting for the reply.
+    for (let i = 0; i < 10; i++) {
+      await su.query(
+        "insert into app.attachments (organization_id, conversation_id, uploader_id, filename, declared_type, size_bytes, status, event_id) values ($1, $2, $3, $4, 'text/csv', 10, 'pending', $5)",
+        [orgId, engId, atlasId, `shared-${i}.csv`, eventId],
+      );
+    }
+    await refusedWith(downloadCall({ eventId, workSessionId, path: "README.md" }), "file_cap_reached");
+    expect(await ledgerOfTurn(eventId)).toEqual([]);
+    expect(await fileCommandsOf(workSessionId)).toEqual([]);
   });
 });
