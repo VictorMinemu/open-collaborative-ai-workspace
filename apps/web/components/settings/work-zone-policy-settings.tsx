@@ -172,9 +172,11 @@ export function policyFieldError(err: unknown): { field: string; message: string
 
 /**
  * The Save body: the whole draft, a runtime left on "any model" sending no list. The bot file limit goes in bytes,
- * and only to an API that reported its ceiling (an older one does not know the field).
+ * only to an API that reported its ceiling (an older one does not know the field), and, given the `saved` draft,
+ * only when the field changed (review IN-06): the form shows a stored value floored to whole MB and clamped to the
+ * ceiling, which an unrelated save would otherwise write back.
  */
-export function toPolicyBody(draft: Draft, restrict: Restrict): UpdateWorkZonePolicyRequest {
+export function toPolicyBody(draft: Draft, restrict: Restrict, saved?: Draft): UpdateWorkZonePolicyRequest {
   const { botFileMaxMb, serverFileMaxBytes, ...rest } = draft;
   return {
     ...rest,
@@ -182,7 +184,9 @@ export function toPolicyBody(draft: Draft, restrict: Restrict): UpdateWorkZonePo
       "claude-code": restrict["claude-code"] ? draft.allowedModels["claude-code"] : [],
       codex: restrict.codex ? draft.allowedModels.codex : [],
     },
-    ...(serverFileMaxBytes !== undefined ? { botFileMaxBytes: botFileMaxMb * MIB } : {}),
+    ...(serverFileMaxBytes !== undefined && (saved === undefined || botFileMaxMb !== saved.botFileMaxMb)
+      ? { botFileMaxBytes: botFileMaxMb * MIB }
+      : {}),
   };
 }
 const restrictOf = (d: Draft): Restrict => ({
@@ -332,7 +336,7 @@ export function PolicyForm({
     setModelErrors(errors);
     if (noModes || botError || fileError || Object.keys(errors).length > 0) return;
     try {
-      const updated = await save.mutateAsync(toPolicyBody(draft, restrict));
+      const updated = await save.mutateAsync(toPolicyBody(draft, restrict, saved));
       const next = toDraft(updated);
       setDraft(next);
       setRestrict(restrictOf(next));

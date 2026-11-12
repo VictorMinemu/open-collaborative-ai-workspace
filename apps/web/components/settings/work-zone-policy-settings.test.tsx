@@ -112,7 +112,7 @@ describe("Bot sessions at once (Task 3)", () => {
     });
     // The form's Save sends exactly that body, and refuses an invalid value first.
     const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
-    expect(source).toContain("save.mutateAsync(toPolicyBody(draft, restrict))");
+    expect(source).toContain("save.mutateAsync(toPolicyBody(draft, restrict, saved))");
     expect(source).toMatch(/if \(noModes \|\| botError \|\|[^\n]*\) return;/);
   });
 
@@ -191,6 +191,27 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
     expect(toPolicyBody(toDraft(policy()), { "claude-code": false, codex: false })).not.toHaveProperty(
       "botFileMaxBytes",
     );
+  });
+
+  it("an unchanged field is not sent: an unrelated save never rewrites a stored value the form rounded (review IN-06)", () => {
+    // 25.5 MiB stored (not a whole MB), and a stored 2 GiB above a server ceiling lowered to 1 GiB since.
+    for (const stored of [25.5 * MIB, 2 * GIB]) {
+      const view = policy({ botFileMaxBytes: stored, serverFileMaxBytes: GIB });
+      const saved = toDraft(view);
+      const unrelated = { ...saved, allowFastMode: true };
+      const body = toPolicyBody(unrelated, { "claude-code": false, codex: false }, saved);
+      expect(body, String(stored)).not.toHaveProperty("botFileMaxBytes");
+      expect(body.allowFastMode).toBe(true);
+      // Edited by the person: sent.
+      const edited = toPolicyBody(
+        { ...saved, botFileMaxMb: 30 },
+        { "claude-code": false, codex: false },
+        saved,
+      );
+      expect(edited.botFileMaxBytes).toBe(30 * MIB);
+    }
+    const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
+    expect(source).toContain("save.mutateAsync(toPolicyBody(draft, restrict, saved))");
   });
 
   it("renders under Bot sessions at once: label tied to the input, the unit, the server's ceiling", () => {
