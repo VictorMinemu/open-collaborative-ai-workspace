@@ -371,6 +371,10 @@ class ImageGate(unittest.TestCase):
         self.assertEqual(finalized.get("BlockUntrustedRefererLinks"), "true")
         links = [p.findtext("value") for p in root.iter("prop") if p.get(f"{ns}name") == "Link"]
         self.assertEqual(links, ["1", "1"])
+        # 07.17.1.1.1 review IN-01: a workbook is never recalculated on load (1 = never), so a WEBSERVICE-style formula
+        # never runs, whatever a bot's own profile says.
+        self.assertEqual(finalized.get("OOXMLRecalcMode"), "1")
+        self.assertEqual(finalized.get("ODFRecalcMode"), "1")
 
 
 if __name__ == "__main__":
