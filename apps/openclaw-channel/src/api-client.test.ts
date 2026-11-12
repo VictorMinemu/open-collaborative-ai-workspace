@@ -5,6 +5,7 @@ import {
   ATTACHMENT_READ_TIMEOUT_MS,
   createAgentChannelClient,
   isRetryableStatus,
+  TASK_REQUEST_TIMEOUT_MS,
   WORK_SESSION_FILE_REQUEST_TIMEOUT_MS,
   WORK_SESSION_REQUEST_TIMEOUT_MS,
 } from "./api-client.js";
@@ -869,5 +870,84 @@ describe("bot Work Zone file calls (07.17.1.1 D-01, PD-18): one attempt, the tra
     } finally {
       timeout.mockRestore();
     }
+  });
+});
+
+describe("task calls (07.17.1.1.2 D-02, PD-04): one attempt each, the ids and the bot's own fields only", () => {
+  const EVENT = "00000000-0000-7000-8000-000000000011";
+  const AGENT = "00000000-0000-7000-8000-000000000012";
+  const TASK = "00000000-0000-7000-8000-000000000013";
+  const client = (responses: Array<{ status: number; body?: unknown }>) => {
+    const scripted = scriptedFetch(responses);
+    return {
+      calls: scripted.calls,
+      c: createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "cell-token",
+        fetch: scripted.fetchImpl,
+        backoff: { baseMs: 1, maxMs: 2 },
+      }),
+    };
+  };
+  const START = { eventId: EVENT, agentId: AGENT, goal: "Read the knowledge pack" };
+  const CONTINUE = {
+    eventId: EVENT,
+    agentId: AGENT,
+    progress: "Read 120 of 3030 files",
+    nextStep: "Read the next 200",
+    afterSeconds: 60,
+  };
+  const FINISH = { eventId: EVENT, agentId: AGENT, summary: "Done.", outcome: "done" as const };
+
+  it("each posts its body to its own route once, with the bearer token and TASK_REQUEST_TIMEOUT_MS, and parses the answer", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const started = { ok: true, taskId: TASK, maxTurns: 40, deadlineAt: "2026-11-12T18:00:00.000Z" };
+      const continued = { ok: true, next: "after_turn", at: null, turnsLeft: 39, quiet: true };
+      const finished = { ok: true, status: "done" };
+      const { c, calls } = client([
+        { status: 200, body: started },
+        { status: 200, body: continued },
+        { status: 200, body: finished },
+      ]);
+      await expect(c.taskStart(START)).resolves.toEqual(started);
+      await expect(c.taskContinue(CONTINUE)).resolves.toEqual(continued);
+      await expect(c.taskFinish(FINISH)).resolves.toEqual(finished);
+      expect(calls.map((x) => x.url)).toEqual([
+        "http://api/agent-channel/v1/tasks/start",
+        "http://api/agent-channel/v1/tasks/continue",
+        "http://api/agent-channel/v1/tasks/finish",
+      ]);
+      expect(calls.map((x) => x.init.method)).toEqual(["POST", "POST", "POST"]);
+      expect(calls.map((x) => JSON.parse(String(x.init.body)))).toEqual([START, CONTINUE, FINISH]);
+      expect((calls[0]?.init.headers as Record<string, string> | undefined)?.authorization).toBe(
+        "Bearer cell-token",
+      );
+      expect(timeout).toHaveBeenCalledWith(TASK_REQUEST_TIMEOUT_MS);
+      expect(TASK_REQUEST_TIMEOUT_MS).toBe(10_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("a 200 refusal and a 4xx {ok:false, code, sentence} body are the refusal; a 5xx is never retried; a malformed 200 is rejected", async () => {
+    const refusal = { ok: false, code: "task_active", sentence: "You already have a task running." };
+    await expect(client([{ status: 200, body: refusal }]).c.taskStart(START)).resolves.toEqual(refusal);
+    const coded = client([{ status: 409, body: { ok: false, code: "task_busy", sentence: "Busy." } }]);
+    await expect(coded.c.taskContinue(CONTINUE)).resolves.toEqual({
+      ok: false,
+      code: "task_busy",
+      sentence: "Busy.",
+    });
+    const down = client([{ status: 503 }, { status: 200, body: { ok: true, status: "done" } }]);
+    await expect(down.c.taskFinish(FINISH)).rejects.toBeInstanceOf(AgentChannelHttpError);
+    expect(down.calls).toHaveLength(1);
+    const gone = client([{ status: 404, body: { error: { code: "unknown_turn", message: "no" } } }]);
+    const err = (await gone.c.taskContinue(CONTINUE).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err.status).toBe(404);
+    expect(err.code).toBe("unknown_turn");
+    await expect(
+      client([{ status: 200, body: { ok: true, next: "soon" } }]).c.taskContinue(CONTINUE),
+    ).rejects.toBeDefined();
   });
 });
