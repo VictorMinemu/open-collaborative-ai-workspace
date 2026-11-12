@@ -15,6 +15,7 @@ import { lint as lintCodeowners } from "./codeowners.mjs";
 import {
   checkFields,
   checkGraph,
+  checkPythonManifests,
   collectLockfile,
   collectPythonLock,
   evaluate,
@@ -374,6 +375,100 @@ describe("guard: Python lock licenses (07.17.1.1.1 D-09, PD-15)", () => {
 
   it("returns nothing when the lock is absent", () => {
     assert.deepEqual(collectPythonLock(root, PYTHON_LOCKS[0]), []);
+  });
+
+  const record = (name, version, license = "MIT") => ({
+    name,
+    version,
+    license,
+    source: "pypi",
+    repo: `https://example.org/${name}`,
+  });
+
+  it("a pin without a record fails naming it as Unknown", () => {
+    put(LOCK, "alpha==1.0.0 \\\n    # via -r requirements.in\nBeta_Pkg==2.0.0\n");
+    put(MANIFEST, JSON.stringify([record("alpha", "1.0.0")]));
+    const failures = checkGraph(collectPythonLock(root, PYTHON_LOCKS[0]), policy);
+    assert.deepEqual(failures, [
+      "license not allowed: beta-pkg@2.0.0 (Unknown) [infra/sandbox/sbx/tools/requirements.lock]",
+    ]);
+    assert.deepEqual(checkPythonManifests(root), []);
+  });
+
+  it("a record whose version is not pinned is stale, and the pin it should describe fails as Unknown", () => {
+    put(LOCK, "alpha==1.0.0\n");
+    put(MANIFEST, JSON.stringify([record("alpha", "0.9.0")]));
+    assert.deepEqual(checkPythonManifests(root), [
+      `licenses.json entry alpha@0.9.0 has no pin in requirements.lock [${MANIFEST}]`,
+    ]);
+    const failures = checkGraph(collectPythonLock(root, PYTHON_LOCKS[0]), policy);
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /alpha@1\.0\.0 \(Unknown\)/);
+  });
+
+  it("a manifest that is not a JSON array, or a record without a license, fails naming the manifest", () => {
+    put(LOCK, "alpha==1.0.0\n");
+    put(MANIFEST, JSON.stringify({ alpha: "MIT" }));
+    const notArray = checkPythonManifests(root);
+    assert.equal(notArray.length, 1);
+    assert.ok(notArray[0].includes(MANIFEST), notArray[0]);
+    put(MANIFEST, "[{");
+    assert.equal(checkPythonManifests(root).length, 1);
+    put(MANIFEST, JSON.stringify([{ name: "alpha", version: "1.0.0", source: "pypi", repo: "x" }]));
+    const noLicense = checkPythonManifests(root);
+    assert.equal(noLicense.length, 1);
+    assert.ok(noLicense[0].includes(MANIFEST), noLicense[0]);
+    assert.match(noLicense[0], /alpha@1\.0\.0/);
+  });
+
+  it("with no lock and no manifest nothing fails; a manifest without its lock fails naming the manifest", () => {
+    assert.deepEqual(checkPythonManifests(root), []);
+    put(MANIFEST, JSON.stringify([record("alpha", "1.0.0")]));
+    const failures = checkPythonManifests(root);
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0].includes(MANIFEST), failures[0]);
+    assert.ok(failures[0].includes(LOCK), failures[0]);
+  });
+
+  it("a denied license fails; MIT-CMU and PSF-2.0 pass with the real policy", () => {
+    put(LOCK, "copyleft==1.0.0\npillow-like==13.0.0\ntyping-like==4.16.0\n");
+    put(
+      MANIFEST,
+      JSON.stringify([
+        record("copyleft", "1.0.0", "GPL-2.0-only"),
+        record("pillow-like", "13.0.0", "MIT-CMU"),
+        record("typing-like", "4.16.0", "PSF-2.0"),
+      ]),
+    );
+    const failures = checkGraph(collectPythonLock(root, PYTHON_LOCKS[0]), policy);
+    assert.deepEqual(failures, [
+      "license not allowed: copyleft@1.0.0 (GPL-2.0-only) [infra/sandbox/sbx/tools/requirements.lock]",
+    ]);
+  });
+
+  it("the pypdfium2 and xlrd records admit only their pinned versions", () => {
+    const REAL = new Map(collectPythonLock(REPO_ROOT, PYTHON_LOCKS[0]).map((e) => [e.name, e]));
+    for (const name of ["pypdfium2", "xlrd"]) {
+      const pinned = REAL.get(name);
+      assert.ok(pinned, `${name} is pinned`);
+      assert.equal(evaluate(pinned.license, policy), "deny", `${name} needs its policy record`);
+      const notes = [];
+      assert.deepEqual(checkGraph([pinned], policy, notes), []);
+      assert.equal(notes.length, 1);
+      assert.match(notes[0], new RegExp(`^exception: ${name} \\(pending approval before merge`));
+      const [major, minor, patch] = pinned.version.split(".").map(Number);
+      const next = { ...pinned, version: `${major}.${minor}.${patch + 1}` };
+      assert.equal(checkGraph([next], policy).length, 1, `${name}@${next.version} is not covered`);
+    }
+  });
+
+  it("pnpm guard --only licenses passes on the real tree and checks the Python pins", () => {
+    const res = guard(["--only", "licenses"]);
+    assert.equal(res.status, 0, res.out);
+    const count = Number(/licenses: (\d+) package versions checked/.exec(res.out)?.[1]);
+    assert.ok(count > collectPythonLock(REPO_ROOT, PYTHON_LOCKS[0]).length, res.out);
+    assert.match(res.out, /exception: pypdfium2 \(pending approval before merge/);
+    assert.doesNotMatch(res.out, /has no pin/);
   });
 });
 
