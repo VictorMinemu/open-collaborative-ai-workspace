@@ -40,6 +40,8 @@ ARCHIVE_MAX_ENTRIES = 10_000
 ARCHIVE_MAX_RATIO = 100
 ARCHIVE_RATIO_MIN_ENTRY_BYTES = 10 * 1024 * 1024
 ARCHIVE_MAX_DEPTH = 1
+# An OOXML/ODF container's total uncompressed size (07.17.1.1.1 review WR-04): python-pptx holds every part in memory.
+OFFICE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 ARCHIVE_FREE_MARGIN_BYTES = 64 * 1024 * 1024
 ARCHIVE_WATCH_INTERVAL_S = 0.25
 # The room left under the bot's soft disk quota when the exec started (07.17.1.1.1 review WR-06): sandboxd sets it

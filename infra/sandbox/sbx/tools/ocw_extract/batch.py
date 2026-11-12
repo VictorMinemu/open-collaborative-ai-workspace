@@ -30,7 +30,7 @@ import sys
 import tempfile
 import time
 
-from . import archives, bounds, detect, office, pdf, runner
+from . import archives, bounds, containers, detect, office, pdf, runner
 
 INDEX = "_index.tsv"
 LOCK = "_index.tsv.lock"
@@ -386,6 +386,7 @@ class Batch:
         that does not fit even a fresh run (nothing else moved) is written as skipped and the entry goes on."""
         office_file = detect.family(type_name) != "pdf"
         if office_file:
+            containers.check(path, type_name, self.steps)
             source = office.convert(path, "pdf", self.steps)
             page_opts = office.Options(self.steps, "always" if self.opts.ocr == "always" else "never", self.opts.lang)
         else:

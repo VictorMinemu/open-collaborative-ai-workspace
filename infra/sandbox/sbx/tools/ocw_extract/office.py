@@ -13,7 +13,7 @@ import re
 import sys
 import tempfile
 
-from . import bounds, ocr, pdf, runner
+from . import bounds, containers, ocr, pdf, runner
 
 TEXT_FILTER = "txt:Text (encoded):UTF8"
 WRITER_FALLBACK = {
@@ -110,6 +110,7 @@ class Options:
 
 
 def extract_writer(path, type_name, opts):
+    containers.check(path, type_name, opts.steps)
     if opts.ocr == "always":
         ocr.check_lang(opts.lang)
         return via_pdf(path, type_name, opts, "pages")
@@ -190,6 +191,7 @@ def extract_pptx(path, type_name, opts):
 
 
 def extract_slides(path, type_name, opts):
+    containers.check(path, type_name, opts.steps)
     if type_name == "pptx" and opts.ocr != "always":
         doc = extract_pptx(path, type_name, opts)
         if doc is not None:

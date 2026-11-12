@@ -688,6 +688,55 @@ class Hostile(Base):
             shutil.rmtree(f"{WS}/.config", ignore_errors=True)
             shutil.rmtree(f"{WS}/out-macro", ignore_errors=True)
 
+    def test_an_office_zip_bomb_is_refused_before_any_parser(self):
+        """07.17.1.1.1 review WR-04: an OOXML or ODF file is a zip too; its entries meet the archive caps (ratio, total,
+        count) before python-pptx, openpyxl or LibreOffice decompresses anything (exit 6)."""
+        import zipfile
+
+        made = []
+
+        def bombed(name, extra):
+            path = f"{WS}/bomb-{name}"
+            shutil.copyfile(f"{FX}/{name}", path)
+            with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as z:
+                for member, size in extra:
+                    with z.open(member, "w", force_zip64=True) as f:
+                        chunk = b"\0" * (1024 * 1024)
+                        for _ in range(size):
+                            f.write(chunk)
+            made.append(path)
+            return os.path.basename(path)
+
+        try:
+            for name in ("slides.pptx", "plan.docx", "ventas.xlsx", "plan.odt"):
+                with self.subTest(name=name, kind="one entry packed 1000:1"):
+                    rc, _out, err = cli(bombed(name, [("media/zeros.bin", 20)]), timeout=120)
+                    self.assertEqual(rc, 6, err)
+                    assert_reason(self, err, "caps: ratio")
+            with self.subTest(kind="many small entries"):
+                rc, _out, err = cli(bombed("ventas.xlsx", [(f"media/z{i}.bin", 9) for i in range(12)]), timeout=120)
+                self.assertEqual(rc, 6, err)
+                assert_reason(self, err, "caps: ratio")
+            # The batch refuses the same file as a failed row, and the walk goes on.
+            src = f"{WS}/bomb-pack"
+            shutil.rmtree(src, ignore_errors=True)
+            os.makedirs(src)
+            shutil.move(made[0], f"{src}/bomb.pptx")
+            shutil.copyfile(f"{FX}/latin1.csv", f"{src}/ok.csv")
+            rc, _out, err = cli("--batch", src, timeout=300)
+            self.assertEqual(rc, 0, err)
+            with open(f"{WS}/extracted/bomb-pack/_index.tsv", encoding="utf-8") as f:
+                rows = {line.split("\t")[0]: line.split("\t") for line in f.read().splitlines()[1:]}
+            self.assertEqual(rows["bomb.pptx"][8], "failed")
+            self.assertTrue(rows["bomb.pptx"][9].startswith("caps: ratio"), rows["bomb.pptx"])
+            self.assertEqual(rows["ok.csv"][8], "done")
+        finally:
+            for path in made:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
+            shutil.rmtree(f"{WS}/bomb-pack", ignore_errors=True)
+            shutil.rmtree(f"{WS}/extracted/bomb-pack", ignore_errors=True)
+
     def test_an_unknown_binary_is_unsupported(self):
         rc, _out, err = cli("fx/blob.bin")
         self.assertEqual(rc, 3)

@@ -14,7 +14,7 @@ import os
 import sys
 import zipfile
 
-from . import bounds, office
+from . import bounds, containers, office
 
 # LibreOffice's CSV filter: comma, double quote, UTF-8 (76), from line 1, …, every sheet (-1) (PD-11, Pitfall 4).
 CSV_FILTER = "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1"
@@ -112,6 +112,7 @@ def via_csv(path, steps):
 
 def extract(path, type_name, opts):
     steps = opts.steps
+    containers.check(path, type_name, steps)
     doc = bounds.Doc(type_name, "openpyxl")
     if type_name in ("xlsx", "xlsm"):
         doc.add(read_xlsx(path, steps))
