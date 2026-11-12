@@ -4,9 +4,14 @@ import {
   type AgentChannelWorkSessionUploadResponse,
   type BotFileLimit,
   type BotFileLimitSource,
+  type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
+  botFileTooLargeSentence,
+  parseSessionFileAck,
   type SessionFileReadPayload,
   SessionFileReadPayload as SessionFileReadPayloadSchema,
+  type SessionFileWritePayload,
+  SessionFileWritePayload as SessionFileWritePayloadSchema,
   transferDeadlineMs,
   WorkSessionFilePath,
   workSessionFilePathRefusal,
@@ -19,8 +24,10 @@ import {
   devices,
   type Tx,
   tenantOf,
+  workPrompts,
+  workSessions,
 } from "@ocw/db";
-import { and, eq, inArray, type SQL, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub, FileCommandAck } from "../device";
@@ -186,6 +193,8 @@ export interface BotFileUploadParams extends BotFileCallParams {
   /** The chat attachment the turn may read (`attachmentForTurn`), its size and sha256. */
   attachment: { id: string; sizeBytes: number; sha256: string | null };
   overwrite?: boolean;
+  /** The turn read outside content (default `turn.tainted`): the upload marks the session's `tainted_at` (PD-13). */
+  tainted?: boolean;
 }
 
 /** A move the API enqueued (the waiter now waits for its ack), or why it refused before any row or command. */
@@ -241,6 +250,22 @@ export interface BotFiles {
 
 const COMMAND_KIND = { to_device: "session.file.write", from_device: "session.file.read" } as const;
 
+/**
+ * PD-15: the device's ack code (`parseSessionFileAck`) as the bot's refusal. Anything not listed (a mismatch, no space,
+ * an expired transfer, free text) is `transfer_failed`.
+ */
+const ACK_REFUSAL: Partial<Record<ReturnType<typeof parseSessionFileAck>["code"], BotWorkSessionRefusal>> = {
+  runtime_too_old: "runtime_too_old",
+  too_large: "file_too_large",
+  exists: "file_exists",
+  not_found: "file_not_found",
+  not_a_file: "not_a_file",
+  invalid_path: "path_not_allowed",
+  path_not_allowed: "path_not_allowed",
+  busy: "session_busy",
+  not_running: "session_not_running",
+};
+
 /** The stored outcome of a command the route did not hear about (an ack published before it subscribed). */
 function storedAck(command: { status: string; error: string | null } | undefined): FileCommandAck | null {
   if (command?.status === "acked") return { ok: true, error: null };
@@ -287,6 +312,13 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     if (s.status === "archived") return refusedAnswer("session_ended");
     if (s.status === "completed" || s.status === "failed") return refusedAnswer("session_not_running");
     if (s.status === "host_offline") return refusedAnswer("device_offline");
+    // Before the rights: a revoked device would read as the sponsor's refusal, but the cause is the device.
+    const [device] = await tx
+      .select({ status: devices.status, revokedAt: devices.revokedAt })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId))
+      .limit(1);
+    if (device?.status !== "online" || device.revokedAt !== null) return refusedAnswer("device_offline");
     // PD-07: writing into the tree is acting on the session like a prompt; reading a file is what the diff route asks.
     const sponsorUserId = own.bot.sponsorUserId;
     const { allowed } = await perms.decide(
@@ -296,12 +328,6 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
       await sessionFacts(tx, sponsorUserId, s),
     );
     if (!allowed) return refusedAnswer("not_allowed");
-    const [device] = await tx
-      .select({ status: devices.status, revokedAt: devices.revokedAt })
-      .from(devices)
-      .where(eq(devices.id, s.deviceId))
-      .limit(1);
-    if (device?.status !== "online" || device.revokedAt !== null) return refusedAnswer("device_offline");
     // A session still starting has no tree to read from yet.
     if (s.status === "provisioning") return refusedAnswer("session_busy");
     return { session: s };
@@ -376,17 +402,64 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
       .where(and(eq(deviceCommands.id, row.id), eq(deviceCommands.kind, COMMAND_KIND[row.direction])))
       .for("update")
       .limit(1);
+    // An ack published before the route subscribed is still in the command row (the hub's `onAck` stored it).
     const ack = p.ack ?? storedAck(command);
     const path = (command?.payload as { path?: unknown } | undefined)?.path;
-    const fail = async (failure: string) => {
+    const fail = async (failure: string, sizeBytes?: number) => {
       await markTransfer(
         tx,
         row.id,
-        { status: "failed", failure, completedAt: new Date().toISOString() },
+        {
+          status: "failed",
+          failure,
+          completedAt: new Date().toISOString(),
+          ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+        },
         { from: ["pending", "streaming", "streamed"] },
       );
+      // T-07.17.1.1-11-07: a download whose PUT stored the file but whose move failed leaves nothing a reply links.
+      if (row.direction === "from_device") {
+        await tx
+          .update(attachments)
+          .set({ status: "rejected" })
+          .where(and(eq(attachments.id, row.attachmentId), eq(attachments.status, "pending")));
+      }
     };
-    if (ack?.ok && row.status === "streamed" && typeof path === "string") {
+    if (!ack) {
+      // PD-18: the deadline passed. The command is never delivered again and the transfer is over (a late GET or PUT
+      // answers 410, the daemon acks `expired`).
+      await tx
+        .update(deviceCommands)
+        .set({ status: "failed", error: "timeout", ackedAt: sql`now()` })
+        .where(and(eq(deviceCommands.id, row.id), inArray(deviceCommands.status, ["pending", "sent"])));
+      await fail("timeout");
+      core.log.info({ transferId: row.id, code: "transfer_timeout" }, "bot file move finished");
+      return { answer: refusedAnswer("transfer_timeout"), audit };
+    }
+    if (!ack.ok) {
+      // PD-15: the device's free text becomes one closed code; the bot reads only its fixed (or composed) sentence.
+      const parsed = parseSessionFileAck(ack.error);
+      const code = ACK_REFUSAL[parsed.code] ?? "transfer_failed";
+      const failure = parsed.code === "unknown" ? "transfer_failed" : parsed.code;
+      core.log.info({ transferId: row.id, code, failure }, "bot file move finished");
+      if (code === "file_too_large") {
+        const sizeBytes = parsed.sizeBytes ?? row.sizeBytes ?? undefined;
+        await fail(failure, sizeBytes);
+        const limit: BotFileLimit = { bytes: row.maxBytes, source: row.limitSource };
+        return {
+          answer: {
+            ...refusedAnswer("file_too_large"),
+            sentence: botFileTooLargeSentence({ sizeBytes: sizeBytes ?? null, limit }),
+            limit,
+            ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+          },
+          audit: { ...audit, bytes: sizeBytes ?? audit.bytes },
+        };
+      }
+      await fail(failure);
+      return { answer: refusedAnswer(code), audit };
+    }
+    if (row.status === "streamed" && typeof path === "string") {
       if (row.direction === "to_device") {
         await markTransfer(tx, row.id, { status: "done", completedAt: new Date().toISOString() });
         core.log.debug({ transferId: row.id, code: "uploaded" }, "bot file move finished");
@@ -422,7 +495,9 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
         };
       }
     }
+    // The device said ok, but the bytes never moved through the transfer route (or the file is gone): not a success.
     await fail("transfer_failed");
+    core.log.info({ transferId: row.id, code: "transfer_failed" }, "bot file move finished");
     return { answer: refusedAnswer("transfer_failed"), audit };
   }
 
@@ -431,8 +506,68 @@ export function createBotFiles(deps: BotFilesDeps): BotFiles {
     deadlineFor,
     waitForAck: (transferId, timeoutMs, signal) => hub.waitForFileAck(transferId, timeoutMs, signal),
 
-    async prepareUpload(_tx, _p) {
-      return refusedAnswer("transfer_failed");
+    async prepareUpload(tx, p) {
+      const pre = precheck(p);
+      if (pre) return pre;
+      // The route compared the size already (txA); a limit lowered since is still honoured here.
+      if (p.attachment.sizeBytes > p.limit.bytes) {
+        return {
+          ...refusedAnswer("file_too_large"),
+          sentence: botFileTooLargeSentence({ sizeBytes: p.attachment.sizeBytes, limit: p.limit }),
+          limit: p.limit,
+          sizeBytes: p.attachment.sizeBytes,
+        };
+      }
+      const decided = await decideSession(tx, p, "to_device");
+      if ("kind" in decided) return decided;
+      const s = decided.session;
+      // D-13, principle 4: never a second writer on the tree. Only an idle session with nothing in its queue.
+      if (s.status !== "idle") return refusedAnswer("session_busy");
+      const [busy] = await tx
+        .select({ id: workPrompts.id })
+        .from(workPrompts)
+        .where(
+          and(
+            eq(workPrompts.workSessionId, s.id),
+            inArray(workPrompts.status, ["queued", "dispatched", "running"]),
+          ),
+        )
+        .limit(1);
+      if (busy) return refusedAnswer("session_busy");
+      await insertRow(
+        tx,
+        p,
+        s,
+        {
+          direction: "to_device",
+          attachmentId: p.attachment.id,
+          sizeBytes: p.attachment.sizeBytes,
+          sha256: p.attachment.sha256,
+        },
+        p.attachment.sizeBytes,
+      );
+      const payload: SessionFileWritePayload = SessionFileWritePayloadSchema.parse({
+        path: p.path,
+        sizeBytes: p.attachment.sizeBytes,
+        sha256: p.attachment.sha256,
+        overwrite: p.overwrite ?? false,
+      });
+      await hub.enqueue(tx, {
+        id: p.transferId,
+        deviceId: s.deviceId,
+        workSessionId: s.id,
+        kind: "session.file.write",
+        payload,
+      });
+      // PD-13 (D-02): a file written after outside content taints the session for good, exactly as a tainted prompt
+      // does (`bots.prompt`); the first mark is kept.
+      if (p.tainted ?? p.turn.tainted) {
+        await tx
+          .update(workSessions)
+          .set({ taintedAt: sql`now()` })
+          .where(and(eq(workSessions.id, s.id), isNull(workSessions.taintedAt)));
+      }
+      return { kind: "enqueued", transferId: p.transferId };
     },
 
     async prepareDownload(tx, p) {
