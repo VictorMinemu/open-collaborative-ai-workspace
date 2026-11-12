@@ -224,6 +224,18 @@ export const SHELL_ENV: readonly string[] = [
 ];
 
 /**
+ * Whether a container's inspected `Config.Env` holds every current `SHELL_ENV` line (07.17.1.1.1 D-10, PD-10): a shell
+ * created before an environment change (e.g. without the toolkit on PATH) lacks one and is created again at its next
+ * start. Presence, not equality: Docker merges the image's own `ENV` lines (e.g. `NODE_VERSION`) into the container's,
+ * so an exact comparison would always fail. No environment at all is never current.
+ */
+export function shellEnvCurrent(env: unknown): boolean {
+  if (!Array.isArray(env) || env.length === 0) return false;
+  const have = new Set(env.filter((l): l is string => typeof l === "string"));
+  return SHELL_ENV.every((line) => have.has(line));
+}
+
+/**
  * The `ContainerCreate` body of a bot's `sbx` (research Code Examples, hardened profile table). The command only keeps
  * the container alive; every bot command arrives later through exec as 10001 via `ocw-run`.
  */

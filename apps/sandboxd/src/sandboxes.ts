@@ -32,6 +32,7 @@ import {
   ownerLabels,
   packagesVolumeSpec,
   SANDBOX_USER,
+  shellEnvCurrent,
   shellSpec,
   volumeSpec,
   WORKSPACE,
@@ -988,7 +989,8 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   /**
    * Why the bot's shell must be created again before it runs, or null to reuse it (07.17.1.1.1 D-10, PD-10), in this
    * order: a stale proxy entry in /etc/hosts (only with an egress proxy), an image other than the one the tag names now
-   * (Compose rebuilds the same tag, so a shell otherwise keeps the old toolkit forever). Called only for a stopped shell from `ensure` (a running one is never cut) and from
+   * (Compose rebuilds the same tag, so a shell otherwise keeps the old toolkit forever), an environment that lacks a
+   * current `SHELL_ENV` line (`shellEnvCurrent`). Called only for a stopped shell from `ensure` (a running one is never cut) and from
    * `restart` (which stops its commands anyway). An image Docker cannot inspect, or a shell that reports none, is
    * unknown: nothing is re-created (a create from a missing image would fail and lose a startable shell), and one warn
    * line with ids only says so.
@@ -1005,6 +1007,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       return null;
     }
     if (c.Image !== want) return "image";
+    if (!shellEnvCurrent(c.Config?.Env)) return "env";
     return null;
   }
 
@@ -1210,22 +1213,25 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         if (!c) throw failure("not_found", 404, "this bot has no sandbox");
         if (diskFull.has(targetKey(target)))
           throw failure("disk_full", 409, "the workspace is over its quota");
-        if (options.egress) {
-          const network = await ensureNetwork(target);
-          const egressAddress = await options.egress.attach(target, "sbx", network);
-          if (!egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)) {
-            // A Docker restart keeps a stale /etc/hosts entry: the shell is created again with the current address.
-            const dockerRuntime = await chooseRuntime();
-            await removeShell(c);
-            const fresh = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
-            const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
-            if (started.status !== 204 && started.status !== 304) throw dockerDown();
-            lastActive.set(targetKey(target), clock.now());
-            stopReasons.delete(targetKey(target));
-            cpuLast.delete(targetKey(target));
-            emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
-            return statusOf(target, await ownedShell(target));
-          }
+        // A Docker restart keeps the container's /etc/hosts, image and environment: a shell with a stale proxy entry,
+        // an older image or an older environment (07.17.1.1.1 D-10) is created again instead. A restart stops its
+        // commands anyway, so a running shell may be re-created here (never from `ensure`).
+        const network = options.egress ? await ensureNetwork(target) : null;
+        const egressAddress =
+          options.egress && network ? await options.egress.attach(target, "sbx", network) : null;
+        if (await driftOf(target, c, egressAddress)) {
+          requirePolicy(target.orgId, { runnable: true });
+          const dockerRuntime = await chooseRuntime();
+          const net = network ?? (await ensureNetwork(target));
+          await removeShell(c);
+          const fresh = await createShell(target, lim.container, dockerRuntime, net, egressAddress);
+          const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
+          if (started.status !== 204 && started.status !== 304) throw dockerDown();
+          lastActive.set(targetKey(target), clock.now());
+          stopReasons.delete(targetKey(target));
+          cpuLast.delete(targetKey(target));
+          emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
+          return statusOf(target, await ownedShell(target));
         }
         expectStop(c.Id);
         const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/restart?t=5`);
