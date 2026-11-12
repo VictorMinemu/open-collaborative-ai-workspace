@@ -4569,4 +4569,240 @@ describe("07.17.1.1.2 tasks", () => {
       { ...input, kind: "generic" },
     ]);
   });
+
+  it("every mirrored task schema gives the contract's verdict on a valid and an invalid sample (07.17.1.1.2-01 T3)", async () => {
+    const { tasks, channel, m } = await load();
+    const c = tasks as Record<string, Schema>;
+    const cont = { eventId: EVENT, agentId: AGENT, progress: "Read 400 files", nextStep: "Read 400 more" };
+    const refused = { ok: false, code: "no_task", sentence: m.BOT_TASK_SENTENCES.no_task };
+    const long = (n: number) => "x".repeat(n);
+    const table: Array<[string, Schema, Schema, unknown, unknown]> = [
+      ["TaskGoal", m.TaskGoal, c.TaskGoal as Schema, " A goal ", "two\nlines"],
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "A note", long(501)],
+      [
+        "TaskSummary",
+        m.TaskSummary,
+        c.TaskSummary as Schema,
+        "Line one\nline two",
+        `x${String.fromCodePoint(0x2066)}`,
+      ],
+      ["TaskWaitFor", m.TaskWaitFor, c.TaskWaitFor as Schema, { workSessionId: SESSION }, {}],
+      [
+        "AgentChannelTaskStart",
+        m.AgentChannelTaskStart,
+        c.AgentChannelTaskStart as Schema,
+        { eventId: EVENT, agentId: AGENT, goal: "A goal" },
+        { eventId: EVENT, agentId: AGENT, goal: "A goal", conversationId: U(4) },
+      ],
+      [
+        "AgentChannelTaskContinue",
+        m.AgentChannelTaskContinue,
+        c.AgentChannelTaskContinue as Schema,
+        { ...cont, afterSeconds: 120, waitFor: { processId: "p1" } },
+        { ...cont, afterSeconds: 99999 },
+      ],
+      [
+        "AgentChannelTaskFinish",
+        m.AgentChannelTaskFinish,
+        c.AgentChannelTaskFinish as Schema,
+        { eventId: EVENT, agentId: AGENT, summary: "Done.", outcome: "blocked" },
+        { eventId: EVENT, agentId: AGENT, summary: "Done.", outcome: "budget_turns" },
+      ],
+      [
+        "BotTaskRefused",
+        m.BotTaskRefused,
+        c.BotTaskRefused as Schema,
+        refused,
+        { ...refused, sentence: long(301) },
+      ],
+      [
+        "AgentChannelTaskStartResponse",
+        m.AgentChannelTaskStartResponse,
+        c.AgentChannelTaskStartResponse as Schema,
+        refused,
+        { ok: true, taskId: TASK, maxTurns: 0, deadlineAt: LATER },
+      ],
+      [
+        "AgentChannelTaskContinueResponse",
+        m.AgentChannelTaskContinueResponse,
+        c.AgentChannelTaskContinueResponse as Schema,
+        { ok: true, next: "on_session", at: LATER, turnsLeft: 2, quiet: false },
+        { ok: true, next: "on_session", at: LATER, turnsLeft: -1, quiet: false },
+      ],
+      [
+        "AgentChannelTaskFinishResponse",
+        m.AgentChannelTaskFinishResponse,
+        c.AgentChannelTaskFinishResponse as Schema,
+        { ok: true, status: "failed" },
+        { ok: true, status: "stopped" },
+      ],
+      [
+        "TaskProcessFact",
+        m.TaskProcessFact,
+        c.TaskProcessFact as Schema,
+        exited,
+        { ...exited, status: "running" },
+      ],
+      ["TurnTask", m.TurnTask, c.TurnTask as Schema, task, { ...task, status: "stopped" }],
+      ["BotTaskWaitKind", m.BotTaskWaitKind, c.BotTaskWaitKind as Schema, "session", "forever"],
+      ["BotTaskWakeReason", m.BotTaskWakeReason, c.BotTaskWakeReason as Schema, "nudge", "session"],
+      ["BotTaskRefusal", m.BotTaskRefusal, c.BotTaskRefusal as Schema, "once_per_turn", "task_exploded"],
+      [
+        "AgentTaskEvent",
+        m.AgentTaskEvent,
+        channel.AgentTaskEvent as Schema,
+        taskEvent,
+        { ...taskEvent, task: { reason: "continue" } },
+      ],
+    ];
+    for (const [name, mirror, contract, valid, invalid] of table) {
+      expect(contract.safeParse(valid).success, `${name} valid`).toBe(true);
+      expect(contract.safeParse(invalid).success, `${name} invalid`).toBe(false);
+      expectSameVerdicts(mirror, contract, [valid, invalid]);
+    }
+    expect({ ...m.BOT_TASK_SENTENCES }).toEqual({ ...(tasks.BOT_TASK_SENTENCES as Record<string, string>) });
+  });
+
+  it("a 07.17.1.1 cell event of each existing turn type parses unchanged in the mirror (no new required field)", async () => {
+    const { channel, m } = await load();
+    const legacyTurn = {
+      ...turn,
+      tools: ["ocw_agent_card"],
+      toolFlags: { ocw_agent_card: turn.toolFlags.ocw_agent_card },
+    };
+    const base = { ...mention, turn: legacyTurn };
+    const events: Array<[string, Schema, Schema, Record<string, unknown>]> = [
+      ["mention", m.AgentMentionEvent, channel.AgentMentionEvent as Schema, base],
+      [
+        "card_action",
+        m.AgentCardActionEvent,
+        channel.AgentCardActionEvent as Schema,
+        {
+          ...base,
+          type: "agent.card_action.v1",
+          cardAction: { messageId: U(9), kind: "report", title: "Weekly report", outcome: "approved" },
+        },
+      ],
+      [
+        "automation_run",
+        m.AgentAutomationRunEvent,
+        channel.AgentAutomationRunEvent as Schema,
+        {
+          ...base,
+          type: "agent.automation_run.v1",
+          automationRun: {
+            automationId: U(10),
+            runId: U(11),
+            name: "Daily digest",
+            trigger: "schedule",
+            instructions: "Summarise the channel.",
+            inbound: null,
+          },
+        },
+      ],
+      [
+        "consult_reply",
+        m.AgentConsultReplyEvent,
+        channel.AgentConsultReplyEvent as Schema,
+        {
+          ...base,
+          type: "agent.consult_reply.v1",
+          consultReply: {
+            chainId: U(12),
+            hopId: U(13),
+            target: { id: U(14), handle: "atlas", displayName: "Atlas" },
+            mode: "consult",
+            outcome: "answered",
+            answerMessageId: U(15),
+          },
+        },
+      ],
+      [
+        "work_session",
+        m.AgentWorkSessionEvent,
+        channel.AgentWorkSessionEvent as Schema,
+        {
+          ...base,
+          type: "agent.work_session.v1",
+          workSession: {
+            workSessionId: SESSION,
+            transition: "turn_done",
+            status: "idle",
+            summary: "Turn 2 finished.",
+            pendingApprovals: 0,
+            deciders: [],
+          },
+        },
+      ],
+      [
+        "automation_item",
+        m.AgentAutomationItemEvent,
+        channel.AgentAutomationItemEvent as Schema,
+        {
+          ...base,
+          type: "agent.automation_item.v1",
+          automationItem: {
+            automationId: U(10),
+            runId: U(11),
+            itemId: U(16),
+            name: "New orders",
+            instructions: "Prepare each order.",
+            item: { title: "Order 1042", text: "Order 1042 from the ERP.", openedAt: AT },
+            escalation: [],
+          },
+        },
+      ],
+    ];
+    for (const [name, mirror, contract, event] of events) {
+      const parsed = mirror.safeParse(event);
+      expect(parsed.success, name).toBe(true);
+      expect(parsed.data, name).toEqual(event);
+      expect("task" in ((parsed.data as { turn: object }).turn ?? {}), name).toBe(false);
+      expect(contract.safeParse(event).data, name).toEqual(event);
+    }
+  });
+
+  it("an agent.task.v1 event fails the mirror's mention schema only on its type, and this bridge skips it", async () => {
+    const { m } = await load();
+    const asMention = m.AgentMentionEvent.safeParse(taskEvent);
+    expect(asMention.success).toBe(false);
+    expect(asMention.error?.issues.map((i) => i.path.join("."))).toEqual(["type"]);
+    // The bridge's own type check: before 07.17.1.1.2-05 adds the handler, a task turn is an unknown type, logged with
+    // its seq and skipped (no run, no post, no failure reply); 05 replaces this pin with the task handler's tests.
+    const logs: string[] = [];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const bridge = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      log: { info: (l) => logs.push(l), warn: (l) => logs.push(l), error: (l) => logs.push(l) },
+      typingIntervalMs: 50,
+      retryDelayMs: 10,
+    });
+    await bridge.refreshCell();
+    const frame = {
+      ...taskEvent,
+      agent: { id: ARCHIE.id, handle: ARCHIE.handle, displayName: ARCHIE.displayName },
+    };
+    await bridge.handleFrame({ seq: 12, type: "agent.task.v1", data: frame });
+    expect(port.dispatched).toEqual([]);
+    expect(api.messages).toEqual([]);
+    expect(logs.some((l) => l.includes("seq=12: ignoring unknown event type agent.task.v1"))).toBe(true);
+  });
+
+  it("TurnContext without task and with task: undefined parse to the same value in both copies; a bad task is dropped by the mirror only", async () => {
+    const { caps, m } = await load();
+    const contract = caps.TurnContext as Schema;
+    const plain = m.TurnContext.parse(turn);
+    const undef = m.TurnContext.parse({ ...turn, task: undefined });
+    expect(undef).toEqual(plain);
+    expect(contract.safeParse({ ...turn, task: undefined }).data).toEqual(contract.safeParse(turn).data);
+    expect(plain).toEqual(contract.safeParse(turn).data);
+    // An invalid block: the contract (the API's own output) refuses it; the mirror keeps the turn without it.
+    const bad = { ...turn, task: { ...task, finishedProcesses: Array(11).fill(exited) } };
+    expect(contract.safeParse(bad).success).toBe(false);
+    const kept = m.TurnContext.parse(bad);
+    expect(kept.task).toBeUndefined();
+    expect(kept.tools).toEqual(turn.tools);
+  });
 });
