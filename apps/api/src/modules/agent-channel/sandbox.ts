@@ -73,6 +73,7 @@ import { attachmentAuditFields, attachmentForTurn } from "./attachment-access";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn, taintReturnTurns } from "./claim";
+import { linkTaskProcess } from "./task-process-wakes";
 import { APPROVAL_MESSAGES, approvalDetails, approvalVerdict, type ToolApprovalGate } from "./tool-calls";
 
 /**
@@ -979,11 +980,22 @@ export function registerSandboxRoutes(
             { timeoutMs: yieldMs + EXEC_ANSWER_MARGIN_MS },
           );
         },
-        finish: async (_tx, result) => ({
-          response: result,
-          stepResult: result,
-          audit: { status: result.status, exitCode: result.status === "exited" ? result.exitCode : null },
-        }),
+        finish: async (tx, result, turn) => {
+          // 07.17.1.1.2 PD-13: a task turn's command still running is linked to its task, so its end wakes the task
+          // waiting on it (sandboxd's `process` event). A turn without a task links nothing (P5).
+          if (result.status === "running") {
+            await linkTaskProcess(tx, {
+              turn,
+              processId: result.processId,
+              timeoutSeconds: body.timeoutSeconds ?? DEFAULT_EXEC_TIMEOUT_SECONDS,
+            });
+          }
+          return {
+            response: result,
+            stepResult: result,
+            audit: { status: result.status, exitCode: result.status === "exited" ? result.exitCode : null },
+          };
+        },
       });
     },
   );

@@ -8,6 +8,7 @@ import {
   BUILTIN_TOOLS,
   cellTopic,
   type ModelRef,
+  type TaskProcessFact,
   taskContinueSentence,
 } from "@ocw/contracts";
 import {
@@ -33,6 +34,7 @@ import type { MemoryService } from "../memory";
 import type { PermissionService } from "../organization";
 import { buildMentionEvents } from "./mentions";
 import { refreshTaskCard } from "./task-card";
+import { processWakeOf } from "./task-process-wakes";
 import {
   auditTask,
   type BotTaskRow,
@@ -127,6 +129,8 @@ interface ContinuePlan {
   task: BotTaskRow;
   eventId: string;
   reason: BotTaskWakeReason;
+  /** The ended (or lost) command a `process` wait was woken by (PD-13), carried as `task.process`. */
+  process: TaskProcessFact | null;
   tainted: boolean;
   previous: Reserved;
 }
@@ -161,7 +165,7 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
   // PD-06: not yet (an early job: the done or the timer queues another), or the turn that continued still runs.
   if (!clock.due || !clock.currentDone) return { kind: "none" };
   const eventId = taskEventId(task.id, task.waitSeq);
-  const reason = REASON_OF[task.waitKind ?? "turn"];
+  let reason = REASON_OF[task.waitKind ?? "turn"];
   // A run whose outcome was lost delivered this very wait: the reservation is confirmed, nothing is sent again.
   if (await delivered(tx, eventId)) {
     await consumeWait(tx, task, { eventId, reason });
@@ -215,6 +219,11 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
     }
   }
 
+  // PD-13: a process wait carries the command's end, or `lost` once its deadline passed with no event (E20); a wait
+  // that came by the bot's own `afterSeconds` while the command still runs is a timer.
+  let process: TaskProcessFact | null = null;
+  if (task.waitKind === "process") ({ reason, process } = await processWakeOf(tx, task));
+
   const previous: Reserved = {
     turnsUsed: task.turnsUsed,
     currentEventId: task.currentEventId,
@@ -228,7 +237,7 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
   const reserved = await lockTask(tx, task.id);
   if (!reserved) return { kind: "none" };
   await refreshTaskCard(tx, core, reserved);
-  return { kind: "deliver", plan: { task: reserved, eventId, reason, tainted, previous } };
+  return { kind: "deliver", plan: { task: reserved, eventId, reason, process, tainted, previous } };
 }
 
 type DeliverResult =
@@ -238,6 +247,7 @@ type DeliverResult =
 /** deliver (tx2, as the requester): the continuation itself (D-07). */
 async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePlan): Promise<DeliverResult> {
   const { task, eventId, reason } = plan;
+  const taskFacts = { taskId: task.id, reason, ...(plan.process ? { process: plan.process } : {}) };
   // A concurrent run delivered this very wait since tx1 (its turn is keyed by the wait's own id).
   if (await delivered(tx, eventId)) return { delivered: true };
   const [conv] = await tx
@@ -301,7 +311,7 @@ async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePl
     createdAt: new Date().toISOString(),
     delivery: direct ? "dm" : "thread",
     trigger: "task",
-    task: { taskId: task.id, reason },
+    task: taskFacts,
     taintedAtStart: plan.tainted,
     // The wait's own id: delivered at most once whatever retries or runs concurrently.
     eventId,
@@ -341,7 +351,7 @@ async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePl
   const payload: Omit<AgentTaskEvent, "seq"> = {
     ...ev,
     type: AgentChannelEventTypes.task,
-    task: { taskId: task.id, reason },
+    task: taskFacts,
   };
   await core.realtime.appendEvent(tx, cellTopic(organizationId), AgentChannelEventTypes.task, payload, {
     actorUserId: task.requesterUserId,
@@ -352,6 +362,7 @@ async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePl
     turnsUsed: task.turnsUsed,
     maxTurns: task.maxTurns,
     reason,
+    ...(plan.process ? { processId: plan.process.processId } : {}),
   });
   return { delivered: true };
 }

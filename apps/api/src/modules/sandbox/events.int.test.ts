@@ -288,14 +288,15 @@ describe("replay after an API restart never double-counts (T-07.8-11-05)", () =>
       { bootId: B, events: [ev(1, 7)], nextSeq: 1 },
       { bootId: A, events: [ev(2, 999)], nextSeq: 2 },
     ];
+    // The consumer reads the feed's raw body (`stream`) and parses each event on its own (07.17.1.1.2-11, E25).
     const stub = {
       async call(op: string) {
         if (op === "policy") return { ok: true };
-        if (op !== "events") throw new Error(`unexpected ${op}`);
-        return script.shift() ?? { bootId: B, events: [], nextSeq: 1 };
+        throw new Error(`unexpected ${op}`);
       },
-      async stream() {
-        throw new Error("no stream");
+      async stream(op: string) {
+        if (op !== "events") throw new Error(`unexpected stream ${op}`);
+        return new Response(JSON.stringify(script.shift() ?? { bootId: B, events: [], nextSeq: 1 })).body;
       },
     } as unknown as SandboxdClient;
     const c = consumer(stub, KEY + 1);
