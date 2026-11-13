@@ -287,6 +287,20 @@ describe("AI chats (06-10, D-07, P-10)", () => {
     expect(m.allowedTools).not.toContain("ocw_sandbox_exec");
   });
 
+  it("07.17.1.1.2 code review WR-07: a tool left out because the turn is full says so", () => {
+    const withheld = [
+      { tool: "ocw_task_start", reason: "turn_full" },
+      { tool: "bulk__t125", reason: "turn_full" },
+    ];
+    const m = mapMention(mention({ turn: { ...turn, withheld } } as never), BOT);
+    const block = m.contextBlocks.find((b) => b.type === "withheld_tools");
+    expect(block?.payload.withheld).toEqual([
+      "ocw_task_start — this turn already carries the most tools one turn can have",
+      "bulk__t125 — this turn already carries the most tools one turn can have",
+    ]);
+    expect(m.allowedTools).not.toContain("ocw_task_start");
+  });
+
   it("an invalid withheld list is dropped without dropping the turn (informational only)", () => {
     const parsed = AgentMentionEvent.parse({
       ...aiChat(),

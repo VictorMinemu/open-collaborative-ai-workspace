@@ -365,6 +365,10 @@ export const TurnWithheldReason = z.enum([
   // off (`sandbox_off`) or an admin stopped every sandbox and browser (`killed`), so the bot can say why.
   "sandbox_off",
   "killed",
+  // 07.17.1.1.2 code review WR-07 (additive; an older plugin reads any reason as "not available"): the turn already
+  // carries `TURN_TOOLS_MAX` tools, so a task tool was not offered (`ocw_task_start`), or a granted tool gave its place to
+  // the task's continue and finish on a turn of a running task.
+  "turn_full",
 ]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
 

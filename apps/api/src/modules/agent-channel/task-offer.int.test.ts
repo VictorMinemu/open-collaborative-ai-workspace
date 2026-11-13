@@ -838,8 +838,8 @@ describe("finished processes are reported on the task's own turns, once each (PD
   });
 });
 
-describe("the task tools never evict a platform tool (TURN_TOOLS_MAX, P5)", () => {
-  it("TURN_TOOLS_MAX - 1 usable tools: the last two connector tools give their places to the three task tools", async () => {
+describe("the task tools never evict a platform tool, and never silently drop a granted one (TURN_TOOLS_MAX, P5, code review WR-07)", () => {
+  it("TURN_TOOLS_MAX - 1 usable tools: no start offer, every granted tool kept, the start withheld as turn_full; a control turn makes room and says which tools it dropped", async () => {
     const bot = await s.newBot(`Bulky ${randomUUID().slice(0, 4)}`);
     await ok(
       s.victor.request("POST", `/api/v1/channels/${engId}/members`, {
@@ -876,16 +876,38 @@ describe("the task tools never evict a platform tool (TURN_TOOLS_MAX, P5)", () =
         tools: names.map((tool) => ({ sourceKind: "mcp", sourceId: serverMcp, tool })),
       }) as Promise<Res>,
     );
+    // A person's turn at the cap: the start does not fit, so it is not offered; nothing the person was granted goes.
     const full = await turn();
-    expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-    await expectStart(full);
-    for (const name of platform) expect(full.turn.tools).toContain(name);
-    for (const name of names.slice(-2)) {
-      expect(full.turn.tools).not.toContain(name);
-      expect(full.turn.toolFlags).not.toHaveProperty(name);
-    }
-    for (const name of names.slice(0, -2)) expect(full.turn.tools).toContain(name);
+    expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX - 1);
+    expectNoTask(full);
+    for (const name of platform.filter((t) => !t.startsWith("ocw_task_")))
+      expect(full.turn.tools).toContain(name);
+    for (const name of names) expect(full.turn.tools).toContain(name);
+    expect(full.turn.withheld).toEqual(
+      expect.arrayContaining([{ tool: BUILTIN_TOOLS.taskStart, reason: "turn_full" }]),
+    );
     expect((await ledger(full.eventId as string)).tools).toEqual(full.turn.tools);
+
+    // Víctor's waiting task in a thread: his control turn there makes room for continue and finish (the task runs),
+    // and the dropped connector tool is listed for the persona.
+    const root = await post(s.victor, engId, "Sort the bulk export");
+    const t = await seedTask({ threadRootId: root, agentId: bot.id, requesterId: s.victorId });
+    try {
+      const control = await mention(s.victor, { threadRootId: root, handle, agentId: bot.id });
+      expect(control.turn.tools).toHaveLength(TURN_TOOLS_MAX);
+      await expectControl(control, t.id);
+      const dropped = names.slice(-1);
+      for (const name of dropped) {
+        expect(control.turn.tools).not.toContain(name);
+        expect(control.turn.toolFlags).not.toHaveProperty(name);
+      }
+      for (const name of names.slice(0, -1)) expect(control.turn.tools).toContain(name);
+      expect(control.turn.withheld).toEqual(
+        expect.arrayContaining(dropped.map((tool) => ({ tool, reason: "turn_full" }))),
+      );
+    } finally {
+      await endTask(t.id);
+    }
   });
 });
 

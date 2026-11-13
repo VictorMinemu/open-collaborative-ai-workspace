@@ -647,8 +647,13 @@ describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
       const room = await mentionTurn(atlasId);
       await expectOffer(room);
       expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-      // The task tools are platform tools: the last connector tools give them their places.
-      expect(room.turn.tools).toEqual(expect.arrayContaining([...TASK_TOOL_NAMES]));
+      // 07.17.1.1.2 code review WR-07: the task start only takes free slots; none are left, so it is not offered,
+      // every granted connector tool stays, and the turn says why.
+      for (const name of TASK_TOOL_NAMES) expect(room.turn.tools).not.toContain(name);
+      expect(room.turn.tools).toEqual(expect.arrayContaining(names.slice(1)));
+      expect(room.turn.withheld).toEqual(
+        expect.arrayContaining([{ tool: "ocw_task_start", reason: "turn_full" }]),
+      );
     } finally {
       await grant([]);
     }

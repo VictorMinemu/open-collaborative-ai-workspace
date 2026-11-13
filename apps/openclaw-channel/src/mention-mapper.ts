@@ -291,6 +291,10 @@ function withheldReason(w: TurnWithheld, askerName: string, conversation: Withhe
       return "Sandbox & Browser is turned off for this organization";
     case "killed":
       return "an admin stopped every sandbox and browser of this organization";
+    // 07.17.1.1.2 code review WR-07: the turn is at its tool cap (a task start not offered, or a tool that gave its
+    // place to a running task's continue and finish).
+    case "turn_full":
+      return "this turn already carries the most tools one turn can have";
     default:
       return "not available in this conversation";
   }

@@ -1216,22 +1216,33 @@ export async function turnPolicy(
   }
 
   // Phase 07.17.1.1.2 (D-02, D-04, PD-07; P3): the task tools come last, after everything else was decided for the asker,
-  // so a task never widens a turn. They are platform tools: on a full turn the lowest-priority tools (the last
-  // non-platform ones, the conversation-open rule) give their places; all of the offer's tools or none.
+  // so a task never widens a turn; all of the offer's tools or none. Code review WR-07: the start offer (on every
+  // person's turn while long tasks are on) only takes free slots, so a full turn keeps every tool it was granted and
+  // says why the start is missing (`turn_full`). A turn of a running task (control) makes room for continue and
+  // finish, as the conversation-open rule does: the last non-platform tools give their places, each listed as
+  // withheld `turn_full`, so the persona knows a granted tool is missing.
   const task = computed.longTasks ? (p.task ?? null) : null;
   if (task) {
     const missing = TASK_OFFER_TOOLS[task.offer].filter((name) => !computed.toolFlags[name]);
+    const fits = computed.tools.length + missing.length <= MAX_TURN_TOOLS;
     const evictable = computed.tools.filter((name) => !isPlatformTool(name)).length;
-    if (missing.length > 0 && computed.tools.length - evictable + missing.length <= MAX_TURN_TOOLS) {
+    const makeRoom =
+      task.offer === "control" && computed.tools.length - evictable + missing.length <= MAX_TURN_TOOLS;
+    if (missing.length > 0 && (fits || makeRoom)) {
       while (computed.tools.length + missing.length > MAX_TURN_TOOLS) {
         const evict = computed.tools.findLastIndex((name) => !isPlatformTool(name));
         const [name] = computed.tools.splice(evict, 1);
-        if (name) delete computed.toolFlags[name];
+        if (name) {
+          delete computed.toolFlags[name];
+          computed.withheld.push({ tool: name, reason: "turn_full" });
+        }
       }
       for (const name of missing) {
         computed.tools.push(name);
         computed.toolFlags[name] = TASK_TOOL_FLAGS[name];
       }
+    } else if (missing.length > 0 && task.offer === "start") {
+      computed.withheld.push({ tool: BUILTIN_TOOLS.taskStart, reason: "turn_full" });
     }
   }
 
