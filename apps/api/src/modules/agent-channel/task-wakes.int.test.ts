@@ -1,17 +1,25 @@
-import { AgentTaskEvent, BUILTIN_TOOLS } from "@ocw/contracts";
+import { randomUUID } from "node:crypto";
+import { AgentTaskEvent, BUILTIN_TOOLS, taskContinueSentence } from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import {
+  ageTurn,
   continueAs,
+  continuedTask,
   deliverTaskTurn,
   drainTaskJobs,
+  dropTaskJobs,
+  endMessagesOf,
+  queuedTaskJobs,
   reportTurnDone,
   setTask,
   startTaskFor,
   taskEvents,
   taskRow,
 } from "../../testing-tasks";
-import { taskEventId } from "./task-wakes";
+import { createPermissionService } from "../organization";
+import { continueBotTask, taskEventId, tickBotTasks } from "./task-wakes";
 
 /**
  * Phase 07.17.1.1.2-09 (D-01, D-02, D-07; PD-05, PD-06, PD-11; BTASK-01, BTASK-03, BTASK-06): the phase's API end to end,
@@ -238,5 +246,267 @@ describe("who the turn is for and who pays (D-01, D-07, ADR-0019)", () => {
       ])
     ).rows[0] as { n: number };
     expect(usage.n).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: single delivery, timers, nudge, tick
+
+const deps = () => ({ perms: createPermissionService(s.stack.built.core) });
+const turnsWithId = async (eventId: string) =>
+  (
+    (await s.su.query("select count(*)::int as n from app.agent_turns where event_id = $1", [eventId]))
+      .rows[0] as {
+      n: number;
+    }
+  ).n;
+
+describe("the same wait is delivered once (Pitfall 2, PD-06, E3)", () => {
+  it("two handlers at once, the backstop job, the tick and a second done: one turn, one cell event", async () => {
+    const { taskId, start } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    const data = { organizationId: s.orgA, taskId };
+    const outs = await Promise.all([
+      continueBotTask(s.stack.built.core, deps(), data),
+      continueBotTask(s.stack.built.core, deps(), data),
+    ]);
+    expect(outs.filter((o) => o === "delivered")).toHaveLength(1);
+    await drainTaskJobs(s);
+    await tickBotTasks(s.stack.built.core, deps());
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    expect(await turnsWithId(taskEventId(taskId, 1))).toBe(1);
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 2 });
+  });
+});
+
+describe("timers, the backstop and lost turns (D-03, E4, E5)", () => {
+  it("a 120 s timer: nothing at once, one turn with reason timer once wake_at has passed", async () => {
+    const { taskId } = await continuedTask(s, {
+      who: s.sam,
+      conversationId: engId,
+      body: { afterSeconds: 120 },
+    });
+    expect((await taskRow(s, taskId)).wait_kind).toBe("timer");
+    // The jobs are due at wake_at: nothing runs yet, nothing is delivered.
+    expect(await s.stack.built.core.jobs.drain("bot_task.continue")).toBe(0);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      task: { taskId, reason: "timer" },
+      message: { text: "The wait you asked for is over. Continue your task (turn 2 of 40)." },
+    });
+  });
+
+  it("the cell never reports done: the 30-minute backstop delivers the wait once the turn is taken as lost", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    expect((await continueAs(s, event)).body).toMatchObject({ ok: true });
+    await ageTurn(s, event.eventId as string, 31);
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ task: { taskId, reason: "continue" } });
+  });
+});
+
+describe("the nudge (D-12, E6)", () => {
+  it("a task turn ends without continue or finish: one nudge turn; a second one in a row stops the task", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await drainTaskJobs(s);
+    const [second] = await taskEvents(s, taskId);
+    // Turn 2 ends without ocw_task_continue or ocw_task_finish.
+    expect((await reportTurnDone(s, second?.eventId as string)).status).toBe(200);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", wait_kind: "nudge", nudged: true });
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      task: { taskId, reason: "nudge" },
+      message: { text: taskContinueSentence("nudge", 3, 40) },
+    });
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 3, nudged: true });
+
+    // The nudge turn ends without them too: the task stops as blocked, with one message mentioning Sam.
+    expect((await reportTurnDone(s, events[1]?.eventId as string)).status).toBe(200);
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "failed", outcome: "no_progress", wait_kind: null });
+    const card = (
+      await s.su.query("select status, status_label from app.message_cards where message_id = $1", [
+        row.card_message_id,
+      ])
+    ).rows[0] as Json;
+    expect(card).toEqual({ status: "failed", status_label: "Blocked" });
+    const posted = await endMessagesOf(s, taskId);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toMatch(/^@sam I stopped this task: two turns in a row ended without progress\./);
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toHaveLength(2);
+  });
+
+  it("a continue in between resets the nudge: the next idle turn is nudged again, not stopped", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    // The start turn ends without continue: the nudge.
+    expect((await reportTurnDone(s, event.eventId as string)).status).toBe(200);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", wait_kind: "nudge", nudged: true });
+    await drainTaskJobs(s);
+    const [nudge] = await taskEvents(s, taskId);
+    expect(nudge).toMatchObject({ task: { reason: "nudge" } });
+    expect((await continueAs(s, nudge as Json)).body).toMatchObject({ ok: true });
+    expect((await taskRow(s, taskId)).nudged).toBe(false);
+    expect((await reportTurnDone(s, nudge?.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const [, third] = await taskEvents(s, taskId);
+    expect(third).toMatchObject({ task: { reason: "continue" } });
+    expect((await reportTurnDone(s, third?.eventId as string)).status).toBe(200);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", wait_kind: "nudge", nudged: true });
+  });
+});
+
+describe("the minute tick (PD-06, PD-09, E5, E8, E10)", () => {
+  let tokenB: string;
+  let wardenId: string;
+  let fleetId: string;
+
+  beforeAll(async () => {
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await s.su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [s.orgB, sha256Hex(tokenB)],
+    );
+    wardenId = (
+      await ok(
+        s.eve.request("POST", "/api/v1/agents", {
+          name: "Warden",
+          username: "warden",
+          instructions: "You are Warden.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    fleetId = (
+      await ok(
+        s.eve.request("POST", "/api/v1/channels", { name: "fleet", visibility: "public" }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(
+      s.eve.request("POST", `/api/v1/channels/${fleetId}/members`, {
+        kind: "agent",
+        id: wardenId,
+      }) as Promise<Res>,
+    );
+  });
+
+  /** Moves a task's eight hours into the past (its hour budget stays 8). */
+  const pastDeadline = async (taskId: string) => {
+    const row = await taskRow(s, taskId);
+    const shift = 9 * 3_600_000;
+    await setTask(s, taskId, {
+      started_at: new Date(new Date(row.started_at as string).getTime() - shift),
+      deadline_at: new Date(new Date(row.deadline_at as string).getTime() - shift),
+    });
+  };
+
+  it("a waiting task due two minutes ago whose job was lost: the tick queues it and it is delivered", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await dropTaskJobs(s, taskId);
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 2 * 60_000) });
+    await tickBotTasks(s.stack.built.core, deps());
+    expect((await queuedTaskJobs(s, taskId)).length).toBeGreaterThanOrEqual(1);
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+  });
+
+  it("a running task whose current turn is 31 minutes old without done: the nudge path", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    await ageTurn(s, event.eventId as string, 31);
+    await setTask(s, taskId, { updated_at: new Date(Date.now() - 31 * 60_000) });
+    await tickBotTasks(s.stack.built.core, deps());
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", wait_kind: "nudge", nudged: true });
+    await drainTaskJobs(s);
+    const [ev] = await taskEvents(s, taskId);
+    expect(ev).toMatchObject({ task: { taskId, reason: "nudge" } });
+  });
+
+  it("a task past its deadline is stopped budget_time with one message", async () => {
+    const { taskId } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    await pastDeadline(taskId);
+    await tickBotTasks(s.stack.built.core, deps());
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "stopped", outcome: "budget_time" });
+    const posted = await endMessagesOf(s, taskId);
+    expect(posted.map((m) => m.body)).toEqual([
+      "@sam I stopped this task after 8 h, the limit for one task. The card shows where it got to.",
+    ]);
+  });
+
+  it("a task of a disabled bot is stopped bot_unavailable without a message", async () => {
+    const ranger = await s.newBot("Ranger");
+    const { taskId } = await startTaskFor(s, {
+      who: s.sam,
+      conversationId: ranger.dm,
+      agentId: ranger.id,
+      handle: null,
+    });
+    await s.su.query("update app.agents set status = 'disabled' where id = $1", [ranger.id]);
+    await tickBotTasks(s.stack.built.core, deps());
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "stopped", outcome: "bot_unavailable" });
+    const card = (
+      await s.su.query("select notices from app.message_cards where message_id = $1", [row.card_message_id])
+    ).rows[0] as Json;
+    expect(card.notices).toEqual([
+      { tone: "neutral", text: "Stopped: the bot is not available here any more." },
+    ]);
+    await new Promise((r) => setTimeout(r, 300));
+    const posted = (
+      await s.su.query(
+        "select 1 from app.messages m left join app.message_cards c on c.message_id = m.id where m.conversation_id = $1 and m.author_kind = 'agent' and c.message_id is null",
+        [ranger.dm],
+      )
+    ).rows;
+    expect(posted).toEqual([]);
+  });
+
+  it("tasks of two organizations past their deadline are each stopped in their own organization", async () => {
+    const { taskId: a } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const evB = await deliverTaskTurn(s, {
+      who: s.eve,
+      conversationId: fleetId,
+      agentId: wardenId,
+      handle: "warden",
+      organizationId: s.orgB,
+    });
+    const startB = await s.cell(
+      "/tasks/start",
+      { eventId: evB.eventId, agentId: wardenId, goal: "Count the fleet" },
+      tokenB,
+    );
+    expect(startB.body).toMatchObject({ ok: true });
+    const b = startB.body?.taskId as string;
+    await pastDeadline(a);
+    await pastDeadline(b);
+    await tickBotTasks(s.stack.built.core, deps());
+    expect(await taskRow(s, a)).toMatchObject({
+      organization_id: s.orgA,
+      status: "stopped",
+      outcome: "budget_time",
+    });
+    expect(await taskRow(s, b)).toMatchObject({
+      organization_id: s.orgB,
+      status: "stopped",
+      outcome: "budget_time",
+    });
+    const audits = (
+      await s.su.query(
+        "select organization_id, resource_id from app.audit_events where action = 'bot.task_stopped' and resource_id::text = any($1::text[])",
+        [[a, b]],
+      )
+    ).rows as Json[];
+    expect(audits).toHaveLength(2);
+    expect(audits.find((r) => r.resource_id === b)?.organization_id).toBe(s.orgB);
   });
 });

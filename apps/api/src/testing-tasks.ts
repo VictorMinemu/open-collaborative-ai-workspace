@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { expect } from "vitest";
 import type { TestClient } from "./testing";
+import { eventually } from "./testing-device";
 import { type Json, ok, type Res, type SandboxStack } from "./testing-sandbox";
 
 /**
@@ -131,6 +132,7 @@ const SETTABLE = new Set([
   "last_post_at",
   "nudged",
   "tainted",
+  "updated_at",
 ]);
 
 /** Superuser test seam: writes clock-like and state fields of a task row directly (Dates as ISO strings). */
@@ -192,4 +194,68 @@ export async function taskEvents(s: SandboxStack, taskId: string, organizationId
       [`cell:${organizationId ?? s.orgA}`, taskId],
     )
   ).rows.map((r) => r.payload as Json);
+}
+
+/** The bot's plain (card-less) messages in the task's thread (or its DM), oldest first. */
+export async function botMessagesOf(s: SandboxStack, taskId: string): Promise<Json[]> {
+  const row = await taskRow(s, taskId);
+  return (
+    await s.su.query(
+      `select m.body from app.messages m left join app.message_cards c on c.message_id = m.id
+        where m.conversation_id = $1 and m.author_kind = 'agent' and c.message_id is null
+          and m.thread_id is not distinct from $2 order by m.created_at`,
+      [row.conversation_id, row.thread_root_id],
+    )
+  ).rows as Json[];
+}
+
+/**
+ * The task's end messages once the first has been posted (they are posted after commit), after a short settle so a
+ * second one (a duplicate, a generic limit notice) would show too.
+ */
+export async function endMessagesOf(s: SandboxStack, taskId: string): Promise<Json[]> {
+  await eventually(async () => ((await botMessagesOf(s, taskId)).length > 0 ? true : undefined));
+  await new Promise((r) => setTimeout(r, 300));
+  return botMessagesOf(s, taskId);
+}
+
+/** Superuser seam: the turn `eventId` was delivered `minutes` ago (a lost or old turn, PD-06). */
+export async function ageTurn(s: SandboxStack, eventId: string, minutes: number): Promise<void> {
+  await s.su.query(
+    "update app.agent_turns set created_at = now() - make_interval(mins => $2) where event_id = $1",
+    [eventId, minutes],
+  );
+}
+
+/** The task's queued (not yet run) `bot_task.continue` jobs. */
+export async function queuedTaskJobs(s: SandboxStack, taskId: string): Promise<Json[]> {
+  return (
+    await s.su.query(
+      "select id, start_after from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1 and state in ('created', 'retry')",
+      [taskId],
+    )
+  ).rows as Json[];
+}
+
+/** Drops the task's queued jobs (a lost job: only the tick can recover the task). */
+export async function dropTaskJobs(s: SandboxStack, taskId: string): Promise<void> {
+  await s.su.query(
+    "delete from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1 and state in ('created', 'retry')",
+    [taskId],
+  );
+}
+
+/** A task continued on its start turn, which then reported done: due once the 5 s gap passes (`drainTaskJobs`). */
+export async function continuedTask(
+  s: SandboxStack,
+  p: TaskTurnInput & { body?: Record<string, unknown> },
+): Promise<{ taskId: string; start: Json }> {
+  const { taskId, event } = await startTaskFor(s, p);
+  const c = await continueAs(s, event, p.body ?? {});
+  expect(c.body, JSON.stringify(c.body)).toMatchObject({ ok: true });
+  const d = await reportTurnDone(s, event.eventId as string, "replied", {
+    agentId: event.agent.id as string,
+  });
+  expect(d.status, JSON.stringify(d.body)).toBe(200);
+  return { taskId, start: event };
 }
