@@ -7,11 +7,11 @@ import {
   AgentTaskEvent,
   ATTACHMENT_READ_FLAGS,
   ATTACHMENT_READ_LIMITS,
+  BOT_CONVERSATION_LIMITS,
   BotCapabilities,
   BotCapabilityView,
   BotPolicy,
   BROWSER_TOOL_NAMES,
-  BOT_CONVERSATION_LIMITS,
   BUILTIN_TOOLS,
   BuiltinCapability,
   CellAgent,
@@ -172,10 +172,9 @@ describe("bot conversations policy (quick 261113-id6): how long conversations ar
       { strictSummaries: "yes" },
       { freshSessionOnFailure: null },
     ]) {
-      expect(
-        UpdateBotPolicyRequest.safeParse({ conversations }).success,
-        JSON.stringify(conversations),
-      ).toBe(false);
+      expect(UpdateBotPolicyRequest.safeParse({ conversations }).success, JSON.stringify(conversations)).toBe(
+        false,
+      );
     }
   });
 

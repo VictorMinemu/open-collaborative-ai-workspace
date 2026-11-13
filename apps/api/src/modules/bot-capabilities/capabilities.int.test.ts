@@ -1018,7 +1018,9 @@ describe("conversations policy (quick 261113-id6)", () => {
     const changesBefore = (await configChanges("policy.updated")).length;
     const p = await ok(putPolicy({ conversations: { keepRecentTokens: 8_000 } }));
     expect(p.conversations).toEqual({ ...DEFAULTS, keepRecentTokens: 8_000 });
-    const p2 = await ok(putPolicy({ conversations: { strictSummaries: true, freshSessionOnFailure: false } }));
+    const p2 = await ok(
+      putPolicy({ conversations: { strictSummaries: true, freshSessionOnFailure: false } }),
+    );
     expect(p2.conversations).toEqual({
       strictSummaries: true,
       keepIdentifiers: false,
@@ -1069,9 +1071,10 @@ describe("conversations policy (quick 261113-id6)", () => {
 
     // The database holds the same bounds.
     await expect(
-      su.query("update app.bot_policies set conversation_keep_recent_tokens = 100 where organization_id = $1", [
-        orgId,
-      ]),
+      su.query(
+        "update app.bot_policies set conversation_keep_recent_tokens = 100 where organization_id = $1",
+        [orgId],
+      ),
     ).rejects.toThrow(/bot_policies_conversation_keep_recent_tokens_check/);
   });
 
@@ -1092,7 +1095,9 @@ describe("conversations policy (quick 261113-id6)", () => {
     );
     const { db } = stack.built.core;
     // `loadPolicy` reads the first visible row: only RLS keeps this organization's saved row out.
-    const theirs = await db.withTenant({ organizationId: otherOrg, userId: otherUser }, (tx) => loadPolicy(tx));
+    const theirs = await db.withTenant({ organizationId: otherOrg, userId: otherUser }, (tx) =>
+      loadPolicy(tx),
+    );
     expect(theirs.conversations).toEqual(DEFAULTS);
     expect(theirs.updatedAt).toBeNull();
     // Not vacuous: the saved value is read in its own organization.

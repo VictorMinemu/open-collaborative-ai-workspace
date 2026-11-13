@@ -717,7 +717,9 @@ export const botPolicies = appSchema.table(
     conversationStrictSummaries: boolean("conversation_strict_summaries").notNull().default(false),
     conversationKeepIdentifiers: boolean("conversation_keep_identifiers").notNull().default(false),
     conversationKeepRecentTokens: integer("conversation_keep_recent_tokens").notNull().default(20000),
-    conversationFreshSessionOnFailure: boolean("conversation_fresh_session_on_failure").notNull().default(true),
+    conversationFreshSessionOnFailure: boolean("conversation_fresh_session_on_failure")
+      .notNull()
+      .default(true),
   },
   (t) => [
     check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`),

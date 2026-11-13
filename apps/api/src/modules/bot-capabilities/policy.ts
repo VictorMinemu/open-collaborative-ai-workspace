@@ -126,7 +126,12 @@ function changedKeys(before: BotPolicy, after: BotPolicy): string[] {
   for (const key of ["maxTurns", "maxHours", "maxRunning"] as const) {
     if (before.tasks[key] !== after.tasks[key]) out.push(`tasks.${key}`);
   }
-  for (const key of ["strictSummaries", "keepIdentifiers", "keepRecentTokens", "freshSessionOnFailure"] as const) {
+  for (const key of [
+    "strictSummaries",
+    "keepIdentifiers",
+    "keepRecentTokens",
+    "freshSessionOnFailure",
+  ] as const) {
     if (before.conversations[key] !== after.conversations[key]) out.push(`conversations.${key}`);
   }
   return out;
