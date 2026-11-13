@@ -414,6 +414,12 @@ describe("07.17.1.1.2 tasks: the platform task card (D-05, PD-11, PD-12, T-07.17
     expect(AgentCardTaskLink.safeParse({ ...link, waiting: "forever" }).success).toBe(false);
     // A viewer field never travels in the link (realtime events may carry it to every reader).
     expect("canStop" in AgentCardTaskLink.parse({ ...link, canStop: true })).toBe(false);
+    // 07.17.1.1.2-10: the timer's due time is additive (an older link without it still parses).
+    const timer = { ...link, status: "waiting", waiting: "timer", wakeAt: LATER };
+    expect(AgentCardTaskLink.parse(timer)).toEqual(timer);
+    expect(AgentCardTaskLink.parse({ ...link, wakeAt: null }).wakeAt).toBeNull();
+    expect("wakeAt" in AgentCardTaskLink.parse(link)).toBe(false);
+    expect(AgentCardTaskLink.safeParse({ ...link, wakeAt: "soon" }).success).toBe(false);
   });
 
   it("AgentCardInput refuses the platform-owned kinds (task, browser) and still accepts report", () => {
