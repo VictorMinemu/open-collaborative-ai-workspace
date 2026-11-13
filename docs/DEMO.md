@@ -1198,7 +1198,9 @@ needs more than one turn, it starts a task and keeps going in the thread by itse
 - **Start, continue, finish.** The bot calls `ocw_task_start` with a one-line goal, then `ocw_task_continue` with its
   progress and next step at the end of each turn, and `ocw_task_finish` (done, or blocked when it needs the person).
   The platform delivers its next turn in the same thread 5 s after the last one ended. A turn that ends without
-  either call gets one nudge turn; a second one in a row stops the task as blocked.
+  either call gets one nudge turn; a second one in a row stops the task as blocked. A next turn that cannot be
+  delivered after three tries (15 s, then 30 s apart) stops the task as failed, with one message. Each tool succeeds
+  at most once per turn, and a turn makes at most six task calls.
 - **Waits.** `waitFor: { processId }` waits for a background sandbox command (`ocw-extract --batch` with
   `background true`, `timeoutSeconds 600`): the bot is woken with its exit code (75: run the same batch again; 8: no
   progress; 0: done). `waitFor: { workSessionId }` waits for a Work Zone session the task started. `afterSeconds`
@@ -1210,11 +1212,13 @@ needs more than one turn, it starts a task and keeps going in the thread by itse
   for a personal bot, bot admins and the unit's leads for a team bot). No new turn starts; a turn already running
   finishes.
 - **Limits.** Settings › Bot policy › **Long tasks** (on by default, team and personal columns), **Turns per task**
-  (40, 1–200), **Hours per task** (8, 1–24), **Tasks running at once** (10, 0–100; 0 turns long tasks off). Per bot:
+  (40, 1–200), **Hours per task** (8, 1–24), **Tasks running at once** (10, 0–100; at 0 no new task starts). Per bot:
   Bots › the bot › Capabilities › **Long tasks**. Every task turn runs as, and is paid by, the person who started it,
   and counts in the bot's daily limit. When a limit ends the task, the bot posts one message mentioning that person.
 - **Safety.** Each turn is re-decided as that person; the taint is sticky; continuations have no browser tools; not
-  in AI chats. Losing access to the conversation, or the bot turned off or removed, stops the task.
+  in AI chats. Losing access to the conversation, or the bot turned off or removed, stops the task. Only that
+  person's own message (never another bot's consult or an automation) can steer the task while it waits. A turn
+  that already carries 128 tools is not offered the start, and says so (`turn_full`).
 - **Audit.** `bot.task_started`, `bot.task_continued`, `bot.task_finished`, `bot.task_stopped` and
   `bot.task_refused` carry ids, counts, reasons and durations, never the goal, the notes or the summary.
 

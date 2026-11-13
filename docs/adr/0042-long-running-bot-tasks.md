@@ -344,3 +344,72 @@ So the fix is a platform entity, three tools, one more trigger, and one guidance
   - shorter history on task turns;
   - tasks in AI chats.
 - AGENTS.md's "Jobs and automations" row names long bot tasks and cites this record next to ADR-0028.
+
+## Amendment (code review)
+
+**Date:** 2026-11-13, before the phase merged. The phase's code review
+(`.planning/phases/07.17.1.1.2-long-running-bot-tasks-a-bot-keeps-working-across-turns-on-i/07.17.1.1.2-REVIEW.md`,
+findings CR-01 to IN-10, fix log at its end) found places where the behaviour fell short of the text above. The
+decision stands. The points below change behaviour; where they name a sentence above, they replace or complete it.
+
+- **A Stop is never overtaken by a delivery (CR-01).** This makes § 7's "Stopping is immediate for the platform: no
+  new turn is delivered" hold between the reservation and the delivery. The delivery (§ 4's second transaction) locks
+  the task row first and goes on only while the task still holds its reservation (`running`, this continuation's id
+  as its current turn, the reserved `wait_seq`). A Stop, a budget stop or a policy stop that committed in between wins:
+  no turn, no metering, no `bot.task_continued`, and the reserved turn is given back on the ended row. A continuation
+  (`trigger: "task"`) only ever controls the task it continues.
+- **Only a person's own message takes control while the task waits (WR-04).** This narrows § 2's `control` offer
+  ("the requester's turn while the task waits"). Besides
+  the task's own turns (a continuation, a Work Zone wake that took the wait), only the requester's own message
+  (`mention`, `reply_mode`) controls a waiting task. A consult hop (another bot's text), an automation run or an item
+  gets `view`.
+- **A Work Zone wake respects the readiness rule (WR-05).** This completes § 5's Work Zone bullets. A wake takes the
+  task's wait only when § 4's readiness holds (the turn that continued reported done, or is lost after 30 minutes) and
+  only a wait it answers: this session, or the plain "after this turn" and nudge waits. A timer or a background
+  command keeps its wait, and the wake is a `view` turn. A wake that comes while the turn that continued still runs
+  makes a wait on this session due at once, so the task's own continuation follows that turn's done.
+- **A delivery error that persists stops the task (WR-03).** This completes § 6. A continuation job retries twice
+  with backoff (about 15 s, then 30 s). Its last attempt stops the task with outcome `error` (status `failed`, the
+  card's "Stopped after an error.") and one message mentioning the requester: "I stopped this task: an error kept me
+  from going on. The card shows where it got to." The card follows a continuation only once it is delivered, so a
+  failed attempt never touches it. § 6's list of outcomes without a message no longer includes an error.
+- **The API bounds a turn's task calls (WR-06).** This replaces § 11's "The plugin's once-per-turn rule bounds them
+  instead". Under the turn row's lock, a tool that already succeeded on the turn, or a sixth task call of the turn
+  (refusals counted, `taskCallsPerTurnMax`), is refused `once_per_turn` before anything is written but the refusal, so
+  `once_per_turn` (§ 2) is no longer the plugin's alone. The
+  plugin frees a tool's slot once, only after a refusal the model can fix (its params, the wait it named, the
+  workspace unreachable); a second refusal, or one that says the task cannot go on, keeps the slot taken.
+- **Retries never re-run a model turn (WR-01).** This replaces § 9's bridge sentence as far as retries go. The bridge
+  dispatches a turn again only when it failed before the model produced anything (OpenClaw refused it, the agent was
+  not ready). A run in which the model made a tool call is never dispatched again, silent or failed. A silent task
+  turn after a real run gets no failure reply (the API's nudge, § 12, follows); a turn that continued or finished
+  gets none either. The per-attempt inbound id stays for the retries that remain.
+- **A command's end is never lost to its own link (WR-02).** This completes § 5's sandbox bullets. An end whose event
+  is applied before the exec's outcome transaction wrote the link is kept as an unlinked `bot_task_processes` row
+  (`task_id` and `event_id` null, never `running`), only while the bot has an active task. The link takes it (an
+  upsert on the bot's process id) and keeps its status and exit code, so the next task turn lists the real end instead
+  of `lost`. An unclaimed end is pruned after an hour. One more additive migration carries this
+  (`20261113035112_bot_task_process_ends`), so § 15's "One additive migration" is now two.
+- **The task start never evicts a granted tool (WR-07).** This completes § 2's `start` offer, whose three tools used
+  to take the places of a full turn's last connector tools, unlisted. The start takes free tool slots only: on a full
+  turn (`TURN_TOOLS_MAX`) it is not offered, and the turn lists `ocw_task_start` as withheld `turn_full`. A turn of a
+  running task (control) still makes room for continue and finish; each tool that gives its place is listed as
+  withheld `turn_full`, so the persona knows it is missing.
+- **The requester's own message is answered (WR-08, IN-01).** This completes § 9's paragraphs. On the requester's own
+  message while the task waits, the persona gets `person` ("Answer them first; then call `ocw_task_continue` or
+  `ocw_task_finish`"); `active` and its milestones rule are for the task's own turns. A view turn of the requester
+  while another turn of the task runs gets `busy`; `view` stays for another person.
+- **Smaller corrections.**
+  - With `maxRunning` 0 no start is offered (IN-02); tasks already running keep their continue and finish. This
+    replaces "0 turns long tasks off" in § 6.
+  - The minute tick lists tasks by the database's clock (IN-04).
+  - A failure of the task half of `POST /turns/:eventId/done` is logged and never stops the consult chain half
+    (IN-05).
+  - sandboxd reports a command whose exit code it could not read (its shell went away) as `killed`, never `exited`
+    (IN-06).
+  - Goals, notes and summaries refuse C1 controls and U+061C, and U+2028 / U+2029 except in the summary (IN-07).
+  - Only a platform-delivered continuation may be quiet; a Work Zone wake that took the wait always posts (IN-09),
+    which narrows § 8.
+  - The blocked message reads "I need you to go on with this task. See my reply in this conversation." (IN-10).
+- **Not changed.** IN-03 (a session wait checked before the task's lock) and IN-08 (the plugin install retry's
+  timers and the stream it matches) are left as they were; the review log says why.
