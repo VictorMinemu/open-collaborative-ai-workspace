@@ -209,6 +209,7 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
                   name: p.name,
                   gitRemote: p.gitRemote,
                   defaultBranch: p.defaultBranch,
+                  git: p.git ?? null,
                   createdBy: device.ownerUserId,
                 })
                 .onConflictDoUpdate({
@@ -217,6 +218,7 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
                     name: p.name,
                     gitRemote: p.gitRemote,
                     defaultBranch: p.defaultBranch,
+                    git: p.git ?? null,
                     removedAt: null,
                   },
                 })

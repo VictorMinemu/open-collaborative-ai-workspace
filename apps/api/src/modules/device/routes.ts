@@ -201,6 +201,7 @@ function toProject(
     available: p.removedAt === null,
     createdAt: new Date(p.createdAt).toISOString(),
     teamProject,
+    ...(p.git !== null ? { git: p.git } : {}),
   };
 }
 

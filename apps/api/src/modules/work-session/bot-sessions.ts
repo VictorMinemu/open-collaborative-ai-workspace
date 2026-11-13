@@ -16,7 +16,15 @@ import {
   type SessionAudienceInput,
   WORK_PROJECT_LIMITS,
 } from "@ocw/contracts";
-import { type agentTurns, botWorkSessions, messages, orgMembers, type Tx, workSessions } from "@ocw/db";
+import {
+  type agentTurns,
+  botWorkSessions,
+  messages,
+  orgMembers,
+  projects,
+  type Tx,
+  workSessions,
+} from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { HttpError } from "../../lib/errors";
@@ -38,7 +46,8 @@ import { audienceTarget, checkAudience } from "./visibility";
  * the Agent Channel route found the live turn, checked the tool on it, decided the profile's status and claimed the
  * call. What it adds around the start:
  *
- * - The device, runtime and worktree are the profile's; model and options absent = the profile's defaults (PD-09).
+ * - The device, runtime and worktree are the profile's (the worktree only where the device did not say the project is
+ *   outside git, quick 261113-hu7); model and options absent = the profile's defaults (PD-09).
  * - The audience is decided here from existing kinds only (PD-11, `botSessionAudience`), never by the bot.
  * - One `bot_work_sessions` row (origin, requester, card) and one platform-owned `work_zone` card in the asker's thread
  *   (PD-12), then `bot.work_session_started` with ids, the mode, the model and the prompt's length only (PD-21).
@@ -467,8 +476,16 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
       if (load.botPromptsHour >= profile.promptsPerHour) return refuse(refusedAnswer("prompt_rate"));
       // The project must be one of the profile's that the sponsor can still start in.
       if (!status.projectIds.includes(input.projectId)) return refuse(refusedAnswer("project_not_allowed"));
+      // Quick 261113-hu7: an isolated worktree needs git, so a project the device said is in no git repository runs on
+      // its own checkout whatever the profile asks (null = the device did not say: the profile's choice stands).
+      const [target] = await tx
+        .select({ git: projects.git })
+        .from(projects)
+        .where(eq(projects.id, input.projectId))
+        .limit(1);
+      const worktree = profile.worktree && target?.git !== false;
       // One executor per tree (D-15): without a worktree, never next to another active session on the project's tree.
-      if (!profile.worktree && load.treeBusy) return refuse(refusedAnswer("tree_busy"));
+      if (!worktree && load.treeBusy) return refuse(refusedAnswer("tree_busy"));
 
       const visibility = await botSessionAudience(tx, {
         projectId: input.projectId,
@@ -488,7 +505,7 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         projectId: input.projectId,
         deviceId: profile.deviceId,
         runtime: profile.runtime,
-        worktree: profile.worktree,
+        worktree,
         prompt,
         visibility,
         ...(settings.model !== undefined ? { model: settings.model } : {}),
