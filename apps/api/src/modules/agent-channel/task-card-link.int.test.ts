@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { TestClient } from "../../testing";
+import { TestClient } from "../../testing";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
-import { continueAs, startTaskFor, taskRow } from "../../testing-tasks";
+import { continueAs, finishAs, startTaskFor, taskRow } from "../../testing-tasks";
+import { createPermissionService } from "../organization";
+import { createTaskCards } from "./task-card";
+import { lockTask, mayStopTask } from "./tasks";
 
 /**
  * Phase 07.17.1.1.2-10 (D-05, PD-11, PD-12, E18; BTASK-09, BTASK-11): the live task card as every reader gets it. The
@@ -141,5 +144,203 @@ describe("card.task and viewerCan.stop on every read (tracer, PD-11, PD-12)", ()
     );
     expect(live).not.toHaveProperty("viewerCan");
     expect(live).not.toHaveProperty("following");
+  });
+});
+
+/** A new member of organization A with `role`, signed in. */
+async function joinAs(
+  email: string,
+  name: string,
+  role: "standard" | "lead" | "admin",
+): Promise<[TestClient, string]> {
+  const inv = await ok(s.victor.request("POST", "/api/v1/invitations", { email, role }) as Promise<Res>);
+  const c = new TestClient(s.stack.baseUrl);
+  const acc = await ok(
+    c.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
+      name,
+      password: "another-long-password",
+    }) as Promise<Res>,
+  );
+  return [c, acc.user.id as string];
+}
+
+/** `mayStopTask` as `userId` decides it, in a tenant transaction of organization A (the route's one rule). */
+async function mayStop(taskId: string, userId: string): Promise<boolean> {
+  const core = s.stack.built.core;
+  const perms = createPermissionService(core);
+  return core.db.withTenant({ organizationId: s.orgA, userId }, async (tx) => {
+    const task = await lockTask(tx, taskId);
+    if (!task) throw new Error("task not found");
+    return mayStopTask(tx, core, perms, task, userId);
+  });
+}
+
+describe("viewerCan.stop for each role, and only while the task is active (PD-12, E18)", () => {
+  /** Mo: a channel moderator (`message.delete_any`) whose bot rights are denied. */
+  let mo: TestClient;
+  let moId: string;
+  /** Riley: a Lead who leads the Backend team (`bot.manage_unit` on its bots). */
+  let riley: TestClient;
+  let rileyId: string;
+  /** Builder: a team bot of the Backend team. */
+  let builderId: string;
+  let opsId: string;
+
+  beforeAll(async () => {
+    // Moderation (`message.delete_any`) is an admin right that no allow rule grants: Mo is an admin whose bot rights
+    // are denied, so moderating the channel is the only way Mo may stop a task.
+    [mo, moId] = await joinAs("mo@example.test", "Mo Diaz", "admin");
+    [riley, rileyId] = await joinAs("riley@example.test", "Riley Park", "lead");
+    for (const permission of ["bot.manage", "bot.manage_unit", "bot.configure"]) {
+      await ok(
+        s.victor.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: moId,
+          permission,
+          effect: "deny",
+        }) as Promise<Res>,
+      );
+    }
+    const unit = async (kind: string, name: string, parentId: string | null) =>
+      (await ok(s.victor.request("POST", "/api/v1/units", { kind, name, parentId }) as Promise<Res>))
+        .id as string;
+    const backend = await unit("team", "Backend", await unit("department", "Engineering", null));
+    await ok(
+      s.victor.request("POST", `/api/v1/units/${backend}/members`, {
+        userId: rileyId,
+        role: "lead",
+      }) as Promise<Res>,
+    );
+    // Sam is a Backend member: a unit persona answers the people of its unit.
+    await ok(
+      s.victor.request("POST", `/api/v1/units/${backend}/members`, { userId: s.samId }) as Promise<Res>,
+    );
+    builderId = (await s.newBot("Builder")).id;
+    await s.su.query("update app.agents set unit_id = $2 where id = $1", [builderId, backend]);
+    opsId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", { name: "ops", visibility: "public" }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const member of [
+      { kind: "agent", id: builderId },
+      ...[s.samId, s.alexId, moId, rileyId].map((id) => ({ kind: "user", id })),
+    ]) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${opsId}/members`, member) as Promise<Res>);
+    }
+  }, 120_000);
+
+  it("the requester, a moderator, the team bot's unit lead and an admin see Stop; a plain member does not", async () => {
+    const { taskId } = await startTaskFor(s, {
+      who: s.sam,
+      conversationId: opsId,
+      agentId: builderId,
+      handle: "builder",
+    });
+    const cardId = (await taskRow(s, taskId)).card_message_id as string;
+    const table: Array<[string, TestClient, string, boolean]> = [
+      ["the requester (Sam)", s.sam, s.samId, true],
+      ["a channel moderator (Mo, message.delete_any, no bot right)", mo, moId, true],
+      ["the team bot's unit lead (Riley, bot.manage_unit)", riley, rileyId, true],
+      ["an admin (Víctor)", s.victor, s.victorId, true],
+      ["a plain member (Alex)", s.alex, s.alexId, false],
+    ];
+    for (const [who, client, userId, expected] of table) {
+      const card = await cardRead(client, cardId);
+      expect(card.task, who).toMatchObject({ taskId, status: "running" });
+      expect((card.viewerCan as string[]).includes("stop"), who).toBe(expected);
+      // The same people the Stop route's one rule allows.
+      expect(await mayStop(taskId, userId), who).toBe(expected);
+    }
+  });
+
+  it("a personal bot's owner sees Stop on the task in their DM with it", async () => {
+    const pal = await s.newBot("Pal");
+    const alexDm = (
+      await ok(
+        s.alex.request("POST", "/api/v1/dms", {
+          participants: [{ kind: "agent", id: pal.id }],
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const { taskId } = await startTaskFor(s, {
+      who: s.alex,
+      conversationId: alexDm,
+      agentId: pal.id,
+      handle: null,
+    });
+    // Pal becomes Alex's personal bot (its owner is the person its DM tasks run for).
+    await s.su.query("update app.agents set scope = 'personal', owner_user_id = $2 where id = $1", [
+      pal.id,
+      s.alexId,
+    ]);
+    const cardId = (await taskRow(s, taskId)).card_message_id as string;
+    const card = await cardInList(s.alex, alexDm, cardId);
+    expect(card.task).toMatchObject({ taskId, requesterName: "Alex Kim" });
+    expect(card.viewerCan).toContain("stop");
+    expect(await mayStop(taskId, s.alexId)).toBe(true);
+  });
+
+  it("once the task stops or finishes, nobody has Stop; the realtime update says stopped, with no viewer field", async () => {
+    const stopped = await startTaskFor(s, {
+      who: s.sam,
+      conversationId: opsId,
+      agentId: builderId,
+      handle: "builder",
+    });
+    const stoppedCard = (await taskRow(s, stopped.taskId)).card_message_id as string;
+    expect((await cardRead(s.sam, stoppedCard)).viewerCan).toContain("stop");
+    await ok(s.sam.request("POST", `/api/v1/bot-tasks/${stopped.taskId}/stop`) as Promise<Res>);
+    for (const client of [s.sam, mo, riley, s.victor]) {
+      const card = await cardRead(client, stoppedCard);
+      expect(card.task).toMatchObject({ status: "stopped", outcome: "stopped_by_person" });
+      expect((card.task as Json).finishedAt).not.toBeNull();
+      expect(card.viewerCan).not.toContain("stop");
+    }
+    const live = await lastEventCard(opsId, stoppedCard);
+    expect(live.task).toMatchObject({
+      taskId: stopped.taskId,
+      status: "stopped",
+      waiting: null,
+      wakeAt: null,
+    });
+    expect(live).not.toHaveProperty("viewerCan");
+
+    const done = await startTaskFor(s, {
+      who: s.sam,
+      conversationId: opsId,
+      agentId: builderId,
+      handle: "builder",
+    });
+    expect(
+      (await finishAs(s, done.event, { summary: "Summarised the pack", outcome: "done" })).body,
+    ).toMatchObject({ ok: true });
+    const doneCard = (await taskRow(s, done.taskId)).card_message_id as string;
+    for (const client of [s.sam, s.victor]) {
+      const card = await cardRead(client, doneCard);
+      expect(card.task).toMatchObject({ status: "done", outcome: "done" });
+      expect(card.viewerCan).not.toContain("stop");
+    }
+  });
+
+  it("organization B never gets A's card, and linkOf with A's ids inside B's tenant returns nothing", async () => {
+    const { taskId } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const cardId = (await taskRow(s, taskId)).card_message_id as string;
+    const res = await s.eve.request("GET", `/api/v1/cards/${cardId}`);
+    expect(res.status).toBe(404);
+
+    const core = s.stack.built.core;
+    const cards = createTaskCards(core, createPermissionService(core));
+    const inB = await core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, async (tx) => ({
+      links: await cards.linkOf(tx, [cardId]),
+      stop: await cards.canStop(tx, [cardId], s.eveId),
+    }));
+    expect(inB.links.size).toBe(0);
+    expect(inB.stop.size).toBe(0);
+    // In A, the same call finds it (the test reads the right ids).
+    const inA = await core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, async (tx) =>
+      cards.linkOf(tx, [cardId]),
+    );
+    expect(inA.get(cardId)?.taskId).toBe(taskId);
   });
 });
