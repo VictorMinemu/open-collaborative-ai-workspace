@@ -42,7 +42,7 @@ import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted, runLogTainted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
-import { taskOfferFor } from "./task-offer";
+import { markProcessesReported, taskOfferFor } from "./task-offer";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -400,6 +400,10 @@ export async function buildMentionEvents(
         await limitReached(tx, deps, mention, conv, a.id, decision.notice, decision.limit);
       }
       continue;
+    }
+    // PD-13: the ended processes this control turn lists reach it alone (marked in the delivery transaction).
+    if (task?.offer === "control" && decision.turn.task) {
+      await markProcessesReported(tx, task.reportedProcessIds);
     }
     events.push({
       eventId,

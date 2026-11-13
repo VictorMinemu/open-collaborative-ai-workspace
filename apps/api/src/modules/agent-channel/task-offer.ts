@@ -1,6 +1,6 @@
-import { BOT_TASK_ACTIVE, type TaskProcessFact, type TurnTask } from "@ocw/contracts";
-import { botTasks, type Tx, tenantOf } from "@ocw/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { BOT_TASK_ACTIVE, BOT_TASK_LIMITS, type TaskProcessFact, type TurnTask } from "@ocw/contracts";
+import { botTaskProcesses, botTasks, type Tx, tenantOf } from "@ocw/db";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import type { TurnTaskOffer } from "../bot-capabilities";
 
@@ -50,12 +50,44 @@ const iso = (v: string) => new Date(v).toISOString();
  * own (control) turns also the background processes that ended since its last turn (`listProcesses`).
  */
 export async function turnTaskOf(
-  _tx: Tx,
+  tx: Tx,
   row: TaskRow,
-  _opts: { listProcesses: boolean },
+  opts: { listProcesses: boolean },
 ): Promise<{ task: TurnTask; reportedProcessIds: string[] }> {
   const finishedProcesses: TaskProcessFact[] = [];
   const reportedProcessIds: string[] = [];
+  if (opts.listProcesses) {
+    // PD-13: the ended processes no turn of the task heard about yet, oldest first, at most 10 per turn.
+    const ended = await tx
+      .select({
+        id: botTaskProcesses.id,
+        processId: botTaskProcesses.processId,
+        status: botTaskProcesses.status,
+        exitCode: botTaskProcesses.exitCode,
+        durationMs: botTaskProcesses.durationMs,
+      })
+      .from(botTaskProcesses)
+      .where(
+        and(
+          eq(botTaskProcesses.organizationId, row.organizationId),
+          eq(botTaskProcesses.taskId, row.id),
+          ne(botTaskProcesses.status, "running"),
+          isNull(botTaskProcesses.reportedAt),
+        ),
+      )
+      .orderBy(sql`${botTaskProcesses.endedAt} asc nulls last`, asc(botTaskProcesses.id))
+      .limit(BOT_TASK_LIMITS.finishedProcessesMax);
+    for (const p of ended) {
+      if (p.status === "running") continue;
+      finishedProcesses.push({
+        processId: p.processId,
+        status: p.status,
+        exitCode: p.exitCode,
+        durationMs: p.durationMs,
+      });
+      reportedProcessIds.push(p.id);
+    }
+  }
   const task: TurnTask = {
     taskId: row.id,
     status: row.status === "waiting" ? "waiting" : "running",
@@ -74,6 +106,25 @@ export async function turnTaskOf(
     finishedProcesses,
   };
   return { task, reportedProcessIds };
+}
+
+/**
+ * PD-13: marks the processes a delivered control turn listed as reported (`reported_at`), in the delivery transaction,
+ * so each ended process reaches exactly one turn of its task. Called only once the turn carries `turn.task` (delivered,
+ * long tasks on); a turn that was not delivered leaves them for the next one.
+ */
+export async function markProcessesReported(tx: Tx, processRowIds: readonly string[]): Promise<void> {
+  if (processRowIds.length === 0) return;
+  await tx
+    .update(botTaskProcesses)
+    .set({ reportedAt: sql`now()` })
+    .where(
+      and(
+        eq(botTaskProcesses.organizationId, tenantOf(tx).organizationId),
+        inArray(botTaskProcesses.id, [...processRowIds]),
+        isNull(botTaskProcesses.reportedAt),
+      ),
+    );
 }
 
 /**
