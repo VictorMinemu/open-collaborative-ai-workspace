@@ -15,10 +15,13 @@ import {
   processRowsOf,
   queuedTaskJobs,
   reportTurnDone,
+  setTask,
   startTaskFor,
   taskEvents,
   taskRow,
 } from "../../testing-tasks";
+import { createSandboxEventsConsumer, type SandboxdClient } from "../sandbox";
+import { onProcessEvent } from "./task-process-wakes";
 
 /**
  * Phase 07.17.1.1.2-11 (D-03, PD-13; BTASK-04, BTASK-11): a background sandbox command a task waits on wakes the task
@@ -136,6 +139,157 @@ describe("tracer: a background command of a waiting task ends, and the task gets
 
   it("another pass and another drain deliver nothing more", async () => {
     await pumpSandboxEvents(s);
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+  });
+
+  it("an API restart replays the same boot from its start: the durable cursor applies nothing twice (E19)", async () => {
+    const before = await processRowsOf(s, taskId);
+    // A fresh process: no memory of the app's consumer (another lock key; the cursor is in the database).
+    const fresh = createSandboxEventsConsumer(s.stack.built.core, {
+      client: s.stack.built.sandbox.client as SandboxdClient,
+      lockKey: 0x0b07_1100 + Math.floor(Math.random() * 1000),
+      waitMs: 0,
+    });
+    fresh.onEvent("process", (tx, e) => onProcessEvent(tx, s.stack.built.core, e));
+    try {
+      const replay = await fresh.runOnce({ waitMs: 0 });
+      expect(replay.applied).toBe(0);
+      expect(replay.skipped).toBeGreaterThan(0);
+    } finally {
+      await fresh.stop();
+    }
+    expect(await processRowsOf(s, taskId)).toEqual(before);
+    expect(await queuedTaskJobs(s, taskId)).toEqual([]);
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+  });
+});
+
+describe("a command that ends while its task waits on something else (E19)", () => {
+  it("is only recorded (no early wake), then listed once in the next task turn's finishedProcesses", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const r = await backgroundExec(s, start, ["sh", "-c", "sleep 0.3; exit 75"]);
+    const processId = r.body?.processId as string;
+    expect(r.body).toMatchObject({ status: "running" });
+    // The bot waits ten minutes instead of on the command.
+    const c = await continueAs(s, start, { afterSeconds: 600 });
+    expect(c.body, JSON.stringify(c.body)).toMatchObject({ ok: true, next: "at" });
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    const wakeBefore = (await taskRow(s, taskId)).wake_at as Date;
+    const jobsBefore = (await queuedTaskJobs(s, taskId)).length;
+    await pause(400);
+    await pumpSandboxEvents(s);
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({
+      status: "exited",
+      exit_code: 75,
+      reported_at: null,
+    });
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "waiting", wait_kind: "timer" });
+    expect(new Date(row.wake_at as Date).getTime()).toBe(new Date(wakeBefore).getTime());
+    expect(await queuedTaskJobs(s, taskId)).toHaveLength(jobsBefore);
+
+    // The timer comes: the turn lists the command once (with the exit code ocw-extract's batch gives it).
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    await drainTaskJobs(s);
+    const [next] = await taskEvents(s, taskId);
+    expect(next?.task).toEqual({ taskId, reason: "timer" });
+    expect(next?.turn.task.finishedProcesses).toEqual([
+      { processId, status: "exited", exitCode: 75, durationMs: expect.any(Number) },
+    ]);
+    expect((await processRowsOf(s, taskId))[0]?.reported_at).toBeInstanceOf(Date);
+
+    // The turn after it does not list it again.
+    expect((await continueAs(s, next as Json)).body).toMatchObject({ ok: true });
+    expect((await reportTurnDone(s, next?.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(2);
+    expect(events[1]?.turn.task.finishedProcesses).toEqual([]);
+  });
+});
+
+describe("tenant isolation of process events (E22, T-07.17.1.1.2-11-05)", () => {
+  it("organization B's event naming A's bot and process, or A's event naming another bot, changes nothing", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const r = await backgroundExec(s, start, ["sleep", "60"]);
+    const processId = r.body?.processId as string;
+    expect((await continueAs(s, start, { waitFor: { processId } })).body).toMatchObject({
+      next: "on_process",
+    });
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const other = await s.newBot("Other Bot");
+    const ended = { type: "process", processId, status: "exited", exitCode: 0, durationMs: 5 };
+    s.sandboxd.fake.emit({ ...ended, target: { orgId: s.orgB, agentId: s.scoutId } });
+    s.sandboxd.fake.emit({ ...ended, target: { orgId: s.orgA, agentId: other.id } });
+    await pumpSandboxEvents(s);
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "running", ended_at: null });
+    expect(await taskRow(s, taskId)).toMatchObject({
+      status: "waiting",
+      wait_kind: "process",
+      wait_ref: processId,
+    });
+    expect(await queuedTaskJobs(s, taskId)).toEqual([]);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    // Nothing of organization B was written for the event (its tenant holds no such row).
+    expect(
+      (
+        await s.su.query("select count(*)::int as n from app.bot_task_processes where organization_id = $1", [
+          s.orgB,
+        ])
+      ).rows[0]?.n,
+    ).toBe(0);
+  });
+});
+
+describe("a lost command: sandboxd restarted, no event before the deadline (E20)", () => {
+  it("wakes the waiting task at the row's deadline with status lost; a late event changes nothing", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const r = await backgroundExec(s, start, ["sleep", "60"]);
+    const processId = r.body?.processId as string;
+    expect((await continueAs(s, start, { waitFor: { processId } })).body).toMatchObject({
+      next: "on_process",
+    });
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    // sandboxd restarts (a new boot id, its processes forgotten): no event will ever come.
+    s.sandboxd.fake.reboot();
+    await pumpSandboxEvents(s);
+    // The continue and the done queued the wait's jobs at the row's deadline: not due yet, so a plain drain runs none.
+    const queued = (await queuedTaskJobs(s, taskId)).length;
+    expect(queued).toBeGreaterThan(0);
+    await s.stack.built.core.jobs.drain("bot_task.continue");
+    expect(await queuedTaskJobs(s, taskId)).toHaveLength(queued);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "running" });
+
+    // The row's deadline (the run's timeout + 60 s) passes; the wait was set to it.
+    const past = new Date(Date.now() - 1_000);
+    await s.su.query("update app.bot_task_processes set deadline_at = $2 where task_id = $1", [taskId, past]);
+    await setTask(s, taskId, { wake_at: past });
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.task).toEqual({
+      taskId,
+      reason: "process",
+      process: { processId, status: "lost", exitCode: null, durationMs: null },
+    });
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "lost" });
+    expect(events[0]?.turn.task.finishedProcesses).toEqual([]);
+
+    // A late event for it (an old boot's command after all) finds the row ended: nothing more.
+    s.sandboxd.fake.emit({
+      type: "process",
+      target: { orgId: s.orgA, agentId: s.scoutId },
+      processId,
+      status: "exited",
+      exitCode: 0,
+      durationMs: 61_000,
+    });
+    await pumpSandboxEvents(s);
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "lost" });
     await drainTaskJobs(s);
     expect(await taskEvents(s, taskId)).toHaveLength(1);
   });

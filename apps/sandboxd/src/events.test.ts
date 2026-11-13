@@ -225,6 +225,40 @@ describe("events from sandboxd's lifecycle (D-09, T-07.8-09-04)", () => {
     expect(text).toContain('"type":"usage"');
   });
 
+  it("a background command's end reaches the feed as one process event of the contract, without argv or output", async () => {
+    const { docker, events, sandboxes } = await stack();
+    await sandboxes.ensure(target);
+    docker.onExec = (call) =>
+      call.cmd.includes("SENTINEL-argv-55aa")
+        ? new Promise((resolve) =>
+            setTimeout(() => resolve({ exitCode: 8, stdout: "SENTINEL-output-1f9e\n" }), 100),
+          )
+        : { exitCode: 0, stdout: "100\n" };
+    const started = await sandboxes.exec({
+      target,
+      argv: ["echo", "SENTINEL-argv-55aa"],
+      cwd: "SENTINEL-path-77bb",
+      timeoutMs: 60_000,
+      yieldMs: 0,
+    });
+    expect(started.status).toBe("running");
+    const processId = started.status === "running" ? started.processId : "";
+    const end = Date.now() + 3_000;
+    while (!(await events.since(0, 0)).events.some((e) => e.type === "process") && Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const res = await events.since(0, 0);
+    expect(SandboxdEventsResponse.safeParse(res).success).toBe(true);
+    const ended = res.events.filter((e) => e.type === "process");
+    expect(ended).toEqual([
+      expect.objectContaining({ type: "process", target, processId, status: "exited", exitCode: 8 }),
+    ]);
+    const text = JSON.stringify(res);
+    for (const s of ["SENTINEL-argv-55aa", "SENTINEL-path-77bb", "SENTINEL-output-1f9e"]) {
+      expect(text).not.toContain(s);
+    }
+  });
+
   it("GET /v1/events requires the token, rejects waitMs over the contract and caps a long poll at 25 s", async () => {
     const { createServer } = await import("./server");
     const { events, sandboxes, files } = await stack();

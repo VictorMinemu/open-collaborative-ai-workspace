@@ -306,6 +306,27 @@ describe("replay after an API restart never double-counts (T-07.8-11-05)", () =>
     await c.stop();
   });
 
+  it("an event of a type this API does not know is skipped: the known ones apply, the cursor moves past all (E25)", async () => {
+    const bot = await s.newBot("Skew Bot");
+    const c = consumer();
+    await c.runOnce();
+    usage(bot.id, 40);
+    // A newer sandboxd's event: not in this API's contract, and carrying a field nobody may log.
+    const unknown = emit({ type: "future_kind", target: target(bot.id), note: "SENTINEL-skew-3b7c" });
+    const third = usage(bot.id, 2);
+    const pass = await c.runOnce();
+    expect(pass).toMatchObject({ locked: true, applied: 2, skipped: 1 });
+    expect(await cpuOf(bot.id)).toBe(42);
+    expect((await cursorOf())?.seq).toBe(third);
+    expect(await c.runOnce()).toMatchObject({ applied: 0, skipped: 0 });
+    const warned = s.logs.filter((l) => l.includes("skipped a sandbox event of an unknown type"));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('"type":"future_kind"');
+    expect(warned[0]).toContain(`"seq":${unknown}`);
+    expect(s.logs.some((l) => l.includes("SENTINEL-skew-3b7c"))).toBe(false);
+    await c.stop();
+  });
+
   it("an event for a bot outside its organization changes nothing and does not stop the feed", async () => {
     const bot = await s.newBot("Mixed Bot");
     const c = consumer();
