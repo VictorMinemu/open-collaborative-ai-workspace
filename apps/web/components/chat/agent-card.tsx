@@ -2021,7 +2021,7 @@ export function AgentCardView({
         className={
           signIn
             ? "grid gap-2.5 px-3.5 pt-3"
-            : linkedKind || live
+            : linkedKind || live || task
               ? "grid gap-2.5 px-3.5 pt-3 pb-3"
               : "grid gap-2.5 px-3.5 pt-3 pb-3.5"
         }
