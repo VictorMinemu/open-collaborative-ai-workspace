@@ -243,3 +243,41 @@ rules:
       exclude:
         - "*.test.ts"
         - "*.test.tsx"
+
+  - id: ocw.bot-task-text-in-audit
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A bot task's goal, progress note, next step and summary are the bot's own untrusted text: they live only in the
+      task row and its card, never in an audit row (07.17.1.1.2 PD-19, P1, ADR-0042 § 14). Audit `bot.task_*` with
+      ids, counts, reasons and durations only (taskId, conversationId, eventId, turnsUsed, maxTurns, waitKind, reason,
+      outcome, byUserId, processId).
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  # The audit record itself, the keys in any order.
+                  - pattern: '{..., action: "$ACTION", ..., metadata: {..., $KEY: $VALUE, ...}, ...}'
+                  - pattern: '{..., metadata: {..., $KEY: $VALUE, ...}, ..., action: "$ACTION", ...}'
+                  # tasks.ts's helper, whose fifth argument becomes the metadata.
+                  - pattern: 'auditTask($TX, $CORE, "$ACTION", $TASK, {..., $KEY: $VALUE, ...}, ...)'
+              - metavariable-regex:
+                  metavariable: $ACTION
+                  regex: ^bot\.task_
+          # The helpers themselves (tasks.ts), which record every task action from a variable.
+          - patterns:
+              - pattern-inside: 'function $HELPER(...) { ... }'
+              - metavariable-regex:
+                  metavariable: $HELPER
+                  regex: ^(auditTask|auditTaskRefused)$
+              - pattern: '{..., metadata: {..., $KEY: $VALUE, ...}, ...}'
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: ^(goal|progress|nextStep|summary)$
+    paths:
+      include:
+        - /apps/
+        - /packages/
+      exclude:
+        - "*.test.ts"
+        - "*.test.tsx"

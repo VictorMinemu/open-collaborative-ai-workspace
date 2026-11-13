@@ -598,10 +598,18 @@ describe("guard: CODEOWNERS", () => {
   it("a CODEOWNERS without the bot task modules fails with each required area unowned", () => {
     const areas = REQUIRED_AREAS.filter((a) => TASK_MODULES.includes(a.file));
     assert.equal(areas.length, 4);
-    const failures = lintCodeowners("/apps/api/src/modules/agent-channel/consult.ts @VictorMinemu\n", TASK_MODULES, areas);
+    const failures = lintCodeowners(
+      "/apps/api/src/modules/agent-channel/consult.ts @VictorMinemu\n",
+      TASK_MODULES,
+      areas,
+    );
     // Each of the four areas has no owner (the pattern also matches no file of this list).
-    assert.equal(failures.filter((f) => /^required area "bot tasks: .*" \(.*\) has no owner$/.test(f)).length, 4);
-    for (const file of TASK_MODULES) assert.match(failures.join("\n"), new RegExp(file.replaceAll(".", "\\.")));
+    assert.equal(
+      failures.filter((f) => /^required area "bot tasks: .*" \(.*\) has no owner$/.test(f)).length,
+      4,
+    );
+    for (const file of TASK_MODULES)
+      assert.match(failures.join("\n"), new RegExp(file.replaceAll(".", "\\.")));
   });
 
   it("the shipped .github/CODEOWNERS passes against the repository", () => {

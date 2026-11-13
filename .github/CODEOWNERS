@@ -166,6 +166,12 @@
 /apps/api/src/modules/work-session/bot-files.ts             @VictorMinemu
 /apps/api/src/modules/agent-channel/work-session-files.ts   @VictorMinemu
 /apps/api/src/modules/device/auth.ts                        @VictorMinemu
+# Phase 07.17.1.1.2 (ADR-0042): long bot tasks, scheduled only by the API: the state machine with its Stop rule, the
+# continuation scheduler, the routes and the sandbox process wakes.
+/apps/api/src/modules/agent-channel/tasks.ts                @VictorMinemu
+/apps/api/src/modules/agent-channel/task-wakes.ts           @VictorMinemu
+/apps/api/src/modules/agent-channel/task-routes.ts          @VictorMinemu
+/apps/api/src/modules/agent-channel/task-process-wakes.ts   @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu

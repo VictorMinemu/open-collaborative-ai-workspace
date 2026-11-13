@@ -167,3 +167,11 @@ await auditTask(tx, core, "bot.task_continued", task, { eventId, turnsUsed, maxT
 await core.audit.record(tx, { action: "bot.work_session_started", metadata: { sessionId, goal: profile.goal } });
 // ok: ocw.bot-task-text-in-audit
 const taskRow = { goal: body.goal, progress: body.progress, nextStep: body.nextStep, summary: null };
+export async function auditTask(tx: Tx, core: Core, action: TaskAction, task: BotTaskRow, metadata: object) {
+  // ruleid: ocw.bot-task-text-in-audit
+  await core.audit.record(tx, { action, metadata: { taskId: task.id, goal: task.goal, ...metadata } });
+}
+async function auditTaskRefused(tx: Tx, core: Core, p: Refusal) {
+  // ok: ocw.bot-task-text-in-audit
+  await core.audit.record(tx, { action: "bot.task_refused", metadata: { taskId: p.task?.id ?? null, code: p.code } });
+}
