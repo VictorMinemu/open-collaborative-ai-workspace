@@ -1553,6 +1553,11 @@ export const projects = appSchema.table(
     name: text("name").notNull(),
     gitRemote: text("git_remote"),
     defaultBranch: text("default_branch"),
+    /**
+     * Whether the device said the project folder is in a git repository (`DeviceProjectAnnouncement.git`); null = the
+     * device did not say (older daemons). A bot start uses an isolated worktree only where this is not false.
+     */
+    git: boolean("git"),
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
     /** Set when the device stops announcing the project; sessions keep their history. */
