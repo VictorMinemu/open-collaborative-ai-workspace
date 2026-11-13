@@ -176,11 +176,27 @@ describe("tracer: a delivered turn starts a task (PD-08, PD-11)", () => {
   });
 
   it("a second start in the same thread is task_active; another thread starts its own task", async () => {
-    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
-    // The same turn starting twice (the plugin's once-per-turn bypassed): one task, the second refused.
+    const event = await deliverTaskTurn(s, { who: s.sam, conversationId: engId });
+    // Sam replies in the thread before the bot starts: that turn is offered the start too.
+    const second = await deliverTaskTurn(s, {
+      who: s.sam,
+      conversationId: engId,
+      threadRootId: event.message.id,
+    });
+    expect(second.turn.tools).toContain(START);
+    const first = await s.cell("/tasks/start", {
+      eventId: event.eventId,
+      agentId: s.scoutId,
+      goal: TASK_GOAL,
+    });
+    expect(first.body, JSON.stringify(first.body)).toMatchObject({ ok: true });
+    const taskId = first.body?.taskId as string;
+    const late = await s.cell("/tasks/start", { eventId: second.eventId, agentId: s.scoutId, goal: "Again" });
+    expect(late.status).toBe(200);
+    expect(late.body).toMatchObject({ ok: false, code: "task_active" });
+    // The same turn starting twice (the plugin's once-per-turn bypassed): the API's own bound (code review WR-06).
     const twice = await s.cell("/tasks/start", { eventId: event.eventId, agentId: s.scoutId, goal: "Again" });
-    expect(twice.status).toBe(200);
-    expect(twice.body).toMatchObject({ ok: false, code: "task_active" });
+    expect(twice.body).toMatchObject({ ok: false, code: "once_per_turn" });
     expect(
       (
         await s.su.query("select count(*)::int as n from app.bot_tasks where thread_root_id = $1", [
@@ -190,7 +206,7 @@ describe("tracer: a delivered turn starts a task (PD-08, PD-11)", () => {
     ).toBe(1);
     const refused = await s.su.query(
       "select result, metadata from app.audit_events where action = 'bot.task_refused' and metadata->>'eventId' = $1",
-      [event.eventId],
+      [second.eventId],
     );
     expect(refused.rows).toEqual([
       {
@@ -198,7 +214,7 @@ describe("tracer: a delivered turn starts a task (PD-08, PD-11)", () => {
         metadata: {
           taskId,
           conversationId: engId,
-          eventId: event.eventId,
+          eventId: second.eventId,
           tool: START,
           code: "task_active",
         },
@@ -349,16 +365,17 @@ describe("continue: the waits (PD-05)", () => {
     near(row.wake_at, before + 120_000);
     near(timer.body?.at, new Date(row.wake_at as string).getTime(), 1);
 
+    // Each later continue comes from Sam's next turn in the thread (one continue per turn, code review WR-06).
     const deadline = new Date(Date.now() + 60_000);
     await setTask(s, taskId, { deadline_at: deadline });
-    const capped = await continueAs(s, event, { afterSeconds: 120 });
+    const capped = await continueAs(s, await controlTurn(event), { afterSeconds: 120 });
     expect(capped.body).toMatchObject({ ok: true, next: "at" });
     row = await taskRow(s, taskId);
     expect(new Date(row.wake_at as string).getTime()).toBe(deadline.getTime());
 
     await setTask(s, taskId, { deadline_at: new Date(Date.now() + 8 * 60 * MIN) });
     before = Date.now();
-    await continueAs(s, event, { afterSeconds: 3 });
+    await continueAs(s, await controlTurn(event), { afterSeconds: 3 });
     row = await taskRow(s, taskId);
     near(row.wake_at, before + 5_000, 2_000);
     expect(row.wait_seq).toBe(3);
@@ -384,13 +401,15 @@ describe("continue: the waits (PD-05)", () => {
     expect(row).toMatchObject({ wait_kind: "process", wait_ref: "p-running-1" });
     expect(new Date(row.wake_at as string).getTime()).toBe(processDeadline.getTime());
 
-    const ended = await continueAs(s, event, { waitFor: { processId: "p-ended-1" } });
+    // Sam's next turns in the thread (one continue per turn, code review WR-06).
+    const ended = await continueAs(s, await controlTurn(event), { waitFor: { processId: "p-ended-1" } });
     expect(ended.body).toMatchObject({ ok: true, next: "after_turn" });
     expect((await taskRow(s, taskId)).wait_kind).toBe("turn");
 
     const seqBefore = (await taskRow(s, taskId)).wait_seq;
+    const next = await controlTurn(event);
     for (const processId of ["p-other-1", "p-missing-1"]) {
-      const unknown = await continueAs(s, event, { waitFor: { processId } });
+      const unknown = await continueAs(s, next, { waitFor: { processId } });
       expect(unknown.body).toMatchObject({ ok: false, code: "wait_unknown" });
     }
     row = await taskRow(s, taskId);
@@ -407,7 +426,7 @@ describe("continue: the waits (PD-05)", () => {
     const row = await taskRow(s, taskId);
     expect(row).toMatchObject({ wait_kind: "session", wait_ref: mine });
     near(row.wake_at, before + 60 * MIN);
-    const unknown = await continueAs(s, event, { waitFor: { workSessionId: theirs } });
+    const unknown = await continueAs(s, await controlTurn(event), { waitFor: { workSessionId: theirs } });
     expect(unknown.body).toMatchObject({ ok: false, code: "wait_unknown" });
   });
 });
@@ -415,30 +434,45 @@ describe("continue: the waits (PD-05)", () => {
 describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)", () => {
   it("a platform-delivered task turn is quiet inside the cadence and posts at the fifth turn or after 10 minutes", async () => {
     const { taskId, start } = await waitingTask();
-    const turn = await controlTurn(start);
-    // As 09 will deliver it: this turn is the task's current turn, three turns in, last post two minutes ago.
-    const asDelivered = async (patch: Record<string, unknown>) =>
-      setTask(s, taskId, {
+    // As 09 will deliver it: a turn of the task (one per continue, code review WR-06) is its current turn.
+    const asDelivered = async (patch: Record<string, unknown>) => {
+      const turn = await controlTurn(start);
+      await setTask(s, taskId, {
         status: "running",
         wait_kind: null,
         wake_at: null,
         current_event_id: turn.eventId,
         ...patch,
       });
-    await asDelivered({ turns_used: 3, last_post_turn: 1, last_post_at: new Date(Date.now() - 2 * MIN) });
+      return turn;
+    };
+    // Three turns in, last post two minutes ago.
+    let turn = await asDelivered({
+      turns_used: 3,
+      last_post_turn: 1,
+      last_post_at: new Date(Date.now() - 2 * MIN),
+    });
     const quiet = await continueAs(s, turn);
     expect(quiet.body).toMatchObject({ ok: true, quiet: true, turnsLeft: 37 });
     let row = await taskRow(s, taskId);
     expect(row.last_post_turn).toBe(1);
 
-    await asDelivered({ turns_used: 6, last_post_turn: 1, last_post_at: new Date(Date.now() - 2 * MIN) });
+    turn = await asDelivered({
+      turns_used: 6,
+      last_post_turn: 1,
+      last_post_at: new Date(Date.now() - 2 * MIN),
+    });
     const fifth = await continueAs(s, turn);
     expect(fifth.body).toMatchObject({ ok: true, quiet: false });
     row = await taskRow(s, taskId);
     expect(row.last_post_turn).toBe(6);
     near(row.last_post_at, Date.now());
 
-    await asDelivered({ turns_used: 7, last_post_turn: 6, last_post_at: new Date(Date.now() - 11 * MIN) });
+    turn = await asDelivered({
+      turns_used: 7,
+      last_post_turn: 6,
+      last_post_at: new Date(Date.now() - 11 * MIN),
+    });
     expect((await continueAs(s, turn)).body).toMatchObject({ ok: true, quiet: false });
   });
 
@@ -472,6 +506,59 @@ describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)"
       ok: false,
       code: "no_task",
     });
+  });
+});
+
+describe("code review WR-06: the API bounds one turn's task calls", () => {
+  const callsOf = async (eventId: string) =>
+    (
+      await s.su.query(
+        "select tool, decision, reason from app.agent_tool_calls where event_id = $1 and tool like 'ocw_task_%' order by created_at",
+        [eventId],
+      )
+    ).rows as Json[];
+
+  it("a second continue of the turn that continued is refused once_per_turn: the wait, the job and the card are unchanged", async () => {
+    const { taskId, start } = await waitingTask();
+    const before = await taskRow(s, taskId);
+    const card = await cardOf(before.card_message_id as string);
+    const jobs = async () =>
+      (
+        (
+          await s.su.query(
+            "select count(*)::int as n from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1",
+            [taskId],
+          )
+        ).rows[0] as { n: number }
+      ).n;
+    const queued = await jobs();
+    const again = await continueAs(s, start, { afterSeconds: 60 });
+    expect(again.body).toMatchObject({ ok: false, code: "once_per_turn" });
+    expect(await taskRow(s, taskId)).toEqual(before);
+    expect((await cardOf(before.card_message_id as string))?.version).toBe(card?.version);
+    expect(await jobs()).toBe(queued);
+    // The other tool of the turn still works: the turn finishes its task.
+    expect((await finishAs(s, start, { summary: "Read it all", outcome: "done" })).body).toMatchObject({
+      ok: true,
+    });
+    expect((await finishAs(s, start, { summary: "Again", outcome: "done" })).body).toMatchObject({
+      ok: false,
+      code: "once_per_turn",
+    });
+  });
+
+  it("refusals count: after six task calls of one turn every further call is refused once_per_turn", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    for (let i = 0; i < 5; i++) {
+      const r = await continueAs(s, event, { waitFor: { workSessionId: randomUUID() } });
+      expect(r.body, `call ${i + 2}`).toMatchObject({ ok: false, code: "wait_unknown" });
+    }
+    const capped = await continueAs(s, event);
+    expect(capped.body).toMatchObject({ ok: false, code: "once_per_turn" });
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", wait_kind: null });
+    const calls = await callsOf(event.eventId as string);
+    expect(calls).toHaveLength(7);
+    expect(calls.at(-1)).toMatchObject({ tool: CONTINUE, decision: "denied", reason: "once_per_turn" });
   });
 });
 
@@ -561,7 +648,7 @@ describe("continue: the budgets and the policy stop the task with one message (D
 });
 
 describe("finish (D-02, PD-18)", () => {
-  it("done: the card Done and succeeded, Sam notified as a follower, no message; a second finish is task_stopped", async () => {
+  it("done: the card Done and succeeded, Sam notified as a follower, no message; then a continue is task_stopped", async () => {
     const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
     const card = (await taskRow(s, taskId)).card_message_id as string;
     await s.su.query("delete from app.notifications where user_id = $1 and message_id = $2", [s.samId, card]);
@@ -585,8 +672,9 @@ describe("finish (D-02, PD-18)", () => {
     ).toEqual([{ kind: "card_updated" }]);
     expect(await auditsOf("bot.task_finished", taskId)).toHaveLength(1);
 
+    // The turn's finish already succeeded (code review WR-06: the API refuses it again on that turn).
     const again = await finishAs(s, event, { summary: "Again", outcome: "done" });
-    expect(again.body).toMatchObject({ ok: false, code: "task_stopped" });
+    expect(again.body).toMatchObject({ ok: false, code: "once_per_turn" });
     expect((await continueAs(s, event)).body).toMatchObject({ ok: false, code: "task_stopped" });
     // A finish done posts nothing besides the card.
     await new Promise((r) => setTimeout(r, 300));

@@ -360,7 +360,9 @@ function taskTool<T>(spec: Spec<T>, deps: Deps, ctx: TaskToolContext): OpenClawA
       deps.guard.taskCallEnded(
         t,
         name,
-        result.details.ok ? { ok: true, quiet: result.details.quiet } : { ok: false },
+        result.details.ok
+          ? { ok: true, quiet: result.details.quiet }
+          : { ok: false, code: result.details.code ?? "refused" },
       );
       return result;
 

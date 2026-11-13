@@ -26,6 +26,7 @@ import { SandboxProcessId } from "./sandbox";
  * reported done), `sessionWaitMinutes` (a Work Zone wait without a timer), `processGraceSeconds` (added to a background
  * command's own timeout). `finishedProcessesMax`: processes listed on one turn. Visible progress: one post every
  * `progressEveryTurns` turns or `progressEveryMinutes` minutes. `tickBatch`: tasks the minute tick looks at.
+ * `taskCallsPerTurnMax` (code review WR-06): task calls one turn may make, refusals counted (the API's own bound).
  */
 export const BOT_TASK_LIMITS = {
   goalChars: 200,
@@ -47,6 +48,7 @@ export const BOT_TASK_LIMITS = {
   progressEveryTurns: 5,
   progressEveryMinutes: 10,
   tickBatch: 100,
+  taskCallsPerTurnMax: 6,
 } as const;
 
 // ---------------------------------------------------------------- vocabulary (D-01, D-03, D-12)
@@ -178,8 +180,9 @@ export type AgentChannelTaskFinish = z.infer<typeof AgentChannelTaskFinish>;
 // ---------------------------------------------------------------- refusals and answers (PD-08)
 
 /**
- * Why a task call was refused. `once_per_turn` is the plugin's local refusal (a second call of one task tool in a
- * turn); the API never answers it.
+ * Why a task call was refused. `once_per_turn`: a second call of one task tool in a turn after it succeeded, or more task
+ * calls in one turn than `taskCallsPerTurnMax` (the plugin refuses it locally, and the API answers it too, code review
+ * WR-06).
  */
 export const BotTaskRefusal = z.enum([
   "not_in_turn",

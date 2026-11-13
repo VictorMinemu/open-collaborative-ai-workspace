@@ -72,6 +72,7 @@ describe("07.17.1.1.2 tasks: limits and vocabulary (D-01, D-03, D-04, D-11, PD-2
       progressEveryTurns: 5,
       progressEveryMinutes: 10,
       tickBatch: 100,
+      taskCallsPerTurnMax: 6,
     });
   });
 

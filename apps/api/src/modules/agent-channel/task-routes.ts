@@ -5,6 +5,7 @@ import {
   AgentChannelTaskFinishResponse,
   AgentChannelTaskStart,
   AgentChannelTaskStartResponse,
+  BOT_TASK_LIMITS,
   BOT_TASK_SENTENCES,
   type BotTaskRefusal,
   type BotTaskRefused,
@@ -12,10 +13,11 @@ import {
   BUILTIN_TOOLS,
   IdParams,
   TASK_TOOL_FLAGS,
+  TASK_TOOL_NAMES,
   type TaskToolName,
 } from "@ocw/contracts";
-import { agentTurns, botTasks, type Tx } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { agentToolCalls, agentTurns, botTasks, type Tx } from "@ocw/db";
+import { and, eq, inArray } from "drizzle-orm";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess } from "../chat";
@@ -169,6 +171,37 @@ export function registerTaskRoutes(scope: App, core: Core): void {
   }
 
   /**
+   * Code review WR-06: the API's own bound on one turn's task calls (the plugin's once-per-turn rule is not a trust
+   * boundary). The turn row is locked first, so a turn's task calls are decided one at a time; then a tool that already
+   * succeeded on this turn, or `taskCallsPerTurnMax` task calls of the turn (refusals counted), is refused
+   * `once_per_turn` before anything else is read or written (no wait, job, card or audit beyond the refusal's own).
+   */
+  async function turnBound(
+    tx: Tx,
+    base: { cell: CellPrincipal; turn: AgentTurnRow; tool: TaskToolName },
+  ): Promise<BotTaskRefused | null> {
+    const { turn } = base;
+    await tx
+      .select({ eventId: agentTurns.eventId })
+      .from(agentTurns)
+      .where(and(eq(agentTurns.organizationId, turn.organizationId), eq(agentTurns.eventId, turn.eventId)))
+      .for("update");
+    const calls = await tx
+      .select({ tool: agentToolCalls.tool, decision: agentToolCalls.decision })
+      .from(agentToolCalls)
+      .where(
+        and(
+          eq(agentToolCalls.organizationId, turn.organizationId),
+          eq(agentToolCalls.eventId, turn.eventId),
+          inArray(agentToolCalls.tool, [...TASK_TOOL_NAMES]),
+        ),
+      );
+    const succeeded = calls.some((c) => c.tool === base.tool && c.decision === "allowed");
+    if (!succeeded && calls.length < BOT_TASK_LIMITS.taskCallsPerTurnMax) return null;
+    return refuse(tx, { ...base, code: "once_per_turn", task: null });
+  }
+
+  /**
    * The checks of a continue or finish (PD-05, PD-08), in order: the tool on the turn (`not_in_turn`), the turn's task
    * (`no_task`), under its lock: ended (`task_stopped`), another person's (`not_requester`), and the busy rule (one
    * execution authority: while the task runs, only its current turn controls it; while it waits, its requester's turns
@@ -209,6 +242,8 @@ export function registerTaskRoutes(scope: App, core: Core): void {
       const body = req.body;
       return onTurn(cell, body, START, async (tx, turn): Promise<AgentChannelTaskStartResponse> => {
         const base = { cell, turn, tool: START } as const;
+        const bounded = await turnBound(tx, base);
+        if (bounded) return bounded;
         if (!offered(turn, START)) return refuse(tx, { ...base, code: "not_in_turn", task: null });
         const started = await startTask(tx, core, { turn, goal: body.goal, auditBase: cellAuditBase(cell) });
         if (!started.ok) return refuse(tx, { ...base, code: started.code, task: started.task });
@@ -244,6 +279,8 @@ export function registerTaskRoutes(scope: App, core: Core): void {
         CONTINUE,
         async (tx, turn, session) => {
           const base = { cell, turn, tool: CONTINUE } as const;
+          const bounded = await turnBound(tx, base);
+          if (bounded) return bounded;
           const checked = await control(tx, base);
           if ("refusal" in checked) return checked.refusal;
           const out = await continueTask(tx, core, checked.task, {
@@ -289,6 +326,8 @@ export function registerTaskRoutes(scope: App, core: Core): void {
       const body = req.body;
       return onTurn(cell, body, FINISH, async (tx, turn): Promise<AgentChannelTaskFinishResponse> => {
         const base = { cell, turn, tool: FINISH } as const;
+        const bounded = await turnBound(tx, base);
+        if (bounded) return bounded;
         const checked = await control(tx, base);
         if ("refusal" in checked) return checked.refusal;
         const ended = await finishTask(tx, core, checked.task, {

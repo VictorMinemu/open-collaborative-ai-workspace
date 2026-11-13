@@ -2051,7 +2051,7 @@ describe("the task tools (07.17.1.1.2 D-08, D-13, PD-08, E17): self-validated, o
     const g = createToolGuard({ client: () => fakeClient().client });
     begin(g);
     expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
-    g.taskCallEnded(active(g), CONTINUE, { ok: false });
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "bad_params" });
     expect(active(g).task.continued).toBe(false);
     expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
     g.taskCallEnded(active(g), CONTINUE, { ok: true, quiet: true });
@@ -2064,6 +2064,30 @@ describe("the task tools (07.17.1.1.2 D-08, D-13, PD-08, E17): self-validated, o
     expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
     g.taskCallEnded(active(g), START, { ok: true });
     expect(active(g).task.started).toBe(true);
+  });
+
+  it("code review WR-06: a refusal the model can fix frees the slot once; a second one, or one that should stop it, keeps the slot", async () => {
+    const g = createToolGuard({ client: () => fakeClient().client });
+    begin(g);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "wait_unknown" });
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "unreachable" });
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toEqual({ block: true, blockReason: ONCE });
+    // The workspace said the task cannot go on: the model is not invited to call again.
+    const FINISH_ARGS = { summary: "x", outcome: "done" };
+    expect(await g.beforeToolCall(call(FINISH, FINISH_ARGS), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), FINISH, { ok: false, code: "task_stopped" });
+    expect(await g.beforeToolCall(call(FINISH, FINISH_ARGS), ctx())).toEqual({
+      block: true,
+      blockReason: ONCE,
+    });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), START, { ok: false, code: "once_per_turn" });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toEqual({
+      block: true,
+      blockReason: ONCE,
+    });
   });
 
   it("after outside content (local taint, a turn delivered tainted, a session read) the tools still run; memory stays blocked", async () => {

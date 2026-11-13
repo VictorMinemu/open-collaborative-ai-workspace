@@ -89,7 +89,8 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * their static flags (never side-effecting, never approvable: they only schedule this bot's own next turn for this
  * person, within the task's budgets), so a tainted or session-read turn still reaches the route; they are not counted
  * against the cap of 8 (a turn that used its calls can still continue), and each runs once per turn (a second call is
- * refused here with `once_per_turn`; a call that did not succeed frees its slot, `taskCallEnded`). The outcome of the
+ * refused here with `once_per_turn`; a refusal the model can fix frees its slot once, `taskCallEnded`, and the API
+ * bounds the calls per turn too, code review WR-06). The outcome of the
  * turn's task calls (`ActiveTurn.task`) is what the bridge reads after the run (quiet turns, silent task turns).
  * Logs never include params, arguments or results.
  */
@@ -147,7 +148,24 @@ export interface ActiveTurn {
   task: TaskTurnOutcome;
   /** 07.17.1.1.2 (D-13): the task tools called (or in flight) this turn; each runs once per turn. */
   taskCalls: Set<string>;
+  /** Code review WR-06: refused calls of each task tool this turn (at most `TASK_REFUSALS_PER_TOOL`, then no retry). */
+  taskRefusals: Map<string, number>;
 }
+
+/** Code review WR-06: refused calls of one task tool a turn may make before its slot stays taken. */
+const TASK_REFUSALS_PER_TOOL = 2;
+
+/**
+ * Code review WR-06: the refusals the model can fix by calling again (its params, the wait it named, an unreachable or
+ * unreadable workspace answer). Every other code (the task ended, is busy or another person's, a budget, the policy,
+ * the API's own once-per-turn bound) keeps the tool's slot taken for the rest of the turn.
+ */
+const FIXABLE_TASK_REFUSALS: ReadonlySet<string> = new Set([
+  "bad_params",
+  "extra_keys",
+  "wait_unknown",
+  "unreachable",
+]);
 
 export type ToolCallEvent = {
   toolName: string;
@@ -653,6 +671,7 @@ export function createToolGuard(
         sessionOutputRead: false,
         task: noTaskOutcome(),
         taskCalls: new Set(),
+        taskRefusals: new Map(),
       });
       signal?.addEventListener(
         "abort",
@@ -679,12 +698,21 @@ export function createToolGuard(
 
     /**
      * 07.17.1.1.2 (D-13, PD-17): a task tool's call ended. A successful answer records the turn's task outcome (a
-     * finish always posts, so it clears a quiet continue of the same turn); any other end frees the tool's once-per-turn
-     * slot, so the model may fix its call and try again.
+     * finish always posts, so it clears a quiet continue of the same turn). Code review WR-06: a refusal the model can
+     * fix (its params, a wait it named, the workspace unreachable) frees the tool's once-per-turn slot once, so it may
+     * try again; a second refusal, or one that says the task cannot go on this turn, keeps the slot taken.
      */
-    taskCallEnded(t: ActiveTurn, tool: string, outcome: { ok: true; quiet?: boolean } | { ok: false }): void {
+    taskCallEnded(
+      t: ActiveTurn,
+      tool: string,
+      outcome: { ok: true; quiet?: boolean } | { ok: false; code: string },
+    ): void {
       if (!outcome.ok) {
-        t.taskCalls.delete(tool);
+        const refusals = (t.taskRefusals.get(tool) ?? 0) + 1;
+        t.taskRefusals.set(tool, refusals);
+        if (refusals < TASK_REFUSALS_PER_TOOL && FIXABLE_TASK_REFUSALS.has(outcome.code)) {
+          t.taskCalls.delete(tool);
+        }
         return;
       }
       t.taskCalls.add(tool);

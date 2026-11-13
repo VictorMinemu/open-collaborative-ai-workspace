@@ -207,30 +207,55 @@ describe("the task tools through the real entry, the gate and the Agent Channel 
     expect(api.taskCalls).toHaveLength(1);
   });
 
-  it("a refusal renders its fixed sentence, records nothing and frees the slot; a 5xx and an ended turn are fixed sentences", async () => {
+  it("a refusal renders its fixed sentence and records nothing; a fixable one frees the slot once (WR-06); a 5xx and an ended turn are fixed sentences", async () => {
     begin();
     await fetch(`${api.url}/__test/tasks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ answers: { continue: { ok: false, code: "no_task", sentence: "ignored" } } }),
+      body: JSON.stringify({
+        answers: { continue: { ok: false, code: "wait_unknown", sentence: "ignored" } },
+      }),
     });
     expect(await gate(TASK_CONTINUE_TOOL, CONTINUE, "tc-1")).toBeUndefined();
     const refused = await owned(TASK_CONTINUE_TOOL).execute("tc-1", CONTINUE);
-    expect(text(refused)).toBe(BOT_TASK_SENTENCES.no_task);
-    expect(refused.details).toEqual({ ok: false, code: "no_task" });
+    expect(text(refused)).toBe(BOT_TASK_SENTENCES.wait_unknown);
+    expect(refused.details).toEqual({ ok: false, code: "wait_unknown" });
     expect(toolGuard.activeTurn(SESSION)?.task.continued).toBe(false);
-    // The refused call did not use the turn's one continue: the model may fix it and call again.
+    // The refused call did not use the turn's one continue: the model may fix it and call again, once.
     await fetch(`${api.url}/__test/tasks`, { method: "POST", body: JSON.stringify({ status: 503 }) });
     expect(await gate(TASK_CONTINUE_TOOL, CONTINUE, "tc-2")).toBeUndefined();
     const down = await owned(TASK_CONTINUE_TOOL).execute("tc-2", CONTINUE);
     expect(text(down)).toBe(TASK_TOOL_SENTENCES.unreachable);
     expect(JSON.stringify(down)).not.toContain(FAKE_ERROR_CANARY);
+    // Two refusals: the slot stays taken for the rest of the turn.
+    expect((await gate(TASK_CONTINUE_TOOL, CONTINUE, "tc-3"))?.blockReason).toBe(
+      BOT_TASK_SENTENCES.once_per_turn,
+    );
     await fetch(`${api.url}/__test/tasks`, { method: "POST", body: "{}" });
+    begin();
     api.endTurn(EVENT);
-    expect(await gate(TASK_CONTINUE_TOOL, CONTINUE, "tc-3")).toBeUndefined();
-    const gone = await owned(TASK_CONTINUE_TOOL).execute("tc-3", CONTINUE);
+    expect(await gate(TASK_CONTINUE_TOOL, CONTINUE, "tc-4")).toBeUndefined();
+    const gone = await owned(TASK_CONTINUE_TOOL).execute("tc-4", CONTINUE);
     expect(text(gone)).toBe(TASK_TOOL_SENTENCES.unknown_turn);
     expect(api.taskCalls).toHaveLength(3);
+  });
+
+  it("code review WR-06: a refusal that should stop retries (no_task, task_stopped, the API's once_per_turn) keeps the slot at once", async () => {
+    for (const code of ["no_task", "task_stopped", "once_per_turn"] as const) {
+      begin();
+      await fetch(`${api.url}/__test/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ answers: { continue: { ok: false, code, sentence: "ignored" } } }),
+      });
+      expect(await gate(TASK_CONTINUE_TOOL, CONTINUE, `tc-${code}`)).toBeUndefined();
+      const refused = await owned(TASK_CONTINUE_TOOL).execute(`tc-${code}`, CONTINUE);
+      expect(refused.details, code).toEqual({ ok: false, code });
+      expect((await gate(TASK_CONTINUE_TOOL, CONTINUE, `tc-${code}-2`))?.blockReason, code).toBe(
+        BOT_TASK_SENTENCES.once_per_turn,
+      );
+    }
+    await fetch(`${api.url}/__test/tasks`, { method: "POST", body: "{}" });
   });
 
   it("the fake routes are strict like the real ones: a user or conversation id is a 400", async () => {
