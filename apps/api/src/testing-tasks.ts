@@ -245,6 +245,39 @@ export async function dropTaskJobs(s: SandboxStack, taskId: string): Promise<voi
   );
 }
 
+/**
+ * `ocw_sandbox_exec` with `background: true` on `event`'s turn (07.17.1.1.2-11): the fake sandboxd answers `running`
+ * with a process id when the command sleeps (`["sleep", "1"]`, `["sh", "-c", "sleep 1; exit 75"]`).
+ */
+export function backgroundExec(
+  s: SandboxStack,
+  event: Json,
+  argv: string[],
+  opts: { timeoutSeconds?: number; token?: string } = {},
+): Promise<Res> {
+  return cellCall(
+    s,
+    "/sandbox/exec",
+    {
+      eventId: event.eventId,
+      agentId: event.agent.id,
+      argv,
+      background: true,
+      ...(opts.timeoutSeconds !== undefined ? { timeoutSeconds: opts.timeoutSeconds } : {}),
+    },
+    opts.token,
+  );
+}
+
+/** The task's `bot_task_processes` rows as stored (superuser), oldest first. */
+export async function processRowsOf(s: SandboxStack, taskId: string): Promise<Json[]> {
+  return (
+    await s.su.query("select * from app.bot_task_processes where task_id = $1 order by created_at, id", [
+      taskId,
+    ])
+  ).rows as Json[];
+}
+
 /** A task continued on its start turn, which then reported done: due once the 5 s gap passes (`drainTaskJobs`). */
 export async function continuedTask(
   s: SandboxStack,

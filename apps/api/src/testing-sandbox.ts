@@ -9,7 +9,7 @@ import {
   type FakeSandboxdStats,
 } from "../../../infra/fake-model/fake-sandboxd.mjs";
 import type { BrowserBudgets, SandboxBudgets } from "./modules/agent-channel";
-import { pushPolicy } from "./modules/sandbox";
+import { type PassResult, pushPolicy } from "./modules/sandbox";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "./testing";
 
 /**
@@ -110,6 +110,16 @@ export async function ok(res: Promise<Res> | Res, status = 200): Promise<Json> {
 }
 
 export const codeOf = (r: Res): unknown => (r.body?.error as Json | undefined)?.code;
+
+/**
+ * One pass of the app's own sandbox events consumer (07.17.1.1.2-11), with every handler the app registered (the
+ * browser's, the long tasks' `process`): the app starts no consumer loop under NODE_ENV=test, so suites pump it.
+ */
+export async function pumpSandboxEvents(s: SandboxStack): Promise<PassResult> {
+  const events = s.stack.built.sandbox.events;
+  if (!events) throw new Error("the sandbox events consumer is not configured");
+  return events.runOnce({ waitMs: 0 });
+}
 
 export async function startSandboxStack(
   opts: {

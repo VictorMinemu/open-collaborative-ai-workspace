@@ -277,6 +277,90 @@ describe("fake sandboxd", () => {
   });
 });
 
+// ---------------------------------------------------------------- process events (07.17.1.1.2-11, D-03, PD-13)
+
+describe("fake sandboxd: a background command that ends emits one process event", () => {
+  const processEvents = async (after = 0) =>
+    (await op(`/v1/events?after=${after}&waitMs=0`, undefined, TOKEN, "GET")).body.events.filter(
+      (e) => e.type === "process",
+    );
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("a background exec whose sleep passed: exactly one exited event, ids and numbers only, never repeated", async () => {
+    await ensure(A);
+    const r = await exec(A, ["sleep", "0.2"], { yieldMs: 0 });
+    assert.equal(r.body.status, "running");
+    assert.deepEqual(await processEvents(), []);
+    await pause(260);
+    const first = await processEvents();
+    assert.equal(first.length, 1);
+    const [e] = first;
+    assert.deepEqual(Object.keys(e).sort(), [
+      "at",
+      "durationMs",
+      "exitCode",
+      "processId",
+      "seq",
+      "status",
+      "target",
+      "type",
+    ]);
+    assert.deepEqual(
+      { target: e.target, processId: e.processId, status: e.status, exitCode: e.exitCode },
+      { target: A, processId: r.body.processId, status: "exited", exitCode: 0 },
+    );
+    assert.ok(Number.isInteger(e.durationMs) && e.durationMs >= 200);
+    // A second poll (after it, or from the start) never repeats it; a poll of the ended process emits nothing more.
+    assert.deepEqual(await processEvents(e.seq), []);
+    const polled = await op("/v1/sandboxes/process", {
+      target: A,
+      processId: r.body.processId,
+      action: "poll",
+    });
+    assert.equal(polled.body.status, "exited");
+    assert.equal((await processEvents()).length, 1);
+  });
+
+  it("carries the command's own exit code (ocw-extract's 75 and 8 reach the bot as they are)", async () => {
+    await ensure(A);
+    const r = await exec(A, ["sh", "-c", "sleep 0.1; exit 75"], { yieldMs: 0 });
+    assert.equal(r.body.status, "running");
+    await pause(160);
+    const [e] = await processEvents();
+    assert.deepEqual({ status: e.status, exitCode: e.exitCode }, { status: "exited", exitCode: 75 });
+  });
+
+  it("a poll that sees the end first still emits the event once; a kill emits killed once", async () => {
+    await ensure(A);
+    const polledFirst = await exec(A, ["sleep", "0.1"], { yieldMs: 0 });
+    await pause(130);
+    const polled = await op("/v1/sandboxes/process", {
+      target: A,
+      processId: polledFirst.body.processId,
+      action: "poll",
+    });
+    assert.equal(polled.body.status, "exited");
+    const killedRun = await exec(A, ["sleep", "30"], { yieldMs: 0 });
+    await op("/v1/sandboxes/process", { target: A, processId: killedRun.body.processId, action: "kill" });
+    const list = await processEvents();
+    assert.deepEqual(
+      list.map((e) => [e.processId, e.status]),
+      [
+        [polledFirst.body.processId, "exited"],
+        [killedRun.body.processId, "killed"],
+      ],
+    );
+  });
+
+  it("a foreground exec that ended within its yield emits no process event", async () => {
+    await ensure(A);
+    const r = await exec(A, ["sleep", "0.05"]);
+    assert.equal(r.body.status, "exited");
+    await pause(80);
+    assert.deepEqual(await processEvents(), []);
+  });
+});
+
 // ---------------------------------------------------------------- browser ops (07.8-08, P-10, P-13, D-13)
 
 const SENTINEL = "OCW-SENTINEL-PW-5521";
