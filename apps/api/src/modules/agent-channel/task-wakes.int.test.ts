@@ -19,7 +19,7 @@ import {
   taskRow,
 } from "../../testing-tasks";
 import { createPermissionService } from "../organization";
-import { continueBotTask, taskEventId, tickBotTasks } from "./task-wakes";
+import { continueBotTask, runTaskContinuation, taskEventId, tickBotTasks } from "./task-wakes";
 
 /**
  * Phase 07.17.1.1.2-09 (D-01, D-02, D-07; PD-05, PD-06, PD-11; BTASK-01, BTASK-03, BTASK-06): the phase's API end to end,
@@ -357,6 +357,106 @@ describe("code review CR-01: a stop that lands between the reservation and the d
       await s.su.query("select event_id from app.agent_turns where task_id = $1", [y])
     ).rows.map((r) => r.event_id);
     expect(linked).toEqual([rowY.started_event_id]);
+  });
+});
+
+describe("code review WR-03: a delivery error that persists stops the task as error, once", () => {
+  const cardOf = async (taskId: string) =>
+    (
+      await s.su.query(
+        "select c.version, c.status, c.status_label, c.notices from app.message_cards c join app.bot_tasks t on t.card_message_id = c.message_id where t.id = $1",
+        [taskId],
+      )
+    ).rows[0] as Json;
+
+  it("the continuation's jobs retry a few times with backoff", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    const jobs = (
+      await s.su.query(
+        "select retry_limit, retry_delay, retry_backoff from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1",
+        [taskId],
+      )
+    ).rows as Json[];
+    expect(jobs.length).toBeGreaterThan(0);
+    for (const job of jobs) {
+      expect(job.retry_limit).toBe(2);
+      expect(job.retry_delay).toBeGreaterThanOrEqual(10);
+      expect(job.retry_backoff).toBe(true);
+    }
+  });
+
+  it("three failed attempts: the wait is given back twice without touching the card, then the task fails with outcome error and one message", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await dropTaskJobs(s, taskId);
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    const real = deps();
+    const failing = {
+      ...real,
+      perms: {
+        ...real.perms,
+        decide: async () => {
+          throw new Error("the permission store is down");
+        },
+      },
+    };
+    const data = { organizationId: s.orgA, taskId };
+    const before = await cardOf(taskId);
+    for (const retryCount of [0, 1]) {
+      await expect(
+        runTaskContinuation(s.stack.built.core, failing, data, { retryCount, retryLimit: 2 }),
+      ).rejects.toThrow();
+      expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", turns_used: 1, wait_kind: "turn" });
+      expect((await cardOf(taskId)).version).toBe(before.version);
+    }
+    // The last attempt: the task stops, the job completes (nothing left to retry).
+    await runTaskContinuation(s.stack.built.core, failing, data, { retryCount: 2, retryLimit: 2 });
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "failed", outcome: "error", turns_used: 1 });
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    const card = await cardOf(taskId);
+    expect(card.version).toBe(before.version + 1);
+    expect(card).toMatchObject({
+      status: "failed",
+      notices: [{ tone: "neutral", text: "Stopped after an error." }],
+    });
+    const posted = await endMessagesOf(s, taskId);
+    expect(posted.map((m) => m.body)).toEqual([
+      "@sam I stopped this task: an error kept me from going on. The card shows where it got to.",
+    ]);
+    // A later job or the tick finds an ended task.
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 2 * 60_000) });
+    await tickBotTasks(s.stack.built.core, deps());
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+  });
+
+  it("a delivery that fails once and then works is delivered, with the card refreshed once", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await dropTaskJobs(s, taskId);
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    const real = deps();
+    let calls = 0;
+    const flaky = {
+      ...real,
+      perms: {
+        ...real.perms,
+        decide: ((...args: Parameters<typeof real.perms.decide>) => {
+          calls++;
+          if (calls === 1) throw new Error("a transient failure");
+          return real.perms.decide(...args);
+        }) as typeof real.perms.decide,
+      },
+    };
+    const data = { organizationId: s.orgA, taskId };
+    const before = await cardOf(taskId);
+    await expect(
+      runTaskContinuation(s.stack.built.core, flaky, data, { retryCount: 0, retryLimit: 2 }),
+    ).rejects.toThrow();
+    await runTaskContinuation(s.stack.built.core, flaky, data, { retryCount: 1, retryLimit: 2 });
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 2 });
+    const card = await cardOf(taskId);
+    expect(card.version).toBe(before.version + 1);
+    expect(card).toMatchObject({ status: "running", status_label: "Working" });
   });
 });
 

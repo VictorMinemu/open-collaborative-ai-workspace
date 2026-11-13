@@ -427,6 +427,8 @@ export function taskStopSentence(
       return "I stopped this task: long tasks were turned off for me.";
     case "no_progress":
       return "I stopped this task: two turns in a row ended without progress. The card shows where it got to.";
+    case "error":
+      return "I stopped this task: an error kept me from going on. The card shows where it got to.";
     case "blocked":
       return "I need you to go on with this task. See my last message.";
     default:

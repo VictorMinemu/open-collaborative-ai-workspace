@@ -56,6 +56,17 @@ export const JOB_QUEUES = {
 } as const satisfies Record<JobQueueName, z.ZodType>;
 
 export type QueueName = keyof typeof JOB_QUEUES;
+
+/**
+ * Per-queue retry options set on every job of the queue at send (pg-boss's defaults otherwise: 2 retries, no delay).
+ * 07.17.1.1.2 code review WR-03: a long task's continuation retries twice with backoff (about 15 s, then 30 s); its
+ * last attempt stops the task as `error` (`runTaskContinuation`).
+ */
+const QUEUE_RETRY: Partial<
+  Record<QueueName, { retryLimit: number; retryDelay: number; retryBackoff: boolean }>
+> = {
+  "bot_task.continue": { retryLimit: 2, retryDelay: 15, retryBackoff: true },
+};
 export type JobData<Q extends QueueName> = z.infer<(typeof JOB_QUEUES)[Q]>;
 
 /** The API's queues are exactly the migrator's catalog (a mismatch fails the build). */
@@ -196,6 +207,7 @@ export function createJobs(opts: {
       const parsed = schemaOf(queue).parse(data) as object;
       return boss.send(queue, parsed, {
         db: fromDrizzle(tx, sql),
+        ...QUEUE_RETRY[queue],
         ...(sendOpts.singletonKey ? { singletonKey: sendOpts.singletonKey } : {}),
         ...(sendOpts.singletonSeconds ? { singletonSeconds: sendOpts.singletonSeconds } : {}),
         ...(sendOpts.startAfter ? { startAfter: sendOpts.startAfter } : {}),

@@ -26,7 +26,7 @@ import {
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { findAgent } from "../agent";
 import { loadTaskPolicy } from "../bot-capabilities";
 import { createConversationAccess } from "../chat";
@@ -64,8 +64,9 @@ import {
  *    `trigger: "task"`, the fixed server sentence as the message (never the bot's notes, P4), `turnPolicy` decides tools
  *    and meters the bot's daily limit; `agent.task.v1` on `cell:<org>`, `bot.task_continued`.
  * 3. release, user-less, only when nothing was delivered: the reserved fields are restored exactly. A failure throws
- *    (pg-boss retries and decides again); a refusal stops the task (`daily_limit` with its message; `access_lost` and
- *    `bot_unavailable` with a card notice only).
+ *    (pg-boss retries with backoff and decides again; the job's last attempt stops the task as `error`, code review
+ *    WR-03); a refusal stops the task (`daily_limit` with its message; `access_lost` and `bot_unavailable` with a card
+ *    notice only). The card shows the continuation once it is delivered.
  *
  * Audits and logs carry ids, counts and reasons only (P1); jobs carry `{ organizationId, taskId }` only (P7).
  */
@@ -236,7 +237,8 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
   if (!(await consumeWait(tx, task, { eventId, reason }))) return { kind: "none" };
   const reserved = await lockTask(tx, task.id);
   if (!reserved) return { kind: "none" };
-  await refreshTaskCard(tx, core, reserved);
+  // Code review WR-03: the card says "Working" only once the turn is delivered (`cardAfterDelivery`), so a delivery
+  // that fails and is given back never touches it.
   return { kind: "deliver", plan: { task: reserved, eventId, reason, process, tainted, previous } };
 }
 
@@ -408,9 +410,10 @@ async function forgetReservation(tx: Tx, plan: ContinuePlan): Promise<void> {
 
 /**
  * release (tx3, user-less): gives the reserved wait back, only while the row still holds what tx1 wrote (`running` on
- * this turn's id), so the next run decides again. Returns the restored row, or null when something else moved it.
+ * this turn's id), so the next run decides again. Returns the restored row, or null when something else moved it. The
+ * card is not touched: the reservation never changed it (code review WR-03).
  */
-async function release(tx: Tx, core: Core, plan: ContinuePlan): Promise<BotTaskRow | null> {
+async function release(tx: Tx, plan: ContinuePlan): Promise<BotTaskRow | null> {
   const p = plan.previous;
   const [row] = await tx
     .update(botTasks)
@@ -434,14 +437,30 @@ async function release(tx: Tx, core: Core, plan: ContinuePlan): Promise<BotTaskR
       ),
     )
     .returning();
-  if (!row) return null;
-  await refreshTaskCard(tx, core, row);
-  return row;
+  return row ?? null;
+}
+
+/**
+ * Code review WR-03: the card follows a delivered continuation ("Working"), from the row as it is now under its lock
+ * (the delivered turn may already have continued). A failure is logged with ids only: the next change refreshes it.
+ */
+async function cardAfterDelivery(core: Core, plan: ContinuePlan): Promise<void> {
+  try {
+    await core.db.withTenant({ organizationId: plan.task.organizationId, userId: null }, async (tx) => {
+      const row = await lockTask(tx, plan.task.id);
+      if (row) await refreshTaskCard(tx, core, row);
+    });
+  } catch (err) {
+    core.log.warn(
+      { taskId: plan.task.id, organizationId: plan.task.organizationId, err: { name: (err as Error)?.name } },
+      "bot task card not refreshed after its continuation",
+    );
+  }
 }
 
 /**
  * One `bot_task.continue` job (module doc): decide, deliver as the requester, release when nothing was delivered. A
- * failure of the delivery gives the reservation back and throws, so pg-boss retries the job.
+ * failure of the delivery gives the reservation back and throws, so pg-boss retries the job (`runTaskContinuation`).
  */
 export async function continueBotTask(
   core: Core,
@@ -463,10 +482,13 @@ export async function continueBotTask(
       deliver(tx, core, deps, plan),
     );
   } catch (err) {
-    await core.db.withTenant({ organizationId, userId: null }, (tx) => release(tx, core, plan));
+    await core.db.withTenant({ organizationId, userId: null }, (tx) => release(tx, plan));
     throw err;
   }
-  if (out.delivered) return "delivered";
+  if (out.delivered) {
+    await cardAfterDelivery(core, plan);
+    return "delivered";
+  }
   const reason = out.reason;
   if (reason === "superseded") {
     // The stop already wrote its card, audit and message: nothing is released and nothing is stopped again.
@@ -475,7 +497,7 @@ export async function continueBotTask(
   }
   return core.db.withTenant({ organizationId, userId: null }, async (tx): Promise<TaskContinueOutcome> => {
     // The turn that was not delivered is not counted: the wait is given back first, then the task stops.
-    await release(tx, core, plan);
+    await release(tx, plan);
     const task = await lockTask(tx, plan.task.id);
     if (!task || !isActiveTask(task)) return "none";
     // PD-09 (Pitfall 5): the daily limit is not a transient skip (the task would retry every minute until midnight):
@@ -672,19 +694,44 @@ export function registerTaskWakes(core: Core, deps: TaskWakesDeps): void {
     const out = await tickBotTasks(core, deps);
     if (out.queued + out.nudged + out.stopped > 0) core.log.info({ ...out }, "bot task tick");
   });
-  core.jobs.work("bot_task.continue", async (data) => {
-    try {
-      await continueBotTask(core, deps, data);
-    } catch (err) {
-      core.log.warn(
-        {
-          taskId: data.taskId,
-          organizationId: data.organizationId,
-          err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code },
-        },
-        "bot task continuation failed",
-      );
-      throw err;
-    }
-  });
+  core.jobs.work("bot_task.continue", (data, ctx) => runTaskContinuation(core, deps, data, ctx));
+}
+
+/**
+ * One attempt of a `bot_task.continue` job (the worker's body). A failure throws, so pg-boss retries it with backoff
+ * (`QUEUE_RETRY` in jobs.ts); code review WR-03: on the job's last attempt a delivery error that persists stops the
+ * task instead (`failed`, outcome `error`, the card's notice, one message to the requester), so it is never retried
+ * every minute until its deadline. Logs carry ids and error names only.
+ */
+export async function runTaskContinuation(
+  core: Core,
+  deps: TaskWakesDeps,
+  data: JobData<"bot_task.continue">,
+  ctx: Pick<JobContext, "retryCount" | "retryLimit">,
+): Promise<void> {
+  try {
+    await continueBotTask(core, deps, data);
+  } catch (err) {
+    const last = lastAttempt(ctx);
+    core.log.warn(
+      {
+        taskId: data.taskId,
+        organizationId: data.organizationId,
+        attempt: ctx.retryCount,
+        last,
+        err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code },
+      },
+      "bot task continuation failed",
+    );
+    if (!last) throw err;
+    const stopped = await core.db.withTenant(
+      { organizationId: data.organizationId, userId: null },
+      async (tx) => {
+        const task = await lockTask(tx, data.taskId);
+        if (!task || !isActiveTask(task)) return false;
+        return (await stopTask(tx, core, task, "error")) !== null;
+      },
+    );
+    if (!stopped) throw err;
+  }
 }

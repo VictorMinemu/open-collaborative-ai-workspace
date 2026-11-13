@@ -525,7 +525,11 @@ describe("07.17.1.1.2 tasks: labels, cadence and sentences (D-05, D-11, D-12, PD
       "I stopped this task: two turns in a row ended without progress. The card shows where it got to.",
     );
     expect(taskStopSentence("blocked", p)).toBe("I need you to go on with this task. See my last message.");
-    for (const outcome of ["done", "access_lost", "bot_unavailable", "stopped_by_person", "error"] as const) {
+    // Code review WR-03: a delivery error that persisted tells the person once.
+    expect(taskStopSentence("error", p)).toBe(
+      "I stopped this task: an error kept me from going on. The card shows where it got to.",
+    );
+    for (const outcome of ["done", "access_lost", "bot_unavailable", "stopped_by_person"] as const) {
       expect(taskStopSentence(outcome, p), outcome).toBeNull();
     }
     for (const outcome of BotTaskOutcome.options) {
