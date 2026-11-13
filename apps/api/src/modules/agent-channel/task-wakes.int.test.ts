@@ -6,6 +6,7 @@ import {
   deliverTaskTurn,
   drainTaskJobs,
   reportTurnDone,
+  setTask,
   startTaskFor,
   taskEvents,
   taskRow,
@@ -93,22 +94,28 @@ describe("tracer: continue → done → the job → exactly one agent.task.v1 in
     expect(c.body).toMatchObject({ ok: true, next: "after_turn" });
     // The backstop job is due in 30 minutes: a plain drain runs nothing.
     expect(await s.stack.built.core.jobs.drain("bot_task.continue")).toBe(0);
-    // Forced due, the current turn has not reported done (and is younger than 30 min): nothing (PD-06).
+    // The wait made due and the job forced: the turn that continued has not reported done (and is younger than
+    // 30 min), so nothing is delivered (PD-06).
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
     expect(await drainTaskJobs(s)).toBeGreaterThan(0);
     expect(await taskEvents(s, taskId)).toEqual([]);
     expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", turns_used: 1, wait_kind: "turn" });
   });
 
-  it("the cell's done marks the turn, shortens the wait to about 5 s and queues one job", async () => {
+  it("the cell's done marks the turn, keeps the wait within about 5 s and queues one job 5 s later", async () => {
+    // Back to the 30-minute backstop, as the continue left it: the done shortens it.
+    await setTask(s, taskId, { wake_at: new Date(Date.now() + 30 * 60_000) });
     const before = Date.now();
     const r = await reportTurnDone(s, start.eventId as string);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect((await turnOf(start.eventId as string))?.done_at).toBeInstanceOf(Date);
     const row = await taskRow(s, taskId);
-    const wake = (row.wake_at as Date).getTime();
+    const wake = new Date(row.wake_at as Date).getTime();
     expect(wake).toBeGreaterThanOrEqual(before - 1_000);
     expect(wake).toBeLessThanOrEqual(Date.now() + 10_000);
-    expect((await queuedJobs(taskId)).length).toBeGreaterThanOrEqual(1);
+    const jobs = await queuedJobs(taskId);
+    expect(jobs).toHaveLength(1);
+    expect(new Date(jobs[0]?.start_after as Date).getTime()).toBeGreaterThanOrEqual(before + 4_000);
   });
 
   it("the drained job delivers one agent.task.v1: the requester, the card, the sentence, the task tools", async () => {

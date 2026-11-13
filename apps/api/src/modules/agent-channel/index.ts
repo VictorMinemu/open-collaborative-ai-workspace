@@ -67,6 +67,7 @@ import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerTaskRoutes, registerTaskUserRoutes } from "./task-routes";
+import { registerTaskWakes } from "./task-wakes";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerBotWorkSessionFileRoutes } from "./work-session-files";
 import { registerWorkSessionReadRoute } from "./work-session-read";
@@ -232,6 +233,9 @@ export function createAgentChannelModule(
   // Work Zone wakes (07.16-20, PD-16): a bot session's transitions refresh its card and wake the bot in its thread, as
   // the person who asked (`work_session.bot_sync`, ids only).
   registerWorkSessionWakes(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // Long tasks (07.17.1.1.2-09, PD-06): the bot's next task turn, delivered by the platform as the requester
+  // (`bot_task.continue`, ids only), and the minute tick that recovers lost and overdue tasks.
+  registerTaskWakes(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx

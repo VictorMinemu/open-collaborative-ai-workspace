@@ -158,18 +158,20 @@ export async function taskRow(s: SandboxStack, taskId: string): Promise<Json> {
 }
 
 /**
- * Runs every queued long-task job now (07.17.1.1.2-09): the superuser moves `start_after` of the `bot_task.*` jobs to
- * `now()` (tests do not wait out a 5 s gap, a timer or the 30-minute backstop), then drains the tick and the
- * continuation queues. Returns how many continuation jobs ran. A job that is not due stays queued when only
- * `core.jobs.drain` is called, as in production.
+ * Runs every queued long-task job now (07.17.1.1.2-09), as if the 5 s gap had passed: the superuser moves `wake_at` of
+ * waiting tasks due within that gap to `now()` (a timer or the 30-minute backstop is not moved: `setTask` does that)
+ * and `start_after` of the `bot_task.*` jobs to `now()`, then drains the continuation queue. Returns how many jobs ran
+ * (the handler decides each under the task's lock). A job that is not due stays queued when only `core.jobs.drain` is
+ * called, as in production. (The minute tick is never queued in tests: workers are off, so nothing schedules it.)
  */
 export async function drainTaskJobs(s: SandboxStack): Promise<number> {
   await s.su.query(
+    "update app.bot_tasks set wake_at = now() where status = 'waiting' and wake_at <= now() + interval '6 seconds'",
+  );
+  await s.su.query(
     "update pgboss.job set start_after = now() where name like 'bot_task.%' and state in ('created', 'retry')",
   );
-  const jobs = s.stack.built.core.jobs;
-  await jobs.drain("bot_task.tick");
-  return jobs.drain("bot_task.continue");
+  return s.stack.built.core.jobs.drain("bot_task.continue");
 }
 
 /** The cell's `POST /turns/:eventId/done` for a delivered turn (the bridge's report at the end of every task turn). */

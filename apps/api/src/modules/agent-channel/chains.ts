@@ -29,6 +29,7 @@ import { type CellPrincipal, cellOf } from "./auth";
 import { auditUnknownTurn, cellAuditBase } from "./claim";
 import type { ConsultDeps } from "./consult";
 import { buildMentionEvents } from "./mentions";
+import { taskTurnDone } from "./task-wakes";
 
 /**
  * The return half of a consult (Phase 07.7-06; A2A-01, A2A-03; D-01, D-04, D-06, D-07, D-09, D-13, D-15; ADR-0027).
@@ -498,6 +499,14 @@ export async function turnDone(
     },
   );
   if (!found) throw notFound(UNKNOWN_TURN, "unknown_turn");
+  // Phase 07.17.1.1.2 (PD-06): a long task's turn ended. Its wait is released (or the nudge decided) before the chain
+  // half, which runs unchanged; a turn outside any task changes nothing there.
+  await taskTurnDone(core, {
+    organizationId: cell.organizationId,
+    eventId,
+    agentId: body.agentId,
+    outcome: body.outcome,
+  });
   const { chainId } = found;
   if (!chainId) return;
   await core.db.withTenant({ organizationId: cell.organizationId, userId: found.userId }, async (tx) => {
