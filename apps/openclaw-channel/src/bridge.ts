@@ -441,7 +441,11 @@ export function createBridge(opts: BridgeOptions) {
         try {
           const held: string[] = [];
           const run = await opts.port.dispatchMention(
-            mention,
+            // OpenClaw dedupes inbound turns by this id: unique per delivery and per attempt (see MappedMention).
+            {
+              ...mention,
+              inboundMessageId: attempt === 1 ? mention.eventId : `${mention.eventId}:${attempt}`,
+            },
             async (text) => {
               if (isOpenClawAuthFailure(text)) {
                 throw new TerminalTurnError(

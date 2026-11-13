@@ -170,7 +170,14 @@ export type MappedMention = {
    */
   sessionThreadId: string | null;
   target: string;
+  /** The chat message this turn answers (reply anchor, card `inReplyTo`). */
   messageId: string;
+  /**
+   * The id OpenClaw dedupes inbound turns by, set by the bridge per delivery and attempt (`<eventId>`, then
+   * `<eventId>:<attempt>`). Server-originated turns (task continuations, Work Zone wakes) reuse one card message, so
+   * keying OpenClaw on `messageId` made it drop every turn after the first as `skipped:duplicate` (CI p289).
+   */
+  inboundMessageId?: string;
   timestampMs: number | undefined;
   sender: { id: string; name: string; isBot: boolean };
   conversationLabel: string;

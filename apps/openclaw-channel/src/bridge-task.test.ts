@@ -170,6 +170,25 @@ afterEach(async () => {
   await api.close();
 });
 
+describe("OpenClaw's inbound id is unique per delivery and attempt (CI p289: `skipped:duplicate`)", () => {
+  it("two continuations on the same card message, and each retry, reach OpenClaw with distinct inbound ids; replies still anchor on the card", async () => {
+    const b = await bridge();
+    // Attempt 1 of the second event produces nothing (a failed attempt), attempt 2 answers.
+    port.script = [
+      { texts: ["Turn one."], task: null },
+      { texts: [], task: null },
+      { texts: ["Turn two."], task: null },
+    ];
+    await b.handleFrame({ seq: 1, type: "agent.task.v1", data: taskEvent(1) });
+    await b.handleFrame({ seq: 2, type: "agent.task.v1", data: taskEvent(2) });
+    const ids = port.dispatched.map((m) => m.inboundMessageId);
+    expect(ids).toEqual(["evt-task-1", "evt-task-2", "evt-task-2:2"]);
+    expect(new Set(ids).size).toBe(3);
+    // The chat anchor (reply target) stays the real message.
+    expect(port.dispatched.every((m) => m.messageId === CARD_MESSAGE_ID)).toBe(true);
+  });
+});
+
 describe("agent.task.v1 (07.17.1.1.2 D-02, D-14, PD-17): a continuation is the bot's turn in its task card's thread", () => {
   it("is a turn event dispatched once into the card's thread session; a quiet continue drops the text, no failure reply, done replied (tracer)", async () => {
     const b = await bridge();
