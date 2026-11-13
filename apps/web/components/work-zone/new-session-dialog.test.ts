@@ -12,6 +12,7 @@ import {
   startBlocker,
   stepRadio,
   whoUpdates,
+  worktreeChoice,
 } from "./new-session-dialog";
 
 /**
@@ -280,5 +281,18 @@ describe("AddServerLink (07.12-07, owner feedback 2026-10-29)", () => {
     expect(html).toContain('data-testid="new-session-add-server"');
     expect(html).toContain('href="/settings/devices?add=server"');
     expect(html).toContain("Run sessions on a server");
+  });
+});
+
+describe("worktreeChoice (quick 261113-hu7)", () => {
+  it("a project without git: the switch is off and disabled, whatever was chosen", () => {
+    expect(worktreeChoice({ git: false }, true)).toEqual({ checked: false, disabled: true });
+    expect(worktreeChoice({ git: false }, false)).toEqual({ checked: false, disabled: true });
+  });
+
+  it("a project in git, of an older device or none chosen yet: the choice stands", () => {
+    expect(worktreeChoice({ git: true }, true)).toEqual({ checked: true, disabled: false });
+    expect(worktreeChoice({}, true)).toEqual({ checked: true, disabled: false });
+    expect(worktreeChoice(null, false)).toEqual({ checked: false, disabled: false });
   });
 });

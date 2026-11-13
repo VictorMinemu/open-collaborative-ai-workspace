@@ -58,6 +58,7 @@ let serverId: string;
 let billingId: string;
 let ledgerId: string;
 let scratchId: string;
+let notesId: string;
 
 async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
   const r = await res;
@@ -223,11 +224,19 @@ beforeAll(async () => {
   });
   server.send({
     type: "projects.sync",
-    projects: ["billing-api", "ledger", "scratch"].map((name) => ({
-      localId: `lp_${name}`,
-      name,
+    // billing-api says it is in git, ledger and scratch come from an older device (no `git`), notes has no git
+    // repository (quick 261113-hu7).
+    projects: [
+      { name: "billing-api", git: true },
+      { name: "ledger" },
+      { name: "scratch" },
+      { name: "notes", git: false },
+    ].map((p) => ({
+      localId: `lp_${p.name}`,
+      name: p.name,
       gitRemote: null,
       defaultBranch: "main",
+      ...(p.git !== undefined ? { git: p.git } : {}),
     })),
   });
   await server.next((f) => f.type === "projects.ack");
@@ -249,6 +258,7 @@ beforeAll(async () => {
   billingId = list.find((p) => p.name === "billing-api")!.id as string;
   ledgerId = list.find((p) => p.name === "ledger")!.id as string;
   scratchId = list.find((p) => p.name === "scratch")!.id as string;
+  notesId = list.find((p) => p.name === "notes")!.id as string;
 
   // The admin gives Atlas its profile (he becomes its sponsor); the device allows Atlas with Full access.
   await createBotProfile(victor, atlasId, profile());
@@ -557,6 +567,58 @@ describe("one executor per tree (D-15, PD-10)", () => {
     const body = await started(await askAtlas());
     const [s] = await rowsOf("select worktree from app.work_sessions where id = $1", [body.workSessionId]);
     expect(s!.worktree).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- worktree only in git projects (quick 261113-hu7)
+
+describe("an isolated worktree only where the project is in git (quick 261113-hu7)", () => {
+  it("stores what the device announced: git true, git false, absent → null; GET /projects carries it", async () => {
+    const rows = await rowsOf("select name, git from app.projects where device_id = $1 order by name", [
+      serverId,
+    ]);
+    expect(rows).toEqual([
+      { name: "billing-api", git: true },
+      { name: "ledger", git: null },
+      { name: "notes", git: false },
+      { name: "scratch", git: null },
+    ]);
+    const list = (await ok(victor.request("GET", "/api/v1/projects"))).projects as Json[];
+    expect(list.find((p) => p.id === billingId)!.git).toBe(true);
+    expect(list.find((p) => p.id === notesId)!.git).toBe(false);
+    expect(list.find((p) => p.id === ledgerId)!.git).toBeUndefined();
+  });
+
+  it("profile worktree on, a project without git → the session runs on the checkout; a second start → tree_busy", async () => {
+    await saveProfile({ projectIds: [billingId, ledgerId, notesId] });
+    try {
+      const body = await started(await askAtlas(), { projectId: notesId });
+      const [s] = await rowsOf("select worktree, branch from app.work_sessions where id = $1", [
+        body.workSessionId,
+      ]);
+      expect(s).toEqual({ worktree: false, branch: "main" });
+      const cmd = (await server.command("session.start", body.workSessionId)) as Json;
+      expect(cmd.payload.worktree).toBeUndefined();
+      server.ack(cmd.id as string);
+
+      // One executor per tree (principle 4, D-15): the checkout is busy, so a second start there is refused.
+      const before = await counts();
+      await refused(await askAtlas(), "tree_busy", { projectId: notesId });
+      expect(await counts()).toEqual(before);
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("a project in git, or from a device that does not say, keeps the profile's worktree", async () => {
+    const inGit = await started(await askAtlas());
+    const unknown = await started(await askAtlas(), { projectId: ledgerId });
+    const rows = await rowsOf("select id, worktree from app.work_sessions where id = any($1::uuid[])", [
+      [inGit.workSessionId, unknown.workSessionId],
+    ]);
+    expect(rows.map((r) => r.worktree)).toEqual([true, true]);
+    const cmd = (await server.command("session.start", unknown.workSessionId)) as Json;
+    expect(cmd.payload.worktree).toBe(true);
   });
 });
 
