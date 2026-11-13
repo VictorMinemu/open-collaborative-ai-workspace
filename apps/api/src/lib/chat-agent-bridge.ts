@@ -102,7 +102,8 @@ export interface AgentMention {
   /**
    * Phase 07.17.1.1.2 (D-02, D-03, PD-07): the task a `trigger: "task"` delivery continues, why it woke and, for a
    * process wake, the ended process (ids and numbers only). Set only by agent-channel's task delivery and read only on
-   * `trigger: "task"` deliveries. Chat never sets it.
+   * `trigger: "task"` deliveries; 07.17.1.1.2-12 (PD-14): also set by the Work Zone wake of a session its task started
+   * (`{ taskId }` only) and read on `trigger: "work_session"` deliveries. Chat never sets it.
    */
   task?: { taskId: string; reason?: BotTaskWakeReason; process?: TaskProcessFact };
 }

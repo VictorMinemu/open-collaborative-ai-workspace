@@ -130,7 +130,8 @@ export async function markProcessesReported(tx: Tx, processRowIds: readonly stri
 /**
  * The task offer of one turn of `agentId` (PD-07). `threadRootId` is the delivery's thread root (the message itself at a
  * channel's root, ignored in a direct conversation); `eventId` the turn's event id; `mentionTaskId` the task a
- * `trigger: "task"` delivery continues (it alone may take control through the event id).
+ * `trigger: "task"` delivery continues (it alone may take control through the event id), or the task a `work_session`
+ * wake's session belongs to (07.17.1.1.2-12).
  */
 export async function taskOfferFor(
   tx: Tx,
@@ -160,13 +161,19 @@ export async function taskOfferFor(
       ),
     )
     .limit(1);
+  const wake = p.trigger === "work_session";
   if (row) {
     const current =
       row.currentEventId === p.eventId && (p.mentionTaskId == null || p.mentionTaskId === row.id);
-    const control = current || (row.requesterUserId === p.askerUserId && row.status === "waiting");
+    // 07.17.1.1.2-12 (PD-14): a Work Zone wake controls the task only as its own turn (the wake consumed the wait, so
+    // its event is the current turn); otherwise it only sees the task, so an uncounted wake never drives it.
+    const control = current || (!wake && row.requesterUserId === p.askerUserId && row.status === "waiting");
     const { task, reportedProcessIds } = await turnTaskOf(tx, row, { listProcesses: control });
     return { offer: control ? "control" : "view", task, taskId: row.id, reportedProcessIds };
   }
+  // 07.17.1.1.2-12 (D-04, PD-14): the wake of a session a task started never starts another task once that one ended
+  // (a budget it ran out of stays spent).
+  if (wake && p.mentionTaskId) return null;
   return START_TRIGGERS.has(p.trigger)
     ? { offer: "start", task: null, taskId: null, reportedProcessIds: [] }
     : null;

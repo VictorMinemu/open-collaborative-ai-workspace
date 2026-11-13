@@ -353,7 +353,10 @@ export async function buildMentionEvents(
       askerUserId: mention.author.id,
       trigger: mention.trigger ?? "mention",
       eventId,
-      mentionTaskId: mention.trigger === "task" ? (mention.task?.taskId ?? null) : null,
+      mentionTaskId:
+        mention.trigger === "task" || mention.trigger === "work_session"
+          ? (mention.task?.taskId ?? null)
+          : null,
     });
     const decision = await turnPolicy(
       tx,
