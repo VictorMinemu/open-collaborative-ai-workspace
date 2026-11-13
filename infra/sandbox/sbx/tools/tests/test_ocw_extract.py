@@ -232,8 +232,9 @@ class Runner(Base):
             stderr=subprocess.DEVNULL,
         )
         try:
+            # oosplash starts first and execs soffice.bin a moment later: wait for soffice.bin itself (CI p292).
             deadline = time.monotonic() + 90
-            while not office_processes() and time.monotonic() < deadline:
+            while "soffice.bin" not in office_processes() and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertIn("soffice.bin", office_processes(), "LibreOffice never started")
             kill = subprocess.run(["/usr/local/bin/ocw-run", "--kill", rid], capture_output=True, check=False)
