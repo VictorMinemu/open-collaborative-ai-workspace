@@ -81,6 +81,24 @@ export async function lockTask(tx: Tx, id: string): Promise<BotTaskRow | null> {
   return row ?? null;
 }
 
+/**
+ * PD-06's readiness rule, by the database's clock: the task's current turn reported done, or is older than 30 minutes
+ * (lost), or is no turn at all. A waiting task's next turn is delivered only then (the continuation, and code review
+ * WR-05 the Work Zone wake), so two turns of one task never overlap.
+ */
+export async function currentTurnDone(
+  tx: Tx,
+  task: Pick<BotTaskRow, "organizationId" | "currentEventId">,
+): Promise<boolean> {
+  const res = await tx.execute(sql`
+    select coalesce((
+      select t.done_at is not null or t.created_at <= now() - make_interval(mins => ${BOT_TASK_LIMITS.turnLostMinutes})
+        from app.agent_turns t
+       where t.organization_id = ${task.organizationId} and t.event_id = ${task.currentEventId}::uuid
+    ), true) as done`);
+  return (res.rows[0] as { done: boolean }).done;
+}
+
 /** The task a delivered turn belongs to (`agent_turns.task_id`: its start turn, a continuation or a control turn). */
 export async function taskOfTurn(tx: Tx, eventId: string): Promise<BotTaskRow | null> {
   const [turn] = await tx

@@ -522,6 +522,66 @@ describe("a wake while another turn of the task runs: a view turn (PD-07, PD-14)
   });
 });
 
+describe("code review WR-05: a wake never takes the wait while the turn that continued still runs", () => {
+  it("the session ends its turn before the task's turn reported done: a view turn; the done then delivers the task's turn, once", async () => {
+    const { taskId, start, session } = await taskWithSession();
+    // The start turn waits on the session but keeps running (no done yet).
+    const c = await continueAs(s, start, { waitFor: { workSessionId: session.workSessionId } });
+    expect(c.body, JSON.stringify(c.body)).toMatchObject({ ok: true, next: "on_session" });
+    const before = await taskRow(s, taskId);
+    expect(before).toMatchObject({
+      status: "waiting",
+      wait_kind: "session",
+      current_event_id: start.eventId,
+    });
+
+    await finishTurn(session);
+    await drainWakes();
+    const [wake] = await wakesOf(session.workSessionId);
+    expect(wake?.turn.task).toMatchObject({ taskId, status: "waiting" });
+    expect(taskTools(wake as Json)).toEqual([]);
+    expect((await turnOf(wake?.eventId as string))?.task_id).toBeNull();
+    const deferred = await taskRow(s, taskId);
+    expect(deferred).toMatchObject({
+      status: "waiting",
+      turns_used: before.turns_used,
+      current_event_id: start.eventId,
+      wait_seq: before.wait_seq,
+      wait_kind: "session",
+    });
+    // The wake the session gave is not lost: the wait is due as soon as the running turn ends.
+    expect(new Date(deferred.wake_at as Date).getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+
+    expect((await reportTurnDone(s, start.eventId as string, "replied", { agentId: builderId })).status).toBe(
+      200,
+    );
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(1);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 2 });
+  });
+
+  it("a task waiting on a timer is not woken by its session: the wake only sees it", async () => {
+    const { taskId, start, session } = await taskWithSession();
+    expect((await continueAs(s, start, { afterSeconds: 600 })).body).toMatchObject({ ok: true, next: "at" });
+    expect((await reportTurnDone(s, start.eventId as string, "replied", { agentId: builderId })).status).toBe(
+      200,
+    );
+    const before = await taskRow(s, taskId);
+    await finishTurn(session);
+    await drainWakes();
+    const [wake] = await wakesOf(session.workSessionId);
+    expect(taskTools(wake as Json)).toEqual([]);
+    expect(await taskRow(s, taskId)).toMatchObject({
+      status: "waiting",
+      wait_kind: "timer",
+      wait_seq: before.wait_seq,
+      turns_used: before.turns_used,
+    });
+  });
+});
+
 describe("a session without a task in the thread of a waiting task (PD-07, PD-14)", () => {
   it("started before ocw_task_start on the same turn: its wake only sees the task, which keeps waiting uncounted", async () => {
     await quiesce();

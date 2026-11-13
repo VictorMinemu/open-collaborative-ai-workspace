@@ -49,6 +49,7 @@ import {
   auditTask,
   type BotTaskRow,
   consumeWait,
+  currentTurnDone,
   isActiveTask,
   lockTask,
   stopTask,
@@ -569,6 +570,32 @@ async function taskWakeOf(tx: Tx, core: Core, bot: BotRow, eventId: string): Pro
   }
   const bound = { task: { taskId: task.id }, consumed: null, tainted: false };
   if (!isActiveTask(task) || task.status !== "waiting") return bound;
+  // Code review WR-05 (PD-06, one execution authority): the turn that continued may still run. Its wait is then left
+  // alone and the wake only sees the task; a wait on this very session is made due at once, so the task's own
+  // continuation delivers it right after that turn reports done (or is taken as lost).
+  if (!(await currentTurnDone(tx, task))) {
+    if (task.waitKind === "session" && task.waitRef === bot.workSessionId) {
+      await tx
+        .update(botTasks)
+        .set({ wakeAt: sql`least(${botTasks.wakeAt}, now())` })
+        .where(
+          and(
+            eq(botTasks.organizationId, task.organizationId),
+            eq(botTasks.id, task.id),
+            eq(botTasks.status, "waiting"),
+            eq(botTasks.waitSeq, task.waitSeq),
+          ),
+        );
+    }
+    return bound;
+  }
+  // Only a wait this wake answers is consumed: this session, or the task's plain "after this turn" (and nudge). A
+  // timer or a background command the bot waits for keeps its wait (its own end carries the facts).
+  const answers =
+    task.waitKind === "turn" ||
+    task.waitKind === "nudge" ||
+    (task.waitKind === "session" && task.waitRef === bot.workSessionId);
+  if (!answers) return bound;
 
   const stop = async (outcome: TaskStopOutcome): Promise<TaskWake> => {
     await stopTask(tx, core, task, outcome, { eventId });
