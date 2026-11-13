@@ -8,14 +8,18 @@ import {
   BOT_TASK_SENTENCES,
   type BotTaskRefusal,
   type BotTaskRefused,
+  BotTaskStopResponse,
   BUILTIN_TOOLS,
+  IdParams,
   TASK_TOOL_FLAGS,
   type TaskToolName,
 } from "@ocw/contracts";
-import { agentTurns, type Tx } from "@ocw/db";
+import { agentTurns, botTasks, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
-import type { App, Core } from "../../core";
-import { notFound } from "../../lib/errors";
+import { type App, authOf, type Core, tenant } from "../../core";
+import { HttpError, notFound } from "../../lib/errors";
+import { createConversationAccess } from "../chat";
+import type { PermissionService } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
 import {
@@ -25,12 +29,15 @@ import {
   finishTask,
   isActiveTask,
   lockTask,
+  mayStopTask,
   startTask,
+  stopTask,
   type TaskAuditMetadata,
   type TaskSessionFact,
   taskOfTurn,
   taskSessionOf,
 } from "./tasks";
+import { judgedConversationId } from "./work-session-calls";
 
 /**
  * Phase 07.17.1.1.2 (D-01, D-02, D-04, D-05, D-07, D-13; PD-05, PD-08 … PD-12, PD-18, PD-19; ADR-0042): the long task's
@@ -62,6 +69,10 @@ const refused = (code: BotTaskRefusal): BotTaskRefused => ({
   code,
   sentence: BOT_TASK_SENTENCES[code],
 });
+
+/** The tool is on the turn, and the turn is not an AI chat's (D-10: never a task there, whatever the ledger says). */
+const offered = (turn: AgentTurnRow, tool: TaskToolName): boolean =>
+  turn.conversationKind !== "ai_chat" && turn.tools.includes(tool);
 
 export function registerTaskRoutes(scope: App, core: Core): void {
   /** The claim of a task call: recorded and audited, outside the cap of 8; `reason` set = a refusal. */
@@ -170,7 +181,7 @@ export function registerTaskRoutes(scope: App, core: Core): void {
     const no = async (code: BotTaskRefusal, task: Pick<BotTaskRow, "id"> | null) => ({
       refusal: await refuse(tx, { ...base, code, task }),
     });
-    if (!turn.tools.includes(base.tool)) return no("not_in_turn", null);
+    if (!offered(turn, base.tool)) return no("not_in_turn", null);
     const linked = await taskOfTurn(tx, turn.eventId);
     const task = linked ? await lockTask(tx, linked.id) : null;
     if (!task) return no("no_task", null);
@@ -197,7 +208,7 @@ export function registerTaskRoutes(scope: App, core: Core): void {
       const body = req.body;
       return onTurn(cell, body, START, async (tx, turn): Promise<AgentChannelTaskStartResponse> => {
         const base = { cell, turn, tool: START } as const;
-        if (!turn.tools.includes(START)) return refuse(tx, { ...base, code: "not_in_turn", task: null });
+        if (!offered(turn, START)) return refuse(tx, { ...base, code: "not_in_turn", task: null });
         const started = await startTask(tx, core, { turn, goal: body.goal, auditBase: cellAuditBase(cell) });
         if (!started.ok) return refuse(tx, { ...base, code: started.code, task: started.task });
         await claim(tx, { ...base, task: started.task.id, reason: null });
@@ -296,5 +307,69 @@ export function registerTaskRoutes(scope: App, core: Core): void {
         return { ok: true, status: ended.status === "done" ? "done" : "failed" };
       });
     },
+  );
+}
+
+const TASK_NOT_FOUND = "Task not found";
+
+/**
+ * Stop (PD-12; D-05, D-07; ADR-0027's rule, the cell has no abort): `POST /api/v1/bot-tasks/:id/stop`, a signed-in person
+ * stops a bot's long task. A task of a conversation the caller cannot read, of another organization (RLS) or that does
+ * not exist is 404 `task_not_found` (existence hidden); a reader who is not the person it runs for, a moderator of its
+ * channel or a manager of the bot (`mayStopTask`) is refused 403 `not_task_owner`. Then, under the row lock: an ended
+ * task answers its status and writes nothing more (idempotent); an active one is stopped (`stopped_by_person`, one
+ * `bot.task_stopped` with the person as actor, the card "Stopped by <name>.", no thread message: the person acted). The
+ * in-flight turn finishes and its later continue answers `task_stopped`; no further turn is delivered.
+ */
+export function registerTaskUserRoutes(app: App, core: Core, deps: { perms: PermissionService }): void {
+  app.register(
+    async (raw) => {
+      // Child scopes lose the Zod type provider in their inferred type; restore it.
+      const scope = raw as unknown as App;
+      scope.post(
+        "/bot-tasks/:id/stop",
+        {
+          config: { authz: "user" as const },
+          preHandler: core.identity.requireUser,
+          schema: { tags, params: IdParams, response: { 200: BotTaskStopResponse } },
+        },
+        async (req): Promise<BotTaskStopResponse> =>
+          core.db.withTenant(tenant(req), async (tx) => {
+            const { userId } = authOf(req);
+            const [found] = await tx.select().from(botTasks).where(eq(botTasks.id, req.params.id)).limit(1);
+            if (!found) throw notFound(TASK_NOT_FOUND, "task_not_found");
+            // The resolver, for this request: the caller reads the task's conversation (a thread through its
+            // channel), else the task does not exist for them.
+            const judged = await judgedConversationId(tx, found.conversationId);
+            try {
+              await createConversationAccess(core).readable(req, tx, judged, {
+                kinds: ["channel", "dm", "group"],
+                notFoundMessage: TASK_NOT_FOUND,
+              });
+            } catch (err) {
+              if (err instanceof HttpError && err.statusCode === 404) {
+                throw notFound(TASK_NOT_FOUND, "task_not_found");
+              }
+              throw err;
+            }
+            if (!(await mayStopTask(tx, core, deps.perms, found, userId))) {
+              throw new HttpError(
+                403,
+                "not_task_owner",
+                "Only the person this task runs for, a channel moderator or the bot's manager can stop it",
+              );
+            }
+            const task = await lockTask(tx, found.id);
+            if (!task) throw notFound(TASK_NOT_FOUND, "task_not_found");
+            if (!isActiveTask(task)) return { ok: true, status: task.status };
+            const stopped = await stopTask(tx, core, task, "stopped_by_person", {
+              byUserId: userId,
+              notify: false,
+            });
+            return { ok: true, status: stopped?.status ?? task.status };
+          }),
+      );
+    },
+    { prefix: "/api/v1" },
   );
 }

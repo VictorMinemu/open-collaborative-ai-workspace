@@ -618,3 +618,31 @@ describe("finish (D-02, PD-18)", () => {
     expect(finished[0]?.metadata).toMatchObject({ taskId, outcome: "blocked" });
   });
 });
+
+describe("no goal, note or summary in any record of this suite (P1, PD-19, E24)", () => {
+  it("after every case above: audit rows, tool calls, jobs and log lines carry none of the bot's text", async () => {
+    // The after-commit messages of the cases above have been posted (their logs and audits are part of the scan).
+    await new Promise((r) => setTimeout(r, 300));
+    for (const text of [
+      TASK_GOAL,
+      TASK_PROGRESS,
+      TASK_NEXT_STEP,
+      "three findings",
+      "I need the export password",
+    ]) {
+      for (const table of ["app.audit_events", "app.agent_tool_calls", "pgboss.job"]) {
+        const n = (
+          await s.su.query(
+            `select count(*)::int as n from ${table} t where strpos(row_to_json(t)::text, $1) > 0`,
+            [text],
+          )
+        ).rows[0].n;
+        expect(n, `${table} carries "${text}"`).toBe(0);
+      }
+      expect(
+        s.logs.filter((line) => line.includes(text)),
+        `a log line carries "${text}"`,
+      ).toEqual([]);
+    }
+  });
+});

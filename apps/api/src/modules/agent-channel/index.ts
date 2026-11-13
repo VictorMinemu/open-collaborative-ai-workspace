@@ -66,7 +66,7 @@ import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
-import { registerTaskRoutes } from "./task-routes";
+import { registerTaskRoutes, registerTaskUserRoutes } from "./task-routes";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerBotWorkSessionFileRoutes } from "./work-session-files";
 import { registerWorkSessionReadRoute } from "./work-session-read";
@@ -677,6 +677,8 @@ export function createAgentChannelModule(
 
       // Stop (07.7-06, P-14): the chain's human or a channel moderator stops an agent-to-agent chain.
       registerChainUserRoutes(app, core, perms);
+      // Stop (07.17.1.1.2-08, PD-12): the person a long task runs for, a channel moderator or the bot's manager stops it.
+      registerTaskUserRoutes(app, core, { perms });
 
       registerCellGateway(app, core, auth, presence, perms);
     },

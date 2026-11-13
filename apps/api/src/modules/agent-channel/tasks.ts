@@ -16,6 +16,7 @@ import {
   botTaskProcesses,
   botTasks,
   botWorkSessions,
+  conversations,
   messageCardFollows,
   messages,
   type Tx,
@@ -24,8 +25,10 @@ import {
 } from "@ocw/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
+import { agentFacts, findAgent, loadAgentUnit } from "../agent";
 import { loadTaskPolicy } from "../bot-capabilities";
-import { createConversationAccess, loadDirectory } from "../chat";
+import { channelFacts, createConversationAccess, loadDirectory } from "../chat";
+import { agentResource, channelResource, type PermissionService } from "../organization";
 import type { AgentTurnRow } from "./claim";
 import { postTaskCard, refreshTaskCard, taskMaxHours } from "./task-card";
 import { taskThreadKey } from "./task-offer";
@@ -638,4 +641,37 @@ function postTaskMessage(tx: Tx, core: Core, task: BotTaskRow, body: string): vo
       );
     }
   });
+}
+
+// ---------------------------------------------------------------- who may stop (PD-12)
+
+/**
+ * The one rule of who may stop a task (PD-12), used by the Stop route and by the card's `viewerCan.stop` (10): the person
+ * it runs for; a moderator of its channel (`message.delete_any` on the channel's facts, the chain Stop's rule: admins,
+ * never in a direct conversation); or the bot's manager on its bot resource (`bot.configure` for a personal bot's
+ * owner, `bot.manage` or, for a unit persona, `bot.manage_unit` for a team bot), the decisions the agent module makes.
+ * Reading the conversation is the caller's check (a reader who may not stop is 403, a non-reader 404).
+ */
+export async function mayStopTask(
+  tx: Tx,
+  _core: Core,
+  perms: PermissionService,
+  task: Pick<BotTaskRow, "requesterUserId" | "conversationId" | "agentId">,
+  userId: string,
+): Promise<boolean> {
+  if (task.requesterUserId === userId) return true;
+  const principal = { kind: "user", userId } as const;
+  const judgedId = await judgedConversationId(tx, task.conversationId);
+  const [conv] = await tx.select().from(conversations).where(eq(conversations.id, judgedId)).limit(1);
+  if (conv?.kind === "channel") {
+    const channel = channelResource(await channelFacts(tx, conv, { kind: "user", id: userId }));
+    if ((await perms.decide(tx, principal, "message.delete_any", channel)).allowed) return true;
+  }
+  const agent = await findAgent(tx, task.agentId);
+  if (!agent) return false;
+  const unit = await loadAgentUnit(tx, agent.unitId);
+  const bot = agentResource(agentFacts(agent, unit?.path ?? []), userId);
+  if (agent.scope === "personal") return (await perms.decide(tx, principal, "bot.configure", bot)).allowed;
+  if ((await perms.decide(tx, principal, "bot.manage", bot)).allowed) return true;
+  return unit !== null && (await perms.decide(tx, principal, "bot.manage_unit", bot)).allowed;
 }
