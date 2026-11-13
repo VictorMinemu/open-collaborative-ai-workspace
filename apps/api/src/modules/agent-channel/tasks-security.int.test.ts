@@ -128,10 +128,16 @@ describe("one task per thread and the organization's cap, under concurrency (PD-
       ).toBe(1);
 
       await endAll();
-      await setMaxRunning(0);
+      // A turn delivered before the cap went to 0 still carries the start: the route's cap refuses it.
       const c = await deliverTaskTurn(s, { who: s.sam, conversationId: engId });
+      await setMaxRunning(0);
       const refused = await cellCall(s, "/tasks/start", startBody(c));
       expect(refused.body).toMatchObject({ ok: false, code: "org_cap" });
+      // Code review IN-02: a turn delivered at 0 is not offered the start at all.
+      const d = await deliverTaskTurn(s, { who: s.sam, conversationId: engId });
+      expect(d.turn.tools).not.toContain("ocw_task_start");
+      const unoffered = await cellCall(s, "/tasks/start", startBody(d));
+      expect(unoffered.body).toMatchObject({ ok: false, code: "not_in_turn" });
     } finally {
       await setMaxRunning(100);
     }
