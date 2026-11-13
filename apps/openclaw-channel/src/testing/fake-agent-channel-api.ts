@@ -161,6 +161,7 @@ import type {
   AgentMentionEvent,
   CellAgent,
   CellApprovedPlugin,
+  CellConversations,
   CellMcpServer,
   CellProvider,
   CellSnapshot,
@@ -919,6 +920,8 @@ export async function startFakeAgentChannelApi(
     providers?: CellProvider[];
     subscriptions?: CellSubscription[];
     webSearchProvider?: string;
+    /** Snapshot `conversations` (quick 261113-id6); omitted = not sent (an older API). */
+    conversations?: CellConversations;
     denyTools?: string[];
     mcpServers?: CellMcpServer[];
     plugins?: CellApprovedPlugin[];
@@ -1015,6 +1018,7 @@ export async function startFakeAgentChannelApi(
     providers: state.providers,
     ...(state.cellSubscriptions ? { subscriptions: state.cellSubscriptions } : {}),
     ...(state.webSearchProvider ? { webSearch: { provider: state.webSearchProvider } } : {}),
+    ...(opts.conversations ? { conversations: opts.conversations } : {}),
     ...(state.mcpServers.length > 0 ? { mcpServers: state.mcpServers } : {}),
     plugins: state.plugins.filter((p) => p.status !== "uninstalled"),
   });
