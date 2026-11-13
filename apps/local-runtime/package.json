@@ -1,6 +1,6 @@
 {
   "name": "@ocw/local-runtime",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Local Runtime daemon: Device Link client, project registry, Claude Code adapter, git adapter",
   "license": "AGPL-3.0-only",
