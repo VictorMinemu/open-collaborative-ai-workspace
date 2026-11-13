@@ -5,17 +5,20 @@ import {
   BOT_TASK_LIMITS,
   type BotTaskWaitKind,
   type BotTaskWakeReason,
+  BUILTIN_TOOLS,
   cellTopic,
   type ModelRef,
   taskContinueSentence,
 } from "@ocw/contracts";
 import {
   agents,
+  agentToolCalls,
   agentTurns,
   botTasks,
   conversationMembers,
   conversations,
   messages,
+  orgMembers,
   type Tx,
   tenantOf,
 } from "@ocw/db";
@@ -51,12 +54,16 @@ import {
  * 1. decide, user-less (`withTenant(org, null)`, RLS, the task re-read by id `FOR UPDATE`): only a `waiting` task whose
  *    `wake_at` has come and whose current turn reported done (or is older than 30 minutes, lost) is delivered (PD-06).
  *    The turn's id is `taskEventId(task, wait_seq)`, so the same wait never produces two turns (`agent_turns.event_id`
- *    is the turn's key). The wait is reserved (`consumeWait`: `running`, one more turn, the id as the current turn).
- * 2. deliver, as the requester (D-07, ADR-0019: they pay and their rights are re-decided): built like a mention of the
- *    bot on its task card, `trigger: "task"`, the fixed server sentence as the message (never the bot's notes, P4),
- *    `turnPolicy` decides tools and meters the bot's daily limit; `agent.task.v1` on `cell:<org>`, `bot.task_continued`.
- * 3. release, user-less, only when nothing was delivered: the reserved fields are restored exactly, so a retry (a
- *    transient failure) decides again.
+ *    is the turn's key). Before the reservation, under the lock: every turn used, the deadline, long tasks off, the bot
+ *    archived and the requester deactivated stop the task (D-04, D-07); the taint of every earlier task turn is carried
+ *    (D-08, PD-15). The wait is then reserved (`consumeWait`: `running`, one more turn, the id as the current turn).
+ * 2. deliver, as the requester (D-07, ADR-0019: they pay and their rights are re-decided): they still read the
+ *    conversation, the bot is live and a member, the card is there; built like a mention of the bot on its task card,
+ *    `trigger: "task"`, the fixed server sentence as the message (never the bot's notes, P4), `turnPolicy` decides tools
+ *    and meters the bot's daily limit; `agent.task.v1` on `cell:<org>`, `bot.task_continued`.
+ * 3. release, user-less, only when nothing was delivered: the reserved fields are restored exactly. A failure throws
+ *    (pg-boss retries and decides again); a refusal stops the task (`daily_limit` with its message; `access_lost` and
+ *    `bot_unavailable` with a card notice only).
  *
  * Audits and logs carry ids, counts and reasons only (P1); jobs carry `{ organizationId, taskId }` only (P7).
  */
@@ -68,7 +75,7 @@ export interface TaskWakesDeps {
 }
 
 /** What one `bot_task.continue` run did (for tests and the log). */
-export type TaskContinueOutcome = "delivered" | "stopped" | "skipped" | "none";
+export type TaskContinueOutcome = "delivered" | "stopped" | "none";
 
 /** Direct conversations are flat: the continuation names the card message itself (PD-11). */
 const DIRECT_KINDS = new Set(["dm", "group"]);
@@ -176,6 +183,37 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
   if (task.turnsUsed >= task.maxTurns) return stop("budget_turns");
   if (clock.pastDeadline) return stop("budget_time");
   if (!(await loadTaskPolicy(tx, agent)).enabled) return stop("policy_off");
+  // D-07: a person who left the organization (deactivated) is never acted for; the card says why, no message.
+  const [requester] = await tx
+    .select({ deactivatedAt: orgMembers.deactivatedAt })
+    .from(orgMembers)
+    .where(eq(orgMembers.userId, task.requesterUserId))
+    .limit(1);
+  if (!requester || requester.deactivatedAt) return stop("access_lost", false);
+
+  // D-08, PD-15 (Pitfall 6): taint is sticky. A turn of this task that read outside content (even after it called
+  // continue) taints every later turn, and the task itself from then on.
+  let tainted = task.tainted;
+  if (!tainted) {
+    const [taintedTurn] = await tx
+      .select({ id: agentTurns.eventId })
+      .from(agentTurns)
+      .where(
+        and(
+          eq(agentTurns.organizationId, orgOf(tx)),
+          eq(agentTurns.taskId, task.id),
+          eq(agentTurns.tainted, true),
+        ),
+      )
+      .limit(1);
+    if (taintedTurn) {
+      tainted = true;
+      await tx
+        .update(botTasks)
+        .set({ tainted: true })
+        .where(and(eq(botTasks.organizationId, orgOf(tx)), eq(botTasks.id, task.id)));
+    }
+  }
 
   const previous: Reserved = {
     turnsUsed: task.turnsUsed,
@@ -190,7 +228,7 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
   const reserved = await lockTask(tx, task.id);
   if (!reserved) return { kind: "none" };
   await refreshTaskCard(tx, core, reserved);
-  return { kind: "deliver", plan: { task: reserved, eventId, reason, tainted: task.tainted, previous } };
+  return { kind: "deliver", plan: { task: reserved, eventId, reason, tainted, previous } };
 }
 
 type DeliverResult =
@@ -281,6 +319,24 @@ async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePl
   });
   const [ev] = events;
   if (!ev) return { delivered: false, reason: limited ? "daily_limit" : "bot_unavailable" };
+  // PD-15 (the wake's rule, D-20): a turn of this task already read a Work Zone session's output, which is now in the
+  // thread's OpenClaw context, so the continuation starts with the mark (set before the append, like the taint).
+  const [readHere] = await tx
+    .select({ id: agentToolCalls.id })
+    .from(agentToolCalls)
+    .innerJoin(agentTurns, eq(agentTurns.eventId, agentToolCalls.eventId))
+    .where(
+      and(
+        eq(agentToolCalls.agentId, agent.id),
+        eq(agentToolCalls.tool, BUILTIN_TOOLS.workSessionRead),
+        eq(agentToolCalls.decision, "allowed"),
+        eq(agentTurns.taskId, task.id),
+      ),
+    )
+    .limit(1);
+  if (readHere) {
+    await tx.update(agentTurns).set({ sessionOutputRead: true }).where(eq(agentTurns.eventId, ev.eventId));
+  }
 
   const payload: Omit<AgentTaskEvent, "seq"> = {
     ...ev,
@@ -360,14 +416,15 @@ export async function continueBotTask(
   if (out.delivered) return "delivered";
   const reason = out.reason;
   return core.db.withTenant({ organizationId, userId: null }, async (tx): Promise<TaskContinueOutcome> => {
-    // The turn that was not delivered is not counted: the wait is given back first, then decided.
+    // The turn that was not delivered is not counted: the wait is given back first, then the task stops.
     await release(tx, core, plan);
-    if (reason !== "daily_limit") return "skipped";
-    // PD-09 (Pitfall 5): the daily limit is not a transient skip (the task would retry every minute until midnight):
-    // the task stops with its one message; the generic limit notice was skipped (`onLimitReached`).
     const task = await lockTask(tx, plan.task.id);
     if (!task || !isActiveTask(task)) return "none";
-    await stopTask(tx, core, task, "daily_limit");
+    // PD-09 (Pitfall 5): the daily limit is not a transient skip (the task would retry every minute until midnight):
+    // the task stops with its one message; the generic limit notice was skipped (`onLimitReached`). D-07, E10, E26:
+    // the requester lost access, the bot or the card is gone: the card's notice says why and no message is posted
+    // (nobody may be posted for, or nothing is left to post with).
+    await stopTask(tx, core, task, reason, { notify: reason === "daily_limit" });
     return "stopped";
   });
 }
