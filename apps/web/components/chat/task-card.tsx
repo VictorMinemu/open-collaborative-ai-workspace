@@ -119,7 +119,8 @@ function TaskBody({ card, task }: { card: AgentCard; task: AgentCardTaskLink }) 
     : null;
   const wait = taskWaitText(task, now);
   const progress = fieldOf(card, TASK_CARD_FIELD_LABELS.progress);
-  const next = fieldOf(card, TASK_CARD_FIELD_LABELS.next);
+  // An ended task (done, blocked, stopped, failed) has no next step: only its last progress note stays.
+  const next = active ? fieldOf(card, TASK_CARD_FIELD_LABELS.next) : null;
   return (
     <div data-testid="task-body" className="grid min-w-0 gap-3 px-3.5 pb-3.5">
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">

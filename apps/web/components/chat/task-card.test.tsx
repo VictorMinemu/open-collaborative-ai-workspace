@@ -302,6 +302,23 @@ describe("the task card's body (PD-20)", () => {
     expect(stopButton(stopped)).toBeNull();
   });
 
+  it("an ended task keeps its last progress note but hides the next step (there is none any more)", () => {
+    for (const [status, outcome] of [
+      ["done", "done"],
+      ["failed", "blocked"],
+      ["stopped", "budget_turns"],
+      ["failed", "error"],
+    ] as const) {
+      const html = render(taskCard({}, { status, outcome, finishedAt: NOW.toISOString() }));
+      expect(textOf(html, "task-progress")).toBe("Read the first forty files of the pack");
+      expect(tagOf(html, "task-next")).toBeNull();
+      expect(html).not.toContain("Next step");
+    }
+    // While it runs or waits, the next step stays.
+    expect(textOf(render(taskCard()), "task-next")).toBe("Read the next forty files of the pack");
+    expect(textOf(render(waiting()), "task-next")).toBe("Read the next forty files of the pack");
+  });
+
   it("a long goal wraps, nothing scrolls sideways, and the body uses foreground text only", () => {
     const goal = `Migrate ${"every-service-in-the-billing-monorepo-".repeat(4)}to the new queue`;
     const html = render(taskCard({ title: goal }));
