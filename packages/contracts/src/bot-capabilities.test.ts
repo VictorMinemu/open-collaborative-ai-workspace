@@ -30,6 +30,8 @@ import {
   TASK_TOOL_NAMES,
   ToolPattern,
   TURN_ATTACHMENT_NOTES,
+  TURN_CATALOG_TOOLS_MAX,
+  TURN_PLATFORM_RESERVE,
   TURN_TOOLS_MAX,
   TurnAttachment,
   TurnContext,
@@ -266,6 +268,20 @@ describe("agent channel additions are backward compatible", () => {
     expect(TurnContext.safeParse({ ...turn, tools: Array(TURN_TOOLS_MAX + 1).fill("x") }).success).toBe(
       false,
     );
+  });
+
+  it("a turn's catalog tools leave room for every turn-scoped platform tool (TURN_PLATFORM_RESERVE)", () => {
+    // Sandbox, browser, Work Zone sessions and long tasks, plus the attachment read, the consult and the conversation open.
+    expect(TURN_PLATFORM_RESERVE).toBe(
+      SANDBOX_TOOL_NAMES.length +
+        BROWSER_TOOL_NAMES.length +
+        WORK_SESSION_TOOL_NAMES.length +
+        TASK_TOOL_NAMES.length +
+        3,
+    );
+    expect(TURN_PLATFORM_RESERVE).toBe(27);
+    expect(TURN_CATALOG_TOOLS_MAX).toBe(TURN_TOOLS_MAX - TURN_PLATFORM_RESERVE);
+    expect(TURN_CATALOG_TOOLS_MAX).toBe(101);
   });
 
   it("cell agents default to no tools and the snapshot to DuckDuckGo", () => {

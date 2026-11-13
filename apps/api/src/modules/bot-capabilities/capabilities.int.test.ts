@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { TASK_TOOL_NAMES } from "@ocw/contracts";
+import { TASK_TOOL_NAMES, TURN_CATALOG_TOOLS_MAX } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -309,9 +309,14 @@ describe("PATCH /agents/:id/capabilities", () => {
       const full = await grant(140);
       const usable = full.tools.filter((t: Json) => t.effective).length;
       expect(usable).toBe(140);
-      // The platform's tools come first, so fewer than 128 MCP tools fit: the rest are counted, never silently lost.
-      expect(full.toolsOverLimit).toBeGreaterThan(140 - 128);
+      // The platform's tools come first, and catalog tools stop at TURN_CATALOG_TOOLS_MAX turn tools (the rest of the
+      // 128 is kept for the turn-scoped platform tools): the ones left out are counted, never silently lost.
+      expect(full.toolsOverLimit).toBeGreaterThan(140 - TURN_CATALOG_TOOLS_MAX);
       expect(full.toolsOverLimit).toBeLessThan(140);
+      // Exactly the catalog share: the platform tools `assemble` adds first take some of it.
+      const share = await grant(TURN_CATALOG_TOOLS_MAX);
+      expect(share.toolsOverLimit).toBeGreaterThan(0);
+      expect(share.toolsOverLimit).toBe(full.toolsOverLimit - (140 - TURN_CATALOG_TOOLS_MAX));
       const fits = await grant(10);
       expect(fits.toolsOverLimit).toBe(0);
     } finally {
