@@ -166,8 +166,11 @@ export async function taskOfferFor(
     const current =
       row.currentEventId === p.eventId && (p.mentionTaskId == null || p.mentionTaskId === row.id);
     // 07.17.1.1.2-12 (PD-14): a Work Zone wake controls the task only as its own turn (the wake consumed the wait, so
-    // its event is the current turn); otherwise it only sees the task, so an uncounted wake never drives it.
-    const control = current || (!wake && row.requesterUserId === p.askerUserId && row.status === "waiting");
+    // its event is the current turn); otherwise it only sees the task, so an uncounted wake never drives it. Code review
+    // CR-01: a continuation (`trigger: "task"`) only ever controls the task it continues, never a newer one.
+    const control =
+      current ||
+      (!wake && p.trigger !== "task" && row.requesterUserId === p.askerUserId && row.status === "waiting");
     const { task, reportedProcessIds } = await turnTaskOf(tx, row, { listProcesses: control });
     return { offer: control ? "control" : "view", task, taskId: row.id, reportedProcessIds };
   }

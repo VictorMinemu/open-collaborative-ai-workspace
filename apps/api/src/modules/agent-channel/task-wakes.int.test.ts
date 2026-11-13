@@ -280,6 +280,86 @@ describe("the same wait is delivered once (Pitfall 2, PD-06, E3)", () => {
   });
 });
 
+describe("code review CR-01: a stop that lands between the reservation and the delivery (D-07)", () => {
+  const auditCount = async (action: string, taskId: string) =>
+    (
+      (
+        await s.su.query(
+          "select count(*)::int as n from app.audit_events where action = $1 and resource_id = $2",
+          [action, taskId],
+        )
+      ).rows[0] as { n: number }
+    ).n;
+
+  it("Sam presses Stop after the wait was reserved: no turn, no usage, no bot.task_continued; the reservation's turn is given back", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 1_000) });
+    const usedBefore = await usageTurns(s.scoutId);
+    const out = await continueBotTask(
+      s.stack.built.core,
+      deps(),
+      { organizationId: s.orgA, taskId },
+      {
+        afterReserve: async () => {
+          // The reservation is committed: the task runs the continuation's turn, which is not delivered yet.
+          expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 2 });
+          const r = (await s.sam.request("POST", `/api/v1/bot-tasks/${taskId}/stop`)) as Res;
+          expect(r.status, JSON.stringify(r.body)).toBe(200);
+        },
+      },
+    );
+    expect(out).toBe("stopped");
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    expect(await turnsWithId(taskEventId(taskId, 1))).toBe(0);
+    expect(await usageTurns(s.scoutId)).toBe(usedBefore);
+    expect(await auditCount("bot.task_continued", taskId)).toBe(0);
+    expect(await auditCount("bot.task_stopped", taskId)).toBe(1);
+    expect(await taskRow(s, taskId)).toMatchObject({
+      status: "stopped",
+      outcome: "stopped_by_person",
+      turns_used: 1,
+    });
+    // Nothing is queued or delivered later either.
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+  });
+
+  it("a stale continuation never takes control of a newer waiting task of the same requester in the thread", async () => {
+    const { taskId: x } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    const rowX = await taskRow(s, x);
+    await setTask(s, x, { wake_at: new Date(Date.now() - 1_000) });
+    let y = "";
+    const out = await continueBotTask(
+      s.stack.built.core,
+      deps(),
+      { organizationId: s.orgA, taskId: x },
+      {
+        afterReserve: async () => {
+          expect(((await s.sam.request("POST", `/api/v1/bot-tasks/${x}/stop`)) as Res).status).toBe(200);
+          // Sam starts task Y in the same thread; it waits for its next turn.
+          const started = await startTaskFor(s, {
+            who: s.sam,
+            conversationId: engId,
+            threadRootId: rowX.thread_root_id as string,
+          });
+          y = started.taskId;
+          expect((await continueAs(s, started.event)).body).toMatchObject({ ok: true });
+          expect((await taskRow(s, y)).status).toBe("waiting");
+        },
+      },
+    );
+    expect(out).toBe("stopped");
+    expect(await turnsWithId(taskEventId(x, 1))).toBe(0);
+    // Y is untouched: still waiting, its current turn its own start turn, no turn linked to it but that one.
+    const rowY = await taskRow(s, y);
+    expect(rowY).toMatchObject({ status: "waiting", turns_used: 1, current_event_id: rowY.started_event_id });
+    const linked = (
+      await s.su.query("select event_id from app.agent_turns where task_id = $1", [y])
+    ).rows.map((r) => r.event_id);
+    expect(linked).toEqual([rowY.started_event_id]);
+  });
+});
+
 describe("timers, the backstop and lost turns (D-03, E4, E5)", () => {
   it("a 120 s timer: nothing at once, one turn with reason timer once wake_at has passed", async () => {
     const { taskId } = await continuedTask(s, {

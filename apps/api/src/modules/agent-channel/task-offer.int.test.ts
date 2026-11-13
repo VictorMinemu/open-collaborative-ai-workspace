@@ -569,6 +569,31 @@ describe("the task trigger: browser off, the thread's files listed, the daily li
     await expectStart(person as Json);
   });
 
+  it("code review CR-01: a continuation of another task only sees the requester's waiting task, never controls it", async () => {
+    const root = await post(s.sam, engId, "Check the April export");
+    const t = await seedTask({ threadRootId: root });
+    try {
+      const offer = await s.stack.built.core.db.withTenant(
+        { organizationId: s.orgA, userId: s.samId },
+        (tx) =>
+          taskOfferFor(tx, {
+            agentId: s.scoutId,
+            conversationId: engId,
+            conversationKind: "channel",
+            threadRootId: root,
+            askerUserId: s.samId,
+            trigger: "task",
+            eventId: randomUUID(),
+            // The stale continuation's own (ended) task, not this one.
+            mentionTaskId: randomUUID(),
+          }),
+      );
+      expect(offer).toMatchObject({ offer: "view", taskId: t.id });
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
   it("an AI chat never carries a task tool or turn.task, even with an active task row there (D-10)", async () => {
     const chatId = randomUUID();
     await s.su.query(

@@ -242,14 +242,23 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
 
 type DeliverResult =
   | { delivered: true }
-  | { delivered: false; reason: "access_lost" | "bot_unavailable" | "daily_limit" };
+  | { delivered: false; reason: "access_lost" | "bot_unavailable" | "daily_limit" }
+  /** Code review CR-01: the task no longer holds this reservation (a Stop, a budget or policy stop landed first). */
+  | { delivered: false; reason: "superseded" };
 
-/** deliver (tx2, as the requester): the continuation itself (D-07). */
+/**
+ * deliver (tx2, as the requester): the continuation itself (D-07). Code review CR-01: the task row is locked first and
+ * must still hold tx1's reservation (`running`, this delivery's id as its current turn, the reserved `wait_seq`); a stop
+ * that committed in between (the Stop route, the tick, a policy stop) wins, and nothing is built, metered, appended or
+ * audited. Holding the lock to the end, a later stop waits for this delivery (the in-flight turn finishes, D-07).
+ */
 async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePlan): Promise<DeliverResult> {
   const { task, eventId, reason } = plan;
   const taskFacts = { taskId: task.id, reason, ...(plan.process ? { process: plan.process } : {}) };
+  const current = await lockTask(tx, task.id);
   // A concurrent run delivered this very wait since tx1 (its turn is keyed by the wait's own id).
   if (await delivered(tx, eventId)) return { delivered: true };
+  if (!holdsReservation(current, plan)) return { delivered: false, reason: "superseded" };
   const [conv] = await tx
     .select({
       id: conversations.id,
@@ -367,6 +376,36 @@ async function deliver(tx: Tx, core: Core, deps: TaskWakesDeps, plan: ContinuePl
   return { delivered: true };
 }
 
+/** Whether `row` still holds `plan`'s reservation (tx1's `consumeWait`), nothing having moved it since. */
+function holdsReservation(row: BotTaskRow | null, plan: ContinuePlan): boolean {
+  return (
+    row !== null &&
+    row.status === "running" &&
+    row.currentEventId === plan.eventId &&
+    row.waitSeq === plan.previous.waitSeq + 1
+  );
+}
+
+/**
+ * Code review CR-01 (tx3, user-less): a reservation a stop overtook. The task ended while it held this undelivered
+ * turn, so the turn it counted is given back (`turns_used` as before tx1; the card shows no turn count, its link reads
+ * the row). A task that moved on otherwise is left as it is.
+ */
+async function forgetReservation(tx: Tx, plan: ContinuePlan): Promise<void> {
+  await tx
+    .update(botTasks)
+    .set({ turnsUsed: plan.previous.turnsUsed })
+    .where(
+      and(
+        eq(botTasks.organizationId, orgOf(tx)),
+        eq(botTasks.id, plan.task.id),
+        inArray(botTasks.status, ["done", "failed", "stopped"]),
+        eq(botTasks.currentEventId, plan.eventId),
+        eq(botTasks.turnsUsed, plan.previous.turnsUsed + 1),
+      ),
+    );
+}
+
 /**
  * release (tx3, user-less): gives the reserved wait back, only while the row still holds what tx1 wrote (`running` on
  * this turn's id), so the next run decides again. Returns the restored row, or null when something else moved it.
@@ -408,6 +447,8 @@ export async function continueBotTask(
   core: Core,
   deps: TaskWakesDeps,
   data: JobData<"bot_task.continue">,
+  /** Test seam only (code review CR-01): runs after tx1 committed the reservation, before tx2 delivers it. */
+  hooks: { afterReserve?: () => Promise<void> } = {},
 ): Promise<TaskContinueOutcome> {
   const { organizationId, taskId } = data;
   const decision = await core.db.withTenant({ organizationId, userId: null }, (tx) =>
@@ -415,6 +456,7 @@ export async function continueBotTask(
   );
   if (decision.kind !== "deliver") return decision.kind;
   const { plan } = decision;
+  await hooks.afterReserve?.();
   let out: DeliverResult;
   try {
     out = await core.db.withTenant({ organizationId, userId: plan.task.requesterUserId }, (tx) =>
@@ -426,6 +468,11 @@ export async function continueBotTask(
   }
   if (out.delivered) return "delivered";
   const reason = out.reason;
+  if (reason === "superseded") {
+    // The stop already wrote its card, audit and message: nothing is released and nothing is stopped again.
+    await core.db.withTenant({ organizationId, userId: null }, (tx) => forgetReservation(tx, plan));
+    return "stopped";
+  }
   return core.db.withTenant({ organizationId, userId: null }, async (tx): Promise<TaskContinueOutcome> => {
     // The turn that was not delivered is not counted: the wait is given back first, then the task stops.
     await release(tx, core, plan);
