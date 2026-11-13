@@ -7,6 +7,7 @@ import {
   type EscalationTargetView,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_TOOL_NAMES,
+  TURN_CATALOG_TOOLS_MAX,
   TURN_TOOLS_MAX,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
@@ -1214,7 +1215,7 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
     }
   });
 
-  it("WR-07 (MAX_TURN_TOOLS): a full run turn keeps the open tool, the last connector tool giving it the slot; one free slot offers it as before", async () => {
+  it("WR-07, quick 261113-e6s (TURN_CATALOG_TOOLS_MAX): a run turn with every organization tool on keeps the open tool and the sandbox family, the MCP tools past the catalog share left out", async () => {
     const bot = await s.newBot(`Bulky ${randomUUID().slice(0, 4)}`);
     await ok(
       s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, {
@@ -1227,7 +1228,6 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
       await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [bot.id]);
       return runNowEvent(automationId);
     };
-    const base = ((await runTurn()).turn.tools as string[]).length - 1;
     const serverMcp = randomUUID();
     await s.su.query(
       `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
@@ -1235,7 +1235,7 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
       [serverMcp, s.orgA],
     );
     const names = Array.from(
-      { length: TURN_TOOLS_MAX - base },
+      { length: TURN_TOOLS_MAX + 10 },
       (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
     );
     for (const name of names) {
@@ -1244,27 +1244,23 @@ describe("07.17-11: a fan-out run turn offers ocw_conversation_open with its cap
         [s.orgA, serverMcp, name.slice("bulk__".length), name],
       );
     }
-    const grant = (tools: string[]) =>
-      ok(
-        s.victor.request("PATCH", `/api/v1/agents/${bot.id}/capabilities`, {
-          tools: tools.map((tool) => ({ sourceKind: "mcp", sourceId: serverMcp, tool })),
-        }) as Promise<Res>,
-      );
-    await grant(names);
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${bot.id}/capabilities`, {
+        tools: names.map((tool) => ({ sourceKind: "mcp", sourceId: serverMcp, tool })),
+      }) as Promise<Res>,
+    );
     const full = await runTurn();
-    expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-    // The run turn's primary tool is reserved: the lowest-priority tool (the last MCP tool offered) makes room.
+    expect(full.turn.tools.length).toBeLessThanOrEqual(TURN_TOOLS_MAX);
+    // The run turn's primary tool and the sandbox keep their slots: organization tools stop at the catalog share.
     expect(full.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
-    expect(full.turn.tools).not.toContain(names.at(-1));
-    expect(full.turn.toolFlags).not.toHaveProperty(names.at(-1) as string);
+    expect(full.turn.toolFlags[BUILTIN_TOOLS.conversationOpen]).toEqual(CONVERSATION_OPEN_FLAGS);
+    expect(full.turn.tools).toEqual(expect.arrayContaining([...SANDBOX_TOOL_NAMES]));
+    const kept = names.filter((name) => full.turn.tools.includes(name));
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(TURN_CATALOG_TOOLS_MAX);
+    expect(kept).toEqual(names.slice(0, kept.length));
     expect(full.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
     expect((await turnRow(full.eventId)).tools).toContain(BUILTIN_TOOLS.conversationOpen);
-
-    await grant(names.slice(1));
-    const room = await runTurn();
-    expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-    expect(room.turn.tools).toContain(BUILTIN_TOOLS.conversationOpen);
-    expect(room.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
   });
 
   it("a person's mention of the same bot in the fan-out run's thread never has the tool", async () => {

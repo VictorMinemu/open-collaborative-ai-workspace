@@ -1,6 +1,11 @@
 "use client";
 
-import { type BotCapabilityView, type CatalogTool, type ToolGrant, TURN_TOOLS_MAX } from "@ocw/contracts";
+import {
+  type BotCapabilityView,
+  type CatalogTool,
+  type ToolGrant,
+  TURN_CATALOG_TOOLS_MAX,
+} from "@ocw/contracts";
 import { ArrowUpRight, Lock, Plug, Puzzle, Wrench } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -144,8 +149,8 @@ export function ToolsSection({
             {view.toolsOverLimit === 1
               ? "1 tool that is on does not fit in a bot turn, so the bot cannot use it."
               : `${view.toolsOverLimit} tools that are on do not fit in a bot turn, so the bot cannot use them.`}{" "}
-            A turn carries at most {TURN_TOOLS_MAX} tools, including the platform's. Turn off the ones this
-            bot does not need.
+            A turn carries at most {TURN_CATALOG_TOOLS_MAX} tools from MCP servers and plugins, so the
+            platform's own tools always fit. Turn off the ones this bot does not need.
           </span>
         </p>
       ) : null}

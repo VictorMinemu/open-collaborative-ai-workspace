@@ -99,7 +99,9 @@ describe("ToolsSection", () => {
     const html = render(view({ toolsOverLimit: 12 }));
     expect(html).toContain('data-testid="tools-over-limit"');
     expect(html).toContain("12 tools that are on do not fit in a bot turn");
-    expect(html).toContain("at most 128 tools");
+    // Organization tools have a share of the turn, so the platform's own tools always keep their slots (quick 261113-e6s).
+    expect(html).toContain("at most 101 tools from MCP servers and plugins");
+    expect(html).toContain("own tools always fit");
     expect(render(view({ toolsOverLimit: 0 }))).not.toContain("tools-over-limit");
     expect(render(view())).not.toContain("tools-over-limit");
   });

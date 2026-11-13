@@ -21,6 +21,7 @@ import {
   TASK_TOOL_FLAGS,
   TASK_TOOL_NAMES,
   type TaskToolName,
+  TURN_CATALOG_TOOLS_MAX,
   TURN_TOOLS_MAX,
   type TurnAttachment,
   type TurnContext,
@@ -383,9 +384,13 @@ function assemble(
       sideEffecting: memberTools.some((f) => f.sideEffecting),
     });
   }
+  // The bot's MCP and plugin tools last, up to `TURN_CATALOG_TOOLS_MAX` turn tools (quick 261113-e6s): the rest of the
+  // turn is kept for the turn-scoped platform tools `computeTurn` adds afterwards (`TURN_PLATFORM_RESERVE`), so an
+  // organization tool never takes a platform capability's place.
   for (const source of catalog) {
     if (cellWide && proxiedSource(source)) continue;
     for (const t of source.tools) {
+      if (tools.length >= TURN_CATALOG_TOOLS_MAX) break;
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
         add(t.name, catalogFlags(source, t.sideEffecting));
       }
@@ -395,9 +400,10 @@ function assemble(
 }
 
 /**
- * How many of a bot's usable catalog tools a channel turn cannot carry (`MAX_TURN_TOOLS`, after the platform tools
- * `assemble` adds first). The bot sheet shows it (`BotCapabilityView.toolsOverLimit`): a tool past the cap is never
- * offered, so the bot cannot call it. Turn-scoped extras (board, Work Zone, consult) can take a few more slots.
+ * How many of a bot's usable catalog tools a channel turn cannot carry (`TURN_CATALOG_TOOLS_MAX`, after the platform
+ * tools `assemble` adds first). The bot sheet shows it (`BotCapabilityView.toolsOverLimit`): a tool past the cap is never
+ * offered, so the bot cannot call it. The turn-scoped platform tools (sandbox, Work Zone sessions, tasks, ...) have
+ * their own reserved slots; a board, automation or record tool `assemble` adds on some turns takes one of the catalog's.
  */
 export function toolsOverLimit(
   effective: BotCapabilityView["effective"],

@@ -273,8 +273,8 @@ export const BotCapabilityView = z.object({
   /** Phase 07.8 (R11): the Sandbox and Browser rows; absent on older payloads. */
   confined: z.object({ sandbox: ConfinedCapabilityState, browser: ConfinedCapabilityState }).optional(),
   /**
-   * How many of the bot's usable tools do not fit in one turn (`TURN_TOOLS_MAX`, counted on a channel turn after the
-   * platform tools), so the sheet can say so instead of the bot failing silently. Absent on older payloads.
+   * How many of the bot's usable tools do not fit in one turn (`TURN_CATALOG_TOOLS_MAX`, counted on a channel turn
+   * after the platform tools), so the sheet can say so instead of the bot failing silently. Absent on older payloads.
    */
   toolsOverLimit: z.number().int().nonnegative().optional(),
 });
@@ -472,7 +472,8 @@ export const ATTACHMENT_READ_LIMITS = {
 } as const;
 
 /**
- * The most tools one bot turn carries: platform tools first, then the bot's MCP and plugin tools. Raised from 64 on
+ * The most tools one bot turn carries: platform tools first, then the bot's MCP and plugin tools (at most
+ * `TURN_CATALOG_TOOLS_MAX` turn tools, so the turn-scoped platform tools added last always fit). Raised from 64 on
  * 2026-11-11, because an ERP MCP server's tools past the cap were silently dropped and the bot said it could not use
  * them. 128 is the most function tools OpenAI's API accepts in one request.
  */
@@ -752,6 +753,23 @@ export const BROWSER_TOOL_NAMES = [
   BUILTIN_TOOLS.browserClose,
 ] as const;
 export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
+
+/**
+ * Quick 261113-e6s: the slots a turn keeps for the turn-scoped platform tools decided after the bot's MCP and plugin
+ * tools (the sandbox and browser families, the Work Zone session tools, the long-task tools, `ocw_attachment_read`,
+ * `ocw_consult_agent` and `ocw_conversation_open`). Organization tools never take a platform capability's place: with
+ * every MCP tool on, a bot used to lose its Work Zone sessions, sandbox and tasks silently. 128 (`TURN_TOOLS_MAX`)
+ * stays the provider limit.
+ */
+export const TURN_PLATFORM_RESERVE =
+  SANDBOX_TOOL_NAMES.length +
+  BROWSER_TOOL_NAMES.length +
+  WORK_SESSION_TOOL_NAMES.length +
+  TASK_TOOL_NAMES.length +
+  3;
+
+/** The most turn tools once the bot's MCP and plugin tools are added: the rest of `TURN_TOOLS_MAX` is reserved. */
+export const TURN_CATALOG_TOOLS_MAX = TURN_TOOLS_MAX - TURN_PLATFORM_RESERVE;
 
 export type ConfinedToolName = SandboxToolName | BrowserToolName;
 

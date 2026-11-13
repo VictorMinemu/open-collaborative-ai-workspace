@@ -5,6 +5,7 @@ import {
   CONVERSATION_OPEN_FLAGS,
   type SessionAudienceInput,
   TASK_TOOL_NAMES,
+  TURN_CATALOG_TOOLS_MAX,
   TURN_TOOLS_MAX,
   TurnWorkZone,
   WORK_SESSION_TOOL_FLAGS,
@@ -604,13 +605,8 @@ describe("organization B never influences an organization-A turn", () => {
   });
 });
 
-describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
-  it("TURN_TOOLS_MAX - 5 tools besides the proposal tools: none of the six (the proposals stay); one fewer: all six, replacing them", async () => {
-    // 07.17.1.1.2 (PD-07): the three task tools come after the six and take their own slots (counted apart here).
-    const base =
-      (await mentionTurn(atlasId)).turn.tools.length -
-      WORK_SESSION_TOOL_NAMES.length -
-      TASK_TOOL_NAMES.length;
+describe("organization tools never take the six tools' slots (TURN_CATALOG_TOOLS_MAX, quick 261113-e6s)", () => {
+  it("more usable MCP tools than a turn's catalog share: all six anyway, replacing the proposals, the task tools too; the MCP tools past the share left out", async () => {
     const serverMcp = randomUUID();
     await su.query(
       `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
@@ -618,7 +614,7 @@ describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
       [serverMcp, orgId],
     );
     const names = Array.from(
-      { length: TURN_TOOLS_MAX - 5 - base },
+      { length: TURN_TOOLS_MAX + 10 },
       (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
     );
     for (const name of names) {
@@ -636,23 +632,20 @@ describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
     try {
       await grant(names);
       const full = await mentionTurn(atlasId);
-      // No room for the six: the turn keeps the two proposal tools, so the bot can still propose. The three task tools
-      // (07.17.1.1.2) then fill the three slots left, and the Work Zone decision is unchanged by them.
-      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-      expect(full.turn.tools).toContain("ocw_start_work_zone");
+      // The owner's UAT: every organization tool on used to fill the 128 slots, so the bot only proposed sessions.
+      await expectOffer(full);
+      expect(full.turn.tools).toEqual(expect.arrayContaining([...WORK_SESSION_TOOL_NAMES]));
+      expect(full.turn.tools).not.toContain("ocw_start_work_zone");
+      expect(full.turn.tools).not.toContain("ocw_work_zone_projects");
       expect(full.turn.tools).toEqual(expect.arrayContaining([...TASK_TOOL_NAMES]));
-      await expectNoOffer(full);
-
-      await grant(names.slice(1));
-      const room = await mentionTurn(atlasId);
-      await expectOffer(room);
-      expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
-      // 07.17.1.1.2 code review WR-07: the task start only takes free slots; none are left, so it is not offered,
-      // every granted connector tool stays, and the turn says why.
-      for (const name of TASK_TOOL_NAMES) expect(room.turn.tools).not.toContain(name);
-      expect(room.turn.tools).toEqual(expect.arrayContaining(names.slice(1)));
-      expect(room.turn.withheld).toEqual(
-        expect.arrayContaining([{ tool: "ocw_task_start", reason: "turn_full" }]),
+      expect(full.turn.tools.length).toBeLessThanOrEqual(TURN_TOOLS_MAX);
+      // The MCP tools fill the catalog share in order; the ones past it are left out (the bot sheet counts them).
+      const kept = names.filter((name) => full.turn.tools.includes(name));
+      expect(kept.length).toBeGreaterThan(0);
+      expect(kept.length).toBeLessThan(TURN_CATALOG_TOOLS_MAX);
+      expect(kept).toEqual(names.slice(0, kept.length));
+      expect(full.turn.withheld ?? []).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ reason: "turn_full" })]),
       );
     } finally {
       await grant([]);
