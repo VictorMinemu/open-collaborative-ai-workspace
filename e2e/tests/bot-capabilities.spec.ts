@@ -326,6 +326,10 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
       "ocw_automation_propose",
       // 07.5-08: Sam may start Work Zone sessions, so every turn of his offers the Work Zone proposal tools.
       "ocw_start_work_zone",
+      // 07.17.1.1.2 (PD-07): a person's turn in a thread without the bot's task may start one (long tasks on by default).
+      "ocw_task_continue",
+      "ocw_task_finish",
+      "ocw_task_start",
       "ocw_work_zone_projects",
       "web_fetch",
       "web_search",
