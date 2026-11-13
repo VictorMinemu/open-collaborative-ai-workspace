@@ -6,12 +6,15 @@ import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from ".
 import {
   continueAs,
   deliverTaskTurn,
+  drainTaskJobs,
   finishAs,
+  reportTurnDone,
   setTask,
   startTaskFor,
   TASK_GOAL,
   TASK_NEXT_STEP,
   TASK_PROGRESS,
+  taskEvents,
   taskRow,
 } from "../../testing-tasks";
 
@@ -434,20 +437,20 @@ describe("continue: the waits (PD-05)", () => {
 describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)", () => {
   it("a platform-delivered task turn is quiet inside the cadence and posts at the fifth turn or after 10 minutes", async () => {
     const { taskId, start } = await waitingTask();
-    // As 09 will deliver it: a turn of the task (one per continue, code review WR-06) is its current turn.
-    const asDelivered = async (patch: Record<string, unknown>) => {
-      const turn = await controlTurn(start);
-      await setTask(s, taskId, {
-        status: "running",
-        wait_kind: null,
-        wake_at: null,
-        current_event_id: turn.eventId,
-        ...patch,
-      });
+    // The platform delivers each next turn (an `agent.task.v1` continuation, one continue per turn, code review WR-06;
+    // only such a turn may be quiet, IN-09); the cadence fields are then set as the case needs.
+    let previous = start;
+    const delivered = async (patch: Record<string, unknown>) => {
+      expect((await reportTurnDone(s, previous.eventId as string)).status).toBe(200);
+      await drainTaskJobs(s);
+      const turn = (await taskEvents(s, taskId)).at(-1) as Json;
+      expect(turn.eventId).not.toBe(previous.eventId);
+      previous = turn;
+      await setTask(s, taskId, patch);
       return turn;
     };
     // Three turns in, last post two minutes ago.
-    let turn = await asDelivered({
+    let turn = await delivered({
       turns_used: 3,
       last_post_turn: 1,
       last_post_at: new Date(Date.now() - 2 * MIN),
@@ -457,7 +460,7 @@ describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)"
     let row = await taskRow(s, taskId);
     expect(row.last_post_turn).toBe(1);
 
-    turn = await asDelivered({
+    turn = await delivered({
       turns_used: 6,
       last_post_turn: 1,
       last_post_at: new Date(Date.now() - 2 * MIN),
@@ -468,7 +471,7 @@ describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)"
     expect(row.last_post_turn).toBe(6);
     near(row.last_post_at, Date.now());
 
-    turn = await asDelivered({
+    turn = await delivered({
       turns_used: 7,
       last_post_turn: 6,
       last_post_at: new Date(Date.now() - 11 * MIN),

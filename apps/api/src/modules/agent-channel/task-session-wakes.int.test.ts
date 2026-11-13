@@ -522,6 +522,22 @@ describe("a wake while another turn of the task runs: a view turn (PD-07, PD-14)
   });
 });
 
+describe("code review IN-09: a Work Zone wake that is the task's turn always posts", () => {
+  it("inside the cadence its continue is never quiet: the wake's word to the person is posted", async () => {
+    const { taskId, start, session } = await taskWithSession();
+    await waitOnSession(start, session);
+    await finishTurn(session);
+    await drainWakes();
+    const [wake] = await wakesOf(session.workSessionId);
+    expect(taskTools(wake as Json).sort()).toEqual([CONTINUE, FINISH].sort());
+    // Turn 2, the last post on turn 1 a moment ago: a continuation here would be quiet.
+    expect(await taskRow(s, taskId)).toMatchObject({ turns_used: 2, last_post_turn: 1 });
+    const c = await continueAs(s, wake as Json);
+    expect(c.body, JSON.stringify(c.body)).toMatchObject({ ok: true, quiet: false });
+    expect((await taskRow(s, taskId)).last_post_turn).toBe(2);
+  });
+});
+
 describe("code review WR-05: a wake never takes the wait while the turn that continued still runs", () => {
   it("the session ends its turn before the task's turn reported done: a view turn; the done then delivers the task's turn, once", async () => {
     const { taskId, start, session } = await taskWithSession();

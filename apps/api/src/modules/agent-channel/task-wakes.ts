@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   AgentChannelEventTypes,
   type AgentTaskEvent,
@@ -43,6 +42,7 @@ import {
   lockTask,
   stopTask,
   type TaskStopOutcome,
+  taskEventId,
 } from "./tasks";
 
 /**
@@ -96,18 +96,9 @@ const REASON_OF: Readonly<Record<BotTaskWaitKind, BotTaskWakeReason>> = {
 
 const orgOf = (tx: Tx) => tenantOf(tx).organizationId;
 
-/**
- * A continuation's event id, derived from the task and the wait it ends (`wait_seq` before the wait is consumed), so a
- * retry, a duplicate job, the tick or a second done can never deliver the same wait twice. A UUID of version 8 (RFC
- * 9562, custom) from SHA-256, `wakeEventId`'s recipe under its own domain prefix.
- */
-export function taskEventId(taskId: string, waitSeq: number): string {
-  const h = createHash("sha256").update(`ocw.bot_task.turn\u0000${taskId}\u0000${waitSeq}`).digest();
-  h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
-  h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
-  const x = h.subarray(0, 16).toString("hex");
-  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
-}
+// A continuation's event id (`taskEventId`) lives in tasks.ts since code review IN-09 (the continue route tells a
+// continuation from a Work Zone wake by it); re-exported here, where the continuation derives it.
+export { taskEventId };
 
 /** Whether the turn `eventId` exists (it is written in the delivery's transaction, with its cell event). */
 async function delivered(tx: Tx, eventId: string): Promise<boolean> {

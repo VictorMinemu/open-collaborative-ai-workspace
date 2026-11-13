@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   BOT_TASK_ACTIVE,
   BOT_TASK_LIMITS,
@@ -63,6 +64,19 @@ export interface TaskAuditMetadata {
   outcome?: BotTaskOutcome;
   byUserId?: string;
   processId?: string;
+}
+
+/**
+ * A continuation's event id, derived from the task and the wait it ends (`wait_seq` before the wait is consumed), so a
+ * retry, a duplicate job, the tick or a second done can never deliver the same wait twice. A UUID of version 8 (RFC
+ * 9562, custom) from SHA-256, `wakeEventId`'s recipe under its own domain prefix.
+ */
+export function taskEventId(taskId: string, waitSeq: number): string {
+  const h = createHash("sha256").update(`ocw.bot_task.turn\u0000${taskId}\u0000${waitSeq}`).digest();
+  h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
+  h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
+  const x = h.subarray(0, 16).toString("hex");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
 }
 
 export const isActiveTask = (t: Pick<BotTaskRow, "status">): boolean =>
@@ -423,7 +437,12 @@ export async function continueTask(
   }
   if (wake.getTime() > deadline.getTime()) wake = deadline;
 
-  const platformTurn = p.turn.eventId === task.currentEventId && p.turn.eventId !== task.startedEventId;
+  // Code review IN-09: only a continuation the platform delivered (`agent.task.v1`, its id derived from the wait it
+  // ended) may be quiet; a Work Zone wake that took the wait carries 07.16's word to the person, so it always posts.
+  const platformTurn =
+    p.turn.eventId === task.currentEventId &&
+    p.turn.eventId !== task.startedEventId &&
+    p.turn.eventId === taskEventId(task.id, task.waitSeq - 1);
   const quiet =
     platformTurn &&
     taskQuiet({
