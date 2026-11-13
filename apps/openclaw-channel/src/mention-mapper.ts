@@ -106,7 +106,8 @@ export function parseTarget(raw: string): { conversationId: string; threadRootId
  * 07.17.1.1.2 (D-06, PD-16): what the bot is told about long tasks, by what the turn may do with them: `offer` (it may
  * start one), `active` (a turn of the task itself: a continuation or a Work Zone wake that took its wait), `person`
  * (code review WR-08: the person it runs for wrote while it waits; they get an answer, the milestones rule is for task
- * turns only), `view` (its task in this thread runs for another person or another turn). Fixed sentences; the proactive
+ * turns only), `view` (its task in this thread runs for another person), `busy` (code review IN-01: the person it runs
+ * for wrote while another turn of the task runs, or a wake came then). Fixed sentences; the proactive
  * part is the owner's ask: keep going instead of asking "¿continúo?", never claim background work that is not
  * scheduled, report when done or blocked.
  */
@@ -127,6 +128,9 @@ export const TASK_GUIDANCE = {
   view:
     "A task of yours for another person runs in this thread (see 'Your task'). Answer this person; do not continue " +
     "that task.",
+  busy:
+    "Another turn of your task for this person is running (see 'Your task'). Answer them; do not continue the task " +
+    "here, it goes on by itself.",
 } as const;
 export type TaskGuidance = keyof typeof TASK_GUIDANCE;
 
@@ -477,10 +481,12 @@ function taskGuidanceFor(
   turn: TurnContext,
   allowedTools: readonly string[],
   taskTurn: boolean,
+  askerId: string,
 ): TaskGuidance | null {
   if (turn.task && allowedTools.includes(TASK_CONTINUE_TOOL)) return taskTurn ? "active" : "person";
   if (allowedTools.includes(TASK_START_TOOL)) return "offer";
-  return turn.task ? "view" : null;
+  if (!turn.task) return null;
+  return turn.task.requesterId === askerId ? "busy" : "view";
 }
 
 // ---------------------------------------------------------------- the bot's Work Zone (07.16 D-05, PD-17)
@@ -859,7 +865,11 @@ export function mapMention(
     })),
     personaPrompt: buildPersonaPrompt(
       bot ?? { displayName: event.agent.displayName, handle: event.agent.handle, instructions: "" },
-      { direct, aiChat, tasks: taskGuidanceFor(turn, allowedTools, opts.taskTurn === true) },
+      {
+        direct,
+        aiChat,
+        tasks: taskGuidanceFor(turn, allowedTools, opts.taskTurn === true, chainHuman?.id ?? author.id),
+      },
     ),
     turn,
     agentTools,

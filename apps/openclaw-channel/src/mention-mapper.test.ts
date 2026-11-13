@@ -2355,8 +2355,29 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
   const PERSON =
     "The person your task runs for wrote this message while the task waits (see 'Your task'). Answer them first; then call ocw_task_continue or ocw_task_finish.";
 
+  // Code review IN-01: the person it runs for wrote while another turn of the task runs.
+  const BUSY =
+    "Another turn of your task for this person is running (see 'Your task'). Answer them; do not continue the task here, it goes on by itself.";
+
   it("TASK_GUIDANCE holds the hub's paragraphs verbatim", () => {
-    expect(TASK_GUIDANCE).toEqual({ offer: OFFER, active: ACTIVE, person: PERSON, view: VIEW });
+    expect(TASK_GUIDANCE).toEqual({ offer: OFFER, active: ACTIVE, person: PERSON, view: VIEW, busy: BUSY });
+  });
+
+  it("code review IN-01: a view turn of the requester says the task's other turn runs; another person's says it runs for someone else", () => {
+    const mine = mapMention(
+      mention({ turn: turnWith([], { task: task({ status: "running", waiting: null }) }) } as never),
+      TASK_BOT,
+    );
+    expect(mine.personaPrompt).toContain(BUSY);
+    expect(mine.personaPrompt).not.toContain(VIEW);
+    const theirs = mapMention(
+      mention({
+        turn: turnWith([], { task: task({ requesterId: ALEX.id }) }),
+      } as never),
+      TASK_BOT,
+    );
+    expect(theirs.personaPrompt).toContain(VIEW);
+    expect(theirs.personaPrompt).not.toContain(BUSY);
   });
 
   it("without tasks (null or absent) the prompt is byte-identical to before, in a thread, a DM, an AI chat and for a bare bot", () => {
@@ -2397,6 +2418,7 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
       ["active", ACTIVE],
       ["person", PERSON],
       ["view", VIEW],
+      ["busy", BUSY],
     ] as const) {
       expect(buildPersonaPrompt(BOT, { tasks })).toBe(
         [...BASE_THREAD, "", paragraph, ...INSTRUCTIONS].join("\n"),
@@ -2423,7 +2445,10 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     expect(person.personaPrompt).not.toContain(ACTIVE);
     expect(person.personaPrompt).not.toContain(OFFER);
     expect(taskOf(person)?.label).toBe("Your task (your own notes)");
-    const view = mapMention(mention({ turn: turnWith([], { task: task() }) } as never), TASK_BOT);
+    const view = mapMention(
+      mention({ turn: turnWith([], { task: task({ requesterId: ALEX.id }) }) } as never),
+      TASK_BOT,
+    );
     expect(view.personaPrompt).toContain(VIEW);
     expect(taskOf(view)).toBeDefined();
     // A bot whose configured tools lack the task tools (no delivered-turn tool) is never told to use them.
