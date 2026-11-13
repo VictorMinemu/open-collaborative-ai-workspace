@@ -114,7 +114,7 @@ export const TASK_FIELDS: Array<{
   {
     key: "maxRunning",
     label: "Tasks running at once",
-    hint: "0 turns long tasks off for everyone",
+    hint: "At 0 no new task starts; running ones go on",
     min: 0,
     max: BOT_TASK_LIMITS.maxRunningCap,
     testId: "policy-task-max-running",

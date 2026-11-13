@@ -105,7 +105,7 @@ describe("the Long tasks limits", () => {
       expect(input, id).toContain(`max="${max}"`);
       expect(labelFor(html, input), id).toBe(label);
     }
-    expect(text(html)).toContain("0 turns long tasks off for everyone");
+    expect(text(html)).toContain("At 0 no new task starts; running ones go on");
     expect(TASK_FIELDS.map((f) => f.testId)).toEqual(fields.map((f) => f[0]));
   });
 
@@ -142,7 +142,7 @@ describe("the Long tasks limits", () => {
   it("0 tasks running at once is accepted, with its hint, and Save stays on", () => {
     const html = render(policy(), { maxRunning: 0 });
     expect(tagsOf(html, "policy-task-max-running")[0]).toContain('aria-invalid="false"');
-    expect(text(html)).toContain("0 turns long tasks off for everyone");
+    expect(text(html)).toContain("At 0 no new task starts; running ones go on");
     expect(text(html)).not.toContain("Enter a whole number");
     expect(tagsOf(html, "bot-policy-save")[0]).not.toMatch(/\sdisabled=""/);
   });
