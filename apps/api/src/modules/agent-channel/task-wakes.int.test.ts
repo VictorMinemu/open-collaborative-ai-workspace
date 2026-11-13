@@ -601,6 +601,16 @@ describe("the minute tick (PD-06, PD-09, E5, E8, E10)", () => {
     expect(await taskEvents(s, taskId)).toHaveLength(1);
   });
 
+  it("code review IN-04: the lister reads the database's clock when the tick passes none", async () => {
+    const { taskId } = await continuedTask(s, { who: s.sam, conversationId: engId });
+    await setTask(s, taskId, { wake_at: new Date(Date.now() - 2 * 60_000) });
+    const listed = (await s.su.query("select id from app.due_bot_tasks(1000, null)")).rows.map((r) => r.id);
+    expect(listed).toContain(taskId);
+    await dropTaskJobs(s, taskId);
+    await tickBotTasks(s.stack.built.core, deps());
+    expect((await queuedTaskJobs(s, taskId)).length).toBeGreaterThanOrEqual(1);
+  });
+
   it("a running task whose current turn is 31 minutes old without done: the nudge path", async () => {
     const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
     await ageTurn(s, event.eventId as string, 31);

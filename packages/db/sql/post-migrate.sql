@@ -981,16 +981,18 @@ GRANT EXECUTE ON FUNCTION app.idle_agent_chains(integer, timestamptz) TO ocw_app
 -- waiting task whose wake is more than 60 s overdue (its job was lost), a running task unchanged for 30 minutes (its
 -- turn was lost), a task past its deadline, and a task whose bot is disabled or archived (soft-deleted). Oldest wake (or
 -- change) first. The tick re-reads every task by id inside its organization's own withTenant() transaction, where RLS
--- applies again, and decides there under the task's row lock.
+-- applies again, and decides there under the task's row lock. Code review IN-04: a null `p_now` (what the tick passes)
+-- is the database's own clock, the one every decision reads (Pitfall 7); a time is only ever passed by tests.
 CREATE OR REPLACE FUNCTION app.due_bot_tasks(p_limit integer, p_now timestamptz)
 RETURNS TABLE (id uuid, organization_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
   SELECT t.id, t.organization_id FROM app.bot_tasks t
   JOIN app.agents a ON a.organization_id = t.organization_id AND a.id = t.agent_id
+  CROSS JOIN (SELECT coalesce(p_now, now()) AS at) c
   WHERE t.status IN ('running', 'waiting')
-    AND ((t.status = 'waiting' AND t.wake_at <= p_now - interval '60 seconds')
-      OR (t.status = 'running' AND t.updated_at <= p_now - interval '30 minutes')
-      OR t.deadline_at <= p_now
+    AND ((t.status = 'waiting' AND t.wake_at <= c.at - interval '60 seconds')
+      OR (t.status = 'running' AND t.updated_at <= c.at - interval '30 minutes')
+      OR t.deadline_at <= c.at
       OR a.status = 'disabled'
       OR a.deleted_at IS NOT NULL)
   ORDER BY coalesce(t.wake_at, t.updated_at), t.id

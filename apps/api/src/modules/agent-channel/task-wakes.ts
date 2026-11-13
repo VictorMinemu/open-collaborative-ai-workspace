@@ -660,11 +660,12 @@ async function tickTask(tx: Tx, core: Core, taskId: string): Promise<keyof TaskT
 export async function tickBotTasks(
   core: Core,
   _deps: TaskWakesDeps,
-  now: Date = new Date(),
+  /** Test seam only; absent = the database's clock (code review IN-04: never the API's, Pitfall 7). */
+  now?: Date,
 ): Promise<TaskTickResult> {
   const due = await core.db.pool.query<{ id: string; organization_id: string }>(
     "select id, organization_id from app.due_bot_tasks($1, $2)",
-    [BOT_TASK_LIMITS.tickBatch, now.toISOString()],
+    [BOT_TASK_LIMITS.tickBatch, now ? now.toISOString() : null],
   );
   const out: TaskTickResult = { queued: 0, nudged: 0, stopped: 0 };
   for (const row of due.rows) {
