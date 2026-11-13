@@ -66,6 +66,7 @@ import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
+import { registerTaskRoutes } from "./task-routes";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerBotWorkSessionFileRoutes } from "./work-session-files";
 import { registerWorkSessionReadRoute } from "./work-session-read";
@@ -610,6 +611,9 @@ export function createAgentChannelModule(
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
           // Automation fan-out (07.17, D-02, PD-07): a fan-out run opens one conversation per new item in its target.
           if (opts.fanOut) registerConversationOpenRoute(scope, core, opts.fanOut);
+          // Long bot tasks (07.17.1.1.2-08, D-02, PD-08): start, continue and finish the bot's own task in its thread,
+          // re-decided on the stored turn and the task row under its lock; outside the cap of 8 (D-13).
+          registerTaskRoutes(scope, core);
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
           // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
           registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });

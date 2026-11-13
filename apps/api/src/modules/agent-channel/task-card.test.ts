@@ -61,8 +61,10 @@ describe("composeTaskCard", () => {
       { tone: "neutral", text: "Stopped: it ran for 8 h." },
     ]);
     expect(
-      composeTaskCard({ ...base, status: "stopped", outcome: "stopped_by_person" }, { stoppedByName: "Sam Lee" })
-        .notices,
+      composeTaskCard(
+        { ...base, status: "stopped", outcome: "stopped_by_person" },
+        { stoppedByName: "Sam Lee" },
+      ).notices,
     ).toEqual([{ tone: "neutral", text: "Stopped by Sam Lee." }]);
     expect(
       composeTaskCard({ ...base, status: "stopped", outcome: "stopped_by_person" }, { stoppedByName: null })
@@ -88,6 +90,7 @@ describe("composeTaskCard", () => {
       statusLabel: card.statusLabel,
       fields: card.fields,
       notices: card.notices,
+      actions: [{ kind: "follow", label: "Follow" }],
     });
     expect(parsed.success).toBe(true);
   });

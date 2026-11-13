@@ -153,7 +153,12 @@ describe("tracer: a delivered turn starts a task (PD-08, PD-11)", () => {
     expect(row.thread_root_id).toBeNull();
     expect(row.conversation_id).toBe(s.samDm);
     const card = await cardOf(row.card_message_id as string);
-    expect(card).toMatchObject({ conversation_id: s.samDm, thread_id: null, kind: "task", platform_owned: true });
+    expect(card).toMatchObject({
+      conversation_id: s.samDm,
+      thread_id: null,
+      kind: "task",
+      platform_owned: true,
+    });
   });
 
   it("a second start in the same thread is task_active; another thread starts its own task", async () => {

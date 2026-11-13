@@ -134,7 +134,11 @@ const SETTABLE = new Set([
 ]);
 
 /** Superuser test seam: writes clock-like and state fields of a task row directly (Dates as ISO strings). */
-export async function setTask(s: SandboxStack, taskId: string, patch: Record<string, unknown>): Promise<void> {
+export async function setTask(
+  s: SandboxStack,
+  taskId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
   const keys = Object.keys(patch);
   if (keys.length === 0) return;
   for (const k of keys) if (!SETTABLE.has(k)) throw new Error(`setTask: ${k} is not a settable column`);
