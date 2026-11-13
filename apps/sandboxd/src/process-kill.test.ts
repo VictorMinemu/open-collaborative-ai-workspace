@@ -180,7 +180,7 @@ describe("the process event of a background command", () => {
     timedCommand(docker, 120, 0);
     const started = await run(sandboxes);
     const processId = (started as { processId: string }).processId;
-    await new Promise((r) => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 180));
     const polls = await Promise.allSettled(
       [1, 2, 3].map(() => sandboxes.process({ target, processId, action: "poll" })),
     );

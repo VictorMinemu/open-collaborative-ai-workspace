@@ -330,6 +330,22 @@ interface ProcessRecord {
   timer: NodeJS.Timeout | null;
   /** Resolves when the output stream ends, so a wait wakes at once instead of on the next poll tick. */
   streamDone: Promise<void>;
+  /** The run's timeout as `ocw-run` applies it (whole seconds): an end at or past it is a timeout. */
+  timeoutSeconds: number;
+  /**
+   * 07.17.1.1.2-11 (D-03, PD-13): sandboxd answered `running` for this command (the bot got a process id), so its end
+   * is reported once as a `process` event; `reported` once it was.
+   */
+  yielded: boolean;
+  reported: boolean;
+  /** `ocw-run --kill` reached the command's group: a person or the bot stopped it (`/process` kill). */
+  killed: boolean;
+  /** The backstop timer killed it (the helper itself was killed or hung past the timeout). */
+  timedOut: boolean;
+  /** The exit code came from Docker (false: unknown, e.g. the container went away with the command). */
+  exitKnown: boolean;
+  /** The kill in flight (`killRecord`), settled; `reportEnd` waits for it to tell a kill from an end. */
+  killing: Promise<void> | null;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -886,6 +902,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     for (let i = 0; i < 20; i++) {
       const state = await execInspect(rec.execId);
       if (!state.running) {
+        rec.exitKnown = state.exitCode !== null;
         rec.exitCode = state.exitCode ?? -1;
         break;
       }
@@ -896,6 +913,36 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     rec.endedAt = clock.now();
     if (rec.timer) clearTimeout(rec.timer);
     rec.stream.destroy();
+    reportEnd(rec);
+  }
+
+  /**
+   * 07.17.1.1.2-11 (D-03, PD-13): a yielded command ended (its exit code resolved by `finish`): one `process` event,
+   * whichever of the stream end, a poll or a kill got here first (`reported`). Ids and numbers only: never the argv,
+   * the cwd or the output (T-07.8-09-04). A command that ended within its yield reports nothing (the bot has its result).
+   */
+  function reportEnd(rec: ProcessRecord): void {
+    if (!rec.yielded || rec.reported) return;
+    rec.reported = true;
+    const durationMs = Math.max(0, Math.round((rec.endedAt ?? clock.now()) - rec.startedAt));
+    void (rec.killing ?? Promise.resolve()).then(() => {
+      // Precedence: the backstop's kill, a requested kill, then ocw-run's own timeout (the end came at its deadline).
+      const status = rec.timedOut
+        ? "timed_out"
+        : rec.killed
+          ? "killed"
+          : durationMs >= rec.timeoutSeconds * 1000
+            ? "timed_out"
+            : "exited";
+      emit({
+        type: "process",
+        target: { orgId: rec.orgId, agentId: rec.agentId },
+        processId: rec.id,
+        status,
+        exitCode: rec.exitKnown ? rec.exitCode : null,
+        durationMs,
+      });
+    });
   }
 
   /** Waits up to `ms` for the process to end (stream end, or the exec reported finished). */
@@ -932,6 +979,8 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       processes.delete(rec.id);
       return { status: "exited", exitCode: rec.exitCode ?? -1, ...common };
     }
+    // The bot now holds a process id: the command's end will be reported (`reportEnd`).
+    rec.yielded = true;
     return { status: "running", processId: rec.id, ...common };
   }
 
@@ -1018,13 +1067,23 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
    * `KILL_NO_RECORD` and the kill is tried again until it lands, the command ends, or `PROCESS_KILL_BUDGET_MS` runs
    * out (CI p144: a single attempt left `sleep 300` running and the kill answered `running`).
    */
-  async function killRecord(rec: ProcessRecord): Promise<void> {
+  function killRecord(rec: ProcessRecord): Promise<void> {
+    // 07.17.1.1.2-11: the end a kill causes is reported only once the kill settled (`reportEnd` waits for it), so a
+    // stream end that races the helper's answer still reads as `killed`.
+    const run = killLoop(rec);
+    rec.killing = run.catch(() => undefined);
+    return run;
+  }
+
+  async function killLoop(rec: ProcessRecord): Promise<void> {
     const deadline = clock.now() + PROCESS_KILL_BUDGET_MS;
     for (;;) {
       if (rec.ended) return;
       const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
       if (!c?.State?.Running) return;
       const res = await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
+      // The helper signalled the group of a command that was still running when it was sent (07.17.1.1.2-11).
+      if (res.exitCode === 0) rec.killed = true;
       if (res.exitCode !== KILL_NO_RECORD || rec.ended || clock.now() >= deadline) return;
       await sleep(KILL_RETRY_MS);
     }
@@ -1175,6 +1234,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         exitCode: null,
         timer: null,
         streamDone: Promise.resolve(),
+        timeoutSeconds: seconds,
+        yielded: false,
+        reported: false,
+        killed: false,
+        timedOut: false,
+        exitKnown: false,
+        killing: null,
       };
       rec.streamDone = demux(stream, (frame) =>
         (frame.stream === 2 ? rec.stderr : rec.stdout).push(frame.data),
@@ -1185,12 +1251,17 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       lastActive.set(targetKey(input.target), clock.now());
       // ocw-run's timeout kills the group; this is the backstop if the helper itself was killed or hung.
       rec.timer = setTimeout(() => {
+        if (!rec.ended) rec.timedOut = true;
         void killRecord(rec).catch(() => undefined);
       }, input.timeoutMs + TIMEOUT_GRACE_MS);
       rec.timer.unref();
 
       await waitFor(rec, input.yieldMs);
-      return resultOf(rec);
+      const result = resultOf(rec);
+      // 07.17.1.1.2-11: a command still running ends on its own later; its stream end resolves the exit code and
+      // reports it once (`reportEnd`), whether or not anyone polls it.
+      if (result.status === "running") void rec.streamDone.then(() => finish(rec)).catch(() => undefined);
+      return result;
     },
 
     async process(input) {
