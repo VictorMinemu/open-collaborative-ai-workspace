@@ -311,6 +311,21 @@ its directives are in `message.text`, where the fake model reads them):
 - one session per thread: a second item on its own root gets its own reply bound to its own event, and no item turn's
   model request carries the run's or the other item's turn or offers `ocw_conversation_open`.
 
+`bot_tasks` (07.17.1.1.2-06) runs the working-tree plugin's `ocw_task_start`, `ocw_task_continue` and
+`ocw_task_finish` in the real cell against the fake API (`POST /__test/tasks` sets each route's answer; by default the
+continue is quiet) and the fake model (fixtures `test/mention-task.json`, a DM turn offering the three tools, and
+`test/task-continue.json`, an `agent.task.v1` on the task card with `turn.task`; the directives are in `message.text`):
+- turn-scoped: the three names are in the bot's `alsoAllow`, and the turn offers exactly them;
+- the turn's ids and the bot's notes only: one `POST /tasks/start` with `agentId,eventId,goal` and one
+  `POST /tasks/continue` with `afterSeconds,agentId,eventId,nextStep,progress`, never `/tool-calls`; the person's own
+  turn posts its reply even though the continue answered quiet, its model request carries the long-tasks paragraph,
+  and it reports `/turns/<eventId>/done` once;
+- a task turn that is not quiet is answered in the card's thread (`inReplyToMessageId` = the card, idempotency
+  `evt:<eventId>`), and its model request carries the `Your task (your own notes)` block and the active paragraph,
+  never the offer one;
+- a continuation answered `quiet: true` posts nothing and still reports done once (`replied`); the bot's earlier note
+  reaches no cell log line.
+
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.
 

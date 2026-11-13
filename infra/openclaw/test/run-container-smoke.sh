@@ -107,12 +107,21 @@
 # text only inside its labelled untrusted block and never the user text, an `ocw_memory_save` directive inside the item
 # never run (no `/memories` body) and one the model follows blocked in the cell; two items on two roots get two replies,
 # and no item turn's model request carries another thread's turn or offers `ocw_conversation_open`.
+# Scenario bot_tasks (07.17.1.1.2-06 / BTASK-02, BTASK-10, D-02, D-06, D-13, D-14, PD-10, PD-17): `ocw_task_start`,
+# `ocw_task_continue` and `ocw_task_finish` are in the bot's alsoAllow (turn-scoped); a DM turn offering them makes the
+# model start a task and continue it, and the fake API records exactly `agentId,eventId,goal` on `/tasks/start` and
+# `afterSeconds,agentId,eventId,nextStep,progress` on `/tasks/continue`, never `/tool-calls`; the person's own turn posts
+# its reply even though the continue answered quiet, its model request carries the long-tasks paragraph, and it reports
+# `/turns/<eventId>/done` once. An `agent.task.v1` on the task card (`turn.task` waiting, one finished process) is
+# answered in the card's thread (`inReplyToMessageId` = the card, idempotency `evt:<eventId>`) and its model request
+# carries the "Your task (your own notes)" block and the active paragraph (never the offer one); a continuation whose
+# continue answers `quiet: true` posts nothing and reports done once (replied); the bot's notes reach no cell log line.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
 #                            marketplace, breaker, bot_sandbox, bot_browser, bot_attachments, automation,
-#                            automation-tools, consult, bot_work_sessions, automation-fan-out
+#                            automation-tools, consult, bot_work_sessions, automation-fan-out, bot_tasks
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -2876,6 +2885,195 @@ if (shared.length) { console.log("FAIL: an item turn saw another thread'"'"'s tu
 if (offered.length) { console.log("FAIL: an item turn was offered ocw_conversation_open:", offered.join(", ")); process.exit(1); }
 ' "$FO_DIR/items.json" "$FO_DIR/item-1043.json"
 echo "PASS automation-fan-out"
+fi
+
+if want bot_tasks; then
+# 07.17.1.1.2 (D-02, D-06, D-13, D-14, PD-10, PD-17, PD-24): the bot's long-task tools inside the real cell. The three are
+# plugin tools that post only the turn's ids and the bot's own notes to `/tasks/*` (self-validated, never `/tool-calls`);
+# the fake API's knobs (`POST /__test/tasks`) set what each route answers (default: start ok, continue quiet, finish
+# done). The task turns' directives are in `message.text`, where the fake model reads them (the real API sends a fixed
+# sentence there, P4).
+BT_AGENT=0199a6f0-0000-7000-8000-00000000a001
+# The DM mention that starts the task (mention-task.json).
+BT_DM=0199a6f0-0000-7000-8000-00000000c7a1
+BT_MSG=0199a6f0-0000-7000-8000-00000000d7a1
+BT_EV=0199a6f0-0000-7000-8000-00000000e7a1
+# The task's next turns (task-continue.json): a channel thread (root BT_ROOT) whose task card is BT_CARD.
+BT_CHANNEL=0199a6f0-0000-7000-8000-00000000c7a2
+BT_ROOT=0199a6f0-0000-7000-8000-00000000d7a2
+BT_CARD=0199a6f0-0000-7000-8000-00000000d7a3
+BT_EV2=0199a6f0-0000-7000-8000-00000000e7a2
+BT_EV3=0199a6f0-0000-7000-8000-00000000e7a3
+# The bot's note from an earlier turn: it reaches the model only inside the "Your task" block, never a cell log (P1).
+BT_NOTE=OCW-SMOKE-TASK-NOTE-0717112
+bt_mark() { docker exec "${P}-model" sh -c "mkdir -p /tmp/capture && ls /tmp/capture > /tmp/bt-mark-$1"; }
+bt_requests() { # <mark> → JSON [{file, text}] of the fake model's OpenAI/Anthropic captures written since the mark
+  docker exec -i "${P}-model" node -e '
+const fs = require("fs");
+const before = new Set(fs.readFileSync(`/tmp/bt-mark-${process.argv[1]}`, "utf8").split("\n"));
+const files = fs.readdirSync("/tmp/capture").filter((f) => !before.has(f) && /-(openai|anthropic)\.json$/.test(f)).sort();
+process.stdout.write(JSON.stringify(files.map((file) => ({ file, text: fs.readFileSync(`/tmp/capture/${file}`, "utf8") }))));
+' "$1"
+}
+bt_tasks() { # <JSON body of POST /__test/tasks> ({} resets the knobs; the records stay)
+  api_exec "
+const body = await new Response(process.stdin).text();
+await fetch('http://127.0.0.1:4000/__test/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+" <<<"$1"
+}
+# Waits until the fake API recorded the turn-done signal for `$1` (sent after the turn's last post); prints the state.
+bt_wait_done() {
+  local state=""
+  for i in $(seq 1 90); do
+    state="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); console.log(JSON.stringify(await r.json()));")"
+    if EV="$1" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+process.exit((s.turnsDone ?? []).some((d) => d.eventId === process.env.EV) ? 0 : 1);
+' <<<"$state"; then break; fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${P}-openclaw")" != "true" ]]; then
+      echo "FAIL: openclaw container died: $(docker inspect -f 'exit={{.State.ExitCode}} oomKilled={{.State.OOMKilled}}' "${P}-openclaw")" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  printf '%s' "$state"
+}
+bt_tasks '{}'
+
+echo "== [bot_tasks] the three task tools are in the bot's alsoAllow (turn-scoped, like ocw_conversation_open)"
+ALSO="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const lists = Object.entries(cfg.agents?.entries ?? {}).filter(([id]) => id.startsWith("ocw-")).map(([, a]) => a.tools?.alsoAllow ?? []);
+console.log(JSON.stringify(lists.map((l) => l.filter((t) => t.startsWith("ocw_task_")).sort())));
+')"
+echo "   alsoAllow  : $ALSO"
+[[ "$ALSO" == *'["ocw_task_continue","ocw_task_finish","ocw_task_start"]'* ]] ||
+  { echo "FAIL: the three task tools are not in the bot's alsoAllow"; exit 1; }
+
+echo "== [bot_tasks] a DM turn starts a task and continues it: the turn's ids and the bot's notes only, never /tool-calls"
+bt_mark start
+inject_and_wait "$ROOT/infra/openclaw/test/mention-task.json" "$BT_MSG" >/dev/null
+STATE="$(bt_wait_done "$BT_EV")"
+echo "$STATE" | BT_EV="$BT_EV" BT_MSG="$BT_MSG" BT_AGENT="$BT_AGENT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = process.env.BT_EV;
+const replies = s.messages.filter((x) => x.eventId === EV);
+const m = replies[0];
+if (!m) { console.log("FAIL: no reply to the task mention"); process.exit(1); }
+const calls = (s.taskCalls ?? []).filter((c) => c.body.eventId === EV);
+const keys = (b) => Object.keys(b).sort().join();
+const done = (s.turnsDone ?? []).filter((d) => d.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify(calls.map((c) => [c.route, keys(c.body)])), "| done", JSON.stringify(done.map((d) => d.outcome)));
+const [start, cont] = calls;
+const ok =
+  /\[tools: 3 \| ocw_task_continue,ocw_task_finish,ocw_task_start\]/.test(m.text) &&
+  calls.length === 2 && start.route === "start" && cont.route === "continue" &&
+  keys(start.body) === "agentId,eventId,goal" && start.body.agentId === process.env.BT_AGENT &&
+  start.body.goal === "Audit the 40 open invoices for rounding errors." &&
+  keys(cont.body) === "afterSeconds,agentId,eventId,nextStep,progress" && cont.body.agentId === process.env.BT_AGENT &&
+  cont.body.progress === "Checked invoices 1 to 10." && cont.body.nextStep === "Check invoices 11 to 20." &&
+  cont.body.afterSeconds === 60 &&
+  // Self-validated: none of the three ever goes to /tool-calls.
+  s.toolCalls.filter((c) => c.eventId === EV).length === 0 &&
+  m.text.includes("Tool ocw_task_start said: Task started: up to 40 turns, until 2026-11-12T18:00:00.000Z.") &&
+  m.text.includes("Tool ocw_task_continue said: Continue scheduled: your next turn starts right after this one; 39 turns left.") &&
+  // PD-10: a person'"'"'s own turn always posts, even when the continue answers quiet (only task turns hold their text).
+  replies.length === 1 && m.inReplyToMessageId === process.env.BT_MSG &&
+  // PD-17: a turn offered a task tool reports done, once.
+  done.length === 1 && done[0].outcome === "replied";
+if (!ok) { console.log("FAIL: expected one start and one continue with the turn ids and the notes only, one reply, one done"); process.exit(1); }
+'
+bt_requests start | BT_DM="$BT_DM" node -e '
+const reqs = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((r) => r.text.includes(process.env.BT_DM));
+const told = reqs.filter((r) => r.text.includes("Long tasks: when a request needs more work than one turn, call ocw_task_start"));
+console.log(`   guidance   : ${told.length} of ${reqs.length} model request(s) of the turn carry the long-tasks paragraph`);
+if (told.length === 0) { console.log("FAIL: the model never saw the long-tasks paragraph"); process.exit(1); }
+'
+
+echo "== [bot_tasks] an agent.task.v1 (not quiet) is answered in the card's thread, with the Your task block"
+bt_tasks '{"answers":{"continue":{"ok":true,"next":"after_turn","at":null,"turnsLeft":38,"quiet":false}}}'
+bt_mark next
+inject_and_wait "$ROOT/infra/openclaw/test/task-continue.json" "$BT_CARD" /__test/event >/dev/null
+STATE="$(bt_wait_done "$BT_EV2")"
+echo "$STATE" | BT_EV="$BT_EV2" BT_CHANNEL="$BT_CHANNEL" BT_ROOT="$BT_ROOT" BT_CARD="$BT_CARD" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = process.env.BT_EV;
+const replies = s.messages.filter((x) => x.eventId === EV);
+const m = replies[0];
+if (!m) { console.log("FAIL: no reply to the task turn"); process.exit(1); }
+const calls = (s.taskCalls ?? []).filter((c) => c.body.eventId === EV);
+const done = (s.turnsDone ?? []).filter((d) => d.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   anchor     :", m.conversationId, "thread", m.threadRootMessageId, "inReplyTo", m.inReplyToMessageId, "key", m.idempotencyKey);
+console.log("   bodies     :", JSON.stringify(calls.map((c) => [c.route, Object.keys(c.body).sort().join()])), "| done", JSON.stringify(done.map((d) => d.outcome)));
+const ok =
+  replies.length === 1 && m.conversationId === process.env.BT_CHANNEL &&
+  m.threadRootMessageId === process.env.BT_ROOT && m.inReplyToMessageId === process.env.BT_CARD &&
+  m.idempotencyKey === `evt:${EV}` &&
+  /\[tools: 2 \| ocw_task_continue,ocw_task_finish\]/.test(m.text) &&
+  m.text.includes("Tool ocw_task_continue said: Continue scheduled: your next turn starts right after this one; 38 turns left.") &&
+  calls.length === 1 && calls[0].route === "continue" &&
+  Object.keys(calls[0].body).sort().join() === "agentId,eventId,nextStep,progress" &&
+  calls[0].body.progress === "Checked invoices 11 to 20." &&
+  s.toolCalls.filter((c) => c.eventId === EV).length === 0 &&
+  done.length === 1 && done[0].outcome === "replied";
+if (!ok) { console.log("FAIL: expected one reply in the card'"'"'s thread, one continue body and one done"); process.exit(1); }
+'
+bt_requests next | BT_CHANNEL="$BT_CHANNEL" BT_NOTE="$BT_NOTE" node -e '
+const reqs = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((r) => r.text.includes(process.env.BT_CHANNEL));
+const told = reqs.filter((r) => r.text.includes("Your task (your own notes)") && r.text.includes(process.env.BT_NOTE) &&
+  r.text.includes("You are working on your task (see "));
+const offered = reqs.filter((r) => r.text.includes("call ocw_task_start with a one-line goal"));
+console.log(`   task block : ${told.length} of ${reqs.length} model request(s) carry the Your task block and the active paragraph, ${offered.length} the offer paragraph`);
+if (told.length === 0) { console.log("FAIL: the model never saw the Your task block with its notes and the active paragraph"); process.exit(1); }
+if (offered.length > 0) { console.log("FAIL: a task turn that controls its task was told to start one"); process.exit(1); }
+'
+
+echo "== [bot_tasks] a quiet continuation posts nothing and reports done once"
+bt_tasks '{}'
+BT_QUIET="$SECRETS/task-continue-quiet.json"
+node -e '
+const fs = require("fs");
+const [src, out, eventId] = process.argv.slice(1);
+const f = JSON.parse(fs.readFileSync(src, "utf8"));
+f.data.eventId = eventId;
+f.data.message.text = "Continue your task. [[call ocw_task_continue {\"progress\":\"Checked invoices 21 to 30.\",\"nextStep\":\"Check invoices 31 to 40.\"}]]";
+f.data.turn.task = { ...f.data.turn.task, status: "running", turnsUsed: 2, waiting: null, finishedProcesses: [] };
+f.data.task = { taskId: f.data.task.taskId, reason: "continue" };
+fs.writeFileSync(out, JSON.stringify(f));
+' "$ROOT/infra/openclaw/test/task-continue.json" "$BT_QUIET" "$BT_EV3"
+api_exec "
+const body = await new Response(process.stdin).text();
+const r = await fetch('http://127.0.0.1:4000/__test/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+console.log('   published seq', (await r.json()).seq);
+" <"$BT_QUIET" >&2
+STATE="$(bt_wait_done "$BT_EV3")"
+echo "$STATE" | BT_EV="$BT_EV3" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = process.env.BT_EV;
+const posted = s.messages.filter((x) => x.eventId === EV);
+const calls = (s.taskCalls ?? []).filter((c) => c.body.eventId === EV);
+const done = (s.turnsDone ?? []).filter((d) => d.eventId === EV);
+console.log("   quiet turn :", JSON.stringify({ posted: posted.length, bodies: calls.map((c) => [c.route, Object.keys(c.body).sort().join()]), done: done.map((d) => d.outcome) }));
+const ok =
+  posted.length === 0 &&
+  calls.length === 1 && calls[0].route === "continue" &&
+  Object.keys(calls[0].body).sort().join() === "agentId,eventId,nextStep,progress" &&
+  calls[0].body.progress === "Checked invoices 21 to 30." &&
+  s.toolCalls.filter((c) => c.eventId === EV).length === 0 &&
+  // A turn that continued answers with silence (never a failure reply, never a retry): one done, replied.
+  done.length === 1 && done[0].outcome === "replied";
+if (!ok) { console.log("FAIL: a quiet continuation must post nothing, send one continue and report done once"); process.exit(1); }
+'
+docker logs "${P}-openclaw" 2>&1 | grep -E "${BT_EV3}: quiet task turn" | head -n 1 | cut -c1-200 | sed 's/^/   /' || true
+
+echo "== [bot_tasks] P1: the bot's earlier note never reaches a cell log line"
+BT_LOGS="$(docker logs "${P}-openclaw" 2>&1 | grep -c "$BT_NOTE" || true)"
+echo "   cell logs  : $BT_LOGS line(s) carry the task's note"
+[[ "$BT_LOGS" -eq 0 ]] || { echo "FAIL: the cell logged the task's notes"; exit 1; }
+bt_tasks '{}'
+echo "PASS bot_tasks"
 fi
 
 if [[ "$SANDBOX" == "1" ]]; then
