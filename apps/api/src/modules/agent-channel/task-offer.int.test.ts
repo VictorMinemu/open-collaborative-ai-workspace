@@ -1,0 +1,310 @@
+import { randomUUID } from "node:crypto";
+import { BUILTIN_TOOLS, TASK_TOOL_FLAGS, TASK_TOOL_NAMES, TurnTask } from "@ocw/contracts";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { TestClient } from "../../testing";
+import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { startTestStorage, type TestStorage } from "../../testing-storage";
+
+/**
+ * Phase 07.17.1.1.2-07 (D-02, D-04, D-09, D-10; PD-05, PD-07, PD-09, PD-13; BTASK-02, BTASK-03, BTASK-07, BTASK-11): which
+ * turn of a bot gets which task tools and what it knows about its task. Decided at delivery (`taskOfferFor`, then gated
+ * by `computeTurn.longTasks` in `turnPolicy`): a person's turn in a thread without a task is offered the three tools; in a
+ * thread with the bot's active task, the requester's turn while it waits (or the task's own current turn) controls it
+ * (`turn.task`, continue and finish, the ledger's `task_id`), every other turn there only sees it. Real PostgreSQL, Redis
+ * and Garage; the in-memory sandboxd.
+ *
+ * People: Sam asks (the requester), Alex is another member of #eng; Víctor is the admin. Scout is the stack's team bot.
+ */
+
+let storage: TestStorage;
+let s: SandboxStack;
+let engId: string;
+
+const START = BUILTIN_TOOLS.taskStart;
+const CONTINUE = BUILTIN_TOOLS.taskContinue;
+const FINISH = BUILTIN_TOOLS.taskFinish;
+
+beforeAll(async () => {
+  storage = await startTestStorage();
+  try {
+    s = await startSandboxStack({ env: { ...storage.env } });
+  } catch (err) {
+    await storage.stop();
+    throw err;
+  }
+  await s.setPolicy({ enabled: true });
+  await s.su.query(
+    "update app.sandbox_policies set max_sandboxes = 50, max_browsers = 50 where organization_id = $1",
+    [s.orgA],
+  );
+  engId = (await ok(s.victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" }) as Promise<Res>))
+    .id as string;
+  for (const member of [
+    { kind: "agent", id: s.scoutId },
+    { kind: "user", id: s.samId },
+    { kind: "user", id: s.alexId },
+  ]) {
+    await ok(s.victor.request("POST", `/api/v1/channels/${engId}/members`, member) as Promise<Res>);
+  }
+}, 240_000);
+
+afterAll(async () => {
+  try {
+    await s?.stop();
+  } finally {
+    await storage?.stop();
+  }
+});
+
+// ---------------------------------------------------------------- helpers
+
+/** `who` posts in `conv` (a thread reply when `threadRootId` is set); returns the message id. */
+async function post(
+  who: TestClient,
+  conv: string,
+  body: string,
+  opts: { threadRootId?: string; attachmentIds?: string[] } = {},
+): Promise<string> {
+  const msg = await ok(
+    who.request("POST", `/api/v1/conversations/${conv}/messages`, {
+      body,
+      ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
+      ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
+    }) as Promise<Res>,
+  );
+  return msg.id as string;
+}
+
+/** `agentId`'s delivered `agent.mention.v1` payload for one message (exactly one). */
+async function deliveredTo(messageId: string, agentId = s.scoutId): Promise<Json> {
+  const rows = (
+    await s.su.query(
+      "select payload from app.stream_events where type = 'agent.mention.v1' and payload->'message'->>'id' = $1 and payload->'agent'->>'id' = $2",
+      [messageId, agentId],
+    )
+  ).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0].payload as Json;
+}
+
+/**
+ * `who` mentions Scout in #eng (in the thread of `threadRootId` when set, else at the channel's root); the delivered
+ * turn. Today's usage is cleared first: this suite delivers more turns than the bot's daily limit.
+ */
+async function mention(
+  who: TestClient,
+  opts: { threadRootId?: string; conv?: string; handle?: string; agentId?: string } = {},
+): Promise<Json> {
+  await s.su.query("delete from app.agent_usage_daily");
+  const handle = opts.handle ?? "scout";
+  const id = await post(who, opts.conv ?? engId, `@${handle} the invoice totals ${randomUUID().slice(0, 6)}`, {
+    ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
+  });
+  return deliveredTo(id, opts.agentId ?? s.scoutId);
+}
+
+const ledger = async (eventId: string) =>
+  (
+    await s.su.query("select task_id, tainted, tools from app.agent_turns where event_id = $1", [eventId])
+  ).rows[0] as { task_id: string | null; tainted: boolean; tools: string[] };
+
+interface SeedTask {
+  conversationId?: string;
+  threadRootId: string | null;
+  requesterId?: string;
+  agentId?: string;
+  status?: "running" | "waiting";
+  currentEventId?: string;
+  waitKind?: "turn" | "timer" | "process" | "session" | "nudge" | null;
+  wakeAt?: string | null;
+  turnsUsed?: number;
+  maxTurns?: number;
+  organizationId?: string;
+}
+
+/** An active task row, inserted as the start route will (superuser, so the test controls every column). */
+async function seedTask(p: SeedTask): Promise<{ id: string; currentEventId: string; startedAt: string }> {
+  const id = randomUUID();
+  const started = randomUUID();
+  const current = p.currentEventId ?? started;
+  const status = p.status ?? "waiting";
+  const waitKind = p.waitKind === undefined ? (status === "waiting" ? "timer" : null) : p.waitKind;
+  const wakeAt =
+    p.wakeAt === undefined ? (waitKind ? new Date(Date.now() + 120_000).toISOString() : null) : p.wakeAt;
+  const r = await s.su.query(
+    `insert into app.bot_tasks (id, organization_id, agent_id, conversation_id, thread_root_id, requester_user_id,
+       started_event_id, current_event_id, status, goal, progress, next_step, turns_used, max_turns, deadline_at,
+       wait_kind, wait_ref, wake_at, wait_seq)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Reconcile the invoice totals', 'Read the March ledger',
+       'Compare it with the bank export', $10, $11, now() + interval '8 hours', $12, null, $13, 1)
+     returning started_at`,
+    [
+      id,
+      p.organizationId ?? s.orgA,
+      p.agentId ?? s.scoutId,
+      p.conversationId ?? engId,
+      p.threadRootId,
+      p.requesterId ?? s.samId,
+      started,
+      current,
+      status,
+      p.turnsUsed ?? 3,
+      p.maxTurns ?? 40,
+      waitKind,
+      wakeAt,
+    ],
+  );
+  return { id, currentEventId: current, startedAt: new Date(r.rows[0].started_at as string).toISOString() };
+}
+
+/** Ends a seeded task (done), so the thread is free again. */
+const endTask = (id: string) =>
+  s.su.query(
+    "update app.bot_tasks set status = 'done', outcome = 'done', finished_at = now(), wait_kind = null, wake_at = null where id = $1",
+    [id],
+  );
+
+/** No task tool, flag or fact on the turn. */
+function expectNoTask(ev: Json) {
+  for (const name of TASK_TOOL_NAMES) {
+    expect(ev.turn.tools).not.toContain(name);
+    expect(ev.turn.toolFlags).not.toHaveProperty(name);
+  }
+  expect(ev.turn).not.toHaveProperty("task");
+}
+
+/** The start offer: the three tools with their flags, no task fact, no ledger link. */
+async function expectStart(ev: Json) {
+  for (const name of TASK_TOOL_NAMES) {
+    expect(ev.turn.tools).toContain(name);
+    expect(ev.turn.toolFlags[name]).toEqual(TASK_TOOL_FLAGS[name]);
+  }
+  expect(ev.turn).not.toHaveProperty("task");
+  const row = await ledger(ev.eventId as string);
+  expect(row.task_id).toBeNull();
+  expect(row.tools).toEqual(expect.arrayContaining([...TASK_TOOL_NAMES]));
+}
+
+/** Control: continue and finish (never start), `turn.task` of `taskId`, the ledger linked. */
+async function expectControl(ev: Json, taskId: string): Promise<TurnTask> {
+  expect(ev.turn.tools).toEqual(expect.arrayContaining([CONTINUE, FINISH]));
+  expect(ev.turn.tools).not.toContain(START);
+  expect(ev.turn.toolFlags[CONTINUE]).toEqual(TASK_TOOL_FLAGS[CONTINUE]);
+  expect(ev.turn.toolFlags[FINISH]).toEqual(TASK_TOOL_FLAGS[FINISH]);
+  const task = TurnTask.parse(ev.turn.task);
+  expect(task.taskId).toBe(taskId);
+  expect((await ledger(ev.eventId as string)).task_id).toBe(taskId);
+  return task;
+}
+
+/** View: `turn.task` only, no task tool, no ledger link. */
+async function expectView(ev: Json, taskId: string): Promise<TurnTask> {
+  for (const name of TASK_TOOL_NAMES) {
+    expect(ev.turn.tools).not.toContain(name);
+    expect(ev.turn.toolFlags).not.toHaveProperty(name);
+  }
+  const task = TurnTask.parse(ev.turn.task);
+  expect(task.taskId).toBe(taskId);
+  expect((await ledger(ev.eventId as string)).task_id).toBeNull();
+  return task;
+}
+
+const putPolicy = (body: Json) => ok(s.victor.request("PUT", "/api/v1/bot-policy", body) as Promise<Res>);
+
+// ---------------------------------------------------------------- Task 1: the offer (tracer)
+
+describe("tracer: a person's mention carries the three task tools; a waiting task's requester gets control (PD-07)", () => {
+  it("Sam's mention at the root of #eng: the three tools with TASK_TOOL_FLAGS, no turn.task, task_id null", async () => {
+    await expectStart(await mention(s.sam));
+  });
+
+  it("a waiting task of Scout for Sam in that thread: Sam's next mention there controls it, with the row's facts", async () => {
+    const root = await post(s.sam, engId, "Reconcile the invoices please");
+    const earlier = await mention(s.sam, { threadRootId: root });
+    const wakeAt = new Date(Date.now() + 300_000).toISOString();
+    const t = await seedTask({
+      threadRootId: root,
+      currentEventId: earlier.eventId as string,
+      waitKind: "timer",
+      wakeAt,
+      turnsUsed: 3,
+      maxTurns: 40,
+    });
+    try {
+      const ev = await mention(s.sam, { threadRootId: root });
+      const task = await expectControl(ev, t.id);
+      expect(task).toMatchObject({
+        status: "waiting",
+        goal: "Reconcile the invoice totals",
+        progress: "Read the March ledger",
+        nextStep: "Compare it with the bank export",
+        turnsUsed: 3,
+        maxTurns: 40,
+        startedAt: t.startedAt,
+        requesterId: s.samId,
+        waiting: { kind: "timer", ref: null, until: wakeAt },
+        finishedProcesses: [],
+      });
+      expect(Date.parse(task.deadlineAt)).toBeGreaterThan(Date.now());
+
+      // Alex (another member) in that thread: sees the task, controls nothing.
+      await expectView(await mention(s.alex, { threadRootId: root }), t.id);
+      // A mention elsewhere in #eng (its own thread): the start offer, the task is not there.
+      await expectStart(await mention(s.sam));
+    } finally {
+      await endTask(t.id);
+    }
+    // The task ended: the thread offers a start again.
+    await expectStart(await mention(s.sam, { threadRootId: root }));
+  });
+
+  it("the same task running on another turn: Sam's own message there only sees it (one execution authority, E16)", async () => {
+    const root = await post(s.sam, engId, "Check the March export");
+    const t = await seedTask({ threadRootId: root, status: "running", currentEventId: randomUUID() });
+    try {
+      const task = await expectView(await mention(s.sam, { threadRootId: root }), t.id);
+      expect(task.status).toBe("running");
+      expect(task.waiting).toBeNull();
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
+  it("in Sam's DM with Scout the task has no thread (thread_root_id null) and is found for a DM message", async () => {
+    const t = await seedTask({ conversationId: s.samDm, threadRootId: null });
+    try {
+      await expectControl(await s.turnOf(s.sam, s.samDm), t.id);
+    } finally {
+      await endTask(t.id);
+    }
+    await expectStart(await s.turnOf(s.sam, s.samDm));
+  });
+
+  it("with the organization's long tasks off: no task tool and no turn.task on any of these turns", async () => {
+    const root = await post(s.sam, engId, "Reconcile the totals");
+    const t = await seedTask({ threadRootId: root });
+    await putPolicy({ capabilities: { longTasks: { orgWide: false, personal: false } } });
+    try {
+      expectNoTask(await mention(s.sam));
+      const control = await mention(s.sam, { threadRootId: root });
+      expectNoTask(control);
+      expect((await ledger(control.eventId as string)).task_id).toBeNull();
+      expectNoTask(await mention(s.alex, { threadRootId: root }));
+      expectNoTask(await s.turnOf(s.sam, s.samDm));
+    } finally {
+      await putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } });
+      await endTask(t.id);
+    }
+    await expectStart(await mention(s.sam));
+  });
+
+  it("with the bot's own Long tasks toggle off: none either", async () => {
+    await ok(s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, { longTasks: false }) as Promise<Res>);
+    try {
+      expectNoTask(await mention(s.sam));
+    } finally {
+      await ok(s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, { longTasks: true }) as Promise<Res>);
+    }
+    await expectStart(await mention(s.sam));
+  });
+});
