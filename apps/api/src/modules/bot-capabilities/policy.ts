@@ -40,6 +40,13 @@ function fromRow(row: PolicyRow | undefined): BotPolicy {
     maxHours: row.taskMaxHours,
     maxRunning: row.maxRunningTasks,
   });
+  // Quick 261113-id6: how long conversations are summarized (the database check holds the token bounds).
+  const conversations = BotPolicy.shape.conversations.safeParse({
+    strictSummaries: row.conversationStrictSummaries,
+    keepIdentifiers: row.conversationKeepIdentifiers,
+    keepRecentTokens: row.conversationKeepRecentTokens,
+    freshSessionOnFailure: row.conversationFreshSessionOnFailure,
+  });
   return {
     capabilities,
     searchProvider: provider.success ? provider.data : DEFAULT_BOT_POLICY.searchProvider,
@@ -47,6 +54,7 @@ function fromRow(row: PolicyRow | undefined): BotPolicy {
     personalDailyLimitMax: row.personalDailyLimitMax,
     personalAllowedModels: row.personalAllowedModels,
     tasks: tasks.success ? tasks.data : { ...DEFAULT_BOT_POLICY.tasks },
+    conversations: conversations.success ? conversations.data : { ...DEFAULT_BOT_POLICY.conversations },
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -118,6 +126,9 @@ function changedKeys(before: BotPolicy, after: BotPolicy): string[] {
   for (const key of ["maxTurns", "maxHours", "maxRunning"] as const) {
     if (before.tasks[key] !== after.tasks[key]) out.push(`tasks.${key}`);
   }
+  for (const key of ["strictSummaries", "keepIdentifiers", "keepRecentTokens", "freshSessionOnFailure"] as const) {
+    if (before.conversations[key] !== after.conversations[key]) out.push(`conversations.${key}`);
+  }
   return out;
 }
 
@@ -142,6 +153,8 @@ export async function savePolicy(
       : before.personalAllowedModels,
     // Merged per limit: a patch naming one limit leaves the others as they were.
     tasks: { ...before.tasks, ...patch.tasks },
+    // Quick 261113-id6: merged per field, like the task limits.
+    conversations: { ...before.conversations, ...patch.conversations },
     updatedAt: before.updatedAt,
   };
   if (patch.searchProvider && patch.searchProvider !== before.searchProvider) {
@@ -162,6 +175,10 @@ export async function savePolicy(
     taskMaxTurns: next.tasks.maxTurns,
     taskMaxHours: next.tasks.maxHours,
     maxRunningTasks: next.tasks.maxRunning,
+    conversationStrictSummaries: next.conversations.strictSummaries,
+    conversationKeepIdentifiers: next.conversations.keepIdentifiers,
+    conversationKeepRecentTokens: next.conversations.keepRecentTokens,
+    conversationFreshSessionOnFailure: next.conversations.freshSessionOnFailure,
     updatedBy: actorUserId,
     updatedAt: now,
   };
