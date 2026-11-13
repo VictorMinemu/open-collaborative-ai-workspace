@@ -37,8 +37,11 @@ beforeAll(async () => {
     "update app.sandbox_policies set max_sandboxes = 50, max_browsers = 50 where organization_id = $1",
     [s.orgA],
   );
-  engId = (await ok(s.victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" }) as Promise<Res>))
-    .id as string;
+  engId = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" }) as Promise<Res>,
+    )
+  ).id as string;
   for (const member of [
     { kind: "agent", id: s.scoutId },
     { kind: "user", id: s.samId },
@@ -97,16 +100,20 @@ async function mention(
 ): Promise<Json> {
   await s.su.query("delete from app.agent_usage_daily");
   const handle = opts.handle ?? "scout";
-  const id = await post(who, opts.conv ?? engId, `@${handle} the invoice totals ${randomUUID().slice(0, 6)}`, {
-    ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
-  });
+  const id = await post(
+    who,
+    opts.conv ?? engId,
+    `@${handle} the invoice totals ${randomUUID().slice(0, 6)}`,
+    {
+      ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
+    },
+  );
   return deliveredTo(id, opts.agentId ?? s.scoutId);
 }
 
 const ledger = async (eventId: string) =>
-  (
-    await s.su.query("select task_id, tainted, tools from app.agent_turns where event_id = $1", [eventId])
-  ).rows[0] as { task_id: string | null; tainted: boolean; tools: string[] };
+  (await s.su.query("select task_id, tainted, tools from app.agent_turns where event_id = $1", [eventId]))
+    .rows[0] as { task_id: string | null; tainted: boolean; tools: string[] };
 
 interface SeedTask {
   conversationId?: string;
@@ -299,11 +306,19 @@ describe("tracer: a person's mention carries the three task tools; a waiting tas
   });
 
   it("with the bot's own Long tasks toggle off: none either", async () => {
-    await ok(s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, { longTasks: false }) as Promise<Res>);
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, {
+        longTasks: false,
+      }) as Promise<Res>,
+    );
     try {
       expectNoTask(await mention(s.sam));
     } finally {
-      await ok(s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, { longTasks: true }) as Promise<Res>);
+      await ok(
+        s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, {
+          longTasks: true,
+        }) as Promise<Res>,
+      );
     }
     await expectStart(await mention(s.sam));
   });

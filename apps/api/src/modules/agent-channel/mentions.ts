@@ -42,6 +42,7 @@ import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted, runLogTainted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
+import { taskOfferFor } from "./task-offer";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -328,6 +329,18 @@ export async function buildMentionEvents(
             // 07.17.1.1 (D-07): the file tools' limit on the turn, under this server's ceiling.
             fileCeilingBytes: deps.core.env.OCW_ATTACHMENT_MAX_BYTES,
           });
+    // Phase 07.17.1.1.2 (D-02, PD-07): the bot's long task in this thread decides this turn's task tools and facts;
+    // `turnPolicy` keeps them only while the bot may run long tasks.
+    const task = await taskOfferFor(tx, {
+      agentId: a.id,
+      conversationId: conv.id,
+      conversationKind: conv.kind,
+      threadRootId: root,
+      askerUserId: mention.author.id,
+      trigger: mention.trigger ?? "mention",
+      eventId,
+      mentionTaskId: mention.trigger === "task" ? (mention.task?.taskId ?? null) : null,
+    });
     const decision = await turnPolicy(
       tx,
       deps.core,
@@ -356,6 +369,7 @@ export async function buildMentionEvents(
         workZone,
         // Phase 07.17 (D-02, PD-07): only a run delivery carries the fan-out offer; every other trigger ignores it.
         conversationOpen: mention.trigger === "automation" ? (mention.conversationOpen ?? null) : null,
+        task,
       },
       {
         audience,

@@ -18,11 +18,15 @@ import {
   MAX_WEB_CALLS_PER_TURN,
   modelAcceptsImages,
   SANDBOX_TOOL_NAMES,
+  TASK_TOOL_FLAGS,
+  TASK_TOOL_NAMES,
+  type TaskToolName,
   TURN_TOOLS_MAX,
   type TurnAttachment,
   type TurnContext,
   type TurnMemoryFile,
   type TurnNow,
+  type TurnTask,
   type TurnToolFlags,
   type TurnWithheldResource,
   type TurnWorkZone,
@@ -112,6 +116,26 @@ export type CurrentTurnTools = TurnTools & {
  * team, department or the organization holds a grant (`unbounded`: the readers are not a list). Given only for AI chat
  * deliveries; channels and DMs pass none and keep their Phase 3.1 turn.
  */
+/**
+ * Phase 07.17.1.1.2 (D-02, PD-07): what a turn may do about the bot's long task in its thread, computed by the caller
+ * (agent-channel's `taskOfferFor`; bot-capabilities never imports agent-channel) and gated here by `computeTurn`'s
+ * `longTasks`. `start`: no active task, the three tools. `control`: the task's own current turn, or its requester's turn
+ * while it waits: continue and finish, `turn.task` and the ledger's `task_id`. `view`: any other turn in that thread:
+ * `turn.task` only.
+ */
+export interface TurnTaskOffer {
+  offer: "start" | "control" | "view";
+  task: TurnTask | null;
+  taskId: string | null;
+}
+
+/** The task tools each offer carries (A-04: the start turn may continue in the same turn). */
+const TASK_OFFER_TOOLS: Readonly<Record<TurnTaskOffer["offer"], readonly TaskToolName[]>> = {
+  start: TASK_TOOL_NAMES,
+  control: [BUILTIN_TOOLS.taskContinue, BUILTIN_TOOLS.taskFinish],
+  view: [],
+};
+
 export interface TurnAudience {
   userIds: readonly string[];
   unbounded: boolean;
@@ -1050,6 +1074,12 @@ export async function turnPolicy(
      * exactly what it was before the phase (E9).
      */
     conversationOpen?: { automationId: string; runId: string } | null;
+    /**
+     * Phase 07.17.1.1.2 (D-02, PD-07): the turn's task offer, computed by the caller (`taskOfferFor`). Used only while
+     * `computeTurn` says the bot may run long tasks (`longTasks`); absent, null or long tasks off = the turn is exactly
+     * what it was before the phase (P5).
+     */
+    task?: TurnTaskOffer | null;
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -1185,6 +1215,26 @@ export async function turnPolicy(
     computed.toolFlags[BUILTIN_TOOLS.conversationOpen] = CONVERSATION_OPEN_FLAGS;
   }
 
+  // Phase 07.17.1.1.2 (D-02, D-04, PD-07; P3): the task tools come last, after everything else was decided for the asker,
+  // so a task never widens a turn. They are platform tools: on a full turn the lowest-priority tools (the last
+  // non-platform ones, the conversation-open rule) give their places; all of the offer's tools or none.
+  const task = computed.longTasks ? (p.task ?? null) : null;
+  if (task) {
+    const missing = TASK_OFFER_TOOLS[task.offer].filter((name) => !computed.toolFlags[name]);
+    const evictable = computed.tools.filter((name) => !isPlatformTool(name)).length;
+    if (missing.length > 0 && computed.tools.length - evictable + missing.length <= MAX_TURN_TOOLS) {
+      while (computed.tools.length + missing.length > MAX_TURN_TOOLS) {
+        const evict = computed.tools.findLastIndex((name) => !isPlatformTool(name));
+        const [name] = computed.tools.splice(evict, 1);
+        if (name) delete computed.toolFlags[name];
+      }
+      for (const name of missing) {
+        computed.tools.push(name);
+        computed.toolFlags[name] = TASK_TOOL_FLAGS[name];
+      }
+    }
+  }
+
   const turn: TurnContext = {
     tools: computed.tools,
     toolFlags: computed.toolFlags,
@@ -1218,6 +1268,8 @@ export async function turnPolicy(
         }
       : {}),
     ...(workZone ? { workZone } : {}),
+    // The task's facts on every turn of the bot in its thread (control and view); its notes travel here only (P4).
+    ...(task?.task ? { task: task.task } : {}),
   };
   // 07.8-28 (WINDOWS #292, ADR-0029): a member's session loaded earlier by this bot in this conversation keeps its
   // member data for every later turn here (the bot's history may hold what it read signed in).
@@ -1234,6 +1286,8 @@ export async function turnPolicy(
     toolFlags: turn.toolFlags,
     tainted: p.taintedAtStart === true,
     ...(sticky ? { memberData: true } : {}),
+    // Only the task's own turns are linked to it (PD-07): the routes accept a continue or finish from those alone.
+    ...(task?.offer === "control" && task.taskId ? { taskId: task.taskId } : {}),
     // Phase 07.7 (D-01): the chain context, plain ledger ids (the consult route and the turn-done signal read them).
     ...(p.chain
       ? {
