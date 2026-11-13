@@ -14,8 +14,9 @@ import type { TurnTaskOffer } from "../bot-capabilities";
  * - An AI chat: nothing (D-10).
  * - The bot's active task in this thread (a direct conversation is one thread): `control` when the turn's event is the
  *   task's `current_event_id` (a continuation, or a Work Zone wake that consumed the task's wait) or when the asker is
- *   the requester and the task waits; `view` for every other turn there (another member, or the requester's own message
- *   while another turn of the task runs: one execution authority).
+ *   the requester, the turn is their own message (`mention`, `reply_mode`) and the task waits; `view` for every other
+ *   turn there (another member, a consult hop or an automation turn, or the requester's own message while another turn
+ *   of the task runs: one execution authority).
  * - No active task: `start` on a person's turn (`mention`, `reply_mode`) and on the bot's Work Zone wakes and opened
  *   items (`work_session`, `automation_item`); never on automation run turns or consult hops (A4).
  */
@@ -35,6 +36,9 @@ const START_TRIGGERS: ReadonlySet<Trigger> = new Set<Trigger>([
   "work_session",
   "automation_item",
 ]);
+
+/** A person's own message (code review WR-04): the only other turn that may take control of their waiting task. */
+const PERSON_TRIGGERS: ReadonlySet<Trigger> = new Set<Trigger>(["mention", "reply_mode"]);
 
 /** The thread a task lives in: none in a direct conversation (`dm`, `group`), else the thread's root message. */
 export function taskThreadKey(conversationKind: string, threadRootId: string | null): string | null {
@@ -167,10 +171,12 @@ export async function taskOfferFor(
       row.currentEventId === p.eventId && (p.mentionTaskId == null || p.mentionTaskId === row.id);
     // 07.17.1.1.2-12 (PD-14): a Work Zone wake controls the task only as its own turn (the wake consumed the wait, so
     // its event is the current turn); otherwise it only sees the task, so an uncounted wake never drives it. Code review
-    // CR-01: a continuation (`trigger: "task"`) only ever controls the task it continues, never a newer one.
+    // CR-01: a continuation (`trigger: "task"`) only ever controls the task it continues, never a newer one. Code review
+    // WR-04: besides its own turns, only the requester's own message takes control while it waits (PD-07); a consult
+    // hop (another bot's text), an automation run or an item only sees it.
     const control =
       current ||
-      (!wake && p.trigger !== "task" && row.requesterUserId === p.askerUserId && row.status === "waiting");
+      (PERSON_TRIGGERS.has(p.trigger) && row.requesterUserId === p.askerUserId && row.status === "waiting");
     const { task, reportedProcessIds } = await turnTaskOf(tx, row, { listProcesses: control });
     return { offer: control ? "control" : "view", task, taskId: row.id, reportedProcessIds };
   }

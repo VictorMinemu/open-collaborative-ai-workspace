@@ -594,6 +594,34 @@ describe("the task trigger: browser off, the thread's files listed, the daily li
     }
   });
 
+  it("code review WR-04: only a person's own turn takes control of their waiting task; consult hops, automation runs and items only see it", async () => {
+    const root = await post(s.sam, engId, "Check the May export");
+    const t = await seedTask({ threadRootId: root });
+    try {
+      const offerOn = (trigger: NonNullable<AgentMention["trigger"]>) =>
+        s.stack.built.core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+          taskOfferFor(tx, {
+            agentId: s.scoutId,
+            conversationId: engId,
+            conversationKind: "channel",
+            threadRootId: root,
+            // A consult hop's author is the chain's human, an automation's its creator: Sam here.
+            askerUserId: s.samId,
+            trigger,
+            eventId: randomUUID(),
+          }),
+        );
+      for (const trigger of ["consult", "automation", "automation_item"] as const) {
+        expect(await offerOn(trigger), trigger).toMatchObject({ offer: "view", taskId: t.id });
+      }
+      for (const trigger of ["mention", "reply_mode"] as const) {
+        expect(await offerOn(trigger), trigger).toMatchObject({ offer: "control", taskId: t.id });
+      }
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
   it("an AI chat never carries a task tool or turn.task, even with an active task row there (D-10)", async () => {
     const chatId = randomUUID();
     await s.su.query(
