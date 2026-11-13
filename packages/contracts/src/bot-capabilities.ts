@@ -111,6 +111,40 @@ export const BotTaskPolicyLimits = z.object({
 });
 export type BotTaskPolicyLimits = z.infer<typeof BotTaskPolicyLimits>;
 
+/** Quick 261113-id6: the bounds of `BotPolicy.conversations.keepRecentTokens` (OpenClaw's own default is 20 000). */
+export const BOT_CONVERSATION_LIMITS = {
+  keepRecentTokensMin: 2_000,
+  keepRecentTokensMax: 100_000,
+  keepRecentTokensDefault: 20_000,
+} as const;
+
+/**
+ * Quick 261113-id6: how the cell summarizes a bot conversation that outgrew the model's context (OpenClaw's compaction,
+ * `agents.defaults.compaction`). `strictSummaries` is OpenClaw's summary quality guard (on, a summary that drops required
+ * facts is refused and a long conversation can get stuck); `keepIdentifiers` asks summaries to keep exact identifiers
+ * (`identifierPolicy` strict / off); `keepRecentTokens` is the recent history kept verbatim; `freshSessionOnFailure` lets
+ * the plugin start the bot over in a fresh session, once per turn, when a summary fails.
+ */
+export const BotConversationPolicy = z.object({
+  strictSummaries: z.boolean(),
+  keepIdentifiers: z.boolean(),
+  keepRecentTokens: z
+    .number()
+    .int()
+    .min(BOT_CONVERSATION_LIMITS.keepRecentTokensMin)
+    .max(BOT_CONVERSATION_LIMITS.keepRecentTokensMax),
+  freshSessionOnFailure: z.boolean(),
+});
+export type BotConversationPolicy = z.infer<typeof BotConversationPolicy>;
+
+/** The conversation defaults: lenient summaries, so a long conversation never gets stuck on its summary. */
+export const DEFAULT_BOT_CONVERSATIONS: BotConversationPolicy = {
+  strictSummaries: false,
+  keepIdentifiers: false,
+  keepRecentTokens: BOT_CONVERSATION_LIMITS.keepRecentTokensDefault,
+  freshSessionOnFailure: true,
+};
+
 export const BotPolicy = z.object({
   capabilities: z.object({
     internet: CapabilityPolicyEntry,
@@ -126,6 +160,8 @@ export const BotPolicy = z.object({
   personalAllowedModels: z.array(z.string().max(250)).max(100),
   /** Phase 07.17.1.1.2 (D-04): the long-task limits. */
   tasks: BotTaskPolicyLimits,
+  /** Quick 261113-id6: how long bot conversations are summarized. */
+  conversations: BotConversationPolicy,
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -154,11 +190,12 @@ export const DEFAULT_BOT_POLICY: Omit<BotPolicy, "updatedAt"> = {
     maxHours: BOT_TASK_LIMITS.maxHoursDefault,
     maxRunning: BOT_TASK_LIMITS.maxRunningDefault,
   },
+  conversations: { ...DEFAULT_BOT_CONVERSATIONS },
 };
 
 /**
- * `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability and `tasks` per limit (a patch
- * naming one limit leaves the others unchanged).
+ * `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability, `tasks` per limit and
+ * `conversations` per field (a patch naming one leaves the others unchanged).
  */
 export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
   .extend({
@@ -172,6 +209,7 @@ export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
       })
       .partial(),
     tasks: BotTaskPolicyLimits.partial(),
+    conversations: BotConversationPolicy.partial(),
   })
   .partial();
 export type UpdateBotPolicyRequest = z.infer<typeof UpdateBotPolicyRequest>;

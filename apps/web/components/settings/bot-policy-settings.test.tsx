@@ -4,7 +4,14 @@ import { type BotPolicyView, DEFAULT_BOT_POLICY } from "@ocw/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { PolicyForm, TASK_FIELDS, taskLimitError, toDraft, toPolicyBody } from "./bot-policy-settings";
+import {
+  CONVERSATION_SWITCHES,
+  PolicyForm,
+  TASK_FIELDS,
+  taskLimitError,
+  toDraft,
+  toPolicyBody,
+} from "./bot-policy-settings";
 
 /**
  * Settings › Bot policy › Long tasks (07.17.1.1.2-04, D-04, PD-20): the "Long tasks" capability row with its personal
@@ -21,11 +28,15 @@ function policy(over: Partial<BotPolicyView> = {}): BotPolicyView {
   };
 }
 
-function render(view: BotPolicyView, initial?: Partial<BotPolicyView["tasks"]>): string {
+function render(
+  view: BotPolicyView,
+  initial?: Partial<BotPolicyView["tasks"]>,
+  initialConversations?: Partial<BotPolicyView["conversations"]>,
+): string {
   const qc = new QueryClient();
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
-      <PolicyForm policy={view} initialTasks={initial} />
+      <PolicyForm policy={view} initialTasks={initial} initialConversations={initialConversations} />
     </QueryClientProvider>,
   );
 }
@@ -166,5 +177,83 @@ describe("the Long tasks limits", () => {
     // The form's Save sends exactly that body.
     const source = readFileSync(join(__dirname, "bot-policy-settings.tsx"), "utf8");
     expect(source).toContain("save.mutateAsync(toPolicyBody(draft, saved, restrictModels))");
+  });
+});
+
+describe("the Conversations section (quick 261113-id6)", () => {
+  it("sits after Long tasks and before web search", () => {
+    const html = render(policy());
+    const section = html.indexOf(">Conversations</h2>");
+    expect(section).toBeGreaterThan(html.indexOf(">Long tasks</h2>"));
+    expect(section).toBeLessThan(html.indexOf(">Web search</h2>"));
+  });
+
+  it("shows three labelled switches with their hints and the defaults (strict and identifiers off, fresh session on)", () => {
+    const html = render(policy());
+    const switches = [
+      ["policy-conversations-strictSummaries", "Strict summaries", "false"],
+      ["policy-conversations-keepIdentifiers", "Keep exact identifiers in summaries", "false"],
+      ["policy-conversations-freshSessionOnFailure", "Start a fresh session when a summary fails", "true"],
+    ] as const;
+    for (const [id, label, checked] of switches) {
+      const tag = tagsOf(html, id)[0] ?? "";
+      expect(tag, id).toContain(`aria-label="${label}"`);
+      expect(tag, id).toContain(`aria-checked="${checked}"`);
+      expect(text(html)).toContain(label);
+    }
+    expect(CONVERSATION_SWITCHES.map((s) => `policy-conversations-${s.key}`)).toEqual(
+      switches.map((s) => s[0]),
+    );
+    expect(text(html)).toContain(
+      "Refuses a summary that drops required facts. A long conversation can then get stuck.",
+    );
+    expect(text(html)).toContain("The bot keeps the recent messages of the chat.");
+  });
+
+  it("an admin's saved choice shows checked", () => {
+    const html = render(
+      policy({
+        conversations: {
+          strictSummaries: true,
+          keepIdentifiers: true,
+          keepRecentTokens: 8_000,
+          freshSessionOnFailure: false,
+        },
+      }),
+    );
+    expect(tagsOf(html, "policy-conversations-strictSummaries")[0]).toContain('aria-checked="true"');
+    expect(tagsOf(html, "policy-conversations-keepIdentifiers")[0]).toContain('aria-checked="true"');
+    expect(tagsOf(html, "policy-conversations-freshSessionOnFailure")[0]).toContain('aria-checked="false"');
+    expect(tagsOf(html, "policy-conversations-keep-recent-tokens")[0]).toContain('value="8000"');
+  });
+
+  it("the recent history field is a labelled number from 2000 to 100000, 44 px tall on phones", () => {
+    const html = render(policy());
+    const input = tagsOf(html, "policy-conversations-keep-recent-tokens")[0] ?? "";
+    expect(input).toContain('value="20000"');
+    expect(input).toContain('min="2000"');
+    expect(input).toContain('max="100000"');
+    expect(input).toContain("h-11");
+    expect(labelFor(html, input)).toBe("Recent history kept");
+    expect(text(html)).toContain("Tokens of the latest messages kept word for word");
+  });
+
+  it("an out-of-range history shows the error inline and turns Save off", () => {
+    const html = render(policy(), undefined, { keepRecentTokens: 1_000 });
+    const input = tagsOf(html, "policy-conversations-keep-recent-tokens")[0] ?? "";
+    expect(input).toContain('aria-invalid="true"');
+    expect(text(html)).toContain("Enter a whole number from 2000 to 100000.");
+    expect(tagsOf(html, "bot-policy-save")[0]).toMatch(/\sdisabled=""/);
+  });
+
+  it("Save sends only the changed fields: { conversations: { strictSummaries: true } }", () => {
+    const saved = toDraft(policy());
+    const draft = { ...saved, conversations: { ...saved.conversations, strictSummaries: true } };
+    expect(toPolicyBody(draft, saved, false)).toEqual({ conversations: { strictSummaries: true } });
+    const more = { ...draft, conversations: { ...draft.conversations, keepRecentTokens: 8_000 } };
+    expect(toPolicyBody(more, saved, false)).toEqual({
+      conversations: { strictSummaries: true, keepRecentTokens: 8_000 },
+    });
+    expect(toPolicyBody(saved, saved, false)).toEqual({});
   });
 });

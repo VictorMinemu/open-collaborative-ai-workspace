@@ -87,6 +87,17 @@ export type RealPortOptions = {
   guard?: ToolGuard;
   /** OpenClaw state dir (default: the runtime's, then OPENCLAW_STATE_DIR); removed bots' state is purged there. */
   stateDir?: string;
+  /** Test seam: the `openclaw/plugin-sdk/session-store-runtime` module (quick 261113-id6). */
+  sessionStore?: () => Promise<SessionStoreModule>;
+};
+
+/** The part of OpenClaw's public session store runtime the port uses (see openclaw-sdk.d.ts). */
+export type SessionStoreModule = {
+  deleteSessionEntry(params: {
+    sessionKey: string;
+    agentId?: string;
+    archiveTranscript?: boolean;
+  }): Promise<boolean>;
 };
 
 export function threadSessionKey(base: string, threadRootId: string): string {
@@ -125,10 +136,32 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
     return next;
   }
 
+  // Literal specifier: OpenClaw's plugin loader only aliases `openclaw/plugin-sdk/*` it can see statically.
+  const sessionStore =
+    opts.sessionStore ??
+    (async () => (await import("openclaw/plugin-sdk/session-store-runtime")) as SessionStoreModule);
+
+  /** The OpenClaw session of a turn (see `sessionKeyFor`). */
+  function sessionKeyOf(m: MappedMention): string {
+    const baseSessionKey = runtime.channel.routing.buildAgentSessionKey({
+      agentId: m.openClawAgentId,
+      channel: CHANNEL_ID,
+      accountId,
+      peer: { kind: "channel" as const, id: m.conversationId },
+      dmScope: "main",
+    });
+    return sessionKeyFor(baseSessionKey, m);
+  }
+
   const port: OpenClawPort = {
     async reconcile(cell: CellSnapshot, reconcileOpts = {}) {
       const current = runtime.config.current() as MutableConfig;
       const searchProvider = current.tools?.web?.search?.provider;
+      const defaults = current.agents?.defaults;
+      const compaction =
+        defaults && typeof defaults === "object"
+          ? (defaults as { compaction?: unknown }).compaction
+          : undefined;
       const loadedPlugins = Array.isArray(current.plugins?.allow) ? (current.plugins.allow as unknown[]) : [];
       const plan = planReconcile(
         {
@@ -136,6 +169,9 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           providers: current.models?.providers,
           mcpServers: current.mcp?.servers,
           ...(typeof searchProvider === "string" ? { webSearchProvider: searchProvider } : {}),
+          // Quick 261113-id6: the port manages compaction (none rendered reads as null and is written).
+          compaction:
+            compaction && typeof compaction === "object" ? (compaction as Record<string, unknown>) : null,
         },
         cell,
         {
@@ -181,23 +217,44 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         for (const key of Object.keys(process.env)) if (key.startsWith(prefix)) delete process.env[key];
       }
       opts.log?.info?.(
-        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}, mcp servers upsert=${Object.keys(plan.upsertMcpServers).length} remove=${plan.removeMcpServers.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}`,
+        `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}, mcp servers upsert=${Object.keys(plan.upsertMcpServers).length} remove=${plan.removeMcpServers.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}${plan.compaction ? ", compaction" : ""}`,
       );
       return { changed: true, results: plan.results };
     },
 
     async dispatchMention(m: MappedMention, deliver, signal) {
-      const baseSessionKey = runtime.channel.routing.buildAgentSessionKey({
-        agentId: m.openClawAgentId,
-        channel: CHANNEL_ID,
-        accountId,
-        peer: { kind: "channel" as const, id: m.conversationId },
-        dmScope: "main",
-      });
       // One OpenClaw session per (bot, thread) — per (bot, conversation) for a DM: OpenClaw serialises runs
       // per session lane, which gives "one generation per thread / DM" for free.
-      const sessionKey = sessionKeyFor(baseSessionKey, m);
+      const sessionKey = sessionKeyOf(m);
       return inLane(sessionKey, () => dispatchOne(m, sessionKey, deliver, signal));
+    },
+
+    /**
+     * Quick 261113-id6: a fresh OpenClaw session for the turn's session after a failed summary. Deletes that session's
+     * entry (its transcript archived, never removed) in the session's lane, so no run of it overlaps; the next dispatch
+     * starts a new session with the turn's chat window. Answers false (logged) when nothing was deleted; never throws.
+     */
+    async resetSession(m: MappedMention) {
+      const sessionKey = sessionKeyOf(m);
+      return inLane(sessionKey, async () => {
+        try {
+          const deleted = await (await sessionStore()).deleteSessionEntry({
+            sessionKey,
+            agentId: m.openClawAgentId,
+            archiveTranscript: true,
+          });
+          // Ids only (no content).
+          if (deleted)
+            opts.log?.info?.(`turn ${m.eventId}: fresh session for ${sessionKey} (transcript archived)`);
+          else opts.log?.warn?.(`turn ${m.eventId}: no session entry to reset for ${sessionKey}`);
+          return deleted;
+        } catch (error) {
+          opts.log?.warn?.(
+            `turn ${m.eventId}: session ${sessionKey} not reset (${error instanceof Error ? error.message.slice(0, 120) : "error"})`,
+          );
+          return false;
+        }
+      });
     },
   };
 

@@ -7,6 +7,7 @@ import {
   AgentTaskEvent,
   ATTACHMENT_READ_FLAGS,
   ATTACHMENT_READ_LIMITS,
+  BOT_CONVERSATION_LIMITS,
   BotCapabilities,
   BotCapabilityView,
   BotPolicy,
@@ -133,6 +134,68 @@ describe("update requests", () => {
     expect(UpdateBotPolicyRequest.parse({}).searchProvider).toBeUndefined();
     expect(UpdateBotPolicyRequest.safeParse({ maxPersonalBotsPerUser: 21 }).success).toBe(false);
     expect(UpdateBotPolicyRequest.safeParse({ searchProvider: "brave" }).success).toBe(false);
+  });
+});
+
+describe("bot conversations policy (quick 261113-id6): how long conversations are summarized", () => {
+  it("defaults: lenient summaries without exact identifiers, 20 000 recent tokens kept, a fresh session on failure", () => {
+    expect(DEFAULT_BOT_POLICY.conversations).toEqual({
+      strictSummaries: false,
+      keepIdentifiers: false,
+      keepRecentTokens: 20_000,
+      freshSessionOnFailure: true,
+    });
+    expect(BOT_CONVERSATION_LIMITS).toMatchObject({
+      keepRecentTokensMin: 2_000,
+      keepRecentTokensMax: 100_000,
+      keepRecentTokensDefault: 20_000,
+    });
+    const { conversations: _c, ...without } = DEFAULT_BOT_POLICY;
+    expect(BotPolicy.safeParse({ ...without, updatedAt: null }).success).toBe(false);
+    expect(BotPolicy.safeParse({ ...DEFAULT_BOT_POLICY, updatedAt: null }).success).toBe(true);
+  });
+
+  it("policy updates take a partial conversations object within the bounds", () => {
+    expect(UpdateBotPolicyRequest.parse({ conversations: { strictSummaries: true } }).conversations).toEqual({
+      strictSummaries: true,
+    });
+    expect(
+      UpdateBotPolicyRequest.parse({ conversations: { keepRecentTokens: 2_000 } }).conversations,
+    ).toEqual({ keepRecentTokens: 2_000 });
+    expect(
+      UpdateBotPolicyRequest.parse({ conversations: { keepRecentTokens: 100_000 } }).conversations,
+    ).toEqual({ keepRecentTokens: 100_000 });
+    for (const conversations of [
+      { keepRecentTokens: 1_999 },
+      { keepRecentTokens: 100_001 },
+      { keepRecentTokens: 2_500.5 },
+      { strictSummaries: "yes" },
+      { freshSessionOnFailure: null },
+    ]) {
+      expect(UpdateBotPolicyRequest.safeParse({ conversations }).success, JSON.stringify(conversations)).toBe(
+        false,
+      );
+    }
+  });
+
+  it("the cell snapshot carries the conversations policy; an older snapshot without it reads the defaults", () => {
+    const base = {
+      protocolVersion: 1,
+      cellId: ID,
+      organizationId: ID,
+      topic: `cell:${ID}`,
+      lastSeq: 0,
+      agents: [],
+      providers: [],
+    };
+    expect(CellSnapshot.parse(base).conversations).toEqual(DEFAULT_BOT_POLICY.conversations);
+    const conversations = {
+      strictSummaries: true,
+      keepIdentifiers: true,
+      keepRecentTokens: 8_000,
+      freshSessionOnFailure: false,
+    };
+    expect(CellSnapshot.parse({ ...base, conversations }).conversations).toEqual(conversations);
   });
 });
 

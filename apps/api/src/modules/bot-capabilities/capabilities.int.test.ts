@@ -995,3 +995,113 @@ describe("long tasks policy (07.17.1.1.2 D-04, E11, E22)", () => {
     expect(policyA.tasks.maxTurns).toBe(12);
   });
 });
+
+// ---------------------------------------------------------------- quick 261113-id6: how long conversations are summarized
+
+describe("conversations policy (quick 261113-id6)", () => {
+  const DEFAULTS = {
+    strictSummaries: false,
+    keepIdentifiers: false,
+    keepRecentTokens: 20_000,
+    freshSessionOnFailure: true,
+  };
+  const putPolicy = (body: Json) => admin.request("PUT", "/api/v1/bot-policy", body);
+
+  it("an organization that never chose reads lenient summaries, 20 000 tokens and a fresh session on failure", async () => {
+    const p = await ok(admin.request("GET", "/api/v1/bot-policy"));
+    expect(p.conversations).toEqual(DEFAULTS);
+    expect((await cellSnapshot()).conversations).toEqual(DEFAULTS);
+  });
+
+  it("a PUT of one field saves only it, audited and sent to the cell; out-of-range is 400; members 403", async () => {
+    const before = (await audits("bot_policy.updated")).length;
+    const changesBefore = (await configChanges("policy.updated")).length;
+    const p = await ok(putPolicy({ conversations: { keepRecentTokens: 8_000 } }));
+    expect(p.conversations).toEqual({ ...DEFAULTS, keepRecentTokens: 8_000 });
+    const p2 = await ok(
+      putPolicy({ conversations: { strictSummaries: true, freshSessionOnFailure: false } }),
+    );
+    expect(p2.conversations).toEqual({
+      strictSummaries: true,
+      keepIdentifiers: false,
+      keepRecentTokens: 8_000,
+      freshSessionOnFailure: false,
+    });
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).conversations).toEqual(p2.conversations);
+
+    const rows = await audits("bot_policy.updated");
+    expect(rows).toHaveLength(before + 2);
+    expect(rows.at(-2)!.metadata.changed).toEqual(["conversations.keepRecentTokens"]);
+    expect(rows.at(-1)!.metadata.changed).toEqual([
+      "conversations.strictSummaries",
+      "conversations.freshSessionOnFailure",
+    ]);
+    expect(await configChanges("policy.updated")).toHaveLength(changesBefore + 2);
+    const stored = (
+      await su.query(
+        `select conversation_strict_summaries, conversation_keep_identifiers, conversation_keep_recent_tokens,
+                conversation_fresh_session_on_failure
+           from app.bot_policies where organization_id = $1`,
+        [orgId],
+      )
+    ).rows[0];
+    expect(stored).toEqual({
+      conversation_strict_summaries: true,
+      conversation_keep_identifiers: false,
+      conversation_keep_recent_tokens: 8_000,
+      conversation_fresh_session_on_failure: false,
+    });
+    expect((await cellSnapshot()).conversations).toEqual(p2.conversations);
+
+    for (const conversations of [
+      { keepRecentTokens: 1_999 },
+      { keepRecentTokens: 100_001 },
+      { keepIdentifiers: "yes" },
+    ]) {
+      expect((await putPolicy({ conversations })).status, JSON.stringify(conversations)).toBe(400);
+    }
+    expect(
+      (await sam.request("PUT", "/api/v1/bot-policy", { conversations: { strictSummaries: false } })).status,
+    ).toBe(403);
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).conversations.strictSummaries).toBe(true);
+    // A no-op PUT neither audits nor notifies the cell.
+    await ok(putPolicy({ conversations: { keepRecentTokens: 8_000 } }));
+    expect(await audits("bot_policy.updated")).toHaveLength(before + 2);
+    expect(await configChanges("policy.updated")).toHaveLength(changesBefore + 2);
+
+    // The database holds the same bounds.
+    await expect(
+      su.query(
+        "update app.bot_policies set conversation_keep_recent_tokens = 100 where organization_id = $1",
+        [orgId],
+      ),
+    ).rejects.toThrow(/bot_policies_conversation_keep_recent_tokens_check/);
+  });
+
+  it("another organization reads its own defaults after this one saved (cross-tenant)", async () => {
+    const otherOrg = randomUUID();
+    const otherUser = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Third', $2)", [
+      otherOrg,
+      `third-${otherOrg}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Cy', $2)", [
+      otherUser,
+      `${otherUser}@third.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Cy', 'admin')",
+      [otherOrg, otherUser],
+    );
+    const { db } = stack.built.core;
+    // `loadPolicy` reads the first visible row: only RLS keeps this organization's saved row out.
+    const theirs = await db.withTenant({ organizationId: otherOrg, userId: otherUser }, (tx) =>
+      loadPolicy(tx),
+    );
+    expect(theirs.conversations).toEqual(DEFAULTS);
+    expect(theirs.updatedAt).toBeNull();
+    // Not vacuous: the saved value is read in its own organization.
+    const ours = await db.withTenant({ organizationId: orgId, userId: null }, (tx) => loadPolicy(tx));
+    expect(ours.conversations.keepRecentTokens).toBe(8_000);
+  });
+});

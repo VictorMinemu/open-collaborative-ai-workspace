@@ -216,7 +216,17 @@ export function renderConfig(env, opts = {}) {
         heartbeat: { every: "0m" },
         // OpenClaw always prints the current date; pin its zone (the asker's local time comes per turn).
         userTimezone: "UTC",
-        compaction: { memoryFlush: { enabled: false } },
+        // Quick 261113-id6: long conversations are summarized leniently from boot. OpenClaw 2026.9.7 runs the safeguard's
+        // quality guard unless it is false (`qualityGuardCfg?.enabled ?? true`) and keeps identifiers strict: required
+        // facts could outgrow the summary and leave a conversation stuck. The plugin then writes the organization's
+        // choice (Settings › Bot policy › Conversations) from GET /cell.
+        compaction: {
+          mode: "safeguard",
+          qualityGuard: { enabled: false },
+          identifierPolicy: "off",
+          keepRecentTokens: 20000,
+          memoryFlush: { enabled: false },
+        },
         // ADR-0029 / 07.8 RESEARCH F-1 (D-11): OpenClaw's own sandbox stays off, pinned rather than left to the default.
         // Its Docker backend needs the host Docker socket in the gateway, which the cell never gets. Bots reach a sandbox
         // or a browser only through the ocw_sandbox_* / ocw_browser_* tools, which the Agent Channel API decides, audits

@@ -169,6 +169,11 @@ export const Project = z.object({
    * ("Linked to a project you can't open"). Absent = false.
    */
   teamProjectHidden: z.boolean().optional(),
+  /**
+   * Whether the device said the project folder is in a git repository (quick 261113-hu7). Absent = the device did not
+   * say (older daemons). False: an isolated worktree cannot be used there.
+   */
+  git: z.boolean().optional(),
 });
 export type Project = z.infer<typeof Project>;
 

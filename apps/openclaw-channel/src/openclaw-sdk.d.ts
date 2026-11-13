@@ -310,3 +310,20 @@ declare module "openclaw/plugin-sdk/provider-auth" {
     profileIds?: string[];
   }): Promise<unknown | null>;
 }
+
+/**
+ * Public `openclaw/plugin-sdk/session-store-runtime` (subset; package.json export, dist/session-store-runtime-*.mjs:342
+ * in 2026.9.7). Deletes one session entry by agent and session key, optionally archiving its transcript; resolves true
+ * when an entry was deleted. Quick 261113-id6: the bridge's fresh session after a failed summary.
+ */
+declare module "openclaw/plugin-sdk/session-store-runtime" {
+  export function deleteSessionEntry(params: {
+    sessionKey: string;
+    agentId?: string;
+    storePath?: string;
+    env?: NodeJS.ProcessEnv;
+    archiveTranscript?: boolean;
+    expectedSessionId?: string;
+    expectedUpdatedAt?: number;
+  }): Promise<boolean>;
+}

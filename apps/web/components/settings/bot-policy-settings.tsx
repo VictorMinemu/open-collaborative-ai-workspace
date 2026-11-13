@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BOT_CONVERSATION_LIMITS,
   BOT_TASK_LIMITS,
   type BotPolicy,
   type BotPolicyView,
@@ -128,6 +129,30 @@ export function taskLimitError(value: number, min: number, max: number): string 
     : `Enter a whole number from ${min} to ${max}.`;
 }
 
+type ConversationSwitch = Exclude<keyof BotPolicy["conversations"], "keepRecentTokens">;
+
+/** Settings › Bot policy › Conversations (quick 261113-id6): how long conversations are summarized, in display order. */
+export const CONVERSATION_SWITCHES: Array<{ key: ConversationSwitch; label: string; hint: string }> = [
+  {
+    key: "strictSummaries",
+    label: "Strict summaries",
+    hint: "Refuses a summary that drops required facts. A long conversation can then get stuck.",
+  },
+  {
+    key: "keepIdentifiers",
+    label: "Keep exact identifiers in summaries",
+    hint: "Ids, codes and order numbers stay word for word, at the cost of longer summaries.",
+  },
+  {
+    key: "freshSessionOnFailure",
+    label: "Start a fresh session when a summary fails",
+    hint: "The bot keeps the recent messages of the chat.",
+  },
+];
+
+const KEEP_TOKENS_MIN = BOT_CONVERSATION_LIMITS.keepRecentTokensMin;
+const KEEP_TOKENS_MAX = BOT_CONVERSATION_LIMITS.keepRecentTokensMax;
+
 const PROVIDERS: Array<{ id: SearchProvider; label: string; description: string }> = [
   { id: "duckduckgo", label: "DuckDuckGo", description: "Built in, no key or account needed" },
   { id: "searxng", label: "SearXNG", description: "Your own self-hosted metasearch instance" },
@@ -164,6 +189,13 @@ export function toPolicyBody(draft: Draft, saved: Draft, restrictModels: boolean
     if (draft.tasks[key] !== saved.tasks[key]) tasks[key] = draft.tasks[key];
   }
   if (Object.keys(tasks).length > 0) body.tasks = tasks;
+  const conversations: NonNullable<UpdateBotPolicyRequest["conversations"]> = {};
+  for (const key of Object.keys(draft.conversations) as Array<keyof Draft["conversations"]>) {
+    if (draft.conversations[key] !== saved.conversations[key]) {
+      Object.assign(conversations, { [key]: draft.conversations[key] });
+    }
+  }
+  if (Object.keys(conversations).length > 0) body.conversations = conversations;
   return body;
 }
 
@@ -205,18 +237,24 @@ export function BotPolicySettings() {
   return <PolicyForm policy={policy.data} />;
 }
 
-/** `initialTasks` seeds typed limits (tests render a typed value without a DOM). */
+/** `initialTasks` and `initialConversations` seed typed values (tests render a typed value without a DOM). */
 export function PolicyForm({
   policy,
   initialTasks,
+  initialConversations,
 }: {
   policy: BotPolicyView;
   initialTasks?: Partial<BotPolicy["tasks"]>;
+  initialConversations?: Partial<BotPolicy["conversations"]>;
 }) {
   const save = useUpdateBotPolicy();
   const models = useModels();
   const saved = toDraft(policy);
-  const [draft, setDraft] = useState<Draft>(() => ({ ...saved, tasks: { ...saved.tasks, ...initialTasks } }));
+  const [draft, setDraft] = useState<Draft>(() => ({
+    ...saved,
+    tasks: { ...saved.tasks, ...initialTasks },
+    conversations: { ...saved.conversations, ...initialConversations },
+  }));
   const [errors, setErrors] = useState<{ maxBots?: string; dailyMax?: string; models?: string }>({});
   const [restrictModels, setRestrictModels] = useState(saved.personalAllowedModels.length > 0);
   const dirty = !same(draft, saved) || restrictModels !== saved.personalAllowedModels.length > 0;
@@ -224,7 +262,15 @@ export function PolicyForm({
   const taskErrors = Object.fromEntries(
     TASK_FIELDS.map((f) => [f.key, taskLimitError(draft.tasks[f.key], f.min, f.max)]),
   ) as Record<TaskLimit, string | null>;
-  const tasksInvalid = Object.values(taskErrors).some((e) => e !== null);
+  // Quick 261113-id6: the recent history kept, checked the same way.
+  const keepTokensError = taskLimitError(
+    draft.conversations.keepRecentTokens,
+    KEEP_TOKENS_MIN,
+    KEEP_TOKENS_MAX,
+  );
+  const limitsInvalid = Object.values(taskErrors).some((e) => e !== null) || keepTokensError !== null;
+  const setConversations = (patch: Partial<Draft["conversations"]>) =>
+    setDraft((d) => ({ ...d, conversations: { ...d.conversations, ...patch } }));
 
   // Leaving the page with unsaved changes asks first.
   useEffect(() => {
@@ -266,7 +312,7 @@ export function PolicyForm({
       next.models = "Pick at least one model, or allow every model";
     }
     setErrors(next);
-    if (Object.keys(next).length > 0 || tasksInvalid) return;
+    if (Object.keys(next).length > 0 || limitsInvalid) return;
     try {
       const updated = await save.mutateAsync(toPolicyBody(draft, saved, restrictModels));
       setDraft(toDraft(updated));
@@ -374,6 +420,39 @@ export function PolicyForm({
               touch
             />
           ))}
+        </div>
+      </Section>
+
+      <Section
+        title="Conversations"
+        description="How bots summarize a conversation that outgrows their model's memory."
+      >
+        <div className="overflow-hidden rounded-2xl border bg-card shadow-xs">
+          <ul className="divide-y">
+            {CONVERSATION_SWITCHES.map((c) => (
+              <ConversationSwitchRow
+                key={c.key}
+                label={c.label}
+                hint={c.hint}
+                checked={draft.conversations[c.key]}
+                onChange={(value) => setConversations({ [c.key]: value })}
+                testId={`policy-conversations-${c.key}`}
+              />
+            ))}
+          </ul>
+          <div className="border-t p-4 sm:max-w-sm">
+            <NumberField
+              label="Recent history kept"
+              hint="Tokens of the latest messages kept word for word"
+              value={draft.conversations.keepRecentTokens}
+              min={KEEP_TOKENS_MIN}
+              max={KEEP_TOKENS_MAX}
+              error={keepTokensError ?? undefined}
+              onChange={(keepRecentTokens) => setConversations({ keepRecentTokens })}
+              testId="policy-conversations-keep-recent-tokens"
+              touch
+            />
+          </div>
         </div>
       </Section>
 
@@ -547,7 +626,7 @@ export function PolicyForm({
         </Button>
         <Button
           onClick={submit}
-          disabled={!dirty || tasksInvalid || save.isPending}
+          disabled={!dirty || limitsInvalid || save.isPending}
           data-testid="bot-policy-save"
         >
           {save.isPending ? <Spinner /> : <Save />}
@@ -614,6 +693,39 @@ function PolicySwitch({
       />
       {hint ? <span className="hidden text-[10.5px] text-muted-foreground sm:block">{hint}</span> : null}
     </label>
+  );
+}
+
+function ConversationSwitchRow({
+  label,
+  hint,
+  checked,
+  onChange,
+  testId,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  testId: string;
+}) {
+  const id = useId();
+  return (
+    <li className="flex min-h-11 items-center justify-between gap-4 px-4 py-3">
+      <span className="min-w-0">
+        <span className="block font-medium text-sm">{label}</span>
+        <span id={`${id}-hint`} className="block text-muted-foreground text-xs leading-snug">
+          {hint}
+        </span>
+      </span>
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        aria-label={label}
+        aria-describedby={`${id}-hint`}
+        data-testid={testId}
+      />
+    </li>
   );
 }
 

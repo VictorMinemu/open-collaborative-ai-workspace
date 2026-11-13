@@ -1828,6 +1828,18 @@ export const CellApprovedPlugin = z.object({
 });
 export type CellApprovedPlugin = z.infer<typeof CellApprovedPlugin>;
 
+/**
+ * Quick 261113-id6: the organization's conversation summary settings (`BotPolicy.conversations`). The reconciler writes
+ * them to `agents.defaults.compaction`; the bridge applies `freshSessionOnFailure`.
+ */
+export const CellConversations = z.object({
+  strictSummaries: z.boolean(),
+  keepIdentifiers: z.boolean(),
+  keepRecentTokens: z.number().int().positive(),
+  freshSessionOnFailure: z.boolean(),
+});
+export type CellConversations = z.infer<typeof CellConversations>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.number().int(),
   cellId: Id,
@@ -1844,6 +1856,8 @@ export const CellSnapshot = z.object({
   mcpServers: z.array(CellMcpServer).optional(),
   /** Approved marketplace plugins (D-14); absent on older APIs = none (every install event is refused). */
   plugins: z.array(CellApprovedPlugin).optional(),
+  /** Quick 261113-id6: conversation summary settings; absent on older APIs = the lenient defaults. */
+  conversations: CellConversations.optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 

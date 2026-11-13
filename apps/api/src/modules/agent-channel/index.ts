@@ -437,6 +437,8 @@ export function createAgentChannelModule(
                     providers,
                     subscriptions,
                     webSearch: { provider: policy.searchProvider },
+                    // Quick 261113-id6: how the cell summarizes long conversations (no secret, no content).
+                    conversations: policy.conversations,
                     mcpServers,
                     plugins,
                   } as const;

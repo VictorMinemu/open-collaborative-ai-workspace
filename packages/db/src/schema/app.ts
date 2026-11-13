@@ -709,6 +709,17 @@ export const botPolicies = appSchema.table(
     taskMaxTurns: integer("task_max_turns").notNull().default(40),
     taskMaxHours: integer("task_max_hours").notNull().default(8),
     maxRunningTasks: integer("max_running_tasks").notNull().default(10),
+    /**
+     * Quick 261113-id6: how long bot conversations are summarized (`BotPolicy.conversations`; OpenClaw's
+     * `agents.defaults.compaction`). Lenient by default: OpenClaw's summary quality guard off, identifiers not forced,
+     * 20 000 recent tokens kept, and a fresh session (once per turn) when a summary still fails.
+     */
+    conversationStrictSummaries: boolean("conversation_strict_summaries").notNull().default(false),
+    conversationKeepIdentifiers: boolean("conversation_keep_identifiers").notNull().default(false),
+    conversationKeepRecentTokens: integer("conversation_keep_recent_tokens").notNull().default(20000),
+    conversationFreshSessionOnFailure: boolean("conversation_fresh_session_on_failure")
+      .notNull()
+      .default(true),
   },
   (t) => [
     check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`),
@@ -719,6 +730,10 @@ export const botPolicies = appSchema.table(
     check("bot_policies_task_max_turns_check", sql`${t.taskMaxTurns} between 1 and 200`),
     check("bot_policies_task_max_hours_check", sql`${t.taskMaxHours} between 1 and 24`),
     check("bot_policies_max_running_tasks_check", sql`${t.maxRunningTasks} between 0 and 100`),
+    check(
+      "bot_policies_conversation_keep_recent_tokens_check",
+      sql`${t.conversationKeepRecentTokens} between 2000 and 100000`,
+    ),
   ],
 );
 
@@ -1553,6 +1568,11 @@ export const projects = appSchema.table(
     name: text("name").notNull(),
     gitRemote: text("git_remote"),
     defaultBranch: text("default_branch"),
+    /**
+     * Whether the device said the project folder is in a git repository (`DeviceProjectAnnouncement.git`); null = the
+     * device did not say (older daemons). A bot start uses an isolated worktree only where this is not false.
+     */
+    git: boolean("git"),
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
     /** Set when the device stops announcing the project; sessions keep their history. */

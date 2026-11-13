@@ -261,6 +261,12 @@ the job workers unless `OCW_JOBS_WORKER=off` is set in `.env` (keep at least one
 passwords through Keychain, limits, retention and troubleshooting:
 [self-hosting/automations.md](self-hosting/automations.md).
 
+## Long bot conversations
+
+When a bot's conversation outgrows its model, the cell summarizes the older part. How (strict summaries, identifiers,
+recent history kept, a fresh session when a summary fails) is set in Settings › Bot policy › Conversations:
+[self-hosting/bot-conversations.md](self-hosting/bot-conversations.md).
+
 ## Keep Claude Code and Codex up to date on devices
 
 The Local Runtime on each device (desktop app or headless daemon) keeps the Claude Code and Codex CLIs it drives up to

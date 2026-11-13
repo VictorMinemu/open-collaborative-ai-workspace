@@ -1,0 +1,11 @@
+-- Quick 261113-hu7: the API keeps whether the device said a project folder is in a git repository
+-- (`DeviceProjectAnnouncement.git`; absent from older daemons). A bot whose Work Zone profile
+-- asks for an isolated worktree starts on the project's own checkout when the project is not in git (the daemon refuses
+-- a worktree there), and the one-executor-per-tree check (D-15, principle 4) then applies to that start.
+-- Additive only: one nullable column on an existing table, no default, no rewrite and no data update; null = the device
+-- did not say, so N-1 code keeps working (it never reads the column). RLS and grants are unchanged (the table's
+-- existing policies and table grants cover it). Chained after 20261113035112_bot_task_process_ends (earlier migrations
+-- are never edited).
+-- Forward-only. Rollback (as ocw_migrator): ALTER TABLE app.projects DROP COLUMN git; delete this migration's row from
+-- drizzle.__drizzle_migrations.
+ALTER TABLE "app"."projects" ADD COLUMN "git" boolean;

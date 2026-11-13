@@ -27,7 +27,13 @@ import {
   BoardColumn,
   WaitingOn,
 } from "./board";
-import { ATTACHMENT_READ_LIMITS, SearchProvider, TurnContext } from "./bot-capabilities";
+import {
+  ATTACHMENT_READ_LIMITS,
+  BotConversationPolicy,
+  DEFAULT_BOT_CONVERSATIONS,
+  SearchProvider,
+  TurnContext,
+} from "./bot-capabilities";
 import { BotTaskWakeReason, TaskProcessFact } from "./bot-tasks";
 import { BOT_WORK_ZONE_LIMITS, WorkSessionDecider } from "./bot-work-zone";
 import { ConversationKind, Mention, MessageBody } from "./chat";
@@ -752,6 +758,11 @@ export const CellSnapshot = z.object({
   mcpServers: z.array(CellMcpServer).default([]),
   /** Additive (Phase 3.1, D-14): approved marketplace plugins (wired into `GET /cell` by 03.1-12). */
   plugins: z.array(CellApprovedPlugin).default([]),
+  /**
+   * Additive (quick 261113-id6): the org's conversation summary settings (`BotPolicy.conversations`); the plugin writes
+   * them to `agents.defaults.compaction` and applies `freshSessionOnFailure` itself.
+   */
+  conversations: BotConversationPolicy.default(() => ({ ...DEFAULT_BOT_CONVERSATIONS })),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 

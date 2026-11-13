@@ -172,6 +172,20 @@ describe("renderConfig", () => {
     assert.equal(config.agents.defaults.compaction.memoryFlush.enabled, false);
   });
 
+  it("long conversations are summarized leniently from boot, before the first snapshot (quick 261113-id6)", () => {
+    const { config } = renderConfig(base);
+    // OpenClaw 2026.9.7 runs the safeguard quality guard unless it is set to false (`qualityGuardCfg?.enabled ?? true`)
+    // and keeps identifiers strict by default: a long conversation could get stuck on its summary. The plugin then
+    // applies the organization's choice (BotPolicy.conversations).
+    assert.deepEqual(config.agents.defaults.compaction, {
+      mode: "safeguard",
+      qualityGuard: { enabled: false },
+      identifierPolicy: "off",
+      keepRecentTokens: 20000,
+      memoryFlush: { enabled: false },
+    });
+  });
+
   it("OpenClaw's own sandbox is pinned off; its exec, file, process and browser tools stay denied (07.8 D-11, F-1)", () => {
     for (const env of [
       base,

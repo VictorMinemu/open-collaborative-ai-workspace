@@ -145,6 +145,8 @@ const HEAD_ONLY = [
   "20261111225544_bot_work_session_files",
   "20261112230733_bot_tasks",
   "20261113035112_bot_task_process_ends",
+  "20261113175346_projects_git",
+  "20261113182003_bot_policy_conversations",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
