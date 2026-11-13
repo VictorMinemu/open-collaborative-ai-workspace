@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { lint as lintCodeowners } from "./codeowners.mjs";
+import { lint as lintCodeowners, REQUIRED_AREAS } from "./codeowners.mjs";
 import {
   checkFields,
   checkGraph,
@@ -205,6 +205,38 @@ describe("guard: ocw.raw-egress in the sandbox egress entrypoint (07.8-12)", () 
     const res = semgrep();
     assert.notEqual(res.status, 0, res.out);
     assert.match(res.out, /ocw\.raw-egress apps\/sandboxd\/src\/egress\/sub\/proxy\.ts/);
+  });
+});
+
+describe("guard: ocw.bot-task-text-in-audit (07.17.1.1.2 PD-19, P1)", () => {
+  it("a bot task audit whose metadata carries the goal, a note or the summary fails, naming the rule and the file", () => {
+    put(
+      "apps/api/src/modules/agent-channel/x.ts",
+      [
+        "export async function f(core, tx, task) {",
+        '  await core.audit.record(tx, { action: "bot.task_started", metadata: { taskId: task.id, goal: task.goal } });',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.bot-task-text-in-audit apps\/api\/src\/modules\/agent-channel\/x\.ts:2/);
+  });
+
+  it("ids and counts pass, and so does the goal in another action's audit", () => {
+    put(
+      "apps/api/src/modules/agent-channel/y.ts",
+      [
+        "export async function g(core, tx, task) {",
+        '  await core.audit.record(tx, { action: "bot.task_started", metadata: { taskId: task.id, turnsUsed: 1 } });',
+        '  await core.audit.record(tx, { action: "automation.created", metadata: { goal: task.goal } });',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const res = semgrep();
+    assert.equal(res.status, 0, res.out);
   });
 });
 
@@ -547,6 +579,29 @@ describe("guard: CODEOWNERS", () => {
     assert.equal(failures.length, 2, failures.join("\n"));
     assert.match(failures.join("\n"), /auth/);
     assert.match(failures.join("\n"), /no owner/);
+  });
+
+  // 07.17.1.1.2 (ADR-0042, T-07.17.1.1.2-14-02): the four modules that decide a bot task (the state machine and the
+  // Stop rule, the continuation scheduler, the routes, the process wakes) stay owned.
+  const TASK_MODULES = [
+    "apps/api/src/modules/agent-channel/tasks.ts",
+    "apps/api/src/modules/agent-channel/task-wakes.ts",
+    "apps/api/src/modules/agent-channel/task-routes.ts",
+    "apps/api/src/modules/agent-channel/task-process-wakes.ts",
+  ];
+
+  it("REQUIRED_AREAS lists the four bot task modules", () => {
+    const files = REQUIRED_AREAS.map((a) => a.file);
+    for (const file of TASK_MODULES) assert.ok(files.includes(file), `${file} is not a required area`);
+  });
+
+  it("a CODEOWNERS without the bot task modules fails with each required area unowned", () => {
+    const areas = REQUIRED_AREAS.filter((a) => TASK_MODULES.includes(a.file));
+    assert.equal(areas.length, 4);
+    const failures = lintCodeowners("/apps/api/src/modules/agent-channel/consult.ts @VictorMinemu\n", TASK_MODULES, areas);
+    // Each of the four areas has no owner (the pattern also matches no file of this list).
+    assert.equal(failures.filter((f) => /^required area "bot tasks: .*" \(.*\) has no owner$/.test(f)).length, 4);
+    for (const file of TASK_MODULES) assert.match(failures.join("\n"), new RegExp(file.replaceAll(".", "\\.")));
   });
 
   it("the shipped .github/CODEOWNERS passes against the repository", () => {
