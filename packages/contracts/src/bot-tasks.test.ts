@@ -130,6 +130,19 @@ describe("07.17.1.1.2 tasks: text rules (D-01, D-07, T-07.17.1.1.2-01-02)", () =
     it(`${name}: a newline is ${newlines ? "allowed" : "refused"}`, () => {
       expect(schema.safeParse("Read the pack\nthen summarise it").success).toBe(newlines);
     });
+
+    it(`${name}: code review IN-07: refuses C1 controls and U+061C; U+2028 and U+2029 only where lines may break`, () => {
+      for (const cp of [0x80, 0x85, 0x9b, 0x9f, 0x061c]) {
+        const bad = `Read ${String.fromCodePoint(cp)}the pack`;
+        expect(schema.safeParse(bad).success, `U+${cp.toString(16)}`).toBe(false);
+      }
+      for (const cp of [0x2028, 0x2029]) {
+        const line = `Read the pack${String.fromCodePoint(cp)}then summarise it`;
+        expect(schema.safeParse(line).success, `U+${cp.toString(16)}`).toBe(newlines);
+      }
+      // Ordinary non-ASCII text stays accepted.
+      expect(schema.safeParse("Leí el paquete: 3 030 ficheros").success).toBe(true);
+    });
   }
 });
 

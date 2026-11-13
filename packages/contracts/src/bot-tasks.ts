@@ -96,12 +96,18 @@ function isBidiControl(c: number): boolean {
   return c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
 }
 
-/** True when `s` holds U+0000–U+001F (a `\n` too unless `newlines`), U+007F or a bidi control. */
+/**
+ * True when `s` holds U+0000–U+001F (a `\n` too unless `newlines`), U+007F, a C1 control (U+0080–U+009F), U+061C (the
+ * Arabic letter mark), a bidi control, or U+2028 / U+2029 (line and paragraph separators) unless `newlines`. Code review
+ * IN-07: a "one-line" note never breaks lines on the card.
+ */
 export function hasForbiddenTaskChar(s: string, newlines: boolean): boolean {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c === 0x0a && newlines) continue;
-    if (c <= 0x1f || c === 0x7f || isBidiControl(c)) return true;
+    if ((c === 0x2028 || c === 0x2029) && newlines) continue;
+    if (c <= 0x1f || c === 0x7f || (c >= 0x80 && c <= 0x9f) || c === 0x061c || isBidiControl(c)) return true;
+    if (c === 0x2028 || c === 0x2029) return true;
   }
   return false;
 }

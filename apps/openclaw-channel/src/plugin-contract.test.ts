@@ -4616,6 +4616,17 @@ describe("07.17.1.1.2 tasks", () => {
     const table: Array<[string, Schema, Schema, unknown, unknown]> = [
       ["TaskGoal", m.TaskGoal, c.TaskGoal as Schema, " A goal ", "two\nlines"],
       ["TaskNote", m.TaskNote, c.TaskNote as Schema, "A note", long(501)],
+      // Code review IN-07: a C1 control, U+061C and a line separator in a one-line note.
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "Leí 400", `A${String.fromCodePoint(0x85)}note`],
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "Leí 400", `A${String.fromCodePoint(0x061c)}note`],
+      ["TaskGoal", m.TaskGoal, c.TaskGoal as Schema, "A goal", `A${String.fromCodePoint(0x2028)}goal`],
+      [
+        "TaskSummary",
+        m.TaskSummary,
+        c.TaskSummary as Schema,
+        `Line one${String.fromCodePoint(0x2029)}line two`,
+        `x${String.fromCodePoint(0x9f)}`,
+      ],
       [
         "TaskSummary",
         m.TaskSummary,
