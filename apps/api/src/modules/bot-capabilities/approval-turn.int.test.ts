@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { TASK_TOOL_NAMES } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { TestClient } from "../../testing";
 import {
@@ -148,7 +149,15 @@ describe("turn flags for tools with an approval rule (07.5-11, D-01)", () => {
         core.env,
       ),
     );
-    expect(now).toEqual({ tools: ev.turn.tools, toolFlags: ev.turn.toolFlags });
+    // 07.17.1.1.2: the task tools are turn-scoped (the task offer at delivery, like consult or the Work Zone), so the
+    // call-time re-decision of the computed tools does not list them; every other tool and flag is the same.
+    const taskTools = new Set<string>(TASK_TOOL_NAMES);
+    expect(now).toEqual({
+      tools: (ev.turn.tools as string[]).filter((t) => !taskTools.has(t)),
+      toolFlags: Object.fromEntries(
+        Object.entries(ev.turn.toolFlags as Record<string, unknown>).filter(([t]) => !taskTools.has(t)),
+      ),
+    });
   });
 
   it("a server-wide pattern flags every tool of that server; `never` flags nothing", async () => {
