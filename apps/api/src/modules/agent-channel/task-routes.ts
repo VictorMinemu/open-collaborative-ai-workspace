@@ -313,7 +313,7 @@ export function registerTaskRoutes(scope: App, core: Core): void {
 const TASK_NOT_FOUND = "Task not found";
 
 /**
- * Stop (PD-12; D-05, D-07; ADR-0027's rule, the cell has no abort): `POST /api/v1/bot-tasks/:id/stop`, a signed-in person
+ * Stop (PD-12; D-05, D-07; ADR-0027's rule, the cell has no abort): `POST /api/v1/bot-tasks/{id}/stop`, a signed-in person
  * stops a bot's long task. A task of a conversation the caller cannot read, of another organization (RLS) or that does
  * not exist is 404 `task_not_found` (existence hidden); a reader who is not the person it runs for, a moderator of its
  * channel or a manager of the bot (`mayStopTask`) is refused 403 `not_task_owner`. Then, under the row lock: an ended
