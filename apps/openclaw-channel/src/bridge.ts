@@ -94,6 +94,11 @@ export type OpenClawPort = {
     cell: CellSnapshot,
     opts?: { readySubscriptions?: ReadonlySet<string> },
   ): Promise<{ changed: boolean; results: AgentProvisioningResult[] }>;
+  /**
+   * Quick 261113-id6: starts the turn's OpenClaw session afresh (its entry deleted, the transcript archived). True when
+   * a session was reset. Absent (an older port or a test fake) = the bridge never recovers a failed summary.
+   */
+  resetSession?(mention: MappedMention): Promise<boolean>;
 };
 
 export type BridgeOptions = {
@@ -178,6 +183,25 @@ export const AUTH_FAILURE_REPLY =
 const OPENCLAW_GENERIC_FAILURE = /^\W*Something went wrong while processing your request/i;
 /** OpenClaw's text when the provider answered 401/403 (e.g. a ChatGPT sign-in that is no longer valid). */
 const OPENCLAW_AUTH_FAILURE = /^\W*Authentication failed \(provider returned HTTP 40[13]\)/i;
+
+/**
+ * OpenClaw's texts when it could not summarize a conversation that outgrew the model's context (2026.9.7:
+ * "⚠️ Context is too large and auto-compaction could not recover this turn." / "… timed out before it could finish." and
+ * "⚠️ Auto-compaction could not recover this turn."). They arrive before the model runs, as plain reply text.
+ */
+const OPENCLAW_COMPACTION_FAILURE =
+  /^\W*(?:Context is too large and auto-compaction|Auto-compaction could not recover this turn)/i;
+
+/** Quick 261113-id6: the bot's sentence when a fresh session failed to summarize too. */
+export const COMPACTION_RETRY_FAILED_REPLY =
+  "This conversation got too long for me to summarize, so I started over with only its recent messages, and that failed too. Try again in a new thread.";
+/** Quick 261113-id6: the bot's sentence when its session could not be started afresh. */
+export const COMPACTION_RESET_FAILED_REPLY =
+  "This conversation got too long for me to summarize. Try again in a new thread.";
+
+export function isOpenClawCompactionFailure(text: string): boolean {
+  return OPENCLAW_COMPACTION_FAILURE.test(text.trim());
+}
 
 export function isOpenClawGenericFailure(text: string): boolean {
   return OPENCLAW_GENERIC_FAILURE.test(text.trim());
@@ -446,6 +470,12 @@ export function createBridge(opts: BridgeOptions) {
     // The turn continued or finished its task: silence is its answer, never a failure to retry (T-07.17.1.1.2-05-03).
     let taskAnswered = false;
     let index = 0;
+    // Quick 261113-id6: a failed summary starts the bot over in a fresh session, once per turn, when the organization
+    // allows it (absent = on) and the port can reset sessions.
+    const resetSession = opts.port.resetSession?.bind(opts.port);
+    const recovers =
+      resetSession !== undefined && lastSnapshot?.conversations?.freshSessionOnFailure !== false;
+    let recovered = false;
     const post = async (text: string) => {
       for (const chunk of chunkText(text, maxReplyChars)) {
         await opts.client.postMessage(
@@ -469,6 +499,8 @@ export function createBridge(opts: BridgeOptions) {
       for (let attempt = 1; ; attempt++) {
         try {
           const held: string[] = [];
+          /** OpenClaw's compaction-failure text, held back while it may still be recovered from. */
+          const compaction: { text: string | null } = { text: null };
           const run = await opts.port.dispatchMention(
             // OpenClaw dedupes inbound turns by this id: unique per delivery and per attempt (see MappedMention).
             {
@@ -484,11 +516,36 @@ export function createBridge(opts: BridgeOptions) {
               }
               if (isOpenClawGenericFailure(text)) throw new Error("OpenClaw reported a failed turn");
               if (!text.trim()) return;
+              if (recovers && index === 0 && held.length === 0 && isOpenClawCompactionFailure(text)) {
+                compaction.text = text;
+                return;
+              }
               if (holdsText) held.push(text);
               else await post(text);
             },
             opts.signal,
           );
+          if (compaction.text !== null) {
+            if (run?.ran === true || index > 0 || held.length > 0) {
+              // Code review WR-01: a run whose model already ran (or that answered) is never dispatched again; the text
+              // goes out as it came.
+              if (holdsText) held.unshift(compaction.text);
+              else await post(compaction.text);
+            } else if (recovered) {
+              throw new TerminalTurnError(
+                "a fresh session could not summarize the conversation either",
+                COMPACTION_RETRY_FAILED_REPLY,
+              );
+            } else {
+              recovered = true;
+              log.info?.(`${label} ${event.eventId}: summary failed; starting a fresh session`);
+              if (!(await resetSession?.(mention))) {
+                throw new TerminalTurnError("the session could not be reset", COMPACTION_RESET_FAILED_REPLY);
+              }
+              // The same turn again (a new inbound id, see above); the chat window is in its structured context.
+              continue;
+            }
+          }
           const task = run?.task ?? null;
           if (task?.quiet) {
             // Ids and counts only: the dropped text never reaches the logs.

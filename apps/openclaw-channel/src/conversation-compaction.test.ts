@@ -123,8 +123,15 @@ describe("reconciler: agents.defaults.compaction from the snapshot's conversatio
   });
 
   it("rewrites nothing when the owned keys already match (other keys ignored)", () => {
-    const current = { ...desiredCompaction(DEFAULTS), timeoutSeconds: 180, qualityGuard: { enabled: false, maxRetries: 1 } };
-    const plan = planReconcile({ compaction: current }, snapshot({ conversations: DEFAULTS } as Partial<CellSnapshot>));
+    const current = {
+      ...desiredCompaction(DEFAULTS),
+      timeoutSeconds: 180,
+      qualityGuard: { enabled: false, maxRetries: 1 },
+    };
+    const plan = planReconcile(
+      { compaction: current },
+      snapshot({ conversations: DEFAULTS } as Partial<CellSnapshot>),
+    );
     expect(plan.compaction).toBeNull();
     expect(plan.changed).toBe(false);
   });
@@ -234,7 +241,11 @@ describe("real port: reconcile writes compaction; resetSession deletes the turn'
     expect(await p.resetSession?.(mention())).toBe(true);
     expect(await p.resetSession?.(mention({ sessionThreadId: "MSG-Root-1" }))).toBe(true);
     expect(calls).toEqual([
-      { sessionKey: "agent:ocw-agent-astra:ocw:channel:conv-1", agentId: "ocw-agent-astra", archiveTranscript: true },
+      {
+        sessionKey: "agent:ocw-agent-astra:ocw:channel:conv-1",
+        agentId: "ocw-agent-astra",
+        archiveTranscript: true,
+      },
       {
         sessionKey: "agent:ocw-agent-astra:ocw:channel:conv-1:thread:msg-root-1",
         agentId: "ocw-agent-astra",
@@ -297,7 +308,7 @@ const mentionEvent = (n: number) => ({
   cellId: "cell-1",
   agent: { id: ASTRA.id, handle: "astra", displayName: "Astra" },
   conversation: { id: "conv-dm", kind: "dm", name: null },
-  thread: { rootMessageId: null },
+  thread: { rootMessageId: `msg-${n}` },
   message: {
     id: `msg-${n}`,
     text: "@astra what is the status of order 4711?",
@@ -400,8 +411,18 @@ describe("bridge: a failed summary starts a fresh session once", () => {
     api = await startFakeAgentChannelApi({ agents: [structuredClone(ASTRA)], providers: [FAKE] });
     const port = scriptedPort();
     port.script = [{ texts: [AUTO_COMPACTION] }, { texts: ["Back on track."] }];
-    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token, backoff: { baseMs: 5, maxMs: 20 } });
-    const b = createBridge({ client, port, signal: new AbortController().signal, retryDelayMs: 5, dispatchAttempts: 1 });
+    const client = createAgentChannelClient({
+      apiUrl: api.url,
+      token: () => api.token,
+      backoff: { baseMs: 5, maxMs: 20 },
+    });
+    const b = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      retryDelayMs: 5,
+      dispatchAttempts: 1,
+    });
     await b.refreshCell();
     await b.handleFrame({ seq: 1, type: "agent.mention.v1", data: mentionEvent(1) });
     expect(port.dispatched).toHaveLength(2);

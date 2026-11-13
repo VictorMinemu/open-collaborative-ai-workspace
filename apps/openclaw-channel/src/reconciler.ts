@@ -1,6 +1,7 @@
 import path from "node:path";
 import type {
   CellAgent,
+  CellConversations,
   CellMcpServer,
   CellProvider,
   CellSnapshot,
@@ -305,6 +306,47 @@ function sameProvider(
 
 export type AgentProvisioningResult = { agentId: string; status: "ready" | "error"; detail?: string };
 
+/**
+ * Quick 261113-id6: the `agents.defaults.compaction` keys the plugin owns, from the snapshot's `conversations` (absent =
+ * the lenient defaults, the same infra/openclaw/render-config.mjs pins at boot). `mode` stays `safeguard` (summaries in
+ * chunks; `default` summarizes the whole transcript in one call and can overflow itself) and the pre-compaction memory
+ * flush stays off (no background model call). Keys verified in the pinned 2026.9.7 image's zod schema
+ * (`compaction.{mode, qualityGuard.enabled, identifierPolicy, keepRecentTokens, memoryFlush.enabled}`).
+ */
+export type CompactionSettings = {
+  mode: "safeguard";
+  qualityGuard: { enabled: boolean };
+  identifierPolicy: "strict" | "off";
+  keepRecentTokens: number;
+  memoryFlush: { enabled: false };
+};
+
+export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+
+export function desiredCompaction(conversations: CellConversations | undefined): CompactionSettings {
+  return {
+    mode: "safeguard",
+    qualityGuard: { enabled: conversations?.strictSummaries ?? false },
+    identifierPolicy: conversations?.keepIdentifiers ? "strict" : "off",
+    keepRecentTokens: conversations?.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS,
+    memoryFlush: { enabled: false },
+  };
+}
+
+const sub = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+
+/** Only the owned keys count: OpenClaw's other compaction keys (timeouts, retries) never cause a write. */
+function sameCompaction(current: Record<string, unknown>, desired: CompactionSettings): boolean {
+  return (
+    current.mode === desired.mode &&
+    sub(current.qualityGuard).enabled === desired.qualityGuard.enabled &&
+    current.identifierPolicy === desired.identifierPolicy &&
+    current.keepRecentTokens === desired.keepRecentTokens &&
+    sub(current.memoryFlush).enabled === desired.memoryFlush.enabled
+  );
+}
+
 export type ReconcilePlan = {
   upsertAgents: Record<string, AgentEntry>;
   removeAgents: string[];
@@ -321,6 +363,8 @@ export type ReconcilePlan = {
   upsertMcpServers: McpServerEntries;
   /** Plugin-owned MCP servers that must go (left the snapshot or lost every enabled tool). */
   removeMcpServers: string[];
+  /** Quick 261113-id6: the owned `agents.defaults.compaction` keys to write, or null to leave them alone. */
+  compaction: CompactionSettings | null;
   changed: boolean;
 };
 
@@ -338,8 +382,16 @@ export function planReconcile(
     providers?: ProviderEntries;
     webSearchProvider?: string;
     mcpServers?: McpServerEntries;
+    /**
+     * Quick 261113-id6: OpenClaw's current `agents.defaults.compaction` (null = none rendered). Omitted = the caller
+     * does not manage compaction (it is then left alone).
+     */
+    compaction?: Record<string, unknown> | null;
   },
-  cell: Pick<CellSnapshot, "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers">,
+  cell: Pick<
+    CellSnapshot,
+    "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers" | "conversations"
+  >,
   opts: {
     readySubscriptions?: ReadonlySet<string>;
     /** Search provider plugins loaded in this cell (`plugins.allow`); a provider not loaded is never set. */
@@ -447,6 +499,14 @@ export function planReconcile(
     (name) => OWNED_MCP_SERVER.test(name) && !desiredMcp.has(name),
   );
 
+  // Quick 261113-id6: how long conversations are summarized (the organization's choice; `freshSessionOnFailure` is the
+  // bridge's, never OpenClaw's).
+  const wantedCompaction = desiredCompaction(cell.conversations);
+  const compaction =
+    current.compaction !== undefined && !sameCompaction(sub(current.compaction), wantedCompaction)
+      ? wantedCompaction
+      : null;
+
   return {
     upsertAgents,
     removeAgents,
@@ -457,8 +517,10 @@ export function planReconcile(
     webSearchProvider,
     upsertMcpServers,
     removeMcpServers,
+    compaction,
     changed:
       webSearchProvider !== null ||
+      compaction !== null ||
       Object.keys(upsertMcpServers).length > 0 ||
       removeMcpServers.length > 0 ||
       Object.keys(upsertAgents).length > 0 ||
@@ -479,6 +541,23 @@ export type MutableConfig = {
 
 /** Applies a plan to a mutable config draft (inside OpenClaw's `mutateConfigFile`). */
 export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): void {
+  if (plan.compaction) {
+    draft.agents ??= {};
+    const defaults = sub(draft.agents.defaults);
+    const current = sub(defaults.compaction);
+    // Merged: OpenClaw's other compaction keys (and the sub-objects' other keys) stay as they are.
+    draft.agents.defaults = {
+      ...defaults,
+      compaction: {
+        ...current,
+        mode: plan.compaction.mode,
+        qualityGuard: { ...sub(current.qualityGuard), ...plan.compaction.qualityGuard },
+        identifierPolicy: plan.compaction.identifierPolicy,
+        keepRecentTokens: plan.compaction.keepRecentTokens,
+        memoryFlush: { ...sub(current.memoryFlush), ...plan.compaction.memoryFlush },
+      },
+    };
+  }
   if (plan.webSearchProvider) {
     draft.tools ??= {};
     draft.tools.web ??= {};
