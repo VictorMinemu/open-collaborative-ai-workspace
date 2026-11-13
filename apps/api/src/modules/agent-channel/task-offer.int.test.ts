@@ -1,9 +1,28 @@
 import { randomUUID } from "node:crypto";
-import { BUILTIN_TOOLS, TASK_TOOL_FLAGS, TASK_TOOL_NAMES, TurnTask } from "@ocw/contracts";
+import {
+  type BotWorkZoneProfileInput,
+  BUILTIN_TOOLS,
+  TASK_TOOL_FLAGS,
+  TASK_TOOL_NAMES,
+  TurnTask,
+  WORK_SESSION_TOOL_NAMES,
+} from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AgentMention } from "../../lib/chat-agent-bridge";
 import type { TestClient } from "../../testing";
+import { eventually, FakeDevice } from "../../testing-device";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
-import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
+import {
+  CLAUDE_CATALOG,
+  CODEX_CATALOG,
+  createBotProfile,
+  grantBotConsent,
+  pairDevice,
+} from "../../testing-workzone";
+import { createPermissionService } from "../organization";
+import { buildMentionEvents } from "./mentions";
+import { taskOfferFor } from "./task-offer";
 
 /**
  * Phase 07.17.1.1.2-07 (D-02, D-04, D-09, D-10; PD-05, PD-07, PD-09, PD-13; BTASK-02, BTASK-03, BTASK-07, BTASK-11): which
@@ -19,6 +38,8 @@ import { startTestStorage, type TestStorage } from "../../testing-storage";
 let storage: TestStorage;
 let s: SandboxStack;
 let engId: string;
+/** Víctor's build server, paired for the Work Zone case (Task 2). */
+let device: FakeDevice | undefined;
 
 const START = BUILTIN_TOOLS.taskStart;
 const CONTINUE = BUILTIN_TOOLS.taskContinue;
@@ -53,6 +74,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try {
+    await device?.close().catch(() => {});
     await s?.stop();
   } finally {
     await storage?.stop();
@@ -321,5 +343,350 @@ describe("tracer: a person's mention carries the three task tools; a waiting tas
       );
     }
     await expectStart(await mention(s.sam));
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: the `task` trigger (D-04, D-09, D-10)
+
+const perms = () => createPermissionService(s.stack.built.core);
+
+const setBotBrowser = (agentId: string, on: boolean) =>
+  s.su.query(
+    "update app.agents set capabilities = capabilities || jsonb_build_object('browser', $2::boolean) where id = $1",
+    [agentId, on],
+  );
+
+const browserTools = (ev: Json) => (ev.turn.tools as string[]).filter((t) => t.startsWith("ocw_browser_"));
+
+/**
+ * A delivery of `agentId` through the one builder (`buildMentionEvents`) as agent-channel's own callers build it (the
+ * continuation of 09, a Work Zone wake, an automation run, a consult hop): the structural author is `author`, the body a
+ * server sentence, in its tenant transaction as that person.
+ */
+async function deliver(
+  p: {
+    trigger: NonNullable<AgentMention["trigger"]>;
+    messageId: string;
+    threadRootId: string;
+    conversationId?: string;
+    agentId?: string;
+    author?: string;
+    eventId?: string;
+    task?: AgentMention["task"];
+    taintedAtStart?: boolean;
+    chain?: AgentMention["chain"];
+  },
+  onLimitReached?: (agentId: string) => void,
+): Promise<Json[]> {
+  const author = p.author ?? s.samId;
+  const mention: AgentMention = {
+    organizationId: s.orgA,
+    conversationId: p.conversationId ?? engId,
+    threadRootId: p.threadRootId,
+    messageId: p.messageId,
+    agentIds: [p.agentId ?? s.scoutId],
+    author: { kind: "user", id: author, displayName: "" },
+    body: "Continue your task (turn 4 of 40).",
+    createdAt: new Date().toISOString(),
+    delivery: "thread",
+    trigger: p.trigger,
+    ...(p.eventId ? { eventId: p.eventId } : {}),
+    ...(p.task ? { task: p.task } : {}),
+    ...(p.taintedAtStart ? { taintedAtStart: true } : {}),
+    ...(p.chain ? { chain: p.chain } : {}),
+  };
+  const events = await s.stack.built.core.db.withTenant({ organizationId: s.orgA, userId: author }, (tx) =>
+    buildMentionEvents(tx, mention, {
+      core: s.stack.built.core,
+      perms: perms(),
+      ...(onLimitReached ? { onLimitReached } : {}),
+    }),
+  );
+  return events as Json[];
+}
+
+/** A thread in #eng: Sam's root (with `attachmentIds`) and a reply in it standing for the task card. */
+async function taskThread(attachmentIds?: string[]): Promise<{ root: string; card: string }> {
+  const root = await post(s.sam, engId, "Reconcile the March invoices", {
+    ...(attachmentIds ? { attachmentIds } : {}),
+  });
+  const card = await post(s.sam, engId, "Task: reconcile the March invoices", { threadRootId: root });
+  return { root, card };
+}
+
+/** A running task in `root` whose current turn is `eventId` (as 09 leaves it before the delivery). */
+const runningTask = (root: string, eventId: string, p: Partial<SeedTask> = {}) =>
+  seedTask({ threadRootId: root, status: "running", currentEventId: eventId, ...p });
+
+describe("the task trigger: browser off, the thread's files listed, the daily limit, run turns and AI chats (D-04, D-09)", () => {
+  beforeAll(async () => {
+    await setBotBrowser(s.scoutId, true);
+  });
+  afterAll(async () => {
+    await setBotBrowser(s.scoutId, false);
+  });
+
+  it("a continuation of Sam's task: no browser tool, the thread's attachments listed, continue and finish, turn.task", async () => {
+    const file = await uploadAttachment(s.sam, engId, {
+      name: "march.csv",
+      type: "text/csv",
+      bytes: new TextEncoder().encode("invoice,total\n1042,99\n"),
+    });
+    const { root, card } = await taskThread([file]);
+    // Sam's own mention in the thread: the browser is there (the bot has it on), and so is the file.
+    const person = await mention(s.sam, { threadRootId: root });
+    expect(browserTools(person).length).toBeGreaterThan(0);
+    expect((person.turn.attachments as Json[]).map((a) => a.id)).toContain(file);
+
+    const eventId = randomUUID();
+    const t = await runningTask(root, eventId);
+    try {
+      await s.su.query("delete from app.agent_usage_daily");
+      const events = await deliver({
+        trigger: "task",
+        messageId: card,
+        threadRootId: root,
+        eventId,
+        task: { taskId: t.id, reason: "continue" },
+      });
+      expect(events).toHaveLength(1);
+      const ev = events[0] as Json;
+      expect(ev.eventId).toBe(eventId);
+      expect(browserTools(ev)).toEqual([]);
+      expect((ev.turn.attachments as Json[]).map((a) => a.id)).toContain(file);
+      const task = await expectControl(ev, t.id);
+      expect(task.status).toBe("running");
+      // P4: the notes travel in turn.task only; the message is the server's sentence.
+      expect(ev.message.text).toBe("Continue your task (turn 4 of 40).");
+      expect(ev.turn).not.toHaveProperty("tainted");
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
+  it("taintedAtStart from the caller: the task turn starts tainted, on the turn and in the ledger (PD-15)", async () => {
+    const { root, card } = await taskThread();
+    const eventId = randomUUID();
+    const t = await runningTask(root, eventId);
+    try {
+      await s.su.query("delete from app.agent_usage_daily");
+      const [ev] = await deliver({
+        trigger: "task",
+        messageId: card,
+        threadRootId: root,
+        eventId,
+        task: { taskId: t.id, reason: "timer" },
+        taintedAtStart: true,
+      });
+      expect((ev as Json).turn.tainted).toBe(true);
+      expect((await ledger(eventId)).tainted).toBe(true);
+      await expectControl(ev as Json, t.id);
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
+  it("at the bot's daily limit: no event, no limit notice, onLimitReached once; a person's mention still gets the notice", async () => {
+    const { root, card } = await taskThread();
+    const eventId = randomUUID();
+    const t = await runningTask(root, eventId);
+    const botMessages = async () =>
+      Number(
+        (
+          await s.su.query(
+            "select count(*)::int as n from app.messages where conversation_id = $1 and author_kind = 'agent' and author_id = $2",
+            [engId, s.scoutId],
+          )
+        ).rows[0].n,
+      );
+    try {
+      await s.su.query(
+        `insert into app.agent_usage_daily (organization_id, agent_id, day, turns)
+         values ($1, $2, (now() at time zone 'utc')::date, 100000)
+         on conflict (organization_id, agent_id, day) do update set turns = 100000`,
+        [s.orgA, s.scoutId],
+      );
+      const before = await botMessages();
+      const calls: string[] = [];
+      const events = await deliver(
+        {
+          trigger: "task",
+          messageId: card,
+          threadRootId: root,
+          eventId,
+          task: { taskId: t.id, reason: "continue" },
+        },
+        (agentId) => calls.push(agentId),
+      );
+      expect(events).toEqual([]);
+      expect(calls).toEqual([s.scoutId]);
+      // The after-commit hooks ran when the transaction returned: nothing was posted, no turn recorded.
+      expect(await botMessages()).toBe(before);
+      expect(await ledger(eventId)).toBeUndefined();
+      // The over-limit delivery is still audited, as not notified.
+      const audit = (
+        await s.su.query(
+          "select metadata from app.audit_events where action = 'agent.limit_reached' and metadata->>'messageId' = $1",
+          [card],
+        )
+      ).rows as Json[];
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.metadata.notified).toBe(false);
+
+      // A person's mention at the limit keeps today's notice (the task did not use the channel's daily notice).
+      await post(s.sam, engId, `@scout are you there ${randomUUID().slice(0, 6)}`);
+      await eventually(async () => ((await botMessages()) === before + 1 ? true : undefined));
+    } finally {
+      await s.su.query("delete from app.agent_usage_daily");
+      await endTask(t.id);
+    }
+  });
+
+  it("automation run turns and consult hops are never offered ocw_task_start (A4)", async () => {
+    const { root } = await taskThread();
+    await s.su.query("delete from app.agent_usage_daily");
+    const [run] = await deliver({ trigger: "automation", messageId: root, threadRootId: root });
+    expectNoTask(run as Json);
+    await s.su.query("delete from app.agent_usage_daily");
+    const [hop] = await deliver({
+      trigger: "consult",
+      messageId: root,
+      threadRootId: root,
+      chain: {
+        chainId: null,
+        depth: 1,
+        answeringHopId: null,
+        returningHopId: null,
+        rootAgentId: null,
+        usedTargetIds: [],
+      },
+    });
+    expectNoTask(hop as Json);
+    // The same message as a person's delivery: the start offer.
+    await s.su.query("delete from app.agent_usage_daily");
+    const [person] = await deliver({ trigger: "mention", messageId: root, threadRootId: root });
+    await expectStart(person as Json);
+  });
+
+  it("an AI chat never carries a task tool or turn.task, even with an active task row there (D-10)", async () => {
+    const chatId = randomUUID();
+    await s.su.query(
+      "insert into app.conversations (id, organization_id, kind, name, created_by) values ($1, $2, 'ai_chat', 'Invoices', $3)",
+      [chatId, s.orgA, s.samId],
+    );
+    const t = await seedTask({ conversationId: chatId, threadRootId: chatId });
+    try {
+      const offer = (eventId: string) =>
+        s.stack.built.core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+          taskOfferFor(tx, {
+            agentId: s.scoutId,
+            conversationId: chatId,
+            conversationKind: "ai_chat",
+            threadRootId: chatId,
+            askerUserId: s.samId,
+            trigger: "mention",
+            eventId,
+          }),
+        );
+      expect(await offer(randomUUID())).toBeNull();
+      expect(await offer(t.currentEventId)).toBeNull();
+    } finally {
+      await endTask(t.id);
+    }
+  });
+});
+
+/** Builder's profile on Víctor's build server: Claude Code, Opus only, up to Full access (the 07.16 offer suite's). */
+const profile = (deviceId: string, projectIds: string[]): BotWorkZoneProfileInput => ({
+  deviceId,
+  runtime: "claude-code",
+  projectIds,
+  defaultModel: "opus",
+  allowedModels: ["opus"],
+  defaultEffort: null,
+  allowedEfforts: [],
+  defaultContextWindow: null,
+  allowedContextWindows: [],
+  fastMode: "off",
+  defaultMode: "default",
+  maxMode: "fullAccess",
+  worktree: true,
+  maxConcurrent: 2,
+  promptsPerHour: 30,
+  wakesPerSessionDay: 20,
+  actOnOutsideContent: false,
+});
+
+describe("a task turn of a bot with an active Work Zone profile carries its session tools, as a Work Zone wake does", () => {
+  let builderId: string;
+
+  beforeAll(async () => {
+    builderId = (await s.newBot("Builder")).id;
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${engId}/members`, {
+        kind: "agent",
+        id: builderId,
+      }) as Promise<Res>,
+    );
+    await ok(s.victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true }) as Promise<Res>);
+    const paired = await pairDevice(s.stack, s.victor, "billing-server");
+    device = await FakeDevice.connect(s.stack.baseUrl, paired.token);
+    device.send({
+      type: "projects.sync",
+      projects: [{ localId: "lp_billing", name: "billing-api", gitRemote: null, defaultBranch: "main" }],
+    });
+    await device.next((f) => f.type === "projects.ack");
+    device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true);
+    await eventually(async () => {
+      const r = await s.su.query(
+        "select runtime_catalog, full_access_opt_in from app.devices where id = $1",
+        [paired.deviceId],
+      );
+      return (r.rows[0].runtime_catalog as unknown[]).length === 2 && r.rows[0].full_access_opt_in === true;
+    });
+    const list = (await ok(s.victor.request("GET", "/api/v1/projects") as Promise<Res>)).projects as Json[];
+    const billingId = list.find((p) => p.name === "billing-api")?.id as string;
+    await createBotProfile(s.victor, builderId, profile(paired.deviceId, [billingId]));
+    await grantBotConsent(s.victor, paired.deviceId, builderId, { allowFullAccess: true });
+  }, 120_000);
+
+  it("Víctor's task turn: the six session tools and turn.workZone, equal to a work_session wake's on the same message", async () => {
+    const root = await post(s.victor, engId, "Fix the billing totals");
+    const person = await mention(s.victor, { threadRootId: root, handle: "builder", agentId: builderId });
+    for (const name of WORK_SESSION_TOOL_NAMES) expect(person.turn.tools).toContain(name);
+
+    const card = await post(s.victor, engId, "Task: fix the billing totals", { threadRootId: root });
+    const eventId = randomUUID();
+    const t = await runningTask(root, eventId, { agentId: builderId, requesterId: s.victorId });
+    try {
+      await s.su.query("delete from app.agent_usage_daily");
+      const [ev] = await deliver({
+        trigger: "task",
+        messageId: card,
+        threadRootId: root,
+        agentId: builderId,
+        author: s.victorId,
+        eventId,
+        task: { taskId: t.id, reason: "continue" },
+      });
+      await s.su.query("delete from app.agent_usage_daily");
+      const [wake] = await deliver({
+        trigger: "work_session",
+        messageId: card,
+        threadRootId: root,
+        agentId: builderId,
+        author: s.victorId,
+      });
+      const sessionTools = (e: Json) =>
+        (e.turn.tools as string[]).filter((n) => (WORK_SESSION_TOOL_NAMES as readonly string[]).includes(n));
+      expect(sessionTools(ev as Json)).toEqual([...WORK_SESSION_TOOL_NAMES]);
+      expect(sessionTools(ev as Json)).toEqual(sessionTools(wake as Json));
+      expect((ev as Json).turn.workZone).toEqual((wake as Json).turn.workZone);
+      await expectControl(ev as Json, t.id);
+      // The wake is not the task's current turn: it only sees the task.
+      await expectView(wake as Json, t.id);
+    } finally {
+      await endTask(t.id);
+    }
   });
 });
