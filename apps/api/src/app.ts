@@ -413,6 +413,7 @@ export async function buildApp(
       records: createRecordWrites(core), // 07.6-14: compare-and-set writes to watched records (AUTO-04)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
       sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
+      events: sandbox.events, // 07.17.1.1.2-11: sandboxd's `process` events wake the tasks waiting on them
       ...(opts.browserBudgetsMs ? { browserBudgets: opts.browserBudgetsMs } : {}),
       ...(opts.sandboxBudgetsMs ? { sandboxBudgets: opts.sandboxBudgetsMs } : {}),
     }),

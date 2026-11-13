@@ -1,0 +1,33 @@
+# The sbx document toolkit's Python environment (07.17.1.1.1 D-03, D-09; ADR-0043): the libraries a bot's sandbox
+# uses to read PDFs, Office files, sheets, images (OCR through tesseract), HTML/XML and text of unknown encoding,
+# installed by the image into the pip-less venv /opt/ocw-tools/venv with `--require-hashes --no-deps --only-binary
+# :all:` from requirements.lock.
+#
+# Top-level names only, unpinned. `tools/lock.sh` is the only way to update requirements.lock (it resolves inside the
+# image's pinned base with its Python 3.11.2, wheels only); never edit the lock by hand. A pin held back by the
+# 14-day rule of `scripts/sandbox-lock-evidence.mjs` is written here as `name<version` with the run date.
+#
+# Removed from D-03 (D-09): extract-msg (GPL, and a GPL/LGPL tree of about eight more pins; Debian `msgconvert` plus
+# the stdlib `email` parser read .msg), odfpy (sdist only, refused by `--only-binary :all:`; LibreOffice reads ODF),
+# chardet (charset-normalizer covers it and is already a pdfminer.six dependency), PyMuPDF (AGPL/commercial), xlrd
+# (its LICENSE adds a four-clause BSD-style text with an advertising clause, outside the allow list; dropped on
+# 2026-11-12 by the orchestrator: `ocw-extract` reads legacy .xls through LibreOffice, 07.17.1.1.1-03).
+# held back by the 14-day rule on 2026-11-12 (7.0.0 uploaded 2026-11-06, 7.0.1 on 2026-11-10)
+pypdf<7.0.0
+pdfplumber
+python-docx
+openpyxl
+python-pptx
+# held back by the 14-day rule on 2026-11-12 (3.1.1 uploaded 2026-11-04)
+pandas<3.1.1
+Pillow
+pytesseract
+charset-normalizer
+beautifulsoup4
+lxml
+defusedxml
+# Dependencies listed only to hold them back by the 14-day rule on 2026-11-12 (pdfplumber needs pypdfium2, pandas
+# needs python-dateutil): pypdfium2 5.15.0 uploaded 2026-11-06 (5.15.1 yanked, 5.15.2 on 2026-11-09), python-dateutil
+# 4.0.0 uploaded 2026-11-01. Drop a line once its newer version passes the rule.
+pypdfium2<5.15.0
+python-dateutil<4.0.0

@@ -114,6 +114,15 @@
  *                                          /__test/conversations {answer?, status?} replaces the knobs ({} resets them;
  *                                          the records stay); `status` makes the route answer that status with an error
  *                                          body carrying FAKE_ERROR_CANARY
+ *   POST /agent-channel/v1/tasks/{start,continue,finish}  (07.17.1.1.2) records every body (`taskCalls`, `{route,
+ *                                          body}`, refused ones included) and answers `tasks.answers[route]`, else start
+ *                                          `{ok: true, taskId: FAKE_TASK_ID, maxTurns: 40, deadlineAt}`, continue `{ok:
+ *                                          true, next: "after_turn", at: null, turnsLeft: 39, quiet: true}` and finish
+ *                                          `{ok: true, status: "done"}`; 400 for any key beyond the contract's (a user, a
+ *                                          conversation, a task, a budget), 404 `unknown_turn` for a turn ended with
+ *                                          `endTurn`. POST /__test/tasks {answers?, status?} replaces the knobs ({}
+ *                                          resets them; the records stay); `status` makes every route answer that status
+ *                                          with an error body carrying FAKE_ERROR_CANARY
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -541,6 +550,31 @@ export const FAKE_OPENED_ROOTS: readonly string[] = Array.from(
   { length: 25 },
   (_, i) => `0199a6f0-0000-7000-8000-00000000d${(0x100 + i).toString(16)}`,
 );
+/** 07.17.1.1.2: the three task routes. */
+export type FakeTaskRoute = "start" | "continue" | "finish";
+/** 07.17.1.1.2: the task routes' knobs (`POST /__test/tasks` replaces them). */
+export type FakeTasks = {
+  /** What a route answers instead of its default (any body, e.g. `{ok: false, code, sentence}`). */
+  answers?: Partial<Record<FakeTaskRoute, unknown>>;
+  /** When set, every task route answers this HTTP status with an error body (FAKE_ERROR_CANARY). */
+  status?: number;
+};
+/** The task every default start answer names. */
+export const FAKE_TASK_ID = "0199a6f0-0000-7000-8000-000000007a51";
+/** The keys each task body may carry (contracts `AgentChannelTaskStart|Continue|Finish`, strict objects). */
+const TASK_KEYS: Readonly<Record<FakeTaskRoute, readonly string[]>> = {
+  start: ["eventId", "agentId", "goal"],
+  continue: ["eventId", "agentId", "progress", "nextStep", "afterSeconds", "waitFor"],
+  finish: ["eventId", "agentId", "summary", "outcome"],
+};
+/** The default answers (contracts' defaults: 40 turns, 8 hours; a quiet continuation right after the turn). */
+function fakeTaskAnswer(route: FakeTaskRoute): unknown {
+  if (route === "start") {
+    return { ok: true, taskId: FAKE_TASK_ID, maxTurns: 40, deadlineAt: "2026-11-12T18:00:00.000Z" };
+  }
+  if (route === "continue") return { ok: true, next: "after_turn", at: null, turnsLeft: 39, quiet: true };
+  return { ok: true, status: "done" };
+}
 /** The keys an open body may carry (contracts `AgentChannelConversationOpen` and its items, strict objects). */
 const CONVERSATION_OPEN_KEYS: readonly string[] = ["eventId", "agentId", "items"];
 const CONVERSATION_OPEN_ITEM_KEYS: readonly string[] = ["externalKey", "title", "body"];
@@ -714,6 +748,10 @@ export type FakeAgentChannelApi = {
   conversationOpens: Array<Record<string, unknown>>;
   /** The open route's knobs (07.17). */
   conversationOpen: FakeConversationOpen;
+  /** Every POST /tasks/{start,continue,finish} body, in order (refused ones included; 07.17.1.1.2). */
+  taskCalls: Array<{ route: FakeTaskRoute; body: Record<string, unknown> }>;
+  /** The task routes' knobs (07.17.1.1.2). */
+  tasks: FakeTasks;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -951,6 +989,8 @@ export async function startFakeAgentChannelApi(
     workSessions: fakeWorkSessions(),
     conversationOpens: [] as Array<Record<string, unknown>>,
     conversationOpen: {} as FakeConversationOpen,
+    taskCalls: [] as Array<{ route: FakeTaskRoute; body: Record<string, unknown> }>,
+    tasks: {} as FakeTasks,
     consultations: [] as Array<Record<string, unknown>>,
     consultOutcome: undefined as ConsultOutcome | undefined,
     turnsDone: [] as StoredTurnDone[],
@@ -1095,6 +1135,15 @@ export async function startFakeAgentChannelApi(
           };
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/tasks") {
+          // 07.17.1.1.2: replace the task routes' knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as FakeTasks;
+          state.tasks = {
+            ...(body.answers && typeof body.answers === "object" ? { answers: body.answers } : {}),
+            ...(typeof body.status === "number" ? { status: body.status } : {}),
+          };
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/consult-outcome") {
           // 07.7: the consult route's answer ({} resets it; the records stay).
           const body = ((await readJson(req)) ?? {}) as { status?: unknown; body?: unknown };
@@ -1164,6 +1213,7 @@ export async function startFakeAgentChannelApi(
             attachments: state.attachments,
             workSessions: state.workSessions,
             conversationOpens: state.conversationOpens,
+            taskCalls: state.taskCalls,
             consultations: state.consultations,
             turnsDone: state.turnsDone,
             mcpProbes: state.mcpProbes,
@@ -1512,6 +1562,31 @@ export async function startFakeAgentChannelApi(
           200,
           knobs.answer ?? fakeConversationOpenAnswer(items as Array<Record<string, unknown>>),
         );
+      }
+      const taskRoute = /^\/tasks\/(start|continue|finish)$/u.exec(route)?.[1] as FakeTaskRoute | undefined;
+      if (req.method === "POST" && taskRoute) {
+        // 07.17.1.1.2 (PD-04, P6): only the turn's ids and the bot's own fields; the real API derives the rest.
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        state.taskCalls.push({ route: taskRoute, body: structuredClone(body) });
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !TASK_KEYS[taskRoute].includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        const knobs = state.tasks;
+        if (knobs.status !== undefined) {
+          return json(res, knobs.status, {
+            error: { code: "internal", message: `failed by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (state.endedTurns.has(body.eventId)) {
+          return json(res, 404, {
+            error: { code: "unknown_turn", message: `turn ended ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(res, 200, knobs.answers?.[taskRoute] ?? fakeTaskAnswer(taskRoute));
       }
       if (req.method === "POST" && route === "/attachments/read") {
         // 07.15 (D-03): only the turn's ids and the attachment id; the real API derives everything else.
@@ -2122,6 +2197,15 @@ export async function startFakeAgentChannelApi(
     },
     set conversationOpen(value: FakeConversationOpen) {
       state.conversationOpen = value;
+    },
+    get taskCalls() {
+      return state.taskCalls;
+    },
+    get tasks() {
+      return state.tasks;
+    },
+    set tasks(value: FakeTasks) {
+      state.tasks = value;
     },
     get mcpServers() {
       return state.mcpServers;

@@ -77,6 +77,12 @@ export async function claimToolCall(
      * other side-effecting call of the turn is refused as `tainted`; prompting and stopping that session are exempt.
      */
     sessionOutputExempt?: boolean;
+    /**
+     * 07.17.1.1.2 D-13 (PD-08): a task tool (`ocw_task_*`) is outside the per-turn cap of 8: the cap is neither checked
+     * nor counted (the plugin bounds each task tool to one call per turn). Only for flags that are not side-effecting,
+     * so the taint and session-output conditions never apply to it either; the call is still recorded and audited.
+     */
+    uncapped?: boolean;
   },
 ): Promise<ClaimedCall> {
   const { turn, flags } = p;
@@ -89,7 +95,9 @@ export async function claimToolCall(
             lt(agentTurns.attachmentReads, p.attachmentRead.maxReads),
             lt(agentTurns.attachmentChars, p.attachmentRead.maxChars),
           ]
-        : [lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)]),
+        : p.uncapped && !flags.sideEffecting
+          ? []
+          : [lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)]),
       p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
       flags.sideEffecting && !p.grantApprovalId && !p.outsideContent
         ? eq(agentTurns.tainted, false)
@@ -102,7 +110,10 @@ export async function claimToolCall(
     const updated = await tx
       .update(agentTurns)
       .set({
-        toolCalls: p.countCall === false ? sql`${agentTurns.toolCalls}` : sql`${agentTurns.toolCalls} + 1`,
+        toolCalls:
+          p.countCall === false || (p.uncapped && !flags.sideEffecting)
+            ? sql`${agentTurns.toolCalls}`
+            : sql`${agentTurns.toolCalls} + 1`,
         webCalls: p.web ? sql`${agentTurns.webCalls} + 1` : sql`${agentTurns.webCalls}`,
         tainted: flags.untrustedOutput ? true : sql`${agentTurns.tainted}`,
         ...(p.attachmentRead ? { attachmentReads: sql`${agentTurns.attachmentReads} + 1` } : {}),

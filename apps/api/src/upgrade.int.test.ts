@@ -143,6 +143,8 @@ const HEAD_ONLY = [
   "20261110124940_automation_item_waiting",
   "20261111194914_runtime_self_update",
   "20261111225544_bot_work_session_files",
+  "20261112230733_bot_tasks",
+  "20261113035112_bot_task_process_ends",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -920,6 +922,52 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       } finally {
         await c.end();
       }
+    });
+
+    it("starts every policy at 40 turns, 8 hours and 10 running tasks, links no turn or session to a task, opens no task and accepts a task card (Phase 07.17.1.1.2, D-01, D-04, D-05)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const policies = await c.query(
+          "select organization_id, task_max_turns, task_max_hours, max_running_tasks from app.bot_policies order by organization_id",
+        );
+        expect(policies.rows).toEqual([
+          { organization_id: ORG_A, task_max_turns: 40, task_max_hours: 8, max_running_tasks: 10 },
+        ]);
+        const cols = await c.query(
+          "select table_name, is_nullable, column_default from information_schema.columns where table_schema = 'app' and column_name = 'task_id' and table_name in ('agent_turns','bot_work_sessions') order by table_name",
+        );
+        expect(cols.rows).toEqual([
+          { table_name: "agent_turns", is_nullable: "YES", column_default: null },
+          { table_name: "bot_work_sessions", is_nullable: "YES", column_default: null },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.bot_tasks) as tasks, (select count(*)::int from app.bot_task_processes) as processes, (select count(*)::int from app.agent_turns where task_id is not null) as turns, (select count(*)::int from app.bot_work_sessions where task_id is not null) as sessions",
+        );
+        expect(empty.rows).toEqual([{ tasks: 0, processes: 0, turns: 0, sessions: 0 }]);
+        // The widened kind check takes a platform-owned task card on an existing message (rolled back: the row counts
+        // the other cases read stay the dump's).
+        const msg = await c.query(
+          "select m.id, m.conversation_id from app.messages m where m.organization_id = $1 and not exists (select 1 from app.message_cards k where k.message_id = m.id) order by m.id limit 1",
+          [ORG_A],
+        );
+        expect(msg.rows).toHaveLength(1);
+        await c.query("begin");
+        try {
+          const card = await c.query(
+            "insert into app.message_cards (message_id, organization_id, conversation_id, agent_id, kind, title, status, platform_owned) values ($1, $2, $3, $4, 'task', 'Read the knowledge pack', 'running', true)",
+            [msg.rows[0].id, ORG_A, msg.rows[0].conversation_id, HELPER_BOT],
+          );
+          expect(card.rowCount).toBe(1);
+        } finally {
+          await c.query("rollback");
+        }
+      } finally {
+        await c.end();
+      }
+      const queues = await pgbossQueues();
+      expect(queues).toContain("bot_task.continue");
+      expect(queues).toContain("bot_task.tick");
     });
 
     it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {

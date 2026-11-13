@@ -421,6 +421,7 @@ describe("flags and the cell-wide view", () => {
           replyMessageId: turn.reply_message_id,
           doneAt: turn.done_at,
           sessionOutputRead: turn.session_output_read,
+          taskId: turn.task_id,
         },
         tool: "ocw_connector_list",
         flags: ev.turn.toolFlags.ocw_connector_list,

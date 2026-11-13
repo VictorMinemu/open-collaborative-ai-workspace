@@ -1,5 +1,6 @@
 import {
-  type BotPolicy,
+  type AgentScope,
+  BotPolicy,
   BuiltinCapability,
   CapabilityPolicyEntry,
   DEFAULT_BOT_POLICY,
@@ -10,6 +11,9 @@ import { botPolicies, cellPlugins, type Tx, tenantOf } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { Env } from "../../config/env";
 import { badRequest } from "../../lib/errors";
+import { readCapabilities, type TaskPolicy, taskPolicyFor } from "./capabilities";
+
+export type { TaskPolicy } from "./capabilities";
 
 /**
  * The organization bot policy (D-06): one `bot_policies` row per org, the defaults (allow everything) when it
@@ -29,12 +33,20 @@ function fromRow(row: PolicyRow | undefined): BotPolicy {
     if (parsed.success) capabilities[cap] = parsed.data;
   }
   const provider = SearchProvider.safeParse(row.searchProvider);
+  // 07.17.1.1.2 (D-04): the long-task limits (database checks hold the same bounds); a value out of range reads as the
+  // default rather than failing the policy.
+  const tasks = BotPolicy.shape.tasks.safeParse({
+    maxTurns: row.taskMaxTurns,
+    maxHours: row.taskMaxHours,
+    maxRunning: row.maxRunningTasks,
+  });
   return {
     capabilities,
     searchProvider: provider.success ? provider.data : DEFAULT_BOT_POLICY.searchProvider,
     maxPersonalBotsPerUser: row.maxPersonalBotsPerUser,
     personalDailyLimitMax: row.personalDailyLimitMax,
     personalAllowedModels: row.personalAllowedModels,
+    tasks: tasks.success ? tasks.data : { ...DEFAULT_BOT_POLICY.tasks },
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -42,6 +54,18 @@ function fromRow(row: PolicyRow | undefined): BotPolicy {
 export async function loadPolicy(tx: Tx): Promise<BotPolicy> {
   const [row] = await tx.select().from(botPolicies).limit(1);
   return fromRow(row);
+}
+
+/**
+ * Phase 07.17.1.1.2 (D-04, E11): may this bot run long tasks now, and within which limits. The bot's own toggle, then
+ * the organization's "Allow long tasks", then its personal sub-switch for a personal bot. Re-decided at every task
+ * start and continuation (08, 09); the turn reads the same rule through `computeTurn.longTasks`.
+ */
+export async function loadTaskPolicy(
+  tx: Tx,
+  agent: { scope: AgentScope; capabilities: unknown },
+): Promise<TaskPolicy> {
+  return taskPolicyFor({ scope: agent.scope, caps: readCapabilities(agent), policy: await loadPolicy(tx) });
 }
 
 /**
@@ -91,6 +115,9 @@ function changedKeys(before: BotPolicy, after: BotPolicy): string[] {
   if (before.personalAllowedModels.join("\n") !== after.personalAllowedModels.join("\n")) {
     out.push("personalAllowedModels");
   }
+  for (const key of ["maxTurns", "maxHours", "maxRunning"] as const) {
+    if (before.tasks[key] !== after.tasks[key]) out.push(`tasks.${key}`);
+  }
   return out;
 }
 
@@ -113,6 +140,8 @@ export async function savePolicy(
     personalAllowedModels: patch.personalAllowedModels
       ? [...new Set(patch.personalAllowedModels)]
       : before.personalAllowedModels,
+    // Merged per limit: a patch naming one limit leaves the others as they were.
+    tasks: { ...before.tasks, ...patch.tasks },
     updatedAt: before.updatedAt,
   };
   if (patch.searchProvider && patch.searchProvider !== before.searchProvider) {
@@ -130,6 +159,9 @@ export async function savePolicy(
     maxPersonalBotsPerUser: next.maxPersonalBotsPerUser,
     personalDailyLimitMax: next.personalDailyLimitMax,
     personalAllowedModels: next.personalAllowedModels,
+    taskMaxTurns: next.tasks.maxTurns,
+    taskMaxHours: next.tasks.maxHours,
+    maxRunningTasks: next.tasks.maxRunning,
     updatedBy: actorUserId,
     updatedAt: now,
   };

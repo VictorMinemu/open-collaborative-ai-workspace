@@ -197,6 +197,10 @@ const MEMORY_DM_TOOLS = [
   "ocw_agent_card",
   // 07.6-12: Sam holds `automation.create` in his DM with the bot.
   "ocw_automation_propose",
+  // 07.17.1.1.2 (PD-07): a person's turn in a thread without the bot's task may start one.
+  "ocw_task_start",
+  "ocw_task_continue",
+  "ocw_task_finish",
 ];
 const READ_FLAGS = { untrustedOutput: false, sideEffecting: false };
 const WRITE_FLAGS = { untrustedOutput: false, sideEffecting: true };
@@ -326,6 +330,10 @@ describe("agent reads follow the audience of the conversation (D-08, Pitfall 5)"
       "ocw_memory_read",
       "ocw_memory_propose",
       "ocw_agent_card",
+      // 07.17.1.1.2 (PD-07): a group DM is one thread; no task of the bot there yet.
+      "ocw_task_start",
+      "ocw_task_continue",
+      "ocw_task_finish",
     ]);
     expect(ev.turn.memory).toEqual([]);
     expect(ev.turn.memoryFiles).toBeUndefined();

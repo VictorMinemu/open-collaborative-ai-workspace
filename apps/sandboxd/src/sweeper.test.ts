@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createFiles } from "./files";
 import { createQuota } from "./quota";
 import { createSandboxes, type SandboxdEventInput } from "./sandboxes";
-import { nameFor } from "./spec";
+import { nameFor, OCW_FILES } from "./spec";
 import { createSweeper } from "./sweeper";
 import { FakeDocker } from "./testing/fake-docker";
 
@@ -37,13 +37,23 @@ const policy = (over: { diskQuotaBytes?: number; idleStopMs?: number; killed?: b
   version: 1,
 });
 
-/** A workspace whose `du` answers `disk` bytes; `rm` frees what the test says. */
-function setup(opts: { disk?: number } = {}) {
+/**
+ * A workspace whose `du` answers `disk` bytes; `rm` frees what the test says. `scratch` bytes of it are ocw-extract's
+ * scratch folder a killed run left (07.17.1.1.1 review WR-06): `rm .ocw-extract-tmp` frees them, or answers 4 (not
+ * found) when there is none.
+ */
+function setup(opts: { disk?: number; scratch?: number } = {}) {
   const docker = new FakeDocker();
-  const state = { disk: opts.disk ?? 1000, afterRm: 1000 };
+  const state = { disk: opts.disk ?? 1000, afterRm: 1000, scratch: opts.scratch ?? 0 };
   docker.onExec = (call) => {
     const sub = call.cmd[1];
     if (sub === "du") return { exitCode: 0, stdout: `${state.disk}\n` };
+    if (sub === "rm" && call.cmd[2] === ".ocw-extract-tmp") {
+      if (state.scratch === 0) return { exitCode: 4 };
+      state.disk -= state.scratch;
+      state.scratch = 0;
+      return { exitCode: 0, stdout: "3" };
+    }
     if (sub === "rm") {
       state.disk = state.afterRm;
       return { exitCode: 0, stdout: "1" };
@@ -176,6 +186,39 @@ describe("soft quota (D-01, F-9, T-07.8-09-03)", () => {
       state: "running",
       diskBytes: 10 * MiB,
     });
+  });
+
+  it("over quota, the scratch a killed ocw-extract run left is removed once the shell is stopped, then measured again (07.17.1.1.1 review WR-06)", async () => {
+    const t = setup({ disk: 130 * MiB, scratch: 100 * MiB });
+    await t.sandboxes.ensure(target);
+    await t.sweeper.tick();
+    const rm = t.docker.execCreates.filter(
+      (c) =>
+        JSON.stringify((c.body as { Cmd: string[] }).Cmd) ===
+        JSON.stringify([OCW_FILES, "rm", ".ocw-extract-tmp", "1"]),
+    );
+    expect(rm).toHaveLength(1);
+    // Removed through the files helper, after the shell was stopped: no ocw-extract run can be using it.
+    expect(rm[0]?.path).toContain(
+      encodeURIComponent(t.docker.container(nameFor("files", NS, AGENT))?.Id ?? "none"),
+    );
+    expect(t.sbx()?.Running).toBe(false);
+    expect((await t.sandboxes.status(target)).state).not.toBe("disk_full");
+    expect((await t.sandboxes.status(target)).diskBytes).toBe(30 * MiB);
+    await expect(t.sandboxes.ensure(target)).resolves.toMatchObject({ state: "running" });
+  });
+
+  it("every exec tells the command the room left under the quota, once it is known (07.17.1.1.1 review WR-06)", async () => {
+    const t = setup({ disk: 10 * MiB });
+    await t.sandboxes.ensure(target);
+    const envOf = () => (t.docker.execCreates.at(-1)?.body as { Env?: string[] } | undefined)?.Env ?? [];
+    await t.sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 1000, yieldMs: 0 });
+    expect(envOf().some((l) => l.startsWith("SBX_DISK_ROOM_BYTES="))).toBe(false);
+    await t.quota.measure(target);
+    await t.sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 1000, yieldMs: 0 });
+    expect(envOf()).toEqual([`SBX_DISK_ROOM_BYTES=${54 * MiB}`]);
+    // Never an OCW_ variable in the bot's environment (the sandbox smoke's core rule).
+    expect(envOf().filter((l) => l.includes("OCW_"))).toEqual([]);
   });
 
   it("measuring never counts as activity (the sweeper does not keep a sandbox awake)", async () => {

@@ -42,6 +42,7 @@ import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted, runLogTainted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
+import { markProcessesReported, taskOfferFor } from "./task-offer";
 
 /** Bounded thread context per mention (A2.2). */
 export const HISTORY_LIMIT = 50;
@@ -93,6 +94,11 @@ export async function buildMentionEvents(
     modelLabel?: ((ref: ModelRef) => string) | undefined;
     /** Memory files (07.2-11): absent = turns carry no memory. */
     memory?: MemoryService | undefined;
+    /**
+     * Phase 07.17.1.1.2 (D-04, PD-09): a `trigger: "task"` delivery of a bot at its daily limit calls this (once per bot)
+     * instead of posting the generic limit notice; the task's caller stops the task with its own message.
+     */
+    onLimitReached?: ((agentId: string) => void) | undefined;
   },
 ): Promise<StoredMention[]> {
   // MVP 0: only human-authored mentions reach the cell (no agent ↔ agent loops).
@@ -269,18 +275,26 @@ export async function buildMentionEvents(
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker). Phase 07.16
   // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser). Phase 07.17
-  // (D-04, PD-09): nor an item a fan-out run opened (its own turn, delivered by the item worker).
+  // (D-04, PD-09): nor an item a fan-out run opened (its own turn, delivered by the item worker). Phase 07.17.1.1.2
+  // (D-09): nor a continuation of the bot's long task (nobody watches it), for the browser only: see `listsFiles`.
   const workSessionWake = mention.trigger === "work_session";
   const automationItem = mention.trigger === "automation_item";
+  const taskTurn = mention.trigger === "task";
   const unattended =
-    mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake || automationItem;
+    mention.trigger === "automation" ||
+    mention.trigger === "consult" ||
+    workSessionWake ||
+    automationItem ||
+    taskTurn;
 
   // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
   // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
   // upload order, then the history newest first. Automation runs and consult hops list none (PD-04). `turnPolicy` decides
-  // per bot how each can be read.
+  // per bot how each can be read. Phase 07.17.1.1.2 (D-09): a task's continuation lists them like a person's turn (the
+  // files the person posted are what the task works on).
+  const listsFiles = !unattended || taskTurn;
   const attachments: AttachmentRow[] = [];
-  if (!unattended) {
+  if (listsFiles) {
     const byMessage = await attachmentRowsForMessages(tx, [
       mention.messageId,
       ...historyRows.map((m) => m.id),
@@ -317,8 +331,9 @@ export async function buildMentionEvents(
     // consult hop) or a wake about the bot's own session (`work_session`, 07.16-20), of a bot whose Work Zone profile is
     // active, for an asker who passes the Work Zone module gate. Phase 07.17 (D-04, ADR-0039): an opened item's turn
     // too, for the automation's run-as person, tainted (outside content: the start route decides the flag's path).
+    // Phase 07.17.1.1.2 (D-09): a task's continuation too, for its requester, as a Work Zone wake.
     const workZone =
-      unattended && !workSessionWake && !automationItem
+      unattended && !workSessionWake && !automationItem && !taskTurn
         ? null
         : await workZoneOfferFor(tx, deps.perms, {
             agentId: a.id,
@@ -328,6 +343,21 @@ export async function buildMentionEvents(
             // 07.17.1.1 (D-07): the file tools' limit on the turn, under this server's ceiling.
             fileCeilingBytes: deps.core.env.OCW_ATTACHMENT_MAX_BYTES,
           });
+    // Phase 07.17.1.1.2 (D-02, PD-07): the bot's long task in this thread decides this turn's task tools and facts;
+    // `turnPolicy` keeps them only while the bot may run long tasks.
+    const task = await taskOfferFor(tx, {
+      agentId: a.id,
+      conversationId: conv.id,
+      conversationKind: conv.kind,
+      threadRootId: root,
+      askerUserId: mention.author.id,
+      trigger: mention.trigger ?? "mention",
+      eventId,
+      mentionTaskId:
+        mention.trigger === "task" || mention.trigger === "work_session"
+          ? (mention.task?.taskId ?? null)
+          : null,
+    });
     const decision = await turnPolicy(
       tx,
       deps.core,
@@ -356,6 +386,7 @@ export async function buildMentionEvents(
         workZone,
         // Phase 07.17 (D-02, PD-07): only a run delivery carries the fan-out offer; every other trigger ignores it.
         conversationOpen: mention.trigger === "automation" ? (mention.conversationOpen ?? null) : null,
+        task,
       },
       {
         audience,
@@ -366,10 +397,16 @@ export async function buildMentionEvents(
     );
     // Not delivered (daily limit reached, or the bot is gone): no cell event, so no model call.
     if (!decision.deliver) {
-      if (decision.reason === "limit_reached") {
+      if (decision.reason === "limit_reached" && mention.trigger === "task") {
+        await taskLimitReached(tx, deps, mention, conv, a.id, decision.limit);
+      } else if (decision.reason === "limit_reached") {
         await limitReached(tx, deps, mention, conv, a.id, decision.notice, decision.limit);
       }
       continue;
+    }
+    // PD-13: the ended processes this control turn lists reach it alone (marked in the delivery transaction).
+    if (task?.offer === "control" && decision.turn.task) {
+      await markProcessesReported(tx, task.reportedProcessIds);
     }
     events.push({
       eventId,
@@ -465,6 +502,31 @@ async function replyModeGate<T extends typeof agents.$inferSelect>(
     }
   }
   return out;
+}
+
+/**
+ * Phase 07.17.1.1.2 (D-04, PD-09, E9): a task's continuation at the bot's daily limit. Audited like every over-limit
+ * delivery (`agent.limit_reached`, not notified), but no generic notice is posted and the channel's daily notice is not
+ * used up: the caller stops the task (`daily_limit`) and posts its one message.
+ */
+async function taskLimitReached(
+  tx: Tx,
+  deps: { core: Core; onLimitReached?: ((agentId: string) => void) | undefined },
+  mention: AgentMention,
+  conv: { id: string; kind: string },
+  agentId: string,
+  limit: number,
+): Promise<void> {
+  await recordLimitReached(tx, deps.core, {
+    agentId,
+    humanUserId: mention.author.id,
+    conversationId: conv.id,
+    conversationKind: conv.kind,
+    messageId: mention.messageId,
+    limit,
+    notified: false,
+  });
+  deps.onLimitReached?.(agentId);
 }
 
 /**

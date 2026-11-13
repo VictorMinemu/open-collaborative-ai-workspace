@@ -18,7 +18,10 @@ import {
   SHELL_ENV,
   type ShellSpecInput,
   STAGING_DIR,
+  shellEnvCurrent,
   shellSpec,
+  TOOLS_DIR,
+  TOOLS_SITE,
   volumeSpec,
 } from "./spec";
 
@@ -89,13 +92,14 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     });
   });
 
-  it("sets exactly HOME, the package paths and the egress proxy (no OCW_ variable, no token, no secret)", () => {
+  it("sets exactly HOME, the toolkit and package paths and the egress proxy (no OCW_ variable, no token, no secret)", () => {
     // 07.8-17: package bins come after the system paths; curl, pip and npm use the proxy by default (WINDOWS #253).
+    // 07.17.1.1.1 (D-03, PD-05): the document toolkit sits after the system paths and before approved packages.
     expect(shellSpec(base).Env).toEqual([
       "HOME=/workspace",
-      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-tools/bin:/opt/ocw-packages/bin",
       "NODE_PATH=/opt/ocw-packages/node_modules",
-      "PYTHONPATH=/opt/ocw-packages/python",
+      "PYTHONPATH=/opt/ocw-packages/python:/opt/ocw-tools/venv/lib/python3.11/site-packages",
       "HTTP_PROXY=http://sandbox-egress:3128",
       "HTTPS_PROXY=http://sandbox-egress:3128",
       "http_proxy=http://sandbox-egress:3128",
@@ -105,6 +109,24 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     ]);
     expect(shellSpec(base).Env).toEqual([...SHELL_ENV]);
     for (const line of SHELL_ENV) expect(line).not.toMatch(/OCW_|TOKEN|SECRET|PASSWORD|@/i);
+  });
+
+  it("puts the toolkit bin between the system and package bins and its site after approved packages (07.17.1.1.1)", () => {
+    expect(TOOLS_DIR).toBe("/opt/ocw-tools");
+    expect(TOOLS_SITE).toBe("/opt/ocw-tools/venv/lib/python3.11/site-packages");
+    const value = (name: string) => {
+      const line = SHELL_ENV.find((l) => l.startsWith(`${name}=`));
+      expect(line).toBeDefined();
+      return (line ?? "").slice(name.length + 1).split(":");
+    };
+    const path = value("PATH");
+    expect(path.indexOf("/opt/ocw-tools/bin")).toBe(path.indexOf("/bin") + 1);
+    expect(path.indexOf("/opt/ocw-packages/bin")).toBe(path.indexOf("/opt/ocw-tools/bin") + 1);
+    const pythonPath = value("PYTHONPATH");
+    // 07.17.1.1.1 review WR-08: approved packages come first, so the versions an approval pinned (e.g. numpy<2) win
+    // over the toolkit's; ocw-extract runs isolated (-I) and never reads PYTHONPATH.
+    expect(pythonPath).toEqual([`${PACKAGES_DIR}/python`, TOOLS_SITE]);
+    for (const line of SHELL_ENV) expect(line).not.toContain("/opt/ocw-tools/venv/bin");
   });
 
   it("clamps limits over HARD_MAX and nonsense values to a safe range", () => {
@@ -218,6 +240,8 @@ describe("the files helper keeps only the workspace (07.8-17)", () => {
       { Type: "volume", Source: base.volume, Target: "/workspace", ReadOnly: false },
     ]);
     expect(spec.HostConfig.NetworkMode).toBe("none");
+    // The same environment as the shell (it reuses shellSpec), the toolkit paths included (07.17.1.1.1).
+    expect(spec.Env).toEqual([...SHELL_ENV]);
   });
 });
 
@@ -372,5 +396,30 @@ describe("the proxy's address in /etc/hosts (07.8 gVisor DNS fix)", () => {
     expect(egressHostsCurrent(["sandbox-egress:10.1.0.2", "x:1.2.3.4"], "10.1.0.2")).toBe(false);
     expect(egressHostsCurrent(null, null)).toBe(true);
     expect(egressHostsCurrent([], null)).toBe(true);
+  });
+});
+
+describe("shellEnvCurrent (07.17.1.1.1 D-10, PD-10)", () => {
+  /** The shell environment before the toolkit: no toolkit bin on PATH, approved packages alone on PYTHONPATH. */
+  const previous = [
+    "HOME=/workspace",
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+    "NODE_PATH=/opt/ocw-packages/node_modules",
+    "PYTHONPATH=/opt/ocw-packages/python",
+    ...SHELL_ENV.filter((l) => /^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy)=/.test(l)),
+  ];
+
+  it("is true when every SHELL_ENV line is present, in any order, with the image's own ENV lines merged in", () => {
+    expect(shellEnvCurrent([...SHELL_ENV])).toBe(true);
+    expect(shellEnvCurrent(["NODE_VERSION=24.22.1", ...SHELL_ENV.slice().reverse()])).toBe(true);
+  });
+
+  it("is false for the previous environment, a missing line, or no environment at all", () => {
+    expect(shellEnvCurrent(previous)).toBe(false);
+    expect(shellEnvCurrent(SHELL_ENV.slice(1))).toBe(false);
+    expect(shellEnvCurrent(null)).toBe(false);
+    expect(shellEnvCurrent(undefined)).toBe(false);
+    expect(shellEnvCurrent([])).toBe(false);
+    expect(shellEnvCurrent("HOME=/workspace")).toBe(false);
   });
 });

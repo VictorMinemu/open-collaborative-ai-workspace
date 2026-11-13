@@ -17,6 +17,16 @@ export const WORKSPACE = "/workspace";
 export const OCW_RUN = "/usr/local/bin/ocw-run";
 /** The helper every file operation goes through (infra/sandbox/sbx/ocw-files), workspace-confined with realpath. */
 export const OCW_FILES = "/usr/local/bin/ocw-files";
+/**
+ * `ocw-extract`'s scratch folder in the workspace (infra/sandbox/sbx/tools/ocw_extract/runner.py SCRATCH_ROOT), as
+ * `ocw-files` names it: a run SIGKILLed mid-extraction leaves it behind (07.17.1.1.1 review WR-06).
+ */
+export const EXTRACT_SCRATCH = ".ocw-extract-tmp";
+/**
+ * The room left under the soft quota, told to every exec (07.17.1.1.1 review WR-06; ocw-extract caps archives). SBX_,
+ * never OCW_: no OCW_ variable ever reaches a bot's environment.
+ */
+export const DISK_ROOM_ENV = "SBX_DISK_ROOM_BYTES";
 
 export interface ContainerLimits {
   nanoCpus: number;
@@ -200,17 +210,42 @@ export function egressHostsCurrent(extraHosts: unknown, address: string | null):
 }
 
 /**
- * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): package bins after the system paths (a package never
- * shadows a system command), Node and Python find approved packages, and every tool uses the egress proxy by default.
- * Constants only: nothing here comes from a request, and no secret is ever set.
+ * The document toolkit baked into the `sbx` image (07.17.1.1.1, D-03, PD-05; ADR-0043): its `bin` comes after the system
+ * paths and before approved package bins in PATH; in PYTHONPATH it comes after approved packages (07.17.1.1.1 review
+ * WR-08), so a version an approval pinned is never replaced by the toolkit's. `bin` holds curated links only (e.g.
+ * `pdfplumber`), never the venv's own `bin` (it has `python`, which would shadow bookworm's missing one).
+ */
+export const TOOLS_DIR = "/opt/ocw-tools";
+/** The toolkit venv's site-packages (Python 3.11, the image's interpreter), after approved packages on PYTHONPATH. */
+export const TOOLS_SITE = `${TOOLS_DIR}/venv/lib/python3.11/site-packages`;
+
+/**
+ * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): the toolkit (07.17.1.1.1) and then package bins after
+ * the system paths (neither ever shadows a system command), Node and Python find approved packages and then the toolkit
+ * (an approved package and the dependencies its approval pinned win over a toolkit module of the same name; ocw-extract
+ * runs isolated and never reads PYTHONPATH), and every tool uses the egress proxy by default.
+ * Constants only: nothing here comes from a request, and no secret is ever set. Package runs (`runEnv`) never see the
+ * toolkit.
  */
 export const SHELL_ENV: readonly string[] = [
   `HOME=${WORKSPACE}`,
-  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PACKAGES_DIR}/bin`,
+  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${TOOLS_DIR}/bin:${PACKAGES_DIR}/bin`,
   `NODE_PATH=${PACKAGES_DIR}/node_modules`,
-  `PYTHONPATH=${PACKAGES_DIR}/python`,
+  `PYTHONPATH=${PACKAGES_DIR}/python:${TOOLS_SITE}`,
   ...PROXY_ENV,
 ];
+
+/**
+ * Whether a container's inspected `Config.Env` holds every current `SHELL_ENV` line (07.17.1.1.1 D-10, PD-10): a shell
+ * created before an environment change (e.g. without the toolkit on PATH) lacks one and is created again at its next
+ * start. Presence, not equality: Docker merges the image's own `ENV` lines (e.g. `NODE_VERSION`) into the container's,
+ * so an exact comparison would always fail. No environment at all is never current.
+ */
+export function shellEnvCurrent(env: unknown): boolean {
+  if (!Array.isArray(env) || env.length === 0) return false;
+  const have = new Set(env.filter((l): l is string => typeof l === "string"));
+  return SHELL_ENV.every((line) => have.has(line));
+}
 
 /**
  * The `ContainerCreate` body of a bot's `sbx` (research Code Examples, hardened profile table). The command only keeps

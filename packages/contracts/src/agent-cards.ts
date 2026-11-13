@@ -7,6 +7,7 @@ import {
   ApprovalNote,
   ApprovalRequestStatus,
 } from "./approvals";
+import { AgentCardTaskLink } from "./bot-tasks";
 import { BrowserEndReason, BrowserHost, BrowserSignInStatus } from "./browser";
 import { Id, IsoDateTime, PrincipalKind } from "./common";
 import { WorkZoneStartBlock } from "./work-zone-proposals";
@@ -20,7 +21,7 @@ export * from "./browser";
 
 /**
  * Phase 6 Agent Cards (AGENT-04, D-07, P-11): a typed card an agent posts with a message and updates in place.
- * Imports `common`, `approvals`, `agent-card-route`, `work-zone-proposals` and `browser` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
+ * Imports `common`, `approvals`, `agent-card-route`, `work-zone-proposals`, `browser` and `bot-tasks` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
  * would be a cycle (`approvals` never imports `chat.ts` or this file).
  * Actions are server-decided; an Open action can only point to an internal app route (`AgentCardRoute`).
  */
@@ -45,6 +46,8 @@ export const AgentCardKind = z.enum([
   "generic",
   // Phase 07.8 (UI-SPEC R1): the platform-owned "Sign in needed" card.
   "browser",
+  // Phase 07.17.1.1.2 (D-05): the platform-owned task card (goal, status, turns, elapsed, progress, Stop).
+  "task",
 ]);
 export type AgentCardKind = z.infer<typeof AgentCardKind>;
 
@@ -202,9 +205,10 @@ export const AgentCard = z.object({
   following: z.boolean().optional(),
   /**
    * Viewer-specific: what the viewer may do on this card. `sign_in` (Phase 07.8): the viewer is the requester of a
-   * `browser` card and may open the live view to sign in.
+   * `browser` card and may open the live view to sign in. `stop` (Phase 07.17.1.1.2, PD-12): the viewer may stop this
+   * `task` card's task (the person it runs for, a moderator of the channel or a manager of the bot).
    */
-  viewerCan: z.array(z.enum(["follow", "decide", "sign_in"])).optional(),
+  viewerCan: z.array(z.enum(["follow", "decide", "sign_in", "stop"])).optional(),
   /**
    * Phase 07.2 (D-08): composed by the server, never by an agent (an agent PATCH is refused), so a model cannot
    * rewrite findings or reader counts. Absent on older cards.
@@ -214,6 +218,11 @@ export const AgentCard = z.object({
   approval: AgentCardApprovalLink.nullable().optional(),
   /** Phase 07.8: the sign-in this `browser` card mirrors. Absent on every other card. */
   browserSignIn: AgentCardBrowserSignInLink.nullable().optional(),
+  /**
+   * Phase 07.17.1.1.2 (D-05, PD-11): the task this `task` card mirrors, composed by the server from the task row for
+   * every reader, never by the bot. Absent on every other card.
+   */
+  task: AgentCardTaskLink.nullable().optional(),
   /**
    * Phase 07.6 (R1, P-12): the pill's word instead of the generic status label, and up to three notices. Honoured by the
    * API only for platform-owned cards (set through `updatePlatformCard`); absent on older cards, which render as before.
@@ -225,7 +234,8 @@ export type AgentCard = z.infer<typeof AgentCard>;
 
 /**
  * What an agent posts; `summary` becomes the plain-text message body (search and notifications keep working). A
- * `browser` (sign-in) card is platform-owned (Phase 07.8, UI-SPEC R1): never an agent's, so it is not a postable kind.
+ * `browser` (sign-in) card is platform-owned (Phase 07.8, UI-SPEC R1), and so is a `task` card (Phase 07.17.1.1.2,
+ * D-05): never an agent's, so neither is a postable kind.
  */
 export const AgentCardInput = AgentCard.pick({
   kind: true,
@@ -234,7 +244,7 @@ export const AgentCardInput = AgentCard.pick({
   status: true,
   actions: true,
 }).extend({
-  kind: AgentCardKind.exclude(["browser"]),
+  kind: AgentCardKind.exclude(["browser", "task"]),
   summary: z.string().trim().min(1).max(AGENT_CARD_SUMMARY_MAX),
   /** Phase 07.6 (R1, P-12): stored only with `cardPlatformOwned: true`; an agent's values are not honoured. */
   statusLabel: AgentCardStatusLabel.optional(),

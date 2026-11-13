@@ -3,8 +3,11 @@ import type {
   AgentCardBrowserSignInLink,
   AgentCardInput,
   AgentCardKind,
+  AgentCardTaskLink,
   ApprovalRequestStatus,
   ApprovalSummary,
+  BotTaskWakeReason,
+  TaskProcessFact,
 } from "@ocw/contracts";
 import type { AfterCommit, TenantCtx, Tx } from "@ocw/db";
 
@@ -63,9 +66,12 @@ export interface AgentMention {
    * D-04, PD-09): an item a fan-out run opened, delivered by agent-channel's item delivery (`deliverAutomationItem`) on
    * the item's own root; the structural author is the automation's run-as person, the body the server's sentence, the
    * turn tainted from its first call and unattended like a run, offered the bot's Work Zone tools (ADR-0039). Set only
-   * there; chat never sets it.
+   * there; chat never sets it. `task` (Phase 07.17.1.1.2, D-02, D-09, PD-07): a continuation of the bot's own long task,
+   * built by agent-channel's task delivery only on the task card's message; the structural author is the task's
+   * requester, the body a fixed server sentence (never the bot's notes, which travel in `turn.task`), and the turn is
+   * unattended for browser tools only (the thread's files are still listed). Chat never sets it.
    */
-  trigger?: "mention" | "reply_mode" | "automation" | "consult" | "work_session" | "automation_item";
+  trigger?: "mention" | "reply_mode" | "automation" | "consult" | "work_session" | "automation_item" | "task";
   /**
    * Phase 07.7 (D-01, D-07; ADR-0027): the chain this delivery belongs to, built by agent-channel's consult code from the
    * chain ledger, never from message text. Absent = a turn outside any chain (depth 0). Chat never sets it.
@@ -93,6 +99,13 @@ export interface AgentMention {
    * `trigger: "automation"` deliveries. Chat never sets it.
    */
   conversationOpen?: { automationId: string; runId: string } | null;
+  /**
+   * Phase 07.17.1.1.2 (D-02, D-03, PD-07): the task a `trigger: "task"` delivery continues, why it woke and, for a
+   * process wake, the ended process (ids and numbers only). Set only by agent-channel's task delivery and read only on
+   * `trigger: "task"` deliveries; 07.17.1.1.2-12 (PD-14): also set by the Work Zone wake of a session its task started
+   * (`{ taskId }` only) and read on `trigger: "work_session"` deliveries. Chat never sets it.
+   */
+  task?: { taskId: string; reason?: BotTaskWakeReason; process?: TaskProcessFact };
 }
 
 /**
@@ -209,6 +222,17 @@ export interface SignInCards {
   skip(tx: Tx, input: { messageId: string; userId: string }): Promise<void>;
 }
 
+/**
+ * Phase 07.17.1.1.2 (07.17.1.1.2-10; D-05, PD-11, PD-12): registered by agent-channel, so chat shows a `task` card's
+ * task and offers Stop without importing agent-channel. No registration = no task link and never `stop` (fail closed).
+ */
+export interface TaskCards {
+  /** The task each `task` card among `messageIds` mirrors, composed from its row (no viewer field: every reader sees it). */
+  linkOf(tx: Tx, messageIds: readonly string[]): Promise<Map<string, AgentCardTaskLink>>;
+  /** The cards among `messageIds` whose task is active and that `viewerId` may stop now (`mayStopTask`). */
+  canStop(tx: Tx, messageIds: readonly string[], viewerId: string): Promise<Set<string>>;
+}
+
 /** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */
 interface LinkedCardBase {
   id: string;
@@ -310,6 +334,9 @@ export interface ChatAgentBridge {
   registerSignInCards(provider: SignInCards): void;
   /** The browser module's sign-in cards, or null (no sign-in link is shown, "Not now" is refused). */
   signInCards(): SignInCards | null;
+  registerTaskCards(provider: TaskCards): void;
+  /** Agent-channel's task cards, or null (no task link is shown, nobody is offered Stop). */
+  taskCards(): TaskCards | null;
 }
 
 export function createChatAgentBridge(): ChatAgentBridge {
@@ -319,6 +346,7 @@ export function createChatAgentBridge(): ChatAgentBridge {
   let posterIn: AgentPosterIn | undefined;
   let linked: LinkedCards | null = null;
   let signIns: SignInCards | null = null;
+  let tasks: TaskCards | null = null;
   let context: ThreadContextProvider | undefined;
   let typing: AgentTyping | undefined;
   return {
@@ -369,5 +397,9 @@ export function createChatAgentBridge(): ChatAgentBridge {
       signIns = provider;
     },
     signInCards: () => signIns,
+    registerTaskCards(provider) {
+      tasks = provider;
+    },
+    taskCards: () => tasks,
   };
 }

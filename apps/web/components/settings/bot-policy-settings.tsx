@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BOT_TASK_LIMITS,
   type BotPolicy,
   type BotPolicyView,
   type BuiltinCapability,
@@ -8,8 +9,19 @@ import {
   MAX_DAILY_LIMIT,
   modelLabel,
   type SearchProvider,
+  type UpdateBotPolicyRequest,
 } from "@ocw/contracts";
-import { Clock, Globe, Lock, type LucideIcon, Megaphone, NotebookPen, RotateCcw, Save } from "lucide-react";
+import {
+  Clock,
+  Globe,
+  ListChecks,
+  Lock,
+  type LucideIcon,
+  Megaphone,
+  NotebookPen,
+  RotateCcw,
+  Save,
+} from "lucide-react";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
@@ -62,15 +74,98 @@ const CAPABILITIES: Array<{
     icon: Megaphone,
     personalApplies: false,
   },
+  // 07.17.1.1.2 (D-04, PD-20): "Allow long tasks", within the limits of the Long tasks section.
+  {
+    name: "longTasks",
+    label: "Long tasks",
+    description: "Bots keep working on long requests by themselves, within the limits below",
+    icon: ListChecks,
+    personalApplies: true,
+  },
 ];
+
+type TaskLimit = keyof BotPolicy["tasks"];
+
+/** The Long tasks limits (07.17.1.1.2 D-04, PD-20), in display order, with the API's bounds. */
+export const TASK_FIELDS: Array<{
+  key: TaskLimit;
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+  testId: string;
+}> = [
+  {
+    key: "maxTurns",
+    label: "Turns per task",
+    hint: "Each turn also counts toward the bot's daily limit",
+    min: 1,
+    max: BOT_TASK_LIMITS.maxTurnsCap,
+    testId: "policy-task-max-turns",
+  },
+  {
+    key: "maxHours",
+    label: "Hours per task",
+    hint: "A task stops when its time runs out",
+    min: 1,
+    max: BOT_TASK_LIMITS.maxHoursCap,
+    testId: "policy-task-max-hours",
+  },
+  {
+    key: "maxRunning",
+    label: "Tasks running at once",
+    hint: "At 0 no new task starts; running ones go on",
+    min: 0,
+    max: BOT_TASK_LIMITS.maxRunningCap,
+    testId: "policy-task-max-running",
+  },
+];
+
+/** What the API would refuse for one limit (null = valid), shown as soon as it is typed. */
+export function taskLimitError(value: number, min: number, max: number): string | null {
+  return Number.isInteger(value) && value >= min && value <= max
+    ? null
+    : `Enter a whole number from ${min} to ${max}.`;
+}
 
 const PROVIDERS: Array<{ id: SearchProvider; label: string; description: string }> = [
   { id: "duckduckgo", label: "DuckDuckGo", description: "Built in, no key or account needed" },
   { id: "searxng", label: "SearXNG", description: "Your own self-hosted metasearch instance" },
 ];
 
-const toDraft = ({ updatedAt: _u, availableSearchProviders: _a, ...rest }: BotPolicyView): Draft => rest;
+export const toDraft = ({ updatedAt: _u, availableSearchProviders: _a, ...rest }: BotPolicyView): Draft =>
+  rest;
 const same = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * The PUT body: only what differs from the saved policy (the API merges capabilities per capability and `tasks` per
+ * limit), so changing one limit sends `{ tasks: { maxTurns: 12 } }`. "Every model" sends the empty list.
+ */
+export function toPolicyBody(draft: Draft, saved: Draft, restrictModels: boolean): UpdateBotPolicyRequest {
+  const body: UpdateBotPolicyRequest = {};
+  const capabilities: NonNullable<UpdateBotPolicyRequest["capabilities"]> = {};
+  for (const name of Object.keys(draft.capabilities) as BuiltinCapability[]) {
+    const next = draft.capabilities[name];
+    const before = saved.capabilities[name];
+    if (next.orgWide !== before.orgWide || next.personal !== before.personal) capabilities[name] = next;
+  }
+  if (Object.keys(capabilities).length > 0) body.capabilities = capabilities;
+  if (draft.searchProvider !== saved.searchProvider) body.searchProvider = draft.searchProvider;
+  if (draft.maxPersonalBotsPerUser !== saved.maxPersonalBotsPerUser) {
+    body.maxPersonalBotsPerUser = draft.maxPersonalBotsPerUser;
+  }
+  if (draft.personalDailyLimitMax !== saved.personalDailyLimitMax) {
+    body.personalDailyLimitMax = draft.personalDailyLimitMax;
+  }
+  const models = restrictModels ? draft.personalAllowedModels : [];
+  if (models.join("\n") !== saved.personalAllowedModels.join("\n")) body.personalAllowedModels = models;
+  const tasks: NonNullable<UpdateBotPolicyRequest["tasks"]> = {};
+  for (const { key } of TASK_FIELDS) {
+    if (draft.tasks[key] !== saved.tasks[key]) tasks[key] = draft.tasks[key];
+  }
+  if (Object.keys(tasks).length > 0) body.tasks = tasks;
+  return body;
+}
 
 /**
  * Settings › Bot policy (D-06, D-09, D-11; BOT-01/05): what every bot of the organization may do, what
@@ -110,14 +205,26 @@ export function BotPolicySettings() {
   return <PolicyForm policy={policy.data} />;
 }
 
-function PolicyForm({ policy }: { policy: BotPolicyView }) {
+/** `initialTasks` seeds typed limits (tests render a typed value without a DOM). */
+export function PolicyForm({
+  policy,
+  initialTasks,
+}: {
+  policy: BotPolicyView;
+  initialTasks?: Partial<BotPolicy["tasks"]>;
+}) {
   const save = useUpdateBotPolicy();
   const models = useModels();
   const saved = toDraft(policy);
-  const [draft, setDraft] = useState<Draft>(saved);
+  const [draft, setDraft] = useState<Draft>(() => ({ ...saved, tasks: { ...saved.tasks, ...initialTasks } }));
   const [errors, setErrors] = useState<{ maxBots?: string; dailyMax?: string; models?: string }>({});
   const [restrictModels, setRestrictModels] = useState(saved.personalAllowedModels.length > 0);
   const dirty = !same(draft, saved) || restrictModels !== saved.personalAllowedModels.length > 0;
+  // The Long tasks limits are checked as they are typed: an invalid one shows its sentence and turns Save off.
+  const taskErrors = Object.fromEntries(
+    TASK_FIELDS.map((f) => [f.key, taskLimitError(draft.tasks[f.key], f.min, f.max)]),
+  ) as Record<TaskLimit, string | null>;
+  const tasksInvalid = Object.values(taskErrors).some((e) => e !== null);
 
   // Leaving the page with unsaved changes asks first.
   useEffect(() => {
@@ -159,12 +266,9 @@ function PolicyForm({ policy }: { policy: BotPolicyView }) {
       next.models = "Pick at least one model, or allow every model";
     }
     setErrors(next);
-    if (Object.keys(next).length > 0) return;
+    if (Object.keys(next).length > 0 || tasksInvalid) return;
     try {
-      const updated = await save.mutateAsync({
-        ...draft,
-        personalAllowedModels: restrictModels ? draft.personalAllowedModels : [],
-      });
+      const updated = await save.mutateAsync(toPolicyBody(draft, saved, restrictModels));
       setDraft(toDraft(updated));
       setRestrictModels(updated.personalAllowedModels.length > 0);
       toast.success("Bot policy saved", { description: "Every bot follows it from its next reply." });
@@ -248,6 +352,28 @@ function PolicyForm({ policy }: { policy: BotPolicyView }) {
               );
             })}
           </ul>
+        </div>
+      </Section>
+
+      <Section
+        title="Long tasks"
+        description="Limits for each long task, and how many may run at once in the organization."
+      >
+        <div className="grid gap-4 rounded-2xl border bg-card p-4 shadow-xs sm:grid-cols-2 xl:grid-cols-3">
+          {TASK_FIELDS.map((f) => (
+            <NumberField
+              key={f.key}
+              label={f.label}
+              hint={f.hint}
+              value={draft.tasks[f.key]}
+              min={f.min}
+              max={f.max}
+              error={taskErrors[f.key] ?? undefined}
+              onChange={(value) => setDraft((d) => ({ ...d, tasks: { ...d.tasks, [f.key]: value } }))}
+              testId={f.testId}
+              touch
+            />
+          ))}
         </div>
       </Section>
 
@@ -419,7 +545,11 @@ function PolicyForm({ policy }: { policy: BotPolicyView }) {
         <Button variant="outline" onClick={reset} disabled={!dirty || save.isPending}>
           <RotateCcw /> Discard
         </Button>
-        <Button onClick={submit} disabled={!dirty || save.isPending} data-testid="bot-policy-save">
+        <Button
+          onClick={submit}
+          disabled={!dirty || tasksInvalid || save.isPending}
+          data-testid="bot-policy-save"
+        >
           {save.isPending ? <Spinner /> : <Save />}
           Save policy
         </Button>
@@ -496,6 +626,7 @@ function NumberField({
   error,
   onChange,
   testId,
+  touch = false,
 }: {
   label: string;
   hint: string;
@@ -505,6 +636,8 @@ function NumberField({
   error?: string;
   onChange: (v: number) => void;
   testId: string;
+  /** 44 px tall on phones (the Long tasks fields); the older fields keep their look. */
+  touch?: boolean;
 }) {
   const id = useId();
   return (
@@ -524,7 +657,7 @@ function NumberField({
         aria-invalid={!!error}
         aria-describedby={`${id}-help`}
         data-testid={testId}
-        className="h-9 w-full tabular-nums sm:w-40"
+        className={cn("w-full tabular-nums", touch ? "h-11 sm:h-9 sm:max-w-40" : "h-9 sm:w-40")}
       />
       <span id={`${id}-help`} className={cn("text-xs", error ? "text-destructive" : "text-muted-foreground")}>
         {error ?? hint}

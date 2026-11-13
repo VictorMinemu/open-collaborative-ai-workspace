@@ -57,7 +57,14 @@ describe("a cold ensure on a slow Docker daemon", () => {
     expect(t.shell()?.Running).toBe(true);
 
     const line = t.lines.find((l) => l.msg === "ensure");
-    expect(line).toMatchObject({ level: "info", orgId: ORG, agentId: AGENT, created: true, started: true });
+    expect(line).toMatchObject({
+      level: "info",
+      orgId: ORG,
+      agentId: AGENT,
+      created: true,
+      started: true,
+      recreated: null,
+    });
     const ms = line?.ms as Record<string, number>;
     expect(Object.keys(ms).sort()).toEqual(["create", "egress", "network", "runtime", "start", "total"]);
     expect(ms.create).toBeGreaterThanOrEqual(250);
@@ -71,7 +78,11 @@ describe("a cold ensure on a slow Docker daemon", () => {
     await t.sandboxes.ensure(target);
     t.lines.length = 0;
     await t.sandboxes.ensure(target);
-    expect(t.lines.find((l) => l.msg === "ensure")).toMatchObject({ created: false, started: false });
+    expect(t.lines.find((l) => l.msg === "ensure")).toMatchObject({
+      created: false,
+      started: false,
+      recreated: null,
+    });
   });
 
   it("the kill switch pushed while Docker holds the create: refused `killed`, nothing is started", async () => {

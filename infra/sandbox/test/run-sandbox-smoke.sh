@@ -14,13 +14,27 @@
 # forgotten) and a killed organization stays killed: `policy_missing` until the policy is pushed again, `killed` after,
 # its container never started, while a live organization runs again after one push.
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart]
-#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart;
-#                          default all
+# 07.17.1.1.1 (D-03 … D-08, PD-18) adds the docs section: the document toolkit through the bot's real path, sandboxd's
+# API only (people's file write, exec as 10001 with background polling, never `docker exec`). It writes
+# make_fixtures.py into a bot's workspace, generates the fixtures in the bot's shell and reads every common type with
+# `ocw-extract` (a scanned PDF through OCR, Office files, mail, an archive listing), resumes a batch, and checks that
+# every answer stays under the 16 KiB tail. There is no egress proxy here, so the shell has no way out: the section is
+# offline by construction. It runs on runc (every section) and under gVisor (`--only core,docs`), capped at 900 s.
+# The macro rule (D-08, PD-11): neither `ocw-extract` nor the bot's own `soffice --convert-to` runs a document's load
+# macro; on runc a positive control opens the same document in a test-only image without `ocw.xcd` with a low-security
+# profile (the macro writes its marker there, or the smoke says the control was not achieved) and the same open in the
+# real image (never a marker). The drift section (D-10, PD-10) rebuilds the image tag on real Docker: a stopped shell
+# is re-created on the new image with its workspace kept, a running one is left alone until it stops or restarts. It
+# runs last because it moves the image tag.
+#
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart,docs,drift]
+#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart,
+#                          docs, drift; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
-# and on exit; the image tag is `ocw-sandbox-sbx:smoke-<sha>` and is removed on exit. It never prunes.
+# and on exit; the image tag is `ocw-sandbox-sbx:smoke-<sha>` and is removed on exit, with every image the docs and
+# drift sections build (by tag and by ID, all labelled the same). It never prunes.
 set -euo pipefail
 
 ONLY=all
@@ -40,7 +54,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files quota idle events restart"
+SECTIONS="core files quota idle events restart docs drift"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -56,6 +70,10 @@ cd "$ROOT"
 NS="${OCW_SMOKE_NS_PREFIX:-ocw-smoke}-$$"
 SHA="$(git rev-parse --short HEAD)"
 IMAGE="ocw-sandbox-sbx:smoke-${SHA}"
+# The docs section's positive-control image (runc only) and every image ID the run built (on_exit removes them by ID:
+# the drift section moves the $IMAGE tag, so the original smoke image is untagged by then).
+MACRO_IMAGE="${IMAGE}-macro-control"
+BUILT_IMAGES=""
 WORK="$(mktemp -d)"
 SANDBOXD_PID=""
 FAILURES=0
@@ -96,9 +114,12 @@ on_exit() {
     [ "$left" = "0" ] && break
     sleep 1
   done
-  docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
+  docker image rm -f "$IMAGE" "$MACRO_IMAGE" >/dev/null 2>&1 || true
+  local id
+  for id in $BUILT_IMAGES; do docker image rm -f "$id" >/dev/null 2>&1 || true; done
+  left=$((left + $(docker image ls -q --filter "label=ocw.namespace=${NS}" | sort -u | wc -l | tr -d ' ')))
   if [ "$left" != "0" ]; then
-    log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup"
+    log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup (containers, volumes, networks, images)"
     code=1
   fi
   if [ "$code" != "0" ] && [ -f "$WORK/sandboxd.log" ]; then
@@ -178,6 +199,7 @@ A="$(uuid)"
 
 log "building ${IMAGE} from infra/sandbox/sbx/Dockerfile"
 docker build -q --label "ocw.namespace=${NS}" -t "$IMAGE" -f infra/sandbox/sbx/Dockerfile infra/sandbox/sbx >/dev/null
+BUILT_IMAGES="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 
 # ---------------------------------------------------------------- D-14: a required runsc that is missing refuses to start
 if want core; then
@@ -1120,6 +1142,416 @@ section_restart() {
   fi
 }
 
+# ================================================================ section: docs (07.17.1.1.1; D-03 … D-08, PD-18)
+
+# The section's cap (W7): a slow runtime is fixed by doing less work, never by raising this without a recorded reason.
+DOCS_CAP_S=900
+# Every exec answer of the section (D-03): how many, and the stdout sizes over the 16 KiB tail.
+DOCS_ANSWERS=0
+DOCS_OVER=""
+# The fixtures the section checks, and only those (make_fixtures.py builds what they derive from).
+DOCS_FIXTURES="scan.pdf,text.pdf,sign.png,plan.docx,ventas.xlsx,slides.pptx,plan.odt,pedido.eml,pack.zip,blob.bin,macro.fodt"
+
+# note_answer: counts the exec answer in $WORK/body.json and records its stdout size when it is over 16 384 bytes.
+note_answer() {
+  local n
+  n="$(node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(String(Buffer.byteLength(j.stdout ?? "")));
+  ' "$WORK/body.json" 2>/dev/null || echo 0)"
+  DOCS_ANSWERS=$((DOCS_ANSWERS + 1))
+  if [ "$n" -gt 16384 ]; then DOCS_OVER="${DOCS_OVER} ${n}"; fi
+}
+
+# run_long <org> <agent> <argv json> <deadline s> [timeoutMs]: exec with the 25 s yield and the 600 s command budget (or
+# timeoutMs: the API sends 120000 when the bot names no timeoutSeconds); a command still running is polled every 5 s
+# until it exits or the deadline passes (then it is killed and the call fails). Succeeds when the command exited,
+# whatever its code; the final answer is in $WORK/body.json.
+run_long() {
+  local org="$1" agent="$2" argv="$3" deadline="$4" timeout_ms="${5:-600000}" t0 pid status
+  t0=$(date +%s)
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$org" "$agent" "$argv" "$timeout_ms" 25000)")"
+  [ "$status" = 200 ] || return 1
+  note_answer
+  pid="$(jfield "$WORK/body.json" processId)"
+  while [ "$(jfield "$WORK/body.json" status)" = running ]; do
+    if [ $(($(date +%s) - t0)) -ge "$deadline" ]; then
+      api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$org" "$agent")" "$pid")" >/dev/null || true
+      return 1
+    fi
+    sleep 5
+    status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"poll"}' "$(target "$org" "$agent")" "$pid")")"
+    [ "$status" = 200 ] || return 1
+    note_answer
+  done
+  [ "$(jfield "$WORK/body.json" status)" = exited ]
+}
+
+# stdout_has <needle>...: the answer's stdout holds every needle, accents and case ignored (OCR may drop an accent).
+stdout_has() {
+  node -e '
+    const fold = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+    const out = fold(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stdout ?? "");
+    process.exit(process.argv.slice(2).every((n) => out.includes(fold(n))) ? 0 : 1);
+  ' "$WORK/body.json" "$@"
+}
+
+# stdout_line <regex>: some line of the answer's stdout matches.
+stdout_line() {
+  node -e '
+    const out = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stdout ?? "";
+    process.exit(new RegExp(process.argv[2], "m").test(out) ? 0 : 1);
+  ' "$WORK/body.json" "$1"
+}
+
+exit_code() { jfield "$WORK/body.json" exitCode; }
+docs_fail() { fail "docs: $1 → $(head -c 1500 "$WORK/body.json")"; }
+
+# docs_extract <label> <file> <exit code> [needle...]: `ocw-extract <file>` in bot X's shell through sandboxd.
+docs_extract() {
+  local label="$1" file="$2" want="$3"
+  shift 3
+  if run_long "$DO" "$DA" "[\"ocw-extract\",\"${file}\"]" 300 && [ "$(exit_code)" = "$want" ] &&
+    { [ "$#" = 0 ] || stdout_has "$@"; }; then
+    ok "docs: ${label}"
+  else
+    docs_fail "$label"
+  fi
+}
+
+# download_sha <org> <agent> <path>: the sha256 of the file's bytes as people download them through sandboxd.
+download_sha() {
+  local status
+  status="$(api POST /v1/files/download "$(path_json "$1" "$2" "$3")")"
+  [ "$status" = 200 ] || return 1
+  node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(require("crypto").createHash("sha256").update(Buffer.from(j.data ?? "", "base64")).digest("hex"));
+  ' "$WORK/body.json"
+}
+
+# macro_open <image>: in a throwaway container hardened like a bot's shell (run-sbx-image-tests.sh's flags, tmpfs
+# /workspace and /tmp, no network), generates macro.fodt with make_fixtures.py (streamed with tar), seeds a profile
+# whose MacroSecurityLevel is 0 (low: macros run without asking), opens the document the ordinary way (`soffice
+# --headless`, no conversion) for at most 60 s and prints `marker yes` or `marker no`.
+macro_open() {
+  local tar_opts=""
+  case "$(tar --version 2>/dev/null || true)" in
+    bsdtar*) tar_opts=--no-xattrs ;;
+  esac
+  # shellcheck disable=SC2086 # tar_opts is empty or one word
+  COPYFILE_DISABLE=1 tar $tar_opts -C infra/sandbox/sbx/tools/tests -cf - make_fixtures.py |
+    docker run -i --rm --label "ocw.namespace=${NS}" \
+      --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges:true --init \
+      --pids-limit 256 --memory 1g --memory-swap 1g --cpus 1 --network none \
+      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+      --tmpfs /workspace:rw,nosuid,nodev,size=512m,uid=10001,gid=10001 \
+      -e HOME=/workspace -e LC_ALL=C.UTF-8 \
+      "$1" sh -c '
+        mkdir -p /tmp/t && tar -x -C /tmp/t || exit 10
+        /opt/ocw-tools/venv/bin/python3 -I /tmp/t/make_fixtures.py /workspace/fx --only macro.fodt >/dev/null || exit 11
+        mkdir -p /tmp/pc/user || exit 12
+        cat >/tmp/pc/user/registrymodifications.xcu <<XCU
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>false</value></prop></item>
+</oor:items>
+XCU
+        timeout -k 5 60 soffice --headless --norestore -env:UserInstallation=file:///tmp/pc /workspace/fx/macro.fodt >/dev/null 2>&1 &
+        i=0
+        while [ "$i" -lt 60 ] && [ ! -e /workspace/fx/MACRO-RAN ] && kill -0 "$!" 2>/dev/null; do
+          sleep 1
+          i=$((i + 1))
+        done
+        if [ -e /workspace/fx/MACRO-RAN ]; then echo "marker yes"; else echo "marker no"; fi
+      '
+}
+
+# macro_control: the positive control (runc only; PD-11). A test-only image from $IMAGE without ocw.xcd must run the
+# load macro on an ordinary open with a low-security profile; the real image must not. When the control does not fire,
+# only the configuration proves the rule, and the smoke says so (D-08's permitted outcome, recorded in ADR-0043).
+macro_control() {
+  local control real
+  if printf 'FROM %s\nUSER 0:0\nRUN rm -f /usr/lib/libreoffice/share/registry/ocw.xcd\nUSER 10001:10001\n' "$IMAGE" |
+    docker build -q --label "ocw.namespace=${NS}" -t "$MACRO_IMAGE" - >/dev/null 2>"$WORK/macro-build.err"; then
+    BUILT_IMAGES="${BUILT_IMAGES} $(docker image inspect --format '{{.Id}}' "$MACRO_IMAGE")"
+    control="$(macro_open "$MACRO_IMAGE" 2>&1 || true)"
+  else
+    control="build failed: $(tail -n 3 "$WORK/macro-build.err" | tr '\n' ' ')"
+  fi
+  if [ "$control" = "marker yes" ]; then
+    ok "docs: macro positive control fired (without ocw.xcd, a low-security profile and an ordinary open write MACRO-RAN)"
+  else
+    log "     macro positive control not achieved (configuration-only proof): ${control:-no output}"
+  fi
+  real="$(macro_open "$IMAGE" 2>&1 || true)"
+  if [ "$real" = "marker no" ]; then
+    ok "docs: the same low-security open in the real image never runs the macro (ocw.xcd finalized)"
+  else
+    fail "docs: the real image with a low-security profile → ${real:-no output}"
+  fi
+}
+
+section_docs() {
+  local docs_t0 t took code runs sha_before sha_after
+  docs_t0=$(date +%s)
+  DO="$(uuid)"
+  DA="$(uuid)"
+  status="$(push_policy "$DO")"
+  [ "$status" = 200 ] || fail "docs: policy → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$DO" "$DA")}")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
+    ok "docs: ensure X → running"
+  else
+    fail "docs: ensure X → ${status} $(cat "$WORK/body.json")"
+    return
+  fi
+
+  # ---------------------------------------------------------------- the fixtures, generated in the bot's shell
+
+  # People's file write (base64 from the repository file), then the bot's own python3 with the toolkit PYTHONPATH.
+  node -e '
+    const [org, agent, file] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({
+      target: { orgId: org, agentId: agent },
+      path: "fxgen/make_fixtures.py",
+      content: require("fs").readFileSync(file).toString("base64"),
+      encoding: "base64",
+      mode: "create",
+    }));
+  ' "$DO" "$DA" infra/sandbox/sbx/tools/tests/make_fixtures.py >"$WORK/fxgen.json"
+  status="$(api_file POST /v1/files/write "$WORK/fxgen.json")"
+  [ "$status" = 200 ] && ok "docs: make_fixtures.py written to fxgen/ through the files API" ||
+    fail "docs: write make_fixtures.py → ${status} $(cat "$WORK/body.json")"
+  t=$(date +%s)
+  if run_long "$DO" "$DA" "[\"python3\",\"fxgen/make_fixtures.py\",\"/workspace/fx\",\"--only\",\"${DOCS_FIXTURES}\"]" 600 &&
+    [ "$(exit_code)" = 0 ]; then
+    ok "docs: the bot's shell generated the fixtures it checks in $(($(date +%s) - t)) s (no network)"
+  else
+    docs_fail "generate fixtures"
+    return
+  fi
+
+  # ---------------------------------------------------------------- one check per type (D-03, D-06)
+
+  docs_extract "scanned PDF OCR → (ocr) pages with \"Política de devoluciones\"" fx/scan.pdf 0 "(ocr)" "politica de devoluciones"
+  docs_extract "text PDF → \"facturación\"" fx/text.pdf 0 "facturación"
+  docs_extract "Spanish PNG OCR → \"emergencia\"" fx/sign.png 0 "emergencia"
+  docs_extract "docx → \"Región Norte\"" fx/plan.docx 0 "Región Norte"
+  docs_extract "xlsx → ### sheet: Ventas with Norte,1200" fx/ventas.xlsx 0 "### sheet: Ventas" "Norte,1200"
+  docs_extract "pptx → \"Plan de acción\"" fx/slides.pptx 0 "Plan de acción"
+  docs_extract "odt → \"Plan anual 2026\"" fx/plan.odt 0 "Plan anual 2026"
+  docs_extract ".eml → \"Pedido 42\" and ### attachment: factura.pdf" fx/pedido.eml 0 "Pedido 42" "### attachment: factura.pdf"
+  if run_long "$DO" "$DA" '["ocw-extract","fx/pack.zip"]' 300 && [ "$(exit_code)" = 0 ] &&
+    stdout_line '(^|/)a\.txt · [0-9]+ bytes$'; then
+    ok "docs: zip → a listing line for a.txt (listed, never extracted)"
+  else
+    docs_fail "zip listing"
+  fi
+  docs_extract "unknown binary → exit 3" fx/blob.bin 3
+
+  # ---------------------------------------------------------------- the shell's environment (PD-05)
+
+  if run_long "$DO" "$DA" '["sh","-c","for t in ocw-extract pdftotext tesseract soffice 7zz; do command -v \"$t\" || exit 1; done"]' 60 &&
+    [ "$(exit_code)" = 0 ] &&
+    [ "$(jfield "$WORK/body.json" stdout | grep -c '^/')" = 5 ]; then
+    ok "docs: ocw-extract, pdftotext, tesseract, soffice and 7zz are on the shell's PATH"
+  else
+    docs_fail "tools on PATH"
+  fi
+  if run_long "$DO" "$DA" '["python3","-c","import pandas, openpyxl, pdfplumber, docx; print(\"ok\")"]' 120 &&
+    [ "$(exit_code)" = 0 ] && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf 'ok\n')" ]; then
+    ok "docs: the bot's python3 imports pandas, openpyxl, pdfplumber and docx"
+  else
+    docs_fail "python3 imports"
+  fi
+  if run_long "$DO" "$DA" '["id","-u"]' 60 && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf '10001\n')" ]; then
+    ok "docs: the toolkit runs as uid 10001"
+  else
+    docs_fail "id -u"
+  fi
+
+  # ---------------------------------------------------------------- batch: chunks, resume, originals untouched (D-04)
+
+  sha_before="$(download_sha "$DO" "$DA" fx/text.pdf || true)"
+  # The bot's default path (07.17.1.1.1 review CR-01): no timeoutSeconds means the API's 120 s. The batch refuses it at
+  # once with a usage error naming the way out (never killed by ocw-run's timeout, 137); the reruns below take the
+  # documented path, background with timeoutSeconds 600.
+  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx"]' 150 120000 && [ "$(exit_code)" = 2 ] &&
+    jfield "$WORK/body.json" stderr | grep -q "timeoutSeconds 600"; then
+    ok "docs: ocw-extract --batch under the default 120 s exec timeout → exit 2 naming timeoutSeconds 600 (never 137)"
+  else
+    docs_fail "batch under the default 120 s timeout"
+  fi
+  # 07.17.1.1.1 review CR-02: a budget under the longest step (plus 10 s) is a usage error, never an endless exit 75.
+  if run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx","--budget","1"]' 120 && [ "$(exit_code)" = 2 ] &&
+    jfield "$WORK/body.json" stderr | grep -q -- "--budget must be between 130"; then
+    ok "docs: ocw-extract --batch with --budget 1 → exit 2 (usage), never an endless 75"
+  else
+    docs_fail "batch --budget 1"
+  fi
+  runs=0
+  code=""
+  t=$(date +%s)
+  while [ "$runs" -lt 5 ]; do
+    runs=$((runs + 1))
+    run_long "$DO" "$DA" '["ocw-extract","--batch","/workspace/fx"]' 620 || break
+    code="$(exit_code)"
+    [ "$code" = 75 ] || break
+  done
+  if [ "$code" = 0 ]; then
+    ok "docs: batch reruns (background, timeoutSeconds 600) → exit 0 after ${runs} run(s), $(($(date +%s) - t)) s"
+  else
+    docs_fail "batch reruns (run ${runs}, exit ${code:-none})"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DO" "$DA" extracted/fx/_index.tsv)")"
+  if [ "$status" = 200 ] && node -e '
+    const lines = (JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).content ?? "").split("\n");
+    const rows = lines.slice(1).map((l) => l.split("\t"));
+    const ok = lines[0].startsWith("path\tsize\t") && rows.some((c) => /(^|\/)scan\.pdf$/.test(c[0]) && c[8] === "done");
+    process.exit(ok ? 0 : 1);
+  ' "$WORK/body.json"; then
+    ok "docs: extracted/fx/_index.tsv read through sandboxd, scan.pdf done"
+  else
+    fail "docs: _index.tsv → ${status} $(head -c 1500 "$WORK/body.json")"
+  fi
+  sha_after="$(download_sha "$DO" "$DA" fx/text.pdf || true)"
+  if [ -n "$sha_before" ] && [ "$sha_before" = "$sha_after" ]; then
+    ok "docs: fx/text.pdf has the same sha256 before and after the batch"
+  else
+    fail "docs: text.pdf sha256 ${sha_before:-none} → ${sha_after:-none}"
+  fi
+
+  # ---------------------------------------------------------------- macros never run (D-08, PD-11, E18, E21)
+
+  # ocw-extract, then the bot's own conversion with its default profile (HOME=/workspace → /workspace/.config).
+  if run_long "$DO" "$DA" '["ocw-extract","fx/macro.fodt"]' 300 && [ "$(exit_code)" = 0 ] &&
+    stdout_has "Documento con macro de prueba" &&
+    run_long "$DO" "$DA" '["soffice","--headless","--norestore","--convert-to","pdf","--outdir","/workspace/fx/out","fx/macro.fodt"]' 300 &&
+    [ "$(exit_code)" = 0 ] &&
+    run_long "$DO" "$DA" '["sh","-c","test -s fx/out/macro.pdf || exit 2; test -e fx/MACRO-RAN && exit 1; exit 0"]' 60 &&
+    [ "$(exit_code)" = 0 ]; then
+    ok "docs: macro never runs under conversion (ocw-extract and the bot's own soffice --convert-to pdf, no MACRO-RAN)"
+  else
+    docs_fail "macro under conversion"
+  fi
+  if [ "${RUNTIME:-}" = gvisor ]; then
+    log "skip docs: macro control (tests LibreOffice configuration, not the runtime)"
+  else
+    macro_control
+  fi
+
+  # ---------------------------------------------------------------- every answer under the 16 KiB tail, and the cap
+
+  if [ -z "$DOCS_OVER" ] && [ "$DOCS_ANSWERS" -gt 0 ]; then
+    ok "docs: every exec answer's stdout is at most 16384 bytes (${DOCS_ANSWERS} answers)"
+  else
+    fail "docs: exec answers over 16384 bytes:${DOCS_OVER} (of ${DOCS_ANSWERS})"
+  fi
+  took=$(($(date +%s) - docs_t0))
+  if [ "$took" -le "$DOCS_CAP_S" ]; then
+    ok "docs: section took ${took} s (cap ${DOCS_CAP_S} s, runtime ${RUNTIME:-unknown})"
+  else
+    fail "docs: section took ${took} s, over the ${DOCS_CAP_S} s cap (runtime ${RUNTIME:-unknown})"
+  fi
+}
+
+# ================================================================ section: drift (07.17.1.1.1; D-10, PD-10, E20)
+
+# image_of <container>: the image ID it runs (Docker's top-level `.Image`).
+image_of() { docker inspect --format '{{.Image}}' "$1" 2>/dev/null || echo gone; }
+# tag_id: the image ID $IMAGE names now.
+tag_id() { docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo none; }
+
+# rebuild_image: moves the $IMAGE tag to a new image (FROM the current one plus a random label; the namespace label
+# kept) and records its ID for on_exit. Not in a subshell: BUILT_IMAGES must keep the ID.
+rebuild_image() {
+  printf 'FROM %s\nLABEL ocw.smoke.drift=%s\n' "$IMAGE" "$(uuid)" |
+    docker build -q --label "ocw.namespace=${NS}" -t "$IMAGE" - >/dev/null
+  BUILT_IMAGES="${BUILT_IMAGES} $(tag_id)"
+}
+
+# ensure_running <org> <agent>: ensure → 200 and running.
+ensure_running() {
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$1" "$2")}")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]
+}
+
+section_drift() {
+  local i1 i2 i3 p1 p2 p3 q1 q2
+  DRO="$(uuid)"
+  DP="$(uuid)"
+  DQ="$(uuid)"
+  status="$(push_policy "$DRO")"
+  [ "$status" = 200 ] || fail "drift: policy → ${status} $(cat "$WORK/body.json")"
+
+  # A stopped shell on the old image is re-created on the new one; its workspace volume stays.
+  i1="$(tag_id)"
+  ensure_running "$DRO" "$DP" || fail "drift: ensure P → ${status} $(cat "$WORK/body.json")"
+  p1="$(shell_of "$DP")"
+  if [ -n "$p1" ] && [ "$(image_of "$p1")" = "$i1" ]; then
+    ok "drift: ensure P → running on the smoke image"
+  else
+    fail "drift: P's shell ${p1:-none} runs $(image_of "${p1:-none}"), the tag names ${i1}"
+  fi
+  status="$(api POST /v1/files/write "$(path_json "$DRO" "$DP" drift/kept.txt '"content":"before the rebuild","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 200 ] || fail "drift: write → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/sandboxes/stop "{\"target\":$(target "$DRO" "$DP"),\"reason\":\"user\"}")"
+  [ "$status" = 200 ] && [ "$(running_of "$p1")" = false ] || fail "drift: stop P → ${status} running=$(running_of "$p1")"
+  rebuild_image
+  i2="$(tag_id)"
+  [ "$i2" != "$i1" ] || fail "drift: the rebuild left the tag on ${i1}"
+  ensure_running "$DRO" "$DP" || fail "drift: ensure P after the rebuild → ${status} $(cat "$WORK/body.json")"
+  p2="$(shell_of "$DP")"
+  if [ -n "$p2" ] && [ "$p2" != "$p1" ] && [ "$(image_of "$p2")" = "$i2" ] && [ "$(running_of "$p2")" = true ]; then
+    ok "drift: a stopped shell is re-created after its image tag is rebuilt (new container, .Image = the new image)"
+  else
+    fail "drift: P after the rebuild: ${p1} → ${p2:-none} on $(image_of "${p2:-none}"), want ${i2}"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DRO" "$DP" drift/kept.txt)")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "before the rebuild" ]; then
+    ok "drift: the workspace file written before the rebuild reads back through sandboxd (volumes kept)"
+  else
+    fail "drift: read kept.txt → ${status} $(cat "$WORK/body.json")"
+  fi
+
+  # A running shell is never touched by ensure; it moves at its next stop.
+  ensure_running "$DRO" "$DQ" || fail "drift: ensure Q → ${status} $(cat "$WORK/body.json")"
+  q1="$(shell_of "$DQ")"
+  rebuild_image
+  i3="$(tag_id)"
+  [ "$i3" != "$i2" ] || fail "drift: the second rebuild left the tag on ${i2}"
+  if ensure_running "$DRO" "$DQ" && [ -n "$q1" ] && [ "$(shell_of "$DQ")" = "$q1" ] &&
+    [ "$(running_of "$q1")" = true ] && [ "$(image_of "$q1")" = "$i2" ]; then
+    ok "drift: a running shell is untouched by ensure after another rebuild (same container, still running)"
+  else
+    fail "drift: Q after the second rebuild: ${q1:-none} → $(shell_of "$DQ") running=$(running_of "${q1:-none}")"
+  fi
+  status="$(api POST /v1/sandboxes/stop "{\"target\":$(target "$DRO" "$DQ"),\"reason\":\"user\"}")"
+  [ "$status" = 200 ] || fail "drift: stop Q → ${status}"
+  ensure_running "$DRO" "$DQ" || fail "drift: ensure Q after the stop → ${status} $(cat "$WORK/body.json")"
+  q2="$(shell_of "$DQ")"
+  if [ -n "$q2" ] && [ "$q2" != "$q1" ] && [ "$(image_of "$q2")" = "$i3" ]; then
+    ok "drift: after a stop, the next ensure re-creates the shell on the newest image"
+  else
+    fail "drift: Q after the stop: ${q1:-none} → ${q2:-none} on $(image_of "${q2:-none}"), want ${i3}"
+  fi
+
+  # restart re-creates a running shell that drifted (it stops the commands anyway; PD-10).
+  status="$(api POST /v1/sandboxes/restart "{\"target\":$(target "$DRO" "$DP")}")"
+  p3="$(shell_of "$DP")"
+  if [ "$status" = 200 ] && [ -n "$p3" ] && [ "$p3" != "$p2" ] && [ "$(image_of "$p3")" = "$i3" ] &&
+    [ "$(running_of "$p3")" = true ]; then
+    ok "drift: restart re-creates a running shell on an older image (new container on the newest image)"
+  else
+    fail "drift: restart P → ${status} ${p2:-none} → ${p3:-none} on $(image_of "${p3:-none}"), want ${i3} $(cat "$WORK/body.json")"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$DRO" "$DP" drift/kept.txt)")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "before the rebuild" ] &&
+    ok "drift: the file is still there after the restart" || fail "drift: read after restart → ${status}"
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
@@ -1128,6 +1560,9 @@ if want quota; then section_quota; fi
 if want idle; then section_idle; fi
 if want events; then section_events; fi
 if want restart; then section_restart; fi
+if want docs; then section_docs; fi
+# Last: it moves the $IMAGE tag.
+if want drift; then section_drift; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

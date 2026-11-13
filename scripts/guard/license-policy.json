@@ -1,5 +1,5 @@
 {
-  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in the npm lockfiles of infra/mcp-sandbox and infra/sandbox/browser (NPM_LOCKFILES in licenses.mjs) must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run.",
+  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in the npm lockfiles of infra/mcp-sandbox and infra/sandbox/browser (NPM_LOCKFILES in licenses.mjs), and every pin of the sbx document toolkit's Python lock infra/sandbox/sbx/tools/requirements.lock with the license its infra/sandbox/sbx/tools/licenses.json records (PYTHON_LOCKS; 07.17.1.1.1 D-09), must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run; one with a `version` admits only that version.",
   "allow": [
     "MIT",
     "MIT-0",
@@ -20,7 +20,9 @@
     "AGPL-3.0-only",
     "AGPL-3.0-or-later",
     "CC-BY-4.0",
-    "WTFPL"
+    "WTFPL",
+    "MIT-CMU",
+    "PSF-2.0"
   ],
   "deny": ["GPL-2.0-only", "SSPL-*", "BUSL-*", "Elastic-2.0", "CC-BY-NC-*", "UNLICENSED", "Unknown"],
   "clarifications": [
@@ -40,6 +42,17 @@
       "reason": "Work Zone Claude Code adapter in the Local Runtime (prod dependency of apps/local-runtime); Anthropic commercial terms",
       "adr": "docs/adr/0034-public-releases-and-bundled-claude-agent-sdk.md",
       "status": "owner-confirmed 2026-11-05 for the desktop app release"
+    },
+    {
+      "name": "pypdfium2",
+      "match": ["pypdfium2"],
+      "version": "5.14.0",
+      "declared": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "license": "Apache-2.0 AND BSD-3-Clause AND CC-BY-4.0 AND BSD-2-Clause AND MIT AND Apache-2.0 WITH LLVM-exception AND Zlib AND IJG AND libpng-2.0 AND Unicode-3.0 AND FTL AND LicenseRef-AGG-2.3",
+      "source": "https://github.com/pypdfium2-team/pypdfium2/blob/main/README.md#licensing",
+      "reason": "sbx document toolkit (07.17.1.1.1 D-03), a pdfplumber dependency in infra/sandbox/sbx/tools/requirements.lock; pypdfium2 itself is Apache-2.0 / BSD-3-Clause (docs CC-BY-4.0) and its wheel bundles PDFium (BSD-3-Clause) with the dependency texts it ships in dist-info/licenses/data/linux_<arch>/BUILD_LICENSES/ (read by tools/lock.sh; the same 15 files for linux_x64 and linux_arm64): abseil (Apache-2.0), AGG 2.3, fast_float, lcms, simdutf and pdfium-binaries (MIT), FreeType (FTL), ICU (Unicode-3.0; its GPL sections cover only ICU's autoconf build macros, with the autoconf exception, not the binary), libjpeg-turbo (IJG AND BSD-3-Clause AND Zlib), OpenJPEG (BSD-2-Clause), libpng (libpng-2.0), LLVM libc (Apache-2.0 WITH LLVM-exception) and zlib. Every one is permissive and none is copyleft, but FTL, Unicode-3.0, IJG, libpng-2.0 and the AGG 2.3 notice are outside the allow list",
+      "adr": "docs/adr/0043-sandbox-document-toolkit.md",
+      "status": "approved 2026-11-12 by the orchestrator under the owner's autonomy grant on the (a)-(f) merge evidence, lock sha256 857f81fd78a1b06d1167999282ee4ed3ad78b486ecb914448b09ea9a78939cdb (07.17.1.1.1-07)"
     }
   ]
 }

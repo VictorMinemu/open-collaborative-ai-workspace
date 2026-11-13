@@ -10,6 +10,7 @@ export {
   effectiveCapabilities,
   effectiveTools,
   readCapabilities,
+  taskPolicyFor,
 } from "./capabilities";
 export { loadAllGrants, loadCatalog, loadGrants, replaceGrants } from "./catalog";
 export {
@@ -34,8 +35,10 @@ export {
   availableSearchProviders,
   internetConfigured,
   loadPolicy,
+  loadTaskPolicy,
   type SearchEnv,
   savePolicy,
+  type TaskPolicy,
 } from "./policy";
 export { findBot, governanceList, loadBotFacts, notifyCellConfig, usageToday } from "./routes";
 export {
@@ -50,6 +53,7 @@ export {
   type TurnAudience,
   type TurnDecision,
   type TurnKeys,
+  type TurnTaskOffer,
   turnNow,
   turnPolicy,
 } from "./turn-policy";

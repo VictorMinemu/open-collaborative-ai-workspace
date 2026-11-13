@@ -44,6 +44,15 @@ steps:
     commands:
       - docker build -t ocw-sandbox-sbx:ci infra/sandbox/sbx
 
+  # The document toolkit's image tests (07.17.1.1.1, D-07): run as 10001 in a container hardened like a bot's shell,
+  # with no network; the tests are streamed in with tar (the daemon cannot see this workspace). Prints the Debian
+  # evidence (dpkg-query dump) and the `rootfs <N> MiB` size gate.
+  - name: sandbox-sbx-tests
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - sh infra/sandbox/test/run-sbx-image-tests.sh ocw-sandbox-sbx:ci
+
   - name: sandbox-brw
     image: docker:29.8.2-cli
     volumes: [*docker_sock]

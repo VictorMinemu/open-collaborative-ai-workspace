@@ -55,4 +55,8 @@ for f in "$DIR"/*; do
 done
 # `exec` keeps this pid; GNU timeout calls setpgid(0, 0), so the group id is this pid and covers argv's children.
 echo "$$" >"$DIR/$id"
+# The command learns its own deadline (07.17.1.1.1 review CR-01): `ocw-extract --batch` sizes its budget from it, so a
+# chunk always ends before this timeout kills it.
+SBX_EXEC_DEADLINE_S="$seconds"
+export SBX_EXEC_DEADLINE_S
 exec timeout -s KILL "$seconds" "$@"

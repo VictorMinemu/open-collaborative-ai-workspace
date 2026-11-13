@@ -28,6 +28,7 @@ import {
   WaitingOn,
 } from "./board";
 import { ATTACHMENT_READ_LIMITS, SearchProvider, TurnContext } from "./bot-capabilities";
+import { BotTaskWakeReason, TaskProcessFact } from "./bot-tasks";
 import { BOT_WORK_ZONE_LIMITS, WorkSessionDecider } from "./bot-work-zone";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
@@ -108,6 +109,12 @@ export const AgentChannelEventTypes = {
    * built like a mention of the bot on the opened root. Older plugins skip the unknown type.
    */
   automationItem: "agent.automation_item.v1",
+  /**
+   * Phase 07.17.1.1.2 (D-02, D-03, PD-11): a continuation of the bot's own task, built like a mention of the bot on its
+   * task card (structural author = the person the task runs for, `message.text` a fixed server sentence). Older plugins
+   * skip the unknown type.
+   */
+  task: "agent.task.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -377,6 +384,24 @@ export const AgentAutomationItemEvent = AgentMentionEvent.omit({ type: true }).e
   }),
 });
 export type AgentAutomationItemEvent = z.infer<typeof AgentAutomationItemEvent>;
+
+/**
+ * Phase 07.17.1.1.2 (D-02, D-03, D-07, PD-11): the platform delivers the next turn of the bot's own task in the task's
+ * thread, built like a mention of the bot on its task card: the structural author is the person the task runs for,
+ * `turn` is computed for them again (no browser tools, the task's taint kept) and carries `turn.task`, and
+ * `message.text` is `taskContinueSentence(reason, …)`, never bot text (the notes travel only in `turn.task`). `reason`
+ * says why the turn came (`continue` after the last turn, `timer`, `process` with the ended command, or `nudge` after a
+ * turn that neither continued nor finished). Older plugins skip the unknown type.
+ */
+export const AgentTaskEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.task),
+  task: z.object({
+    taskId: Id,
+    reason: BotTaskWakeReason,
+    process: TaskProcessFact.optional(),
+  }),
+});
+export type AgentTaskEvent = z.infer<typeof AgentTaskEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

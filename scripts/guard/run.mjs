@@ -5,14 +5,15 @@
 //   --root <dir>                                    # scan another tree with this repository's rules (tests)
 //   --rule-tests                                    # Semgrep's own fixture tests over .semgrep/tests/
 // Semgrep is pinned and fails closed: `uvx --from semgrep==<pin>`, else the pinned Docker image, else exit 1 with an
-// install hint. A missing runner is never a silent pass. Then: dependency licenses (full pnpm graph + the mcp-sandbox
-// lockfile, against license-policy.json), workspace package license fields and LICENSE files, CODEOWNERS lint.
+// install hint. A missing runner is never a silent pass. Then: dependency licenses (full pnpm graph, the npm lockfiles
+// outside it and the sbx Python lock joined with its licenses.json, against license-policy.json; the manifest itself
+// must match its lock), workspace package license fields and LICENSE files, CODEOWNERS lint.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { lint as lintCodeowners } from "./codeowners.mjs";
-import { checkFields, checkGraph, collectGraph, collectPackages } from "./licenses.mjs";
+import { checkFields, checkGraph, checkPythonManifests, collectGraph, collectPackages } from "./licenses.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RULES = join(REPO, ".semgrep", "rules.yml");
@@ -119,7 +120,7 @@ function runLicenses() {
     return [error.message];
   }
   const notes = [];
-  const failures = checkGraph(entries, policy, notes);
+  const failures = [...checkGraph(entries, policy, notes), ...checkPythonManifests(root)];
   console.log(`licenses: ${entries.length} package versions checked`);
   for (const note of notes) console.log(note);
   return failures;

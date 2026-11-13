@@ -80,6 +80,11 @@ REVOKE TRUNCATE ON app.bot_work_zone_profiles, app.bot_work_zone_profile_project
 -- granted for the cascades of an automation, a run or a conversation.
 REVOKE TRUNCATE ON app.automation_conversations FROM ocw_app;
 
+-- Long bot tasks (Phase 07.17.1.1.2, D-01): TRUNCATE ignores RLS, so the app role never truncates every organization's
+-- tasks or the processes they wait for (stated explicitly, as for 07.16). DELETE stays granted for the cascades of a bot,
+-- a conversation or a task.
+REVOKE TRUNCATE ON app.bot_tasks, app.bot_task_processes FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
@@ -969,3 +974,29 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.idle_agent_chains(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.idle_agent_chains(integer, timestamptz) TO ocw_app;
+
+-- Phase 07.17.1.1.2 (D-02, D-12, PD-06, PD-09; ADR-0042): the pre-tenant read of the `bot_task.tick` job (one global
+-- cron, every minute, UTC). Same shape as the chain listers above: active long tasks the tick must look at, across
+-- organizations by design, ids and organization ids only (never a goal, progress, a wait reference or a person): a
+-- waiting task whose wake is more than 60 s overdue (its job was lost), a running task unchanged for 30 minutes (its
+-- turn was lost), a task past its deadline, and a task whose bot is disabled or archived (soft-deleted). Oldest wake (or
+-- change) first. The tick re-reads every task by id inside its organization's own withTenant() transaction, where RLS
+-- applies again, and decides there under the task's row lock. Code review IN-04: a null `p_now` (what the tick passes)
+-- is the database's own clock, the one every decision reads (Pitfall 7); a time is only ever passed by tests.
+CREATE OR REPLACE FUNCTION app.due_bot_tasks(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT t.id, t.organization_id FROM app.bot_tasks t
+  JOIN app.agents a ON a.organization_id = t.organization_id AND a.id = t.agent_id
+  CROSS JOIN (SELECT coalesce(p_now, now()) AS at) c
+  WHERE t.status IN ('running', 'waiting')
+    AND ((t.status = 'waiting' AND t.wake_at <= c.at - interval '60 seconds')
+      OR (t.status = 'running' AND t.updated_at <= c.at - interval '30 minutes')
+      OR t.deadline_at <= c.at
+      OR a.status = 'disabled'
+      OR a.deleted_at IS NOT NULL)
+  ORDER BY coalesce(t.wake_at, t.updated_at), t.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_bot_tasks(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_bot_tasks(integer, timestamptz) TO ocw_app;

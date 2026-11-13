@@ -23,6 +23,7 @@ import { type Docker, DockerUnavailableError, demux } from "./docker";
 import type { Egress } from "./egress-attach";
 import {
   type ContainerLimits,
+  DISK_ROOM_ENV,
   type DockerRuntime,
   egressHostsCurrent,
   filesSpec,
@@ -32,6 +33,7 @@ import {
   ownerLabels,
   packagesVolumeSpec,
   SANDBOX_USER,
+  shellEnvCurrent,
   shellSpec,
   volumeSpec,
   WORKSPACE,
@@ -155,9 +157,10 @@ export interface SandboxesOptions {
   egress?: Egress | null;
   /**
    * One line per `ensure`: the target's ids, whether it created or started the shell, and the milliseconds of each phase
-   * (CI p142/p164/p178: a cold start's time is Docker's create and start, not the proxy's attach). Never a spec.
+   * (CI p142/p164/p178: a cold start's time is Docker's create and start, not the proxy's attach), and why a stopped
+   * shell was created again (`recreated`); a `warn` line when the shell's image cannot be compared. Never a spec.
    */
-  log?: (line: { level: "info"; msg: string; [key: string]: unknown }) => void;
+  log?: (line: { level: "info" | "warn"; msg: string; [key: string]: unknown }) => void;
 }
 
 /** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
@@ -305,7 +308,9 @@ function stripLeadingPartial(text: string, bytes: Buffer): string {
 
 interface ContainerInspect {
   Id: string;
-  Config?: { Labels?: Record<string, string> | null; Image?: string };
+  /** The image ID the container runs (`sha256:…`); `Config.Image` is the ref it was created from. */
+  Image?: string;
+  Config?: { Labels?: Record<string, string> | null; Image?: string; Env?: string[] | null };
   State?: { Running?: boolean; Restarting?: boolean; Status?: string; StartedAt?: string };
   HostConfig?: { Runtime?: string; ExtraHosts?: string[] | null };
 }
@@ -325,6 +330,22 @@ interface ProcessRecord {
   timer: NodeJS.Timeout | null;
   /** Resolves when the output stream ends, so a wait wakes at once instead of on the next poll tick. */
   streamDone: Promise<void>;
+  /** The run's timeout as `ocw-run` applies it (whole seconds): an end at or past it is a timeout. */
+  timeoutSeconds: number;
+  /**
+   * 07.17.1.1.2-11 (D-03, PD-13): sandboxd answered `running` for this command (the bot got a process id), so its end
+   * is reported once as a `process` event; `reported` once it was.
+   */
+  yielded: boolean;
+  reported: boolean;
+  /** `ocw-run --kill` reached the command's group: a person or the bot stopped it (`/process` kill). */
+  killed: boolean;
+  /** The backstop timer killed it (the helper itself was killed or hung past the timeout). */
+  timedOut: boolean;
+  /** The exit code came from Docker (false: unknown, e.g. the container went away with the command). */
+  exitKnown: boolean;
+  /** The kill in flight (`killRecord`), settled; `reportEnd` waits for it to tell a kill from an end. */
+  killing: Promise<void> | null;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -881,6 +902,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     for (let i = 0; i < 20; i++) {
       const state = await execInspect(rec.execId);
       if (!state.running) {
+        rec.exitKnown = state.exitCode !== null;
         rec.exitCode = state.exitCode ?? -1;
         break;
       }
@@ -891,6 +913,38 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     rec.endedAt = clock.now();
     if (rec.timer) clearTimeout(rec.timer);
     rec.stream.destroy();
+    reportEnd(rec);
+  }
+
+  /**
+   * 07.17.1.1.2-11 (D-03, PD-13): a yielded command ended (its exit code resolved by `finish`): one `process` event,
+   * whichever of the stream end, a poll or a kill got here first (`reported`). Ids and numbers only: never the argv,
+   * the cwd or the output (T-07.8-09-04). A command that ended within its yield reports nothing (the bot has its result).
+   */
+  function reportEnd(rec: ProcessRecord): void {
+    if (!rec.yielded || rec.reported) return;
+    rec.reported = true;
+    const durationMs = Math.max(0, Math.round((rec.endedAt ?? clock.now()) - rec.startedAt));
+    void (rec.killing ?? Promise.resolve()).then(() => {
+      // Precedence: the backstop's kill, a requested kill, then ocw-run's own timeout (the end came at its deadline).
+      // 07.17.1.1.2 code review IN-06: an exit code nobody could read (the shell went away: disk full, the kill
+      // switch, a purge) is a killed command, never `exited` (ADR-0042 § 5).
+      const status = rec.timedOut
+        ? "timed_out"
+        : rec.killed || !rec.exitKnown
+          ? "killed"
+          : durationMs >= rec.timeoutSeconds * 1000
+            ? "timed_out"
+            : "exited";
+      emit({
+        type: "process",
+        target: { orgId: rec.orgId, agentId: rec.agentId },
+        processId: rec.id,
+        status,
+        exitCode: rec.exitKnown ? rec.exitCode : null,
+        durationMs,
+      });
+    });
   }
 
   /** Waits up to `ms` for the process to end (stream end, or the exec reported finished). */
@@ -927,6 +981,8 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       processes.delete(rec.id);
       return { status: "exited", exitCode: rec.exitCode ?? -1, ...common };
     }
+    // The bot now holds a process id: the command's end will be reported (`reportEnd`).
+    rec.yielded = true;
     return { status: "running", processId: rec.id, ...common };
   }
 
@@ -974,19 +1030,62 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     if (res.status !== 204 && res.status !== 404) throw dockerDown();
   }
 
+  /** The ID of the image `options.image` names now (a rebuilt tag names a new one), or null when Docker cannot say. */
+  async function currentImageId(): Promise<string | null> {
+    const res = await call("GET", `/images/${encodeURIComponent(image)}/json`);
+    if (res.status !== 200) return null;
+    const id = asRecord(res.body).Id;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  }
+
+  /**
+   * Why the bot's shell must be created again before it runs, or null to reuse it (07.17.1.1.1 D-10, PD-10), in this
+   * order: a stale proxy entry in /etc/hosts (only with an egress proxy), an image other than the one the tag names now
+   * (Compose rebuilds the same tag, so a shell otherwise keeps the old toolkit forever), an environment that lacks a
+   * current `SHELL_ENV` line (`shellEnvCurrent`). Called only for a stopped shell from `ensure` (a running one is never cut) and from
+   * `restart` (which stops its commands anyway). An image Docker cannot inspect, or a shell that reports none, is
+   * unknown: nothing is re-created (a create from a missing image would fail and lose a startable shell), and one warn
+   * line with ids only says so.
+   */
+  async function driftOf(
+    target: SandboxdTarget,
+    c: ContainerInspect,
+    egressAddress: string | null,
+  ): Promise<"hosts" | "image" | "env" | null> {
+    if (options.egress && !egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)) return "hosts";
+    const want = await currentImageId();
+    if (!want || !c.Image) {
+      options.log?.({ level: "warn", msg: "image_unknown", orgId: target.orgId, agentId: target.agentId });
+      return null;
+    }
+    if (c.Image !== want) return "image";
+    if (!shellEnvCurrent(c.Config?.Env)) return "env";
+    return null;
+  }
+
   /**
    * SIGKILLs the process group `ocw-run` recorded for this process. Docker answers the exec start before runc has
    * spawned the command, so on a loaded daemon the helper can run before the command recorded its group; it then exits
    * `KILL_NO_RECORD` and the kill is tried again until it lands, the command ends, or `PROCESS_KILL_BUDGET_MS` runs
    * out (CI p144: a single attempt left `sleep 300` running and the kill answered `running`).
    */
-  async function killRecord(rec: ProcessRecord): Promise<void> {
+  function killRecord(rec: ProcessRecord): Promise<void> {
+    // 07.17.1.1.2-11: the end a kill causes is reported only once the kill settled (`reportEnd` waits for it), so a
+    // stream end that races the helper's answer still reads as `killed`.
+    const run = killLoop(rec);
+    rec.killing = run.catch(() => undefined);
+    return run;
+  }
+
+  async function killLoop(rec: ProcessRecord): Promise<void> {
     const deadline = clock.now() + PROCESS_KILL_BUDGET_MS;
     for (;;) {
       if (rec.ended) return;
       const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
       if (!c?.State?.Running) return;
       const res = await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
+      // The helper signalled the group of a command that was still running when it was sent (07.17.1.1.2-11).
+      if (res.exitCode === 0) rec.killed = true;
       if (res.exitCode !== KILL_NO_RECORD || rec.ended || clock.now() >= deadline) return;
       await sleep(KILL_RETRY_MS);
     }
@@ -1026,6 +1125,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         mark = Date.now(); // time spent waiting for another call of this bot is nobody's phase
         let created = false;
         let startedNow = false;
+        let recreated: "hosts" | "image" | "env" | null = null;
         let c = await ownedShell(target);
         const network = await ensureNetwork(target);
         lap("network");
@@ -1033,15 +1133,16 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         // and its address there now, for the shell's /etc/hosts.
         const egressAddress = options.egress ? await options.egress.attach(target, "sbx", network) : null;
         lap("egress");
-        if (
-          c &&
-          !c.State?.Running &&
-          options.egress &&
-          !egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)
-        ) {
-          // Stopped with a stale entry (the proxy restarted, or the shell predates the entry): created again below.
-          await removeShell(c);
-          c = null;
+        if (c && !c.State?.Running) {
+          // Stopped with a stale entry (the proxy restarted, or the shell predates the entry) or built from an older
+          // image (07.17.1.1.1 D-10): created again below from the current spec, its volumes kept. A running shell is
+          // left alone (it converges at its next start). The kill switch may have been pushed during the attach.
+          recreated = await driftOf(target, c, egressAddress);
+          if (recreated) {
+            requirePolicy(target.orgId, { runnable: true });
+            await removeShell(c);
+            c = null;
+          }
         }
         if (!c) {
           c = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
@@ -1075,6 +1176,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           agentId: target.agentId,
           created,
           started: startedNow,
+          recreated,
           ms,
         });
         return statusOf(target, c);
@@ -1093,9 +1195,16 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
 
       const id = randomBytes(12).toString("base64url");
       const seconds = Math.ceil(input.timeoutMs / 1000);
+      // The room left under the soft quota at the last measurement (07.17.1.1.1 review WR-06): ocw-extract caps an
+      // archive's extraction with it, so it never pushes the workspace over and gets the shell stopped mid-run.
+      const quota = limitsFor(input.target.orgId)?.diskQuotaBytes;
+      const used = diskBytes.get(targetKey(input.target));
+      const room =
+        quota !== undefined && used !== undefined ? [`${DISK_ROOM_ENV}=${Math.max(0, quota - used)}`] : [];
       const created = await call("POST", `/containers/${encodeURIComponent(c.Id)}/exec`, {
         User: SANDBOX_USER,
         Cmd: [OCW_RUN, id, String(seconds), "--", ...input.argv],
+        ...(room.length > 0 ? { Env: room } : {}),
         WorkingDir: input.cwd ? `${WORKSPACE}/${input.cwd}` : WORKSPACE,
         AttachStdin: false,
         AttachStdout: true,
@@ -1127,6 +1236,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         exitCode: null,
         timer: null,
         streamDone: Promise.resolve(),
+        timeoutSeconds: seconds,
+        yielded: false,
+        reported: false,
+        killed: false,
+        timedOut: false,
+        exitKnown: false,
+        killing: null,
       };
       rec.streamDone = demux(stream, (frame) =>
         (frame.stream === 2 ? rec.stderr : rec.stdout).push(frame.data),
@@ -1137,12 +1253,17 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       lastActive.set(targetKey(input.target), clock.now());
       // ocw-run's timeout kills the group; this is the backstop if the helper itself was killed or hung.
       rec.timer = setTimeout(() => {
+        if (!rec.ended) rec.timedOut = true;
         void killRecord(rec).catch(() => undefined);
       }, input.timeoutMs + TIMEOUT_GRACE_MS);
       rec.timer.unref();
 
       await waitFor(rec, input.yieldMs);
-      return resultOf(rec);
+      const result = resultOf(rec);
+      // 07.17.1.1.2-11: a command still running ends on its own later; its stream end resolves the exit code and
+      // reports it once (`reportEnd`), whether or not anyone polls it.
+      if (result.status === "running") void rec.streamDone.then(() => finish(rec)).catch(() => undefined);
+      return result;
     },
 
     async process(input) {
@@ -1173,22 +1294,33 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         if (!c) throw failure("not_found", 404, "this bot has no sandbox");
         if (diskFull.has(targetKey(target)))
           throw failure("disk_full", 409, "the workspace is over its quota");
-        if (options.egress) {
-          const network = await ensureNetwork(target);
-          const egressAddress = await options.egress.attach(target, "sbx", network);
-          if (!egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)) {
-            // A Docker restart keeps a stale /etc/hosts entry: the shell is created again with the current address.
-            const dockerRuntime = await chooseRuntime();
-            await removeShell(c);
-            const fresh = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
-            const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
-            if (started.status !== 204 && started.status !== 304) throw dockerDown();
-            lastActive.set(targetKey(target), clock.now());
-            stopReasons.delete(targetKey(target));
-            cpuLast.delete(targetKey(target));
-            emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
-            return statusOf(target, await ownedShell(target));
+        // A Docker restart keeps the container's /etc/hosts, image and environment: a shell with a stale proxy entry,
+        // an older image or an older environment (07.17.1.1.1 D-10) is created again instead. A restart stops its
+        // commands anyway, so a running shell may be re-created here (never from `ensure`).
+        const network = options.egress ? await ensureNetwork(target) : null;
+        const egressAddress =
+          options.egress && network ? await options.egress.attach(target, "sbx", network) : null;
+        if (await driftOf(target, c, egressAddress)) {
+          requirePolicy(target.orgId, { runnable: true });
+          const dockerRuntime = await chooseRuntime();
+          const net = network ?? (await ensureNetwork(target));
+          await removeShell(c);
+          const fresh = await createShell(target, lim.container, dockerRuntime, net, egressAddress);
+          // The same kill-switch re-checks as `ensure` (07.17.1.1.1 review WR-09): the create can wait tens of seconds
+          // on a loaded daemon, so a kill pushed meanwhile never gets the fresh shell started, and one pushed during the
+          // start (killOrg listed the running containers before this one ran) kills it at once.
+          requirePolicy(target.orgId, { runnable: true });
+          const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
+          if (started.status !== 204 && started.status !== 304) throw dockerDown();
+          if (limitsFor(target.orgId)?.killed) {
+            await killListed([{ Id: fresh.Id, Labels: fresh.Config?.Labels ?? {} }]);
+            throw failure("killed", 409, "this organization's sandboxes are stopped");
           }
+          lastActive.set(targetKey(target), clock.now());
+          stopReasons.delete(targetKey(target));
+          cpuLast.delete(targetKey(target));
+          emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
+          return statusOf(target, await ownedShell(target));
         }
         expectStop(c.Id);
         const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/restart?t=5`);
@@ -1283,6 +1415,17 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         const name = nameFor("files", ns, target.agentId);
         let h = await inspectContainer(name);
         if (h && !labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        // An idle helper built from an older image (a rebuilt tag) is removed and created again from the current one
+        // before it is reused (07.17.1.1.1 review IN-08), as a stopped shell is; one with a file op in flight is kept.
+        if (h && !filesBusy.has(h.Id) && h.Image) {
+          const want = await currentImageId();
+          if (want && h.Image !== want) {
+            const removed = await call("DELETE", `/containers/${encodeURIComponent(h.Id)}?force=1`);
+            if (removed.status !== 204 && removed.status !== 404) throw dockerDown();
+            filesUsed.delete(h.Id);
+            h = null;
+          }
+        }
         if (!h) {
           const p = await probe();
           if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);

@@ -139,3 +139,39 @@ const notListedRows = await tx.select().from(mcpServers).where(notInArray(mcpSer
 const memberListed = ["per_member_oauth", "per_member_secret"].includes(server.authMode);
 // ok: ocw.raw-auth-mode
 const modes: ConnectorAuthMode[] = ["org_secret", "org_oauth"];
+
+// 07.17.1.1.2 PD-19, P1 (ADR-0042 § 14): a task audit carries ids, counts, reasons and durations, never the bot's text.
+// ruleid: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { action: "bot.task_started", actorKind: "agent", metadata: { taskId, goal } });
+// ruleid: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { action: "bot.task_continued", metadata: { taskId: task.id, progress: body.progress } });
+// ruleid: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { metadata: { taskId, summary: body.summary }, action: "bot.task_finished" });
+// ruleid: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { ...auditBase, action: "bot.task_refused", metadata: { ...ids, nextStep } });
+// ruleid: ocw.bot-task-text-in-audit
+await core.audit.record(tx, {
+  action: "bot.task_stopped",
+  resourceType: "bot_task",
+  metadata: { taskId: task.id, turnsUsed, goal: task.goal },
+});
+// ruleid: ocw.bot-task-text-in-audit
+await auditTask(tx, core, "bot.task_finished", task, { turnsUsed, summary: body.summary });
+// ok: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { action: "bot.task_started", metadata: { taskId, turnsUsed } });
+// ok: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { action: "bot.task_stopped", metadata: { taskId, reason: "budget_turns", byUserId } });
+// ok: ocw.bot-task-text-in-audit
+await auditTask(tx, core, "bot.task_continued", task, { eventId, turnsUsed, maxTurns, waitKind });
+// ok: ocw.bot-task-text-in-audit
+await core.audit.record(tx, { action: "bot.work_session_started", metadata: { sessionId, goal: profile.goal } });
+// ok: ocw.bot-task-text-in-audit
+const taskRow = { goal: body.goal, progress: body.progress, nextStep: body.nextStep, summary: null };
+export async function auditTask(tx: Tx, core: Core, action: TaskAction, task: BotTaskRow, metadata: object) {
+  // ruleid: ocw.bot-task-text-in-audit
+  await core.audit.record(tx, { action, metadata: { taskId: task.id, goal: task.goal, ...metadata } });
+}
+async function auditTaskRefused(tx: Tx, core: Core, p: Refusal) {
+  // ok: ocw.bot-task-text-in-audit
+  await core.audit.record(tx, { action: "bot.task_refused", metadata: { taskId: p.task?.id ?? null, code: p.code } });
+}

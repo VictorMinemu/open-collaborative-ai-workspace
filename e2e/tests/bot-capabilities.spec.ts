@@ -178,7 +178,7 @@ test("owner: Bot settings in the DM header toggles internet; the next turn carri
     await ask(
       sam.page,
       "what's new?",
-      "[turn tools: ocw_agent_card,ocw_automation_propose,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write,ocw_start_work_zone,ocw_work_zone_projects,web_fetch,web_search]",
+      "[turn tools: ocw_agent_card,ocw_automation_propose,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write,ocw_start_work_zone,ocw_task_continue,ocw_task_finish,ocw_task_start,ocw_work_zone_projects,web_fetch,web_search]",
     );
     await expect(sam.page.getByTestId("bot-settings")).toBeVisible();
     await bothThemes(sam.page, `bot-settings-dm-${tag}`);
@@ -307,7 +307,7 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
     await ask(
       sam.page,
       "anything new today?",
-      "[turn tools: ocw_agent_card,ocw_automation_propose,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write,ocw_start_work_zone,ocw_work_zone_projects]",
+      "[turn tools: ocw_agent_card,ocw_automation_propose,ocw_memory_list,ocw_memory_propose,ocw_memory_read,ocw_memory_save,ocw_memory_write,ocw_start_work_zone,ocw_task_continue,ocw_task_finish,ocw_task_start,ocw_work_zone_projects]",
     );
     // The same gated web call is no longer even offered to the bot.
     await ask(sam.page, 'look it up [[call web_search {"query":"ocw"}]]', "Tool web_search: not offered");
@@ -326,6 +326,10 @@ test("admin: Settings › Bot policy turns internet off for personal bots; the o
       "ocw_automation_propose",
       // 07.5-08: Sam may start Work Zone sessions, so every turn of his offers the Work Zone proposal tools.
       "ocw_start_work_zone",
+      // 07.17.1.1.2 (PD-07): a person's turn in a thread without the bot's task may start one (long tasks on by default).
+      "ocw_task_continue",
+      "ocw_task_finish",
+      "ocw_task_start",
       "ocw_work_zone_projects",
       "web_fetch",
       "web_search",

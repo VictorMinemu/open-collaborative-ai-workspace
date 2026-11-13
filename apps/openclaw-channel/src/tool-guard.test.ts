@@ -1976,3 +1976,163 @@ describe("ocw_conversation_open (07.17 D-02, D-05, PD-07, PD-10): self-validated
     );
   });
 });
+
+describe("the task tools (07.17.1.1.2 D-08, D-13, PD-08, E17): self-validated, outside the cap, once per turn, allowed after outside content", () => {
+  const START = "ocw_task_start";
+  const CONTINUE = "ocw_task_continue";
+  const FINISH = "ocw_task_finish";
+  const NONE = { untrustedOutput: false, sideEffecting: false };
+  const NOTES = { progress: "Read 120 files", nextStep: "Read 200 more" };
+  const ONCE = "That task tool was already called in this turn.";
+  const taskTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["web_search", "ocw_memory_save", START, CONTINUE, FINISH],
+      toolFlags: {
+        web_search: WEB,
+        ocw_memory_save: MEMORY,
+        [START]: NONE,
+        [CONTINUE]: NONE,
+        [FINISH]: NONE,
+      },
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = taskTurn(), tainted = false) =>
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: t, tainted });
+  const active = (g: ReturnType<typeof createToolGuard>) => {
+    const t = g.activeTurn(SESSION);
+    if (!t) throw new Error("no turn");
+    return t;
+  };
+
+  it("a new turn starts with no task outcome", () => {
+    const g = createToolGuard({ client: () => fakeClient().client });
+    begin(g);
+    expect(active(g).task).toEqual({ started: false, continued: false, finished: false, quiet: false });
+  });
+
+  it("never asks /tool-calls and is never counted against the turn's 8 calls: a turn that used them still continues", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, taskTurn({ maxWebCalls: 8 }));
+    for (let i = 0; i < 8; i++) {
+      expect(await g.beforeToolCall(call("web_search", { query: `q${i}` }), ctx())).toBeUndefined();
+    }
+    expect(active(g).calls).toBe(8);
+    expect((await g.beforeToolCall(call("web_search", { query: "q9" }), ctx()))?.blockReason).toMatch(
+      /limit of 8 tool calls/u,
+    );
+    const before = fake.requests.length;
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "done" }), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(before);
+    expect(active(g).calls).toBe(8);
+  });
+
+  it("once each per turn: a second call of the same tool is refused locally with the fixed sentence, another tool is not", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toEqual({ block: true, blockReason: ONCE });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    expect((await g.beforeToolCall(call(START, { goal: "y" }), ctx()))?.blockReason).toBe(ONCE);
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "done" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "done" }), ctx())).toMatchObject({
+      block: true,
+    });
+    // A new turn of the same session starts over.
+    begin(g);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("a call that did not succeed frees its slot (the tool says so); one that succeeded records the outcome", async () => {
+    const g = createToolGuard({ client: () => fakeClient().client });
+    begin(g);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "bad_params" });
+    expect(active(g).task.continued).toBe(false);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: true, quiet: true });
+    expect(active(g).task).toEqual({ started: false, continued: true, finished: false, quiet: true });
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toMatchObject({ block: true });
+    // A finish always posts (PD-10): it clears a quiet continue of the same turn.
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "done" }), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), FINISH, { ok: true });
+    expect(active(g).task).toEqual({ started: false, continued: true, finished: true, quiet: false });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), START, { ok: true });
+    expect(active(g).task.started).toBe(true);
+  });
+
+  it("code review WR-06: a refusal the model can fix frees the slot once; a second one, or one that should stop it, keeps the slot", async () => {
+    const g = createToolGuard({ client: () => fakeClient().client });
+    begin(g);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "wait_unknown" });
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), CONTINUE, { ok: false, code: "unreachable" });
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toEqual({ block: true, blockReason: ONCE });
+    // The workspace said the task cannot go on: the model is not invited to call again.
+    const FINISH_ARGS = { summary: "x", outcome: "done" };
+    expect(await g.beforeToolCall(call(FINISH, FINISH_ARGS), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), FINISH, { ok: false, code: "task_stopped" });
+    expect(await g.beforeToolCall(call(FINISH, FINISH_ARGS), ctx())).toEqual({
+      block: true,
+      blockReason: ONCE,
+    });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    g.taskCallEnded(active(g), START, { ok: false, code: "once_per_turn" });
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toEqual({
+      block: true,
+      blockReason: ONCE,
+    });
+  });
+
+  it("after outside content (local taint, a turn delivered tainted, a session read) the tools still run; memory stays blocked", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call("web_search", { query: "x" }), ctx())).toBeUndefined();
+    expect(active(g).tainted).toBe(true);
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx())).toMatchObject({
+      block: true,
+    });
+    begin(g, taskTurn(), true);
+    expect(await g.beforeToolCall(call(START, { goal: "x" }), ctx())).toBeUndefined();
+    begin(g);
+    active(g).sessionOutputRead = true;
+    expect(await g.beforeToolCall(call(FINISH, { summary: "x", outcome: "blocked" }), ctx())).toBeUndefined();
+  });
+
+  it("takes its static flags: a turn saying side-effecting or approvable changes nothing; one saying untrusted only adds", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(
+      g,
+      taskTurn({
+        toolFlags: {
+          [CONTINUE]: { untrustedOutput: false, sideEffecting: true, approval: "always" as const },
+        },
+      }),
+      true,
+    );
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+    begin(g, taskTurn({ toolFlags: { [CONTINUE]: { untrustedOutput: true, sideEffecting: false } } }));
+    expect(await g.beforeToolCall(call(CONTINUE, NOTES), ctx())).toBeUndefined();
+    expect(active(g).tainted).toBe(true);
+  });
+
+  it("a turn that does not offer them blocks them (the existing not-offered path)", async () => {
+    const g = createToolGuard({ client: () => fakeClient().client });
+    begin(g, taskTurn({ tools: ["web_search"] }));
+    for (const name of [START, CONTINUE, FINISH]) {
+      expect((await g.beforeToolCall(call(name, {}), ctx()))?.blockReason).toBe(
+        `Tool ${name} is not allowed on this turn.`,
+      );
+    }
+  });
+});

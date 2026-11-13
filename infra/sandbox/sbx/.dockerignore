@@ -1,0 +1,4 @@
+# The sbx build context (07.17.1.1.1): never copy a developer's byte-code caches or the image tests into the image.
+**/__pycache__
+**/*.pyc
+tools/tests

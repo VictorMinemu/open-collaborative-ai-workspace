@@ -8,7 +8,7 @@ Operators turn the feature on as described in [docs/self-hosting/sandbox.md](../
 | Folder | Image | What it is |
 | --- | --- | --- |
 | `sandboxd/` | `ocw-sandboxd` | The broker (`apps/sandboxd`, bundled with esbuild into one file, no `node_modules`). The only service that holds the Docker socket. Runs as root only for the socket, with a read-only root, no capabilities and `no-new-privileges` |
-| `sbx/` | `ocw-sandbox-sbx` | A bot's shell: Node 24, Python 3, git, curl, jq, unzip, xz; user `ocw` 10001; setuid and setgid bits stripped at build; `ocw-run` (runs one argv as a process group with a timeout) and `ocw-files` (realpath-confined file ops), both root-owned |
+| `sbx/` | `ocw-sandbox-sbx` | A bot's shell: Node 24, Python 3, git, curl, jq, unzip, xz; user `ocw` 10001; setuid and setgid bits stripped at build; `ocw-run` (runs one argv as a process group with a timeout) and `ocw-files` (realpath-confined file ops), both root-owned; the document toolkit (poppler, tesseract eng+spa, LibreOffice nogui, ImageMagick with an allow-list, 7zip, exiftool, a hash-locked Python venv in /opt/ocw-tools, `ocw-extract`; ADR-0043), tested by `test/run-sbx-image-tests.sh <image>` |
 | `browser/` | `ocw-sandbox-brw` | A bot's browser: `playwright-core@1.64.1` driving the Chrome for Testing headless shell of Chrome stable **156.0.8078.47**, sha256-pinned per arch, over a pipe (no port). `agent.mjs` is the only page view a caller gets: redacted snapshots, masked screenshots, the site lock |
 | `egress/` | `ocw-sandbox-egress` | The `sandbox-egress` proxy (`apps/sandboxd/src/egress`, plain Node, uid 10002): every bot network's only way out, with the API's own 07.4 rules (`@ocw/egress-policy`) |
 
@@ -27,7 +27,7 @@ Each smoke uses its own namespace (`ocw-smoke-<pid>`), builds `:smoke-<sha>` tag
 label **before starting and on exit**, and removes its images. None of them prunes or touches another namespace.
 
 ```bash
-bash infra/sandbox/test/run-sandbox-smoke.sh     # sbx: hardening, isolation, files, quota, idle, events, restart
+bash infra/sandbox/test/run-sandbox-smoke.sh     # sbx: hardening, isolation, files, quota, idle, events, restart, docs, drift
 bash infra/sandbox/test/run-egress-smoke.sh      # the proxy: refusals, the single shared hop, fail closed
 bash infra/sandbox/test/run-browser-smoke.sh     # brw on real Chromium: E1 masking, state, downloads, resize, site lock
 bash infra/sandbox/test/run-stack-smoke.sh       # sandboxd + proxy + brw: frames, takeover, two bots apart, real egress

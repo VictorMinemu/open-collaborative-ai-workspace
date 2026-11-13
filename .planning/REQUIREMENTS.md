@@ -431,6 +431,32 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [ ] **BWF-07**: The per-file limit is configurable: the organization's "Largest file a bot moves" (default 25 MB, at most the server's `OCW_ATTACHMENT_MAX_BYTES`) and the bot's "Largest file" (at most the organization's); the lower wins, refusals name it, the check happens before any byte moves, and large files stream
 - [ ] **BWF-08**: The device's `diff.result` frames never exceed the API's 256 KiB inbound limit (a large diff is shown truncated instead of closing the link)
 
+### Sandbox Document Toolkit (DOC) — added 2026-11-12 by the owner
+
+- [x] **DOC-01**: `sbx` ships the Debian toolkit (PDF, OCR eng+spa, Office, images, archives, mail, metadata) from bookworm `main`
+- [x] **DOC-02**: A hash-locked Python environment at `/opt/ocw-tools/venv`, installed wheels-only, licenses recorded and guarded
+- [x] **DOC-03**: `ocw-extract <file>`: per-type extraction, OCR fallback, page ranges, bounded UTF-8 output, clear errors and exit codes
+- [x] **DOC-04**: `ocw-extract --batch`: a `.txt` mirror tree and an index under /workspace, originals untouched, resumable in chunks under 600 s (exit 75)
+- [x] **DOC-05**: Safety: ImageMagick allow-list, LibreOffice finalized config and throwaway profile, no gs/Java/Firebird/GStreamer, bounded rasterization, archive caps, children without proxy variables; a macro fixture
+- [x] **DOC-06**: The bot is told: the exec tool description and the attachments how-to clause
+- [x] **DOC-07**: Fixtures extracted in the real sandbox smoke on runc and gVisor; the image gate (size, setuid, sources, versions)
+- [x] **DOC-08**: Existing bots pick up the new image and environment: a stopped shell is re-created on image or env drift, a running one never
+- [x] **DOC-09**: ADR-0043, the self-hosting sandbox page, the README image row, the AGENTS.md row, STATUS, the v0.3.2 notes
+
+### Long-running Bot Tasks (BTASK) — added 2026-11-12 by the owner
+
+- [ ] **BTASK-01**: A bot's long task is a platform entity (`app.bot_tasks`, organization-scoped with RLS), at most one active per bot per thread, and its start, every delivered continuation, its finish and its stop are audited with ids and counts only
+- [ ] **BTASK-02**: A bot starts, continues and finishes its task with `ocw_task_start`, `ocw_task_continue` and `ocw_task_finish` (strict contracts, cell routes, plugin tools and gate), which are not side-effecting and do not count toward the turn's 8 tool calls
+- [ ] **BTASK-03**: A continuation reaches the bot exactly once as a `task` trigger turn (`agent.task.v1`), scheduled by the API's `bot_task.continue` job with a derived event id and delivered in three transactions
+- [ ] **BTASK-04**: A background sandbox process the task waits on wakes it once when it ends (sandboxd's `process` event through the exactly-once consumer), and a replayed event never delivers a second turn
+- [ ] **BTASK-05**: A Work Zone session the task started wakes the task as one of its own turns when the session's wake fires
+- [ ] **BTASK-06**: A task can wait on a bounded timer (`afterSeconds`, at most one hour and never past its deadline), and the turn-done release, the 30-minute backstop and the minute tick deliver its next turn even when the cell never reports done
+- [ ] **BTASK-07**: A task never runs away: it stops at its turns, its hours, the organization's running-task cap or the bot's daily limit, with one message in the thread mentioning the person it runs for
+- [ ] **BTASK-08**: Admins switch long tasks on or off in Settings › Bot policy ("Allow long tasks") and set the turns, hours and running-task limits, and each bot's capabilities show "Long tasks"
+- [ ] **BTASK-09**: People see a live platform task card (goal, status, turns used of max, elapsed time, last progress) that the requester, the thread's moderators and the bot's managers can Stop, and visible progress posts are rate-limited to one per 5 turns or 10 minutes
+- [ ] **BTASK-10**: The bot is proactive: its persona paragraph and "Your task" block tell it to start a task and keep going instead of asking whether to continue, silent task turns are accepted and every task turn reports done
+- [ ] **BTASK-11**: Every task turn is re-decided as the requester, the taint stays sticky across its turns, continuations get no browser tools, access loss, a disabled bot or the policy turned off stop the task, and AI chats never get tasks
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -683,6 +709,26 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BWF-06 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
 | BWF-07 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
 | BWF-08 | Phase 07.17.1.1 | Pending | New (owner, 2026-11-11) |
+| DOC-01 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `infra/sandbox/sbx/tools/tests/test_toolkit.py` (images workflow `sandbox-sbx-tests`, the `dpkg-query` dump); approved before merge (07.17.1.1.1-07) |
+| DOC-02 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `scripts/guard/guard.test.mjs`, `scripts/sandbox-lock-evidence.test.mjs`, `test_venv.py`; merge evidence (a)–(f) in 07.17.1.1.1-07-SUMMARY |
+| DOC-03 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `infra/sandbox/sbx/tools/tests/test_ocw_extract.py`; `run-sandbox-smoke.sh` section `docs` |
+| DOC-04 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `infra/sandbox/sbx/tools/tests/test_batch.py`; `run-sandbox-smoke.sh` section `docs` (batch 75 → 0) |
+| DOC-05 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `test_toolkit.py` (ImageMagick policy, absent packages), `test_ocw_extract.py` (macro, entity payloads), `test_batch.py` (caps); smoke `docs` macro positive control |
+| DOC-06 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `apps/openclaw-channel/src/sandbox-tools.test.ts`, `mention-mapper.test.ts` |
+| DOC-07 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); images workflow `sandbox-sbx-tests` (rootfs 1087 MiB of 1300); sandbox workflow `sandbox-smoke` (runc) and `gvisor-smoke --only core,docs` |
+| DOC-08 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `apps/sandboxd/src/image-drift.test.ts`; `run-sandbox-smoke.sh` section `drift` |
+| DOC-09 | Phase 07.17.1.1.1 | Complete | New (owner, 2026-11-12); `docs/adr/0043-sandbox-document-toolkit.md`, AGENTS.md row, `docs/self-hosting/sandbox.md`, `docs/releases/v0.3.2.md` |
+| BTASK-01 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-02 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-03 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-04 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-05 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-06 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-07 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-08 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-09 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-10 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| BTASK-11 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |

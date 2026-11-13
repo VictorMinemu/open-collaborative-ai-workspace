@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSandboxes } from "./sandboxes";
+import { createSandboxes, type SandboxdEventInput } from "./sandboxes";
 import { OCW_RUN } from "./spec";
 import { type ExecCall, FakeDocker } from "./testing/fake-docker";
 import { testPolicy } from "./testing/policy";
@@ -98,4 +98,151 @@ describe("process kill: the kill reaches a command that has not recorded its gro
     expect(helpers.length).toBeGreaterThan(0);
     expect(helpers.length).toBeLessThan(10);
   }, 10_000);
+});
+
+/**
+ * 07.17.1.1.2-11 (D-03, PD-13): a command sandboxd answered `running` for (`yielded`) emits exactly one `process` event
+ * when it ends (`exited` with its exit code, `killed` through `/process`, `timed_out` by its timeout or the backstop),
+ * ids and numbers only. A command that ended within its yield emits none (the bot already has its result).
+ */
+describe("the process event of a background command", () => {
+  async function eventStack() {
+    const docker = new FakeDocker();
+    const seen: SandboxdEventInput[] = [];
+    const sandboxes = createSandboxes({
+      docker,
+      ns: "ocw-unit",
+      runtime: "auto",
+      image: "sbx:test",
+      onEvent: (e) => seen.push(e),
+    });
+    sandboxes.setPolicy(testPolicy(ORG));
+    await sandboxes.ensure(target);
+    const processEvents = () => seen.filter((e) => e.type === "process");
+    return { docker, sandboxes, processEvents };
+  }
+
+  /** A command that ends by itself after `ms` with `exitCode`, or when its group is killed (137). */
+  function timedCommand(docker: FakeDocker, ms: number, exitCode: number) {
+    let killed: (() => void) | null = null;
+    docker.onExec = (call: ExecCall) => {
+      if (call.cmd[1] === "--kill") {
+        killed?.();
+        return { exitCode: 0 };
+      }
+      return new Promise((resolve) => {
+        const t = setTimeout(() => resolve({ exitCode, stdout: "SENTINEL-output-4c1d\n" }), ms);
+        killed = () => {
+          clearTimeout(t);
+          resolve({ exitCode: 137 });
+        };
+      });
+    };
+  }
+
+  async function until(check: () => boolean, ms = 3_000): Promise<void> {
+    const end = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > end) throw new Error("condition not met in time");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  const run = (sandboxes: Awaited<ReturnType<typeof eventStack>>["sandboxes"], timeoutMs = 60_000) =>
+    sandboxes.exec({ target, argv: ["ocw-extract", "SENTINEL-argv-9e2f"], cwd: "", timeoutMs, yieldMs: 0 });
+
+  it("ends by itself: one exited event with its exit code, nobody polling; ids and numbers only", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 150, 75);
+    const started = await run(sandboxes);
+    expect(started).toMatchObject({ status: "running" });
+    const processId = (started as { processId: string }).processId;
+    await until(() => processEvents().length > 0);
+    await new Promise((r) => setTimeout(r, 100));
+    const list = processEvents();
+    expect(list).toHaveLength(1);
+    const [e] = list;
+    expect(Object.keys(e ?? {}).sort()).toEqual([
+      "durationMs",
+      "exitCode",
+      "processId",
+      "status",
+      "target",
+      "type",
+    ]);
+    expect(e).toMatchObject({ type: "process", target, processId, status: "exited", exitCode: 75 });
+    expect((e as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(100);
+    expect(JSON.stringify(list)).not.toMatch(/SENTINEL|ocw-extract|workspace/u);
+  });
+
+  it("a poll racing the stream end still emits it once", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 120, 0);
+    const started = await run(sandboxes);
+    const processId = (started as { processId: string }).processId;
+    await new Promise((r) => setTimeout(r, 180));
+    const polls = await Promise.allSettled(
+      [1, 2, 3].map(() => sandboxes.process({ target, processId, action: "poll" })),
+    );
+    expect(polls.some((p) => p.status === "fulfilled" && p.value.status === "exited")).toBe(true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(processEvents()).toEqual([expect.objectContaining({ processId, status: "exited", exitCode: 0 })]);
+  });
+
+  it("killed through /process: one killed event", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 60_000, 0);
+    const started = await run(sandboxes);
+    const processId = (started as { processId: string }).processId;
+    const res = await sandboxes.process({ target, processId, action: "kill" });
+    expect(res).toMatchObject({ status: "exited", exitCode: 137 });
+    await until(() => processEvents().length > 0);
+    expect(processEvents()).toEqual([
+      expect.objectContaining({ processId, status: "killed", exitCode: 137 }),
+    ]);
+  });
+
+  it("ended by its own timeout (ocw-run's) → timed_out", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    // `timeout -s KILL 1` ends the command once its second has passed.
+    timedCommand(docker, 1_050, 137);
+    const started = await run(sandboxes, 1_000);
+    const processId = (started as { processId: string }).processId;
+    await until(() => processEvents().length > 0);
+    expect(processEvents()).toEqual([
+      expect.objectContaining({ processId, status: "timed_out", exitCode: 137 }),
+    ]);
+  });
+
+  it("ended by the backstop timer (the helper itself hung) → timed_out", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 60_000, 0);
+    const started = await run(sandboxes, 1_000);
+    const processId = (started as { processId: string }).processId;
+    // The backstop fires at the timeout plus its 5 s grace and kills the group.
+    await until(() => processEvents().length > 0, 8_000);
+    expect(processEvents()).toEqual([expect.objectContaining({ processId, status: "timed_out" })]);
+  }, 12_000);
+
+  it("07.17.1.1.2 code review IN-06: a command whose shell went away (its exit code unknown) is reported killed, never exited", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 150, 0);
+    const started = await run(sandboxes);
+    const processId = (started as { processId: string }).processId;
+    // The container is gone (disk full, the kill switch, a purge): Docker no longer knows the exec.
+    docker.execs.clear();
+    await until(() => processEvents().length > 0);
+    expect(processEvents()).toEqual([
+      expect.objectContaining({ processId, status: "killed", exitCode: null }),
+    ]);
+  });
+
+  it("a command that ended within its yield emits no process event", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    docker.onExec = () => ({ exitCode: 0 });
+    const res = await sandboxes.exec({ target, argv: ["true"], cwd: "", timeoutMs: 60_000, yieldMs: 2_000 });
+    expect(res).toMatchObject({ status: "exited", exitCode: 0 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(processEvents()).toEqual([]);
+  });
 });

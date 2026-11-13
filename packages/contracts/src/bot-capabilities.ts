@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { TurnConsult } from "./agent-chains";
+import { BOT_TASK_LIMITS, TurnTask } from "./bot-tasks";
 import { TurnWorkZone } from "./bot-work-zone";
 import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
@@ -26,8 +27,11 @@ import { SANDBOX_LIMITS } from "./sandbox";
 export const ReplyMode = z.enum(["mentions", "all"]);
 export type ReplyMode = z.infer<typeof ReplyMode>;
 
-/** Built-in capabilities governed by the org policy (`replyModeAll` = reply mode `all`). */
-export const BuiltinCapability = z.enum(["internet", "memory", "dateTime", "replyModeAll"]);
+/**
+ * Built-in capabilities governed by the org policy (`replyModeAll` = reply mode `all`). `longTasks` (07.17.1.1.2 D-04):
+ * "Allow long tasks", a bot keeps working across turns on its own, within `BotPolicy.tasks`.
+ */
+export const BuiltinCapability = z.enum(["internet", "memory", "dateTime", "replyModeAll", "longTasks"]);
 export type BuiltinCapability = z.infer<typeof BuiltinCapability>;
 
 /** Highest daily limit any bot may have (team bots; personal bots are capped by the org policy). */
@@ -49,6 +53,12 @@ export const BotCapabilities = z.object({
    */
   sandbox: z.boolean().default(false),
   browser: z.boolean().default(false),
+  /**
+   * Phase 07.17.1.1.2 (D-04): the bot may start a long task that keeps working across turns. On by default (a stored
+   * object without it parses as on); effective only with the organization's "Allow long tasks" switch (and its
+   * personal sub-switch for a personal bot).
+   */
+  longTasks: z.boolean().default(true),
 });
 export type BotCapabilities = z.infer<typeof BotCapabilities>;
 
@@ -62,6 +72,7 @@ export const DEFAULT_CAPABILITIES: Record<AgentScope, BotCapabilities> = {
     dailyLimit: 100,
     sandbox: false,
     browser: false,
+    longTasks: true,
   },
   personal: {
     internet: false,
@@ -71,6 +82,7 @@ export const DEFAULT_CAPABILITIES: Record<AgentScope, BotCapabilities> = {
     dailyLimit: 30,
     sandbox: false,
     browser: false,
+    longTasks: true,
   },
 };
 
@@ -88,18 +100,32 @@ export type CapabilityPolicyEntry = z.infer<typeof CapabilityPolicyEntry>;
 export const SearchProvider = z.enum(["duckduckgo", "searxng"]);
 export type SearchProvider = z.infer<typeof SearchProvider>;
 
+/**
+ * Phase 07.17.1.1.2 (D-04, PD-09): the organization's long-task limits. A task snapshots `maxTurns` and `maxHours` at
+ * start; `maxRunning` caps the organization's active tasks (0 = no task may start).
+ */
+export const BotTaskPolicyLimits = z.object({
+  maxTurns: z.number().int().min(1).max(BOT_TASK_LIMITS.maxTurnsCap),
+  maxHours: z.number().int().min(1).max(BOT_TASK_LIMITS.maxHoursCap),
+  maxRunning: z.number().int().min(0).max(BOT_TASK_LIMITS.maxRunningCap),
+});
+export type BotTaskPolicyLimits = z.infer<typeof BotTaskPolicyLimits>;
+
 export const BotPolicy = z.object({
   capabilities: z.object({
     internet: CapabilityPolicyEntry,
     memory: CapabilityPolicyEntry,
     dateTime: CapabilityPolicyEntry,
     replyModeAll: CapabilityPolicyEntry,
+    longTasks: CapabilityPolicyEntry,
   }),
   searchProvider: SearchProvider,
   maxPersonalBotsPerUser: z.number().int().min(0).max(20),
   personalDailyLimitMax: z.number().int().min(1).max(10_000),
   /** `provider/modelId` entries; empty = every allowed model of the organization. */
   personalAllowedModels: z.array(z.string().max(250)).max(100),
+  /** Phase 07.17.1.1.2 (D-04): the long-task limits. */
+  tasks: BotTaskPolicyLimits,
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -118,14 +144,22 @@ const ALLOW = { orgWide: true, personal: true } as const;
 
 /** Defaults when an organization has no `bot_policies` row: everything allowed (D-06). */
 export const DEFAULT_BOT_POLICY: Omit<BotPolicy, "updatedAt"> = {
-  capabilities: { internet: ALLOW, memory: ALLOW, dateTime: ALLOW, replyModeAll: ALLOW },
+  capabilities: { internet: ALLOW, memory: ALLOW, dateTime: ALLOW, replyModeAll: ALLOW, longTasks: ALLOW },
   searchProvider: "duckduckgo",
   maxPersonalBotsPerUser: 3,
   personalDailyLimitMax: 100,
   personalAllowedModels: [],
+  tasks: {
+    maxTurns: BOT_TASK_LIMITS.maxTurnsDefault,
+    maxHours: BOT_TASK_LIMITS.maxHoursDefault,
+    maxRunning: BOT_TASK_LIMITS.maxRunningDefault,
+  },
 };
 
-/** `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability. */
+/**
+ * `PUT /api/v1/bot-policy`: any subset; `capabilities` entries are merged per capability and `tasks` per limit (a patch
+ * naming one limit leaves the others unchanged).
+ */
 export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
   .extend({
     capabilities: z
@@ -134,8 +168,10 @@ export const UpdateBotPolicyRequest = BotPolicy.omit({ updatedAt: true })
         memory: CapabilityPolicyEntry,
         dateTime: CapabilityPolicyEntry,
         replyModeAll: CapabilityPolicyEntry,
+        longTasks: CapabilityPolicyEntry,
       })
       .partial(),
+    tasks: BotTaskPolicyLimits.partial(),
   })
   .partial();
 export type UpdateBotPolicyRequest = z.infer<typeof UpdateBotPolicyRequest>;
@@ -226,6 +262,8 @@ export const BotCapabilityView = z.object({
     memory: EffectiveCapability,
     dateTime: EffectiveCapability,
     replyModeAll: EffectiveCapability,
+    /** Phase 07.17.1.1.2 (D-04): "Long tasks"; absent on older payloads. */
+    longTasks: EffectiveCapability.optional(),
   }),
   tools: z.array(CatalogTool),
   usage: BotUsage,
@@ -249,6 +287,7 @@ export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
 export const UpdateBotCapabilitiesRequest = BotCapabilities.partial().extend({
   sandbox: z.boolean().optional(),
   browser: z.boolean().optional(),
+  longTasks: z.boolean().optional(),
   tools: z.array(ToolGrant).max(200).optional(),
 });
 export type UpdateBotCapabilitiesRequest = z.infer<typeof UpdateBotCapabilitiesRequest>;
@@ -326,6 +365,10 @@ export const TurnWithheldReason = z.enum([
   // off (`sandbox_off`) or an admin stopped every sandbox and browser (`killed`), so the bot can say why.
   "sandbox_off",
   "killed",
+  // 07.17.1.1.2 code review WR-07 (additive; an older plugin reads any reason as "not available"): the turn already
+  // carries `TURN_TOOLS_MAX` tools, so a task tool was not offered (`ocw_task_start`), or a granted tool gave its place to
+  // the task's continue and finish on a turn of a running task.
+  "turn_full",
 ]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
 
@@ -479,6 +522,12 @@ export const TurnContext = z.object({
    * the file limit. Absent on older payloads and for every bot without a profile (BWZ-06).
    */
   workZone: TurnWorkZone.optional(),
+  /**
+   * Phase 07.17.1.1.2 (D-02, PD-07, PD-16): present on every turn of the bot in a thread with its active task (its own
+   * turns of the task, and any other turn there, which may only read it): goal, notes, budget, times, the wait and the
+   * background commands that ended. Absent on older payloads, without an active task and in AI chats (D-10).
+   */
+  task: TurnTask.optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -588,7 +637,36 @@ export const BUILTIN_TOOLS = {
    * `APPROVABLE_BUILTINS`).
    */
   conversationOpen: "ocw_conversation_open",
+  /**
+   * 07.17.1.1.2 (D-02, ADR-0042): the bot's long tasks. `ocw_task_start` starts one in the turn's thread (one active
+   * task per bot per thread), `ocw_task_continue` schedules this bot's own next turn there for the same person,
+   * `ocw_task_finish` ends it, through `POST /tasks/start|continue|finish`, which decide, claim and audit each call from
+   * the stored turn and the task row. Turn-scoped (never in `GET /cell`), self-validated in the cell, never approvable
+   * (not in `APPROVABLE_BUILTINS`) and never on `/tool-calls`.
+   */
+  taskStart: "ocw_task_start",
+  taskContinue: "ocw_task_continue",
+  taskFinish: "ocw_task_finish",
 } as const;
+
+/** 07.17.1.1.2 (D-02): the three task tools, in this order (start, continue, finish). */
+export const TASK_TOOL_NAMES = [
+  BUILTIN_TOOLS.taskStart,
+  BUILTIN_TOOLS.taskContinue,
+  BUILTIN_TOOLS.taskFinish,
+] as const;
+export type TaskToolName = (typeof TASK_TOOL_NAMES)[number];
+
+/**
+ * 07.17.1.1.2 (D-08, D-13): the task tools only schedule this bot's own next turn for this person, within the task's
+ * budgets, and answer the platform's own ids and numbers: neither side-effecting nor untrusted output, so a tainted turn
+ * may still continue (budgets, not taint, bound a task). Not counted in `MAX_TOOL_CALLS_PER_TURN`.
+ */
+export const TASK_TOOL_FLAGS: Readonly<Record<TaskToolName, TurnToolFlags>> = {
+  ocw_task_start: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_continue: { untrustedOutput: false, sideEffecting: false },
+  ocw_task_finish: { untrustedOutput: false, sideEffecting: false },
+};
 
 /**
  * 07.17.1.1 (D-01, PD-26): the two file tools, declared apart (the file routes and their tests name them on their own)

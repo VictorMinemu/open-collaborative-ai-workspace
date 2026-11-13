@@ -113,6 +113,41 @@ describe("shownCard", () => {
   });
 });
 
+describe("a live task card (07.17.1.1.2-10, PD-12, E18)", () => {
+  const task = (status: "running" | "waiting" | "stopped") => ({
+    taskId: "0b8f5c2e-3a41-4d7e-9c55-7f1e2d3c4b5a",
+    status,
+    outcome: status === "stopped" ? ("stopped_by_person" as const) : null,
+    turnsUsed: 3,
+    maxTurns: 40,
+    startedAt: AT,
+    deadlineAt: LATER,
+    finishedAt: status === "stopped" ? LATER : null,
+    requesterId: "01a11635-d6e7-7c87-9f17-b6b1dc048942",
+    requesterName: "Sam Lee",
+    waiting: status === "waiting" ? ("turn" as const) : null,
+  });
+  const taskCard = (over: Partial<AgentCard>) =>
+    card({ kind: "task", platformOwned: true, status: "running", actions: [], ...over });
+
+  it("a realtime update carries the new task link and keeps the cached Stop until a snapshot says otherwise", () => {
+    const read = taskCard({ task: task("running"), viewerCan: ["follow", "stop"], following: true });
+    const live = taskCard({ task: task("waiting"), version: 2, updatedAt: LATER });
+    const shown = shownCard(live, read);
+    expect(shown.task?.status).toBe("waiting");
+    expect(shown.viewerCan).toEqual(["follow", "stop"]);
+    expect(mergeCard(read, live).viewerCan).toEqual(["follow", "stop"]);
+  });
+
+  it("once the link says stopped, the shown card carries that link (the card then hides Stop)", () => {
+    const read = taskCard({ task: task("running"), viewerCan: ["follow", "stop"] });
+    const stopped = taskCard({ task: task("stopped"), status: "cancelled", version: 3, updatedAt: LATER });
+    const shown = shownCard(stopped, read);
+    expect(shown.task?.status).toBe("stopped");
+    expect(shown.status).toBe("cancelled");
+  });
+});
+
 describe("openTargetOf", () => {
   it("returns an internal route and refuses anything else (client re-check of AgentCardRoute)", () => {
     expect(openTargetOf(card())).toBe("/work-zone");

@@ -87,7 +87,14 @@ export type PluginInstallerDeps = {
   maxBytes?: number;
   tmpDir?: string;
   cliPath?: string;
+  /** Waits before each retry of an install OpenClaw refused as busy (default `BUSY_RETRY_DELAYS_MS`). */
+  busyRetryDelaysMs?: readonly number[];
 };
+
+/** OpenClaw's answer while a config reload or another plugin operation runs ("retry when it completes"). */
+const OPENCLAW_BUSY = /another plugin or config operation is already running|retry when it completes/iu;
+/** Up to four retries over about 30 s: a hot reload takes a few seconds. */
+const BUSY_RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_000];
 
 const FAILURES = {
   invalid_event: "The install request is malformed.",
@@ -588,10 +595,19 @@ export function createPluginInstaller(deps: PluginInstallerDeps) {
       // Hooks off BEFORE the plugin exists, so it never runs with conversation access or prompt injection.
       if (!(await restrictHooks(pluginId))) return failed(ev, "hook_restriction_failed");
       log.info?.(`plugin ${ev.packageName}@${ev.version}: artifact verified; installing through OpenClaw`);
-      const result = await run(
-        ["plugins", "install", `npm-pack:${file}`, "--force", "--accept-capabilities"],
-        INSTALL_TIMEOUT_MS,
-      );
+      // OpenClaw refuses an install while a config reload or another plugin operation runs, and our own hook
+      // restriction above triggers such a reload: retry that one answer a few times (CI p297).
+      const installArgs = ["plugins", "install", `npm-pack:${file}`, "--force", "--accept-capabilities"];
+      let result = await run(installArgs, INSTALL_TIMEOUT_MS);
+      for (const delayMs of deps.busyRetryDelaysMs ?? BUSY_RETRY_DELAYS_MS) {
+        if (result.code === 0 || result.timedOut || !OPENCLAW_BUSY.test(`${result.stdout}\n${result.stderr}`))
+          break;
+        log.info?.(
+          `plugin ${ev.packageName}@${ev.version}: OpenClaw is busy with another operation; retrying`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        result = await run(installArgs, INSTALL_TIMEOUT_MS);
+      }
       if (result.code !== 0 || result.timedOut) {
         const code = classifyInstallFailure(result);
         log.warn?.(`plugin ${ev.packageName}@${ev.version}: install failed (${code})`);

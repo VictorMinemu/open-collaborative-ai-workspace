@@ -45,7 +45,13 @@ import {
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
 import { resetBoardToolState } from "./board-tool.js";
-import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
+import {
+  AUTH_FAILURE_REPLY,
+  createBridge,
+  FAILURE_REPLY,
+  type OpenClawPort,
+  TurnRanError,
+} from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { CONSULT_TOOL_NAME, consultIdempotencyKey } from "./consult-tool.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
@@ -977,6 +983,31 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     await p.dispatchMention({ ...base, startsTainted: false }, async () => {}, signal);
     await p.dispatchMention({ ...base, startsTainted: true }, async () => {}, signal);
     expect(seen).toEqual([false, false, true]);
+  });
+
+  it("code review WR-01: a run that made a tool call says so (ran), and a throw after one is a TurnRanError; a run without one is not", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let callTool = true;
+    let fail = false;
+    const { runtime } = fakeRuntime(async (params) => {
+      const sessionKey = (params.route as { sessionKey: string }).sessionKey;
+      if (callTool)
+        await guard.beforeToolCall({ toolName: "web_search", params: { query: "q" } }, { sessionKey });
+      if (fail) throw new Error("provider stream cut");
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    const m = mapMention(event({ turn: TURN } as never), {
+      ...ARCHIE,
+      capabilities: { tools: ["web_search"] },
+    });
+    const signal = new AbortController().signal;
+    expect(await p.dispatchMention(m, async () => {}, signal)).toMatchObject({ ran: true });
+    callTool = false;
+    expect(await p.dispatchMention(m, async () => {}, signal)).toMatchObject({ ran: false });
+    fail = true;
+    await expect(p.dispatchMention(m, async () => {}, signal)).rejects.not.toBeInstanceOf(TurnRanError);
+    callTool = true;
+    await expect(p.dispatchMention(m, async () => {}, signal)).rejects.toBeInstanceOf(TurnRanError);
   });
 
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {
@@ -2238,6 +2269,9 @@ const PLUGIN_TOOLS = [
   "ocw_record_update",
   "ocw_consult_agent",
   "ocw_conversation_open",
+  "ocw_task_start",
+  "ocw_task_continue",
+  "ocw_task_finish",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
@@ -2340,6 +2374,9 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_work_session_upload",
         "ocw_work_session_download",
         "ocw_conversation_open",
+        "ocw_task_start",
+        "ocw_task_continue",
+        "ocw_task_finish",
       ],
     });
     const boardTurn = {
@@ -2794,7 +2831,7 @@ describe("memory files mirror parity (07.2-07: plugin ↔ packages/contracts mem
     "a /b.md",
     "a\u0000.md",
     "a\n.md",
-    "a‮b.md",
+    "a\u202Eb.md",
     "a/b:c.md",
     "a/<b>.md",
     `${"s".repeat(62)}.md`,
@@ -4290,5 +4327,534 @@ describe("bot Work Zone file mirror parity (07.17.1.1-01: plugin ↔ packages/co
     expect(m.AgentChannelWorkSessionStopResponse.parse(stopped)).toEqual(stopped);
     expect((wz.AgentChannelWorkSessionStopResponse as Schema).safeParse(refused).data).toEqual(refused);
     expect(m.AgentChannelWorkSessionStopResponse.parse(refused)).toEqual(refused);
+  });
+});
+
+describe("07.17.1.1.2 tasks", () => {
+  // Mirror parity (07.17.1.1.2-01: plugin ↔ packages/contracts bot-tasks.ts, bot-capabilities.ts, agent-channel.ts;
+  // PD-21, E25). Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from
+  // here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    tasks: (await import(contracts("bot-tasks.ts"))) as Record<string, unknown>,
+    caps: (await import(contracts("bot-capabilities.ts"))) as Record<string, unknown>,
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, unknown>,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
+  const EVENT = U(1);
+  const AGENT = U(3);
+  const TASK = U(20);
+  const SESSION = U(21);
+  const ANA = U(6);
+  const AT = "2026-11-12T10:00:00.000Z";
+  const LATER = "2026-11-12T18:00:00.000Z";
+  const exited = { processId: "p1", status: "exited", exitCode: 0, durationMs: 1200 };
+  const task = {
+    taskId: TASK,
+    status: "waiting",
+    goal: "Read the knowledge pack and summarise it",
+    progress: "Read 400 of 3030 files",
+    nextStep: "Read the next 400",
+    turnsUsed: 7,
+    maxTurns: 40,
+    startedAt: AT,
+    deadlineAt: LATER,
+    requesterId: ANA,
+    waiting: { kind: "process", ref: "p1", until: LATER },
+    finishedProcesses: [exited, { processId: "p2", status: "lost", exitCode: null, durationMs: null }],
+  };
+  const turn = {
+    tools: ["ocw_agent_card", "ocw_task_start", "ocw_task_continue", "ocw_task_finish"],
+    toolFlags: {
+      ocw_agent_card: { untrustedOutput: false, sideEffecting: true },
+      ocw_task_start: { untrustedOutput: false, sideEffecting: false },
+      ocw_task_continue: { untrustedOutput: false, sideEffecting: false },
+      ocw_task_finish: { untrustedOutput: false, sideEffecting: false },
+    },
+    memory: [],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+  };
+  const mention = {
+    eventId: EVENT,
+    seq: 11,
+    type: "agent.mention.v1",
+    organizationId: U(2),
+    cellId: U(2),
+    agent: { id: AGENT, handle: "gertru", displayName: "Gertru" },
+    conversation: { id: U(4), kind: "channel", name: "knowledge" },
+    thread: { rootMessageId: U(5) },
+    message: {
+      id: U(5),
+      text: "@gertru read the whole knowledge pack",
+      createdAt: AT,
+      author: { kind: "user", id: ANA, displayName: "Ana Pérez" },
+      mentions: [{ kind: "agent", id: AGENT }],
+    },
+    threadHistory: [],
+    roster: [{ kind: "user", id: ANA, displayName: "Ana Pérez", role: "standard" }],
+  };
+  const taskEvent = {
+    ...mention,
+    seq: 12,
+    eventId: U(7),
+    type: "agent.task.v1",
+    message: { ...mention.message, id: U(8), text: "Continue your task (turn 8 of 40)." },
+    turn: { ...turn, tools: turn.tools.slice(0, 1).concat(["ocw_task_continue", "ocw_task_finish"]), task },
+    task: { taskId: TASK, reason: "process", process: exited },
+  };
+
+  it("the tool names, their flags, the limits the plugin needs, the refusal codes and sentences are the contracts'", async () => {
+    const { tasks, caps, channel, m } = await load();
+    const t = tasks as {
+      BOT_TASK_LIMITS: Record<string, number>;
+      BotTaskRefusal: { options: string[] };
+      BOT_TASK_SENTENCES: Record<string, string>;
+    };
+    const b = caps as {
+      BUILTIN_TOOLS: Record<string, string>;
+      TASK_TOOL_NAMES: readonly string[];
+      TASK_TOOL_FLAGS: Record<string, unknown>;
+    };
+    expect([...m.TASK_TOOL_NAMES]).toEqual([...b.TASK_TOOL_NAMES]);
+    expect([...m.TASK_TOOL_NAMES]).toEqual([
+      b.BUILTIN_TOOLS.taskStart,
+      b.BUILTIN_TOOLS.taskContinue,
+      b.BUILTIN_TOOLS.taskFinish,
+    ]);
+    expect({ ...m.TASK_TOOL_FLAGS }).toEqual({ ...b.TASK_TOOL_FLAGS });
+    for (const key of Object.keys(m.BOT_TASK_LIMITS)) {
+      expect(m.BOT_TASK_LIMITS[key as keyof typeof m.BOT_TASK_LIMITS], key).toBe(t.BOT_TASK_LIMITS[key]);
+    }
+    expect(Object.keys(m.BOT_TASK_LIMITS).sort()).toEqual(
+      ["afterSecondsMax", "finishedProcessesMax", "goalChars", "noteChars", "summaryChars"].sort(),
+    );
+    expect([...m.BotTaskRefusal.options]).toEqual([...t.BotTaskRefusal.options]);
+    expect({ ...m.BOT_TASK_SENTENCES }).toEqual({ ...t.BOT_TASK_SENTENCES });
+    expect(m.AgentChannelEventTypes.task).toBe(
+      (channel.AgentChannelEventTypes as Record<string, string>).task,
+    );
+    expect(m.AgentChannelEventTypes.task).toBe("agent.task.v1");
+  });
+
+  it("each body the cell sends: the mirror accepts and refuses what the contract does (strict, ids and notes only)", async () => {
+    const { tasks, m } = await load();
+    const c = tasks as Record<string, Schema>;
+    const start = { eventId: EVENT, agentId: AGENT, goal: "Read the knowledge pack and summarise it" };
+    const cont = {
+      eventId: EVENT,
+      agentId: AGENT,
+      progress: "Read 400 of 3030 files",
+      nextStep: "Read the next 400",
+    };
+    const finish = {
+      eventId: EVENT,
+      agentId: AGENT,
+      summary: "Read every file.\nSee below.",
+      outcome: "done",
+    };
+    expect(m.AgentChannelTaskStart.parse(start)).toEqual(start);
+    expect(m.AgentChannelTaskContinue.parse(cont)).toEqual(cont);
+    expect(m.AgentChannelTaskFinish.parse(finish)).toEqual(finish);
+    const bidi = String.fromCodePoint(0x202e);
+    const nul = String.fromCodePoint(0);
+    expectSameVerdicts(m.AgentChannelTaskStart, c.AgentChannelTaskStart as Schema, [
+      start,
+      { ...start, goal: "  padded goal  " },
+      { ...start, goal: "" },
+      { ...start, goal: "   " },
+      { ...start, goal: "g".repeat(200) },
+      { ...start, goal: "g".repeat(201) },
+      { ...start, goal: "two\nlines" },
+      { ...start, goal: `nul${nul}` },
+      { ...start, goal: `bidi${bidi}` },
+      { ...start, userId: ANA },
+      { ...start, conversationId: U(4) },
+      { ...start, taskId: TASK },
+      { ...start, maxTurns: 40 },
+    ]);
+    expectSameVerdicts(m.AgentChannelTaskContinue, c.AgentChannelTaskContinue as Schema, [
+      cont,
+      { ...cont, afterSeconds: 0 },
+      { ...cont, afterSeconds: 3600 },
+      { ...cont, afterSeconds: -1 },
+      { ...cont, afterSeconds: 3601 },
+      { ...cont, afterSeconds: 1.5 },
+      { ...cont, waitFor: { processId: "a1B2_c3-d4" } },
+      { ...cont, waitFor: { workSessionId: SESSION }, afterSeconds: 600 },
+      { ...cont, waitFor: {} },
+      { ...cont, waitFor: { processId: "p1", workSessionId: SESSION } },
+      { ...cont, waitFor: { processId: "has space" } },
+      { ...cont, progress: "p".repeat(501) },
+      { ...cont, nextStep: "a\nb" },
+      { ...cont, at: AT },
+    ]);
+    expectSameVerdicts(m.AgentChannelTaskFinish, c.AgentChannelTaskFinish as Schema, [
+      finish,
+      { ...finish, outcome: "blocked" },
+      { ...finish, outcome: "stopped" },
+      { ...finish, summary: "s".repeat(1000) },
+      { ...finish, summary: "s".repeat(1001) },
+      { ...finish, summary: `tab\there` },
+      { ...finish, userId: ANA },
+    ]);
+  });
+
+  it("every answer variant parses identically in both copies", async () => {
+    const { tasks, m } = await load();
+    const c = tasks as Record<string, Schema> & { BOT_TASK_SENTENCES: Record<string, string> };
+    const refusals = Object.entries(c.BOT_TASK_SENTENCES).map(([code, sentence]) => ({
+      ok: false,
+      code,
+      sentence,
+    }));
+    const cases: Array<[Schema, Schema, unknown[]]> = [
+      [
+        m.AgentChannelTaskStartResponse,
+        c.AgentChannelTaskStartResponse as Schema,
+        [{ ok: true, taskId: TASK, maxTurns: 40, deadlineAt: LATER }, ...refusals],
+      ],
+      [
+        m.AgentChannelTaskContinueResponse,
+        c.AgentChannelTaskContinueResponse as Schema,
+        [
+          { ok: true, next: "after_turn", at: null, turnsLeft: 33, quiet: true },
+          { ok: true, next: "at", at: LATER, turnsLeft: 33, quiet: false },
+          { ok: true, next: "on_process", at: LATER, turnsLeft: 0, quiet: true },
+          { ok: true, next: "on_session", at: LATER, turnsLeft: 1, quiet: false },
+          ...refusals,
+        ],
+      ],
+      [
+        m.AgentChannelTaskFinishResponse,
+        c.AgentChannelTaskFinishResponse as Schema,
+        [{ ok: true, status: "done" }, { ok: true, status: "failed" }, ...refusals],
+      ],
+    ];
+    for (const [mirror, contract, answers] of cases) {
+      for (const answer of answers) {
+        expect(contract.safeParse(answer).data, JSON.stringify(answer)).toEqual(answer);
+        expect(mirror.safeParse(answer).data, JSON.stringify(answer)).toEqual(answer);
+      }
+    }
+  });
+
+  it("a turn with task and an agent.task.v1 event parse identically in both copies; a 07.17.1.1 turn is unchanged", async () => {
+    const { caps, channel, m } = await load();
+    const contractTurn = caps.TurnContext as Schema;
+    const withTask = { ...turn, task };
+    expect(contractTurn.safeParse(withTask).data).toEqual(withTask);
+    expect(m.TurnContext.parse(withTask)).toEqual(withTask);
+    const legacy = m.TurnContext.parse(turn);
+    expect(legacy).toEqual(turn);
+    expect("task" in legacy).toBe(false);
+    expect(contractTurn.safeParse(turn).data).toEqual(turn);
+    const contractEvent = channel.AgentTaskEvent as Schema;
+    expect(contractEvent.safeParse(taskEvent).data).toEqual(taskEvent);
+    expect(m.AgentTaskEvent.parse(taskEvent)).toEqual(taskEvent);
+    expectSameVerdicts(m.AgentTaskEvent, contractEvent, [
+      taskEvent,
+      { ...taskEvent, task: { taskId: TASK, reason: "continue" } },
+      { ...taskEvent, task: { taskId: TASK, reason: "timer" } },
+      { ...taskEvent, task: { taskId: TASK, reason: "nudge" } },
+      { ...taskEvent, task: { taskId: TASK, reason: "session" } },
+      { ...taskEvent, task: { taskId: TASK, reason: "process", process: { ...exited, status: "running" } } },
+      { ...taskEvent, task: undefined },
+    ]);
+    // The mention event (and its turn) still parse in the mirror exactly as before.
+    expect(m.AgentMentionEvent.parse(mention)).toEqual(mention);
+    expect(m.AgentMentionEvent.parse({ ...mention, turn: withTask }).turn).toEqual(withTask);
+  });
+
+  it("the task card kind is the contracts' and platform-owned: the card input refuses it, like browser", async () => {
+    const cards = (await import(contracts("agent-cards.ts"))) as {
+      AgentCardKind: { options: string[] };
+      AgentCardInput: Schema;
+    };
+    const m = await import("./agent-channel-protocol.js");
+    expect([...m.AGENT_CARD_KINDS]).toEqual([...cards.AgentCardKind.options]);
+    expect(m.AGENT_CARD_KINDS).toContain("task");
+    expect(m.AGENT_POSTABLE_CARD_KINDS as readonly string[]).not.toContain("task");
+    expect(m.AGENT_POSTABLE_CARD_KINDS as readonly string[]).not.toContain("browser");
+    const input = {
+      kind: "report",
+      title: "Weekly report",
+      fields: [],
+      status: "info",
+      actions: [],
+      summary: "The weekly report.",
+    };
+    expectSameVerdicts(m.AgentCardInput, cards.AgentCardInput, [
+      input,
+      { ...input, kind: "task" },
+      { ...input, kind: "browser" },
+      { ...input, kind: "generic" },
+    ]);
+  });
+
+  it("every mirrored task schema gives the contract's verdict on a valid and an invalid sample (07.17.1.1.2-01 T3)", async () => {
+    const { tasks, channel, m } = await load();
+    const c = tasks as Record<string, Schema>;
+    const cont = { eventId: EVENT, agentId: AGENT, progress: "Read 400 files", nextStep: "Read 400 more" };
+    const refused = { ok: false, code: "no_task", sentence: m.BOT_TASK_SENTENCES.no_task };
+    const long = (n: number) => "x".repeat(n);
+    const table: Array<[string, Schema, Schema, unknown, unknown]> = [
+      ["TaskGoal", m.TaskGoal, c.TaskGoal as Schema, " A goal ", "two\nlines"],
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "A note", long(501)],
+      // Code review IN-07: a C1 control, U+061C and a line separator in a one-line note.
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "Leí 400", `A${String.fromCodePoint(0x85)}note`],
+      ["TaskNote", m.TaskNote, c.TaskNote as Schema, "Leí 400", `A${String.fromCodePoint(0x061c)}note`],
+      ["TaskGoal", m.TaskGoal, c.TaskGoal as Schema, "A goal", `A${String.fromCodePoint(0x2028)}goal`],
+      [
+        "TaskSummary",
+        m.TaskSummary,
+        c.TaskSummary as Schema,
+        `Line one${String.fromCodePoint(0x2029)}line two`,
+        `x${String.fromCodePoint(0x9f)}`,
+      ],
+      [
+        "TaskSummary",
+        m.TaskSummary,
+        c.TaskSummary as Schema,
+        "Line one\nline two",
+        `x${String.fromCodePoint(0x2066)}`,
+      ],
+      ["TaskWaitFor", m.TaskWaitFor, c.TaskWaitFor as Schema, { workSessionId: SESSION }, {}],
+      [
+        "AgentChannelTaskStart",
+        m.AgentChannelTaskStart,
+        c.AgentChannelTaskStart as Schema,
+        { eventId: EVENT, agentId: AGENT, goal: "A goal" },
+        { eventId: EVENT, agentId: AGENT, goal: "A goal", conversationId: U(4) },
+      ],
+      [
+        "AgentChannelTaskContinue",
+        m.AgentChannelTaskContinue,
+        c.AgentChannelTaskContinue as Schema,
+        { ...cont, afterSeconds: 120, waitFor: { processId: "p1" } },
+        { ...cont, afterSeconds: 99999 },
+      ],
+      [
+        "AgentChannelTaskFinish",
+        m.AgentChannelTaskFinish,
+        c.AgentChannelTaskFinish as Schema,
+        { eventId: EVENT, agentId: AGENT, summary: "Done.", outcome: "blocked" },
+        { eventId: EVENT, agentId: AGENT, summary: "Done.", outcome: "budget_turns" },
+      ],
+      [
+        "BotTaskRefused",
+        m.BotTaskRefused,
+        c.BotTaskRefused as Schema,
+        refused,
+        { ...refused, sentence: long(301) },
+      ],
+      [
+        "AgentChannelTaskStartResponse",
+        m.AgentChannelTaskStartResponse,
+        c.AgentChannelTaskStartResponse as Schema,
+        refused,
+        { ok: true, taskId: TASK, maxTurns: 0, deadlineAt: LATER },
+      ],
+      [
+        "AgentChannelTaskContinueResponse",
+        m.AgentChannelTaskContinueResponse,
+        c.AgentChannelTaskContinueResponse as Schema,
+        { ok: true, next: "on_session", at: LATER, turnsLeft: 2, quiet: false },
+        { ok: true, next: "on_session", at: LATER, turnsLeft: -1, quiet: false },
+      ],
+      [
+        "AgentChannelTaskFinishResponse",
+        m.AgentChannelTaskFinishResponse,
+        c.AgentChannelTaskFinishResponse as Schema,
+        { ok: true, status: "failed" },
+        { ok: true, status: "stopped" },
+      ],
+      [
+        "TaskProcessFact",
+        m.TaskProcessFact,
+        c.TaskProcessFact as Schema,
+        exited,
+        { ...exited, status: "running" },
+      ],
+      ["TurnTask", m.TurnTask, c.TurnTask as Schema, task, { ...task, status: "stopped" }],
+      ["BotTaskWaitKind", m.BotTaskWaitKind, c.BotTaskWaitKind as Schema, "session", "forever"],
+      ["BotTaskWakeReason", m.BotTaskWakeReason, c.BotTaskWakeReason as Schema, "nudge", "session"],
+      ["BotTaskRefusal", m.BotTaskRefusal, c.BotTaskRefusal as Schema, "once_per_turn", "task_exploded"],
+      [
+        "AgentTaskEvent",
+        m.AgentTaskEvent,
+        channel.AgentTaskEvent as Schema,
+        taskEvent,
+        { ...taskEvent, task: { reason: "continue" } },
+      ],
+    ];
+    for (const [name, mirror, contract, valid, invalid] of table) {
+      expect(contract.safeParse(valid).success, `${name} valid`).toBe(true);
+      expect(contract.safeParse(invalid).success, `${name} invalid`).toBe(false);
+      expectSameVerdicts(mirror, contract, [valid, invalid]);
+    }
+    expect({ ...m.BOT_TASK_SENTENCES }).toEqual({ ...(tasks.BOT_TASK_SENTENCES as Record<string, string>) });
+  });
+
+  it("a 07.17.1.1 cell event of each existing turn type parses unchanged in the mirror (no new required field)", async () => {
+    const { channel, m } = await load();
+    const legacyTurn = {
+      ...turn,
+      tools: ["ocw_agent_card"],
+      toolFlags: { ocw_agent_card: turn.toolFlags.ocw_agent_card },
+    };
+    const base = { ...mention, turn: legacyTurn };
+    const events: Array<[string, Schema, Schema, Record<string, unknown>]> = [
+      ["mention", m.AgentMentionEvent, channel.AgentMentionEvent as Schema, base],
+      [
+        "card_action",
+        m.AgentCardActionEvent,
+        channel.AgentCardActionEvent as Schema,
+        {
+          ...base,
+          type: "agent.card_action.v1",
+          cardAction: { messageId: U(9), kind: "report", title: "Weekly report", outcome: "approved" },
+        },
+      ],
+      [
+        "automation_run",
+        m.AgentAutomationRunEvent,
+        channel.AgentAutomationRunEvent as Schema,
+        {
+          ...base,
+          type: "agent.automation_run.v1",
+          automationRun: {
+            automationId: U(10),
+            runId: U(11),
+            name: "Daily digest",
+            trigger: "schedule",
+            instructions: "Summarise the channel.",
+            inbound: null,
+          },
+        },
+      ],
+      [
+        "consult_reply",
+        m.AgentConsultReplyEvent,
+        channel.AgentConsultReplyEvent as Schema,
+        {
+          ...base,
+          type: "agent.consult_reply.v1",
+          consultReply: {
+            chainId: U(12),
+            hopId: U(13),
+            target: { id: U(14), handle: "atlas", displayName: "Atlas" },
+            mode: "consult",
+            outcome: "answered",
+            answerMessageId: U(15),
+          },
+        },
+      ],
+      [
+        "work_session",
+        m.AgentWorkSessionEvent,
+        channel.AgentWorkSessionEvent as Schema,
+        {
+          ...base,
+          type: "agent.work_session.v1",
+          workSession: {
+            workSessionId: SESSION,
+            transition: "turn_done",
+            status: "idle",
+            summary: "Turn 2 finished.",
+            pendingApprovals: 0,
+            deciders: [],
+          },
+        },
+      ],
+      [
+        "automation_item",
+        m.AgentAutomationItemEvent,
+        channel.AgentAutomationItemEvent as Schema,
+        {
+          ...base,
+          type: "agent.automation_item.v1",
+          automationItem: {
+            automationId: U(10),
+            runId: U(11),
+            itemId: U(16),
+            name: "New orders",
+            instructions: "Prepare each order.",
+            item: { title: "Order 1042", text: "Order 1042 from the ERP.", openedAt: AT },
+            escalation: [],
+          },
+        },
+      ],
+    ];
+    for (const [name, mirror, contract, event] of events) {
+      const parsed = mirror.safeParse(event);
+      expect(parsed.success, name).toBe(true);
+      expect(parsed.data, name).toEqual(event);
+      expect("task" in ((parsed.data as { turn: object }).turn ?? {}), name).toBe(false);
+      expect(contract.safeParse(event).data, name).toEqual(event);
+    }
+  });
+
+  it("an agent.task.v1 event fails the mirror's mention schema only on its type, and this bridge runs it as a task turn", async () => {
+    const { m } = await load();
+    const asMention = m.AgentMentionEvent.safeParse(taskEvent);
+    expect(asMention.success).toBe(false);
+    expect(asMention.error?.issues.map((i) => i.path.join("."))).toEqual(["type"]);
+    // 07.17.1.1.2-05 replaced the skip pin of 01: the bridge maps a task turn like a mention on the task card (one run,
+    // the reply in the card's thread) and reports it done; bridge-task.test.ts covers quiet and silent task turns.
+    const logs: string[] = [];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const bridge = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      log: { info: (l) => logs.push(l), warn: (l) => logs.push(l), error: (l) => logs.push(l) },
+      typingIntervalMs: 50,
+      retryDelayMs: 10,
+    });
+    await bridge.refreshCell();
+    const frame = {
+      ...taskEvent,
+      agent: { id: ARCHIE.id, handle: ARCHIE.handle, displayName: ARCHIE.displayName },
+    };
+    await bridge.handleFrame({ seq: 12, type: "agent.task.v1", data: frame });
+    expect(port.dispatched.map((d) => d.eventId)).toEqual([taskEvent.eventId]);
+    expect(port.dispatched[0]?.body).toBe("Continue your task (turn 8 of 40).");
+    expect(api.messages.map((x) => [x.eventId, x.inReplyToMessageId])).toEqual([
+      [taskEvent.eventId, taskEvent.message.id],
+    ]);
+    expect(api.turnsDone.map((d) => [d.eventId, d.outcome])).toEqual([[taskEvent.eventId, "replied"]]);
+    expect(logs.some((l) => l.includes("ignoring unknown event type agent.task.v1"))).toBe(false);
+  });
+
+  it("TurnContext without task and with task: undefined parse to the same value in both copies; a bad task is dropped by the mirror only", async () => {
+    const { caps, m } = await load();
+    const contract = caps.TurnContext as Schema;
+    const plain = m.TurnContext.parse(turn);
+    const undef = m.TurnContext.parse({ ...turn, task: undefined });
+    expect(undef).toEqual(plain);
+    expect(contract.safeParse({ ...turn, task: undefined }).data).toEqual(contract.safeParse(turn).data);
+    expect(plain).toEqual(contract.safeParse(turn).data);
+    // An invalid block: the contract (the API's own output) refuses it; the mirror keeps the turn without it.
+    const bad = { ...turn, task: { ...task, finishedProcesses: Array(11).fill(exited) } };
+    expect(contract.safeParse(bad).success).toBe(false);
+    const kept = m.TurnContext.parse(bad);
+    expect(kept.task).toBeUndefined();
+    expect(kept.tools).toEqual(turn.tools);
   });
 });

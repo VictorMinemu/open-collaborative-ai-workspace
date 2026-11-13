@@ -689,6 +689,10 @@ describe("probe results become policy-capped bot capabilities (BOT-10, SC6)", ()
       "ocw_start_work_zone",
       "ocw_automation_propose",
       noteName,
+      // 07.17.1.1.2 (PD-07): the task tools come last, after every catalog tool.
+      "ocw_task_start",
+      "ocw_task_continue",
+      "ocw_task_finish",
     ]);
     expect(turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: true });
 

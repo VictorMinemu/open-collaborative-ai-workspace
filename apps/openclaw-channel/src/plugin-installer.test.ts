@@ -106,6 +106,9 @@ let fetched: string[];
 let snap: CellSnapshot;
 let refreshes: number;
 /** CLI behaviour per subcommand; `inspect` is the plugin's inspect output once it is installed. */
+const BUSY =
+  "Error: plugins.install UNAVAILABLE: Another plugin or config operation is already running; retry when it completes.";
+let busyInstalls = 0;
 let cli: {
   install: CliResult;
   uninstall: CliResult;
@@ -149,6 +152,11 @@ const runCli: RunCli = async (args, opts) => {
     return cli.config;
   }
   if (args[2] === "install") {
+    // `busyInstalls` leading attempts answer what OpenClaw says while a config reload or another plugin operation runs.
+    if (busyInstalls > 0) {
+      busyInstalls--;
+      return { code: 1, stdout: "", stderr: BUSY, timedOut: false };
+    }
     if (cli.install.code === 0) oc.installed.add(cli.installsAs);
     return cli.install;
   }
@@ -195,7 +203,7 @@ function fetchOf(
   }) as typeof fetch;
 }
 
-function installer(over: { fetchImpl?: typeof fetch; maxBytes?: number } = {}) {
+function installer(over: { fetchImpl?: typeof fetch; maxBytes?: number; busyRetryDelaysMs?: number[] } = {}) {
   return createPluginInstaller({
     client: {
       async reportPlugin(r) {
@@ -212,6 +220,7 @@ function installer(over: { fetchImpl?: typeof fetch; maxBytes?: number } = {}) {
     exec: runCli,
     fetchImpl: over.fetchImpl ?? fetchOf(ARTIFACT, { headers: { "x-clawhub-artifact-sha256": SHA } }),
     ...(over.maxBytes ? { maxBytes: over.maxBytes } : {}),
+    ...(over.busyRetryDelaysMs ? { busyRetryDelaysMs: over.busyRetryDelaysMs } : {}),
   });
 }
 
@@ -220,6 +229,7 @@ const cache = () => JSON.parse(readFileSync(path.join(stateDir, BOOT_CACHE_FILE)
 
 beforeEach(() => {
   stateDir = mkdtempSync(path.join(tmpdir(), "ocw-installer-"));
+  busyInstalls = 0;
   calls = [];
   reports = [];
   fetched = [];
@@ -370,6 +380,22 @@ describe("plugin.install.v1", () => {
     await installer().onInstall(event(), signal());
     expect(reports[0]).toMatchObject({ state: "failed", error: { code: "install_failed" } });
     expect(reports[0]?.error?.message).not.toContain("/abs/path");
+  });
+
+  it("OpenClaw busy with a config reload (our own hook restriction triggers one) → the install is retried and lands (CI p297)", async () => {
+    busyInstalls = 2;
+    await installer({ busyRetryDelaysMs: [1, 1, 1, 1] }).onInstall(event(), signal());
+    expect(calls.filter((c) => c.args[2] === "install")).toHaveLength(3);
+    expect(reports.at(-1)).toMatchObject({ state: "installed" });
+    expect(oc.installed.has("ocw-echo")).toBe(true);
+  });
+
+  it("OpenClaw still busy after every retry → failed install_failed, as before", async () => {
+    busyInstalls = 99;
+    await installer({ busyRetryDelaysMs: [1, 1, 1, 1] }).onInstall(event(), signal());
+    expect(calls.filter((c) => c.args[2] === "install")).toHaveLength(5);
+    expect(reports.at(-1)).toMatchObject({ state: "failed", error: { code: "install_failed" } });
+    expect(oc.installed.size).toBe(0);
   });
 
   it("an event that is not in the snapshot's approved list → failed not_approved after one refresh; nothing runs", async () => {

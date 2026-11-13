@@ -32,7 +32,7 @@ import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
-import type { SandboxdClient } from "../sandbox";
+import type { SandboxdClient, SandboxEventsConsumer } from "../sandbox";
 // Types only: the watched module reaches modules that import this one (a value import would be a cycle).
 import type { RecordWrites } from "../watched";
 import type { WorkSessionModule, WorkZoneProposalService } from "../work-session";
@@ -66,6 +66,9 @@ import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
+import { onProcessEvent } from "./task-process-wakes";
+import { registerTaskRoutes, registerTaskUserRoutes } from "./task-routes";
+import { registerTaskWakes } from "./task-wakes";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerBotWorkSessionFileRoutes } from "./work-session-files";
 import { registerWorkSessionReadRoute } from "./work-session-read";
@@ -203,6 +206,11 @@ export function createAgentChannelModule(
      * configured (every sandbox call then answers `service_unavailable` after its decision).
      */
     sandbox?: { client: SandboxdClient | null } | null;
+    /**
+     * sandboxd's event feed (07.17.1.1.2-11, PD-13): the sandbox module's consumer, whose `process` events wake the
+     * long task waiting on a background command; null or absent without sandboxd (no process event ever comes).
+     */
+    events?: SandboxEventsConsumer | null;
     /** Test hook: shorter browser call deadlines (contracts BROWSER_TIMEOUTS_MS otherwise); never read from the environment. */
     browserBudgets?: BrowserBudgets;
     /** Test hook: shorter sandbox call budgets (contracts SANDBOX_TIMEOUTS_MS otherwise); never from the environment. */
@@ -231,6 +239,12 @@ export function createAgentChannelModule(
   // Work Zone wakes (07.16-20, PD-16): a bot session's transitions refresh its card and wake the bot in its thread, as
   // the person who asked (`work_session.bot_sync`, ids only).
   registerWorkSessionWakes(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // Long tasks (07.17.1.1.2-09, PD-06): the bot's next task turn, delivered by the platform as the requester
+  // (`bot_task.continue`, ids only), and the minute tick that recovers lost and overdue tasks.
+  registerTaskWakes(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // 07.17.1.1.2-11 (PD-13): a background sandbox command a task waits on wakes it when sandboxd says it ended (inside
+  // the event's organization transaction, after the consumer's cursor check; the browser module's pattern).
+  opts.events?.onEvent("process", (tx, event) => onProcessEvent(tx, core, event));
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx
@@ -610,6 +624,9 @@ export function createAgentChannelModule(
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
           // Automation fan-out (07.17, D-02, PD-07): a fan-out run opens one conversation per new item in its target.
           if (opts.fanOut) registerConversationOpenRoute(scope, core, opts.fanOut);
+          // Long bot tasks (07.17.1.1.2-08, D-02, PD-08): start, continue and finish the bot's own task in its thread,
+          // re-decided on the stored turn and the task row under its lock; outside the cap of 8 (D-13).
+          registerTaskRoutes(scope, core);
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
           // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
           registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
@@ -673,6 +690,8 @@ export function createAgentChannelModule(
 
       // Stop (07.7-06, P-14): the chain's human or a channel moderator stops an agent-to-agent chain.
       registerChainUserRoutes(app, core, perms);
+      // Stop (07.17.1.1.2-08, PD-12): the person a long task runs for, a channel moderator or the bot's manager stops it.
+      registerTaskUserRoutes(app, core, { perms });
 
       registerCellGateway(app, core, auth, presence, perms);
     },

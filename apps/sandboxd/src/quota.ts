@@ -1,6 +1,6 @@
 import type { SandboxdTarget } from "@ocw/contracts";
 import { SandboxdFailure, type Sandboxes } from "./sandboxes";
-import { OCW_FILES } from "./spec";
+import { EXTRACT_SCRATCH, OCW_FILES } from "./spec";
 
 /**
  * The soft disk quota of each bot's workspace (07.8-09, D-01, D-11 F-9, Pitfall 6, T-07.8-09-03). Docker named
@@ -47,7 +47,24 @@ const MEASURE_TIMEOUT_MS = 120_000;
 export function createQuota(deps: QuotaDeps): Quota {
   const { sandboxes } = deps;
 
-  async function measure(target: SandboxdTarget): Promise<number> {
+  /**
+   * Removes ocw-extract's scratch folder (07.17.1.1.1 review WR-06), only once the shell is stopped (`disk_full`), so no
+   * run can be using it: a run SIGKILLed mid-extraction leaves it, and it alone may keep the workspace over its quota.
+   * True when something was removed; never fails the measurement.
+   */
+  async function clearScratch(target: SandboxdTarget): Promise<boolean> {
+    try {
+      const handle = await sandboxes.workspace(target, { touch: false });
+      const res = await sandboxes.run(handle, [OCW_FILES, "rm", EXTRACT_SCRATCH, "1"], {
+        timeoutMs: MEASURE_TIMEOUT_MS,
+      });
+      return res.exitCode === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async function measure(target: SandboxdTarget, again = true): Promise<number> {
     const handle = await sandboxes.workspace(target, { touch: false });
     const res = await sandboxes.run(handle, [OCW_FILES, "du"], { timeoutMs: MEASURE_TIMEOUT_MS });
     const bytes = Number.parseInt(res.stdout.toString("utf8").trim(), 10);
@@ -60,6 +77,8 @@ export function createQuota(deps: QuotaDeps): Quota {
     if (diskQuotaBytes === undefined) return bytes;
     if (bytes > diskQuotaBytes) {
       if (!sandboxes.isDiskFull(target)) await sandboxes.markDiskFull(target);
+      // The shell is stopped now: what a killed ocw-extract left goes, and one more measurement may clear disk_full.
+      if (again && (await clearScratch(target))) return measure(target, false);
     } else if (sandboxes.isDiskFull(target)) {
       await sandboxes.clearDiskFull(target);
     }
@@ -67,7 +86,7 @@ export function createQuota(deps: QuotaDeps): Quota {
   }
 
   return {
-    measure,
+    measure: (target) => measure(target),
 
     async assertRoom(target, incoming) {
       sandboxes.requirePolicy(target.orgId);

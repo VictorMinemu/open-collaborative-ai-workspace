@@ -1,9 +1,10 @@
-import type { SandboxdEvent, SandboxdEventsResponse } from "@ocw/contracts";
+import { SandboxdEvent, SandboxdEventsResponse } from "@ocw/contracts";
 import { agents, auditEvents, botSandboxes, sandboxEventCursor, sandboxUsageDaily, type Tx } from "@ocw/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type pg from "pg";
+import { z } from "zod";
 import type { Core } from "../../core";
-import type { SandboxdClient } from "./client";
+import { type SandboxdClient, SandboxdUnavailableError } from "./client";
 import { markState, retryPendingPurges, utcDay } from "./service";
 import { pushPolicy } from "./settings";
 
@@ -20,7 +21,9 @@ import { pushPolicy } from "./settings";
  *
  * What an event does: `state` mirrors a container into `bot_sandboxes` (and audits sandboxd's own stops: idle, disk full,
  * a crash); `usage` adds CPU to today's `sandbox_usage_daily` and updates the disk mirror; `egress` audits the host once
- * per (bot, host, allowed) per hour; `browser` goes to the handlers other modules register (`onEvent`, 07.8-14).
+ * per (bot, host, allowed) per hour; `browser` goes to the handlers other modules register (`onEvent`, 07.8-14), and
+ * so does `process` (a background command ended: the long task waiting on it wakes, 07.17.1.1.2-11). Each event is
+ * parsed on its own: one of a type this API does not know (a newer sandboxd) is skipped and the feed moves past it.
  *
  * A new boot id (sandboxd restarted, or the first poll of this process) means sandboxd may hold no policy at all, and it
  * has no default: it refuses to start anything (`policy_missing`) until told. The consumer then pushes the current
@@ -69,6 +72,32 @@ export interface SandboxEventsConsumer {
 }
 
 type Outcome = "applied" | "skipped";
+
+/** The feed's envelope with its events unparsed: each is parsed on its own (`itemOf`). */
+const FeedEnvelope = SandboxdEventsResponse.extend({ events: z.array(z.unknown()).max(500) });
+const UnknownEvent = z.object({ seq: z.number().int().positive(), type: z.unknown() });
+/** An event type is logged only when it looks like one (a newer sandboxd's name), never arbitrary text. */
+const EVENT_TYPE_NAME = /^[a-z][a-z0-9_.]{0,39}$/u;
+
+/** One feed entry: a known event, or the seq and type of one this API cannot read (skipped, cursor advanced). */
+type FeedItem = { seq: number; event: SandboxdEvent } | { seq: number; event: null; type: string };
+interface FeedPage {
+  bootId: string;
+  items: FeedItem[];
+}
+
+function itemOf(raw: unknown): FeedItem {
+  const known = SandboxdEvent.safeParse(raw);
+  if (known.success) return { seq: known.data.seq, event: known.data };
+  const base = UnknownEvent.safeParse(raw);
+  const type = base.success && typeof base.data.type === "string" ? base.data.type : "";
+  // Without a seq the entry cannot be placed: seq 0 is behind every cursor, so it is passed over.
+  return {
+    seq: base.success ? base.data.seq : 0,
+    event: null,
+    type: EVENT_TYPE_NAME.test(type) ? type : "invalid",
+  };
+}
 
 export function createSandboxEventsConsumer(
   core: Core,
@@ -155,15 +184,29 @@ export function createSandboxEventsConsumer(
     }
   }
 
-  async function poll(waitMs: number): Promise<SandboxdEventsResponse> {
+  /**
+   * One poll of the feed. The envelope is the contract's; each event is parsed on its own (Pitfall 11, E25): an event
+   * of a type this API does not know (a newer sandboxd) is kept as its seq and type only, so the pass skips it and
+   * moves on instead of failing the whole page (the client's own parse of the contract would refuse it).
+   */
+  async function poll(waitMs: number): Promise<FeedPage> {
     abort = new AbortController();
     try {
       const after = position.bootId ? position.seq : 0;
-      return await deps.client.call(
+      const body = await deps.client.stream(
         "events",
         { after, waitMs },
         { timeoutMs: waitMs + 10_000, signal: abort.signal },
       );
+      let json: unknown;
+      try {
+        json = await new Response(body).json();
+      } catch {
+        throw new SandboxdUnavailableError("events", null);
+      }
+      const page = FeedEnvelope.safeParse(json);
+      if (!page.success) throw new SandboxdUnavailableError("events", null);
+      return { bootId: page.data.bootId, items: page.data.events.map(itemOf) };
     } finally {
       abort = null;
     }
@@ -307,7 +350,7 @@ export function createSandboxEventsConsumer(
       retired.add(position.bootId);
       position = { bootId: res.bootId, seq: 0 };
       // The poll asked past the old boot's position: read the new boot from its start now (no wait).
-      if (res.events[0]?.seq !== 1) res = await poll(0);
+      if (res.items[0]?.seq !== 1) res = await poll(0);
     }
     position.bootId = res.bootId;
     // Before any event: sandboxd refuses every start until it has the organizations' policies again.
@@ -316,8 +359,16 @@ export function createSandboxEventsConsumer(
     let skipped = 0;
     const orgs = new Set<string>();
     const repush = new Set<string>();
-    for (const e of res.events) {
-      if (e.seq <= position.seq) continue;
+    for (const item of res.items) {
+      if (item.seq <= position.seq) continue;
+      const e = item.event;
+      if (!e) {
+        // E25: an event type this API does not know is skipped, its seq and type only in the log; the feed goes on.
+        core.log.warn({ seq: item.seq, type: item.type }, "skipped a sandbox event of an unknown type");
+        position.seq = item.seq;
+        skipped++;
+        continue;
+      }
       const key = `${res.bootId}:${e.seq}`;
       try {
         const r = await apply(res.bootId, e);

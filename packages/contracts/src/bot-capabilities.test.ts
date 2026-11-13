@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentChannelEventTypes,
   AgentChannelMemorySave,
   AgentChannelToolCallRequest,
   AgentMentionEvent,
+  AgentTaskEvent,
   ATTACHMENT_READ_FLAGS,
   ATTACHMENT_READ_LIMITS,
   BotCapabilities,
@@ -10,6 +12,7 @@ import {
   BotPolicy,
   BROWSER_TOOL_NAMES,
   BUILTIN_TOOLS,
+  BuiltinCapability,
   CellAgent,
   CellConfigChangedEvent,
   CellSnapshot,
@@ -23,6 +26,8 @@ import {
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_REFUSED_TOOL_NAMES,
   SANDBOX_TOOL_NAMES,
+  TASK_TOOL_FLAGS,
+  TASK_TOOL_NAMES,
   ToolPattern,
   TURN_ATTACHMENT_NOTES,
   TURN_TOOLS_MAX,
@@ -84,6 +89,7 @@ describe("capability defaults (D-06)", () => {
       dailyLimit: 30,
       sandbox: false,
       browser: false,
+      longTasks: true,
     });
     expect(DEFAULT_CAPABILITIES.team).toEqual({
       internet: false,
@@ -93,6 +99,7 @@ describe("capability defaults (D-06)", () => {
       dailyLimit: 100,
       sandbox: false,
       browser: false,
+      longTasks: true,
     });
   });
 
@@ -124,6 +131,75 @@ describe("update requests", () => {
     expect(UpdateBotPolicyRequest.parse({}).searchProvider).toBeUndefined();
     expect(UpdateBotPolicyRequest.safeParse({ maxPersonalBotsPerUser: 21 }).success).toBe(false);
     expect(UpdateBotPolicyRequest.safeParse({ searchProvider: "brave" }).success).toBe(false);
+  });
+});
+
+describe("long tasks policy (07.17.1.1.2 D-04, PD-09)", () => {
+  it("a stored bot without longTasks parses as on; a patch never resets it", () => {
+    const stored = BotCapabilities.parse({
+      internet: false,
+      memory: true,
+      dateTime: true,
+      replyMode: "mentions",
+      dailyLimit: 30,
+    });
+    expect(stored.longTasks).toBe(true);
+    expect(BuiltinCapability.options).toContain("longTasks");
+    const patch = UpdateBotCapabilitiesRequest.parse({ internet: true });
+    expect("longTasks" in patch).toBe(false);
+    expect(UpdateBotCapabilitiesRequest.parse({ longTasks: false }).longTasks).toBe(false);
+  });
+
+  it("the default policy allows long tasks with 40 turns, 8 hours and 10 running", () => {
+    expect(DEFAULT_BOT_POLICY.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(DEFAULT_BOT_POLICY.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+    const { tasks: _tasks, ...withoutTasks } = DEFAULT_BOT_POLICY;
+    expect(BotPolicy.safeParse({ ...withoutTasks, updatedAt: null }).success).toBe(false);
+    const { longTasks: _longTasks, ...capsWithout } = DEFAULT_BOT_POLICY.capabilities;
+    expect(
+      BotPolicy.safeParse({ ...DEFAULT_BOT_POLICY, capabilities: capsWithout, updatedAt: null }).success,
+    ).toBe(false);
+  });
+
+  it("policy updates take a partial tasks object and the longTasks entry, within the bounds", () => {
+    expect(UpdateBotPolicyRequest.parse({ tasks: { maxHours: 12 } }).tasks).toEqual({ maxHours: 12 });
+    expect(
+      UpdateBotPolicyRequest.parse({ capabilities: { longTasks: { orgWide: false, personal: false } } })
+        .capabilities,
+    ).toEqual({ longTasks: { orgWide: false, personal: false } });
+    expect(UpdateBotPolicyRequest.parse({})).toEqual({});
+    expect(UpdateBotPolicyRequest.parse({ tasks: { maxRunning: 0 } }).tasks).toEqual({ maxRunning: 0 });
+    for (const tasks of [
+      { maxTurns: 0 },
+      { maxTurns: 201 },
+      { maxTurns: 1.5 },
+      { maxHours: 0 },
+      { maxHours: 25 },
+      { maxRunning: -1 },
+      { maxRunning: 101 },
+    ]) {
+      expect(UpdateBotPolicyRequest.safeParse({ tasks }).success, JSON.stringify(tasks)).toBe(false);
+    }
+  });
+
+  it("the capability view may carry effective.longTasks; older views without it parse", () => {
+    const off = { enabled: false, effective: false, reason: null };
+    const view = {
+      agentId: ID,
+      scope: "team",
+      capabilities: DEFAULT_CAPABILITIES.team,
+      effective: { internet: off, memory: off, dateTime: off, replyModeAll: off },
+      tools: [],
+      usage: { today: 0, limit: 100, resetsAt: NOW },
+      dailyLimitMax: 10_000,
+      viewerCan: [],
+    };
+    expect(BotCapabilityView.parse(view).effective.longTasks).toBeUndefined();
+    const denied = { enabled: true, effective: false, reason: "org_policy" };
+    expect(
+      BotCapabilityView.parse({ ...view, effective: { ...view.effective, longTasks: denied } }).effective
+        .longTasks,
+    ).toEqual(denied);
   });
 });
 
@@ -841,5 +917,92 @@ describe("the two Work Zone file tools (07.17.1.1 D-01, PD-04, PD-26)", () => {
       expect(isDangerousToolName(name), name).toBe(false);
       expect(isDangerousToolName(name, "sandbox"), name).toBe(false);
     }
+  });
+});
+
+describe("07.17.1.1.2 tasks: the three task tools, the turn's task and agent.task.v1 (D-02, D-08, D-13, PD-21)", () => {
+  const TASK = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a71";
+  const LATER = "2026-10-05T18:00:00.000Z";
+  const exited = { processId: "p1", status: "exited", exitCode: 0, durationMs: 1200 };
+  const task = {
+    taskId: TASK,
+    status: "waiting",
+    goal: "Read the knowledge pack and summarise it",
+    progress: "Read 400 of 3030 files",
+    nextStep: "Read the next 400",
+    turnsUsed: 7,
+    maxTurns: 40,
+    startedAt: NOW,
+    deadlineAt: LATER,
+    requesterId: ID,
+    waiting: { kind: "process", ref: "p1", until: LATER },
+    finishedProcesses: [exited, { processId: "p2", status: "timed_out", exitCode: null, durationMs: 600000 }],
+  };
+
+  it("are built-ins, neither side-effecting nor untrusted output", () => {
+    expect(BUILTIN_TOOLS.taskStart).toBe("ocw_task_start");
+    expect(BUILTIN_TOOLS.taskContinue).toBe("ocw_task_continue");
+    expect(BUILTIN_TOOLS.taskFinish).toBe("ocw_task_finish");
+    expect([...TASK_TOOL_NAMES]).toEqual(["ocw_task_start", "ocw_task_continue", "ocw_task_finish"]);
+    expect(TASK_TOOL_FLAGS).toEqual({
+      ocw_task_start: { untrustedOutput: false, sideEffecting: false },
+      ocw_task_continue: { untrustedOutput: false, sideEffecting: false },
+      ocw_task_finish: { untrustedOutput: false, sideEffecting: false },
+    });
+  });
+
+  it("are never approvable and never a dangerous name, on either host", () => {
+    for (const name of TASK_TOOL_NAMES) {
+      expect(isApprovableTool(name), name).toBe(false);
+      expect(isApprovableTool(name.toUpperCase()), name).toBe(false);
+      expect(ToolPattern.safeParse(name).success, name).toBe(false);
+      expect(isDangerousToolName(name), name).toBe(false);
+      expect(isDangerousToolName(name, "sandbox"), name).toBe(false);
+    }
+  });
+
+  it("a turn carries the task; a 07.17.1.1 turn parses unchanged; eleven finished processes are refused", () => {
+    const offered = {
+      ...turn,
+      tools: [...turn.tools, ...TASK_TOOL_NAMES],
+      toolFlags: { ...turn.toolFlags, ...TASK_TOOL_FLAGS },
+      task,
+    };
+    expect(TurnContext.parse(offered)).toEqual(offered);
+    const legacy = TurnContext.parse(turn);
+    expect(legacy).toEqual(turn);
+    expect("task" in legacy).toBe(false);
+    expect(AgentMentionEvent.parse({ ...mentionEvent, turn: offered }).turn).toEqual(offered);
+    const tooMany = TurnContext.safeParse({
+      ...turn,
+      task: { ...task, finishedProcesses: Array(11).fill(exited) },
+    });
+    expect(tooMany.success).toBe(false);
+    expect(tooMany.error?.issues[0]?.path).toEqual(["task", "finishedProcesses"]);
+  });
+
+  it("agent.task.v1 is a mention-shaped continuation with the task, its reason and an optional process", () => {
+    expect(AgentChannelEventTypes.task).toBe("agent.task.v1");
+    const event = {
+      ...mentionEvent,
+      type: "agent.task.v1",
+      message: { ...mentionEvent.message, text: "A background command of your task ended." },
+      turn: { ...turn, task: { ...task, status: "running", waiting: null } },
+      task: { taskId: TASK, reason: "process", process: exited },
+    };
+    expect(AgentTaskEvent.parse(event)).toEqual(event);
+    for (const reason of ["continue", "timer", "nudge"]) {
+      const plain = { ...event, task: { taskId: TASK, reason } };
+      expect(AgentTaskEvent.parse(plain)).toEqual(plain);
+    }
+    expect(AgentTaskEvent.safeParse({ ...event, task: { taskId: TASK, reason: "session" } }).success).toBe(
+      false,
+    );
+    expect(AgentTaskEvent.safeParse({ ...event, type: "agent.mention.v1" }).success).toBe(false);
+    expect(AgentTaskEvent.safeParse({ ...event, task: undefined }).success).toBe(false);
+    // An older consumer's mention schema refuses it only on its type, so the bridge skips it (PD-21).
+    const asMention = AgentMentionEvent.safeParse(event);
+    expect(asMention.success).toBe(false);
+    expect(asMention.error?.issues.map((i) => i.path.join("."))).toEqual(["type"]);
   });
 });

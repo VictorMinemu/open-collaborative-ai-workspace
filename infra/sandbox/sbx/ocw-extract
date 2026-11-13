@@ -1,0 +1,15 @@
+#!/opt/ocw-tools/venv/bin/python3 -I
+"""ocw-extract: bounded UTF-8 text from PDFs, scans, images, Office files, sheets, mail and archives in a bot's
+sandbox (phase 07.17.1.1.1, D-04, D-11; ADR-0043). Root-owned and read-only in the `sbx` image.
+
+`-I` keeps PYTHONPATH, the user site and the working directory off `sys.path` (PD-06): a planted `json.py` in
+/workspace or an approved package named like a toolkit module never loads here. The package comes only from
+/opt/ocw-tools/lib. `ocw-extract --help` lists the options."""
+
+import sys
+
+sys.path.insert(0, "/opt/ocw-tools/lib")
+
+from ocw_extract.cli import main  # noqa: E402
+
+raise SystemExit(main())

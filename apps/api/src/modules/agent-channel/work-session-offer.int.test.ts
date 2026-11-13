@@ -4,6 +4,7 @@ import {
   BUILTIN_TOOLS,
   CONVERSATION_OPEN_FLAGS,
   type SessionAudienceInput,
+  TASK_TOOL_NAMES,
   TURN_TOOLS_MAX,
   TurnWorkZone,
   WORK_SESSION_TOOL_FLAGS,
@@ -490,6 +491,8 @@ describe("BWZ-06: a bot without a profile gets the turn it got before the phase"
             chain: null,
             consultTargets: targets,
             attachments: [],
+            // 07.17.1.1.2 (PD-07): the delivery's task offer for a person's mention in a thread without a task.
+            task: { offer: "start", task: null, taskId: null },
           },
           {
             audience: null,
@@ -603,7 +606,11 @@ describe("organization B never influences an organization-A turn", () => {
 
 describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
   it("TURN_TOOLS_MAX - 5 tools besides the proposal tools: none of the six (the proposals stay); one fewer: all six, replacing them", async () => {
-    const base = (await mentionTurn(atlasId)).turn.tools.length - WORK_SESSION_TOOL_NAMES.length;
+    // 07.17.1.1.2 (PD-07): the three task tools come after the six and take their own slots (counted apart here).
+    const base =
+      (await mentionTurn(atlasId)).turn.tools.length -
+      WORK_SESSION_TOOL_NAMES.length -
+      TASK_TOOL_NAMES.length;
     const serverMcp = randomUUID();
     await su.query(
       `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
@@ -629,15 +636,24 @@ describe("the six tools need six free slots (TURN_TOOLS_MAX)", () => {
     try {
       await grant(names);
       const full = await mentionTurn(atlasId);
-      // No room for the six: the turn keeps the two proposal tools, so the bot can still propose.
-      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX - 3);
+      // No room for the six: the turn keeps the two proposal tools, so the bot can still propose. The three task tools
+      // (07.17.1.1.2) then fill the three slots left, and the Work Zone decision is unchanged by them.
+      expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
       expect(full.turn.tools).toContain("ocw_start_work_zone");
+      expect(full.turn.tools).toEqual(expect.arrayContaining([...TASK_TOOL_NAMES]));
       await expectNoOffer(full);
 
       await grant(names.slice(1));
       const room = await mentionTurn(atlasId);
       await expectOffer(room);
       expect(room.turn.tools).toHaveLength(TURN_TOOLS_MAX);
+      // 07.17.1.1.2 code review WR-07: the task start only takes free slots; none are left, so it is not offered,
+      // every granted connector tool stays, and the turn says why.
+      for (const name of TASK_TOOL_NAMES) expect(room.turn.tools).not.toContain(name);
+      expect(room.turn.tools).toEqual(expect.arrayContaining(names.slice(1)));
+      expect(room.turn.withheld).toEqual(
+        expect.arrayContaining([{ tool: "ocw_task_start", reason: "turn_full" }]),
+      );
     } finally {
       await grant([]);
     }

@@ -1,0 +1,113 @@
+{
+  "type": "agent.task.v1",
+  "data": {
+    "eventId": "0199a6f0-0000-7000-8000-00000000e7a2",
+    "agent": {
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "handle": "archie",
+      "displayName": "Archie"
+    },
+    "conversation": {
+      "id": "0199a6f0-0000-7000-8000-00000000c7a2",
+      "kind": "channel",
+      "name": "billing"
+    },
+    "thread": {
+      "rootMessageId": "0199a6f0-0000-7000-8000-00000000d7a2"
+    },
+    "message": {
+      "id": "0199a6f0-0000-7000-8000-00000000d7a3",
+      "text": "Continue your task. [[call ocw_task_continue {\"progress\":\"Checked invoices 11 to 20.\",\"nextStep\":\"Check invoices 21 to 30.\"}]]",
+      "createdAt": "2026-11-12T10:05:00.000Z",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f3",
+        "displayName": "Sam Lee"
+      },
+      "mentions": [
+        {
+          "kind": "agent",
+          "id": "0199a6f0-0000-7000-8000-00000000a001"
+        }
+      ]
+    },
+    "threadHistory": [
+      {
+        "id": "0199a6f0-0000-7000-8000-00000000d7a2",
+        "author": {
+          "kind": "user",
+          "id": "0199a6f0-0000-7000-8000-0000000000f3",
+          "displayName": "Sam Lee"
+        },
+        "text": "@archie audit the open invoices, take as long as you need",
+        "createdAt": "2026-11-12T10:00:00.000Z"
+      }
+    ],
+    "roster": [
+      {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f3",
+        "displayName": "Sam Lee",
+        "role": "member"
+      },
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001",
+        "displayName": "Archie",
+        "handle": "archie"
+      }
+    ],
+    "turn": {
+      "tools": ["ocw_task_continue", "ocw_task_finish"],
+      "toolFlags": {
+        "ocw_task_continue": {
+          "untrustedOutput": false,
+          "sideEffecting": false
+        },
+        "ocw_task_finish": {
+          "untrustedOutput": false,
+          "sideEffecting": false
+        }
+      },
+      "memory": [],
+      "now": null,
+      "maxToolCalls": 8,
+      "maxWebCalls": 5,
+      "task": {
+        "taskId": "0199a6f0-0000-7000-8000-000000007a51",
+        "status": "waiting",
+        "goal": "Audit the 40 open invoices for rounding errors.",
+        "progress": "OCW-SMOKE-TASK-NOTE-0717112 checked invoices 1 to 10.",
+        "nextStep": "Check invoices 11 to 20.",
+        "turnsUsed": 1,
+        "maxTurns": 40,
+        "startedAt": "2026-11-12T10:00:00.000Z",
+        "deadlineAt": "2026-11-12T18:00:00.000Z",
+        "requesterId": "0199a6f0-0000-7000-8000-0000000000f3",
+        "waiting": {
+          "kind": "process",
+          "ref": "p-audit-1",
+          "until": null
+        },
+        "finishedProcesses": [
+          {
+            "processId": "p-audit-1",
+            "status": "exited",
+            "exitCode": 0,
+            "durationMs": 4200
+          }
+        ]
+      }
+    },
+    "task": {
+      "taskId": "0199a6f0-0000-7000-8000-000000007a51",
+      "reason": "process",
+      "process": {
+        "processId": "p-audit-1",
+        "status": "exited",
+        "exitCode": 0,
+        "durationMs": 4200
+      }
+    }
+  }
+}

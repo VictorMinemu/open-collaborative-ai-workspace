@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import type { CellSnapshot } from "./agent-channel-protocol.js";
-import type { OpenClawPort } from "./bridge.js";
+import { type OpenClawPort, TurnRanError, type TurnRun } from "./bridge.js";
 import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
 import {
   agentStateDirFor,
@@ -10,7 +10,7 @@ import {
   planReconcile,
   type ReconcilePlan,
 } from "./reconciler.js";
-import { type ToolGuard, toolGuard } from "./tool-guard.js";
+import { type TaskTurnOutcome, type ToolGuard, toolGuard } from "./tool-guard.js";
 
 /**
  * OpenClaw tracks async work with AsyncLocalStorage scopes. Our account loop inherits the scope it was
@@ -111,10 +111,13 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
    * one session must never overlap (the event stream processes events concurrently).
    */
   const lanes = new Map<string, Promise<void>>();
-  function inLane(key: string, run: () => Promise<void>): Promise<void> {
+  function inLane<T>(key: string, run: () => Promise<T>): Promise<T> {
     const previous = lanes.get(key) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(run);
-    const settled = next.catch(() => undefined);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
     lanes.set(key, settled);
     void settled.then(() => {
       if (lanes.get(key) === settled) lanes.delete(key);
@@ -225,7 +228,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
     sessionKey: string,
     deliver: (text: string) => Promise<void>,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<TurnRun> {
     const cfg = runtime.config.current();
 
     const ingress = await runtime.channel.inbound.ingress.resolveStable({
@@ -239,7 +242,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         agentId: m.openClawAgentId,
         sessionKey,
         nativeChannelId: m.conversationId,
-        messageId: m.messageId,
+        messageId: m.inboundMessageId ?? m.messageId,
         inboundEventKind: "user_request",
       },
       // Authorization already happened server-side: the API only delivers mentions from members
@@ -279,8 +282,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       channelIngress: ingress,
       channel: CHANNEL_ID,
       accountId,
-      messageId: m.messageId,
-      messageIdFull: m.messageId,
+      messageId: m.inboundMessageId ?? m.messageId,
+      messageIdFull: m.inboundMessageId ?? m.messageId,
       ...(m.timestampMs !== undefined ? { timestamp: m.timestampMs } : {}),
       from: m.target,
       sender: { id: m.sender.id, name: m.sender.name, isBot: m.sender.isBot },
@@ -353,6 +356,13 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       },
       signal,
     );
+    let task: TaskTurnOutcome | null = null;
+    let ran = false;
+    /** Code review WR-01: whether this turn's model made a tool call (read before the turn ends). */
+    const modelRan = () => {
+      const t = guard.activeTurn(sessionKey);
+      return t?.eventId === m.eventId && t.toolCallsSeen > 0;
+    };
     try {
       await runDetached(() =>
         runtime.channel.inbound.dispatch({
@@ -381,9 +391,22 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           },
         }),
       );
+    } catch (error) {
+      // Code review WR-01: a failure after the model already ran is never retried by the bridge.
+      if (modelRan()) {
+        const t = guard.activeTurn(sessionKey);
+        throw new TurnRanError(error, t ? { ...t.task } : null);
+      }
+      throw error;
     } finally {
+      // 07.17.1.1.2 (PD-17): what the turn's task calls achieved, read before the turn ends (only this turn's, never a
+      // later one of the same session).
+      const ended = guard.activeTurn(sessionKey);
+      task = ended?.eventId === m.eventId ? { ...ended.task } : null;
+      ran = modelRan();
       guard.endTurn(sessionKey);
     }
+    return { task, ran };
   }
 
   return port;

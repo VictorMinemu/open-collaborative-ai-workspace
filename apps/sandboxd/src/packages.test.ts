@@ -136,6 +136,9 @@ describe("registryConfig and the run environment", () => {
     // A run never finds a program in the packages volume, and Node and Python never load a package from it.
     expect(env).toContain("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     expect(env.join("\n")).not.toContain("/opt/ocw-packages");
+    // The document toolkit (07.17.1.1.1, PD-05) is for the bot's shell only: review and installer runs never see it.
+    expect(env.join("\n")).not.toContain("/opt/ocw-tools");
+    expect(env.some((l) => l.startsWith("PYTHONPATH="))).toBe(false);
     expect(runEnv(registryConfig({})).some((l) => l.startsWith("PIP_TRUSTED_HOST="))).toBe(false);
   });
 });

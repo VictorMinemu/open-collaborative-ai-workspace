@@ -30,6 +30,7 @@ export {
 } from "./client";
 export {
   createSandboxEventsConsumer,
+  type PassResult,
   SANDBOX_EVENTS_LOCK_KEY,
   type SandboxEventHandler,
   type SandboxEventsConsumer,

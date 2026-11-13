@@ -2,7 +2,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AgentChannelConversationOpen } from "../../packages/contracts/src/automation-fan-out";
-import { FakeCellPlugin, type MentionPayload, turnAttachmentsSuffix } from "./fake-cell-plugin";
+import { readPack, taskDirectives } from "./bot-tasks";
+import {
+  FakeCellPlugin,
+  type MentionPayload,
+  parseCallDirectives,
+  TASK_EVENT,
+  type TaskEventPayload,
+  turnAttachmentsSuffix,
+} from "./fake-cell-plugin";
 
 /**
  * 07.8-08: the fake cell's confined tool calls, against a stub Agent Channel. A success renders the result; a refusal
@@ -1488,5 +1496,321 @@ describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
     expect(seen.at(-1)?.body).toMatchObject({ expectedVersion: 5 });
     routes.length = 0;
     delete answers["/agent-channel/v1/board/read"];
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1.1.2-13: long tasks (D-02, D-14, PD-17)
+
+const TASK = "00000000-0000-4000-8000-0000000000aa";
+const TASK_CARD_MSG = "00000000-0000-4000-8000-00000000c0de";
+const TASK_TOOLS = ["ocw_task_start", "ocw_task_continue", "ocw_task_finish"];
+const START_OK = { ok: true, taskId: TASK, maxTurns: 4, deadlineAt: "2026-11-13T10:00:00.000Z" };
+const continued = (quiet: boolean) => ({ ok: true, next: "after_turn", at: null, turnsLeft: 2, quiet });
+
+/** Ana's mention of Scout in #ops, offered the task tools (a start turn). */
+const taskMention = (text: string, over: Record<string, unknown> = {}) =>
+  ({
+    eventId: "00000000-0000-4000-8000-0000000000e7",
+    seq: 1,
+    agent: { id: "00000000-0000-4000-8000-0000000000a1", handle: "scout", displayName: "Scout" },
+    conversation: { id: "00000000-0000-4000-8000-0000000000c1", kind: "channel", name: "ops" },
+    thread: { rootMessageId: "00000000-0000-4000-8000-0000000000d7" },
+    message: {
+      id: "00000000-0000-4000-8000-0000000000d7",
+      text,
+      author: { kind: "user", id: "u-ana", displayName: "Ana Gil" },
+    },
+    threadHistory: [],
+    roster: [],
+    turn: { tools: TASK_TOOLS },
+    ...over,
+  }) as unknown as MentionPayload;
+
+/** The platform's next turn of the task (`agent.task.v1`): on the card, for Ana, turn `n` of 4. */
+const taskEvent = (n: number, over: Record<string, unknown> = {}) =>
+  ({
+    ...taskMention(`Continue your task (turn ${n} of 4).`),
+    eventId: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, "0")}`,
+    type: TASK_EVENT,
+    message: {
+      id: TASK_CARD_MSG,
+      text: `Continue your task (turn ${n} of 4).`,
+      author: { kind: "user", id: "u-ana", displayName: "Ana Gil" },
+    },
+    turn: {
+      tools: ["ocw_task_continue", "ocw_task_finish"],
+      task: {
+        taskId: TASK,
+        status: "running",
+        goal: "Summarise the pack",
+        progress: `Read ${n - 1} of 4`,
+        nextStep: `Read ${n} of 4`,
+        turnsUsed: n,
+        maxTurns: 4,
+      },
+    },
+    task: { taskId: TASK, reason: "continue" },
+    ...over,
+  }) as unknown as TaskEventPayload;
+
+describe("FakeCellPlugin long tasks (07.17.1.1.2-13, D-02, D-14, PD-17)", () => {
+  it("start and continue directives post exactly the plugin's bodies to /tasks/start and /tasks/continue (never /tool-calls)", async () => {
+    answers["/agent-channel/v1/tasks/start"] = [200, START_OK];
+    answers["/agent-channel/v1/tasks/continue"] = [200, continued(false)];
+    const m = taskMention(
+      '@scout [[call ocw_task_start {"goal":"Summarise the pack"}]] [[call ocw_task_continue {"progress":"Read 1 of 4","nextStep":"Read 2"}]]',
+    );
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(m, parseCallDirectives(m.message.text));
+    expect(lines).toEqual([
+      "Tool ocw_task_start: started (4 turns)",
+      "Tool ocw_task_continue: continued (after_turn, 2 left)",
+    ]);
+    expect(seen.slice(from)).toEqual([
+      {
+        path: "/agent-channel/v1/tasks/start",
+        body: { eventId: m.eventId, agentId: m.agent.id, goal: "Summarise the pack" },
+      },
+      {
+        path: "/agent-channel/v1/tasks/continue",
+        body: { eventId: m.eventId, agentId: m.agent.id, progress: "Read 1 of 4", nextStep: "Read 2" },
+      },
+    ]);
+    // Key by key: only the turn's ids and the tool's own fields (T-07.17.1.1.2-13-01).
+    expect(Object.keys(seen.at(-2)?.body ?? {}).sort()).toEqual(["agentId", "eventId", "goal"]);
+    expect(Object.keys(seen.at(-1)?.body ?? {}).sort()).toEqual([
+      "agentId",
+      "eventId",
+      "nextStep",
+      "progress",
+    ]);
+    expect(plugin.taskRequests.slice(-2).map((r) => [r.tool, r.status])).toEqual([
+      ["ocw_task_start", 200],
+      ["ocw_task_continue", 200],
+    ]);
+    expect(plugin.taskOutcome(m.eventId)).toEqual({
+      started: true,
+      continued: true,
+      finished: false,
+      quiet: false,
+    });
+  });
+
+  it("a continue's afterSeconds and waitFor, a finish's summary and outcome travel; null and unknown keys never do", async () => {
+    answers["/agent-channel/v1/tasks/continue"] = [200, { ...continued(false), next: "at" }];
+    answers["/agent-channel/v1/tasks/finish"] = [200, { ok: true, status: "done" }];
+    const m = taskMention("", { eventId: "00000000-0000-4000-8000-0000000000e8" });
+    const from = seen.length;
+    await plugin.simulateToolCalls(m, [
+      {
+        tool: "ocw_task_continue",
+        args: { progress: " Read 2 ", nextStep: "Read 3", afterSeconds: 600, waitFor: null, userId: "x" },
+      },
+      { tool: "ocw_task_finish", args: { summary: "All read.", outcome: "done", taskId: TASK } },
+    ]);
+    expect(seen.slice(from).map((r) => r.body)).toEqual([
+      { eventId: m.eventId, agentId: m.agent.id, progress: "Read 2", nextStep: "Read 3", afterSeconds: 600 },
+      { eventId: m.eventId, agentId: m.agent.id, summary: "All read.", outcome: "done" },
+    ]);
+    // A finish after a continue: never quiet.
+    expect(plugin.taskOutcome(m.eventId)).toMatchObject({ continued: true, finished: true, quiet: false });
+  });
+
+  it("a refusal reads `refused (<code>)`; a tool already done this turn is refused locally; a tool not offered is never sent", async () => {
+    answers["/agent-channel/v1/tasks/continue"] = [
+      200,
+      { ok: false, code: "budget_turns", sentence: "This task used all its turns, so it stopped." },
+    ];
+    const m = taskMention("", { eventId: "00000000-0000-4000-8000-0000000000e9" });
+    expect(
+      await plugin.simulateToolCalls(m, [
+        { tool: "ocw_task_continue", args: { progress: "Read 4 of 4", nextStep: "Read 5" } },
+      ]),
+    ).toEqual(["Tool ocw_task_continue: refused (budget_turns)"]);
+    expect(plugin.taskOutcome(m.eventId)).toMatchObject({ continued: false, quiet: false });
+
+    answers["/agent-channel/v1/tasks/continue"] = [200, continued(true)];
+    const twice = taskMention("", { eventId: "00000000-0000-4000-8000-0000000000ea" });
+    let from = seen.length;
+    expect(
+      await plugin.simulateToolCalls(twice, [
+        { tool: "ocw_task_continue", args: { progress: "a", nextStep: "b" } },
+        { tool: "ocw_task_continue", args: { progress: "c", nextStep: "d" } },
+      ]),
+    ).toEqual([
+      "Tool ocw_task_continue: continued (after_turn, 2 left)",
+      "Tool ocw_task_continue: refused (once_per_turn)",
+    ]);
+    expect(since(from)).toEqual(["/agent-channel/v1/tasks/continue"]);
+
+    answers["/agent-channel/v1/tasks/finish"] = [404, { error: { code: "unknown_turn", message: "x" } }];
+    expect(
+      await plugin.simulateToolCalls(taskMention("", { eventId: "00000000-0000-4000-8000-0000000000eb" }), [
+        { tool: "ocw_task_finish", args: { summary: "s", outcome: "done" } },
+      ]),
+    ).toEqual(["Tool ocw_task_finish: refused (unknown_turn)"]);
+
+    from = seen.length;
+    expect(
+      await plugin.simulateToolCalls(taskMention("", { turn: { tools: [] } }), [
+        { tool: "ocw_task_start", args: { goal: "g" } },
+      ]),
+    ).toEqual(["Tool ocw_task_start: not offered"]);
+    expect(since(from)).toEqual([]);
+  });
+
+  it("an agent.task.v1 runs taskCallsFor (turn n of N) on the card, in the task's thread; a quiet continue posts nothing; done is reported for every task turn", async () => {
+    const ctxs: Array<{ turn: number; maxTurns: number }> = [];
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      autoDone: true,
+      taskCallsFor: (e, ctx) => {
+        ctxs.push(ctx);
+        return readPack({ of: 4, finishAt: 3 })(e, ctx);
+      },
+    });
+    // Turn 2: a quiet continue. No reply, done `replied` (it continued).
+    answers["/agent-channel/v1/tasks/continue"] = [200, continued(true)];
+    let from = seen.length;
+    const two = taskEvent(2);
+    await cell.onEvent(TASK_EVENT, asEvent(two));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/tasks/continue",
+      `/agent-channel/v1/turns/${two.eventId}/done`,
+    ]);
+    expect(seen[from]?.body).toEqual({
+      eventId: two.eventId,
+      agentId: two.agent.id,
+      progress: "Read 2 of 4",
+      nextStep: "Read 3 of 4",
+    });
+    expect(seen.at(-1)?.body).toEqual({ agentId: two.agent.id, outcome: "replied" });
+    expect(cell.taskTurns.at(-1)).toMatchObject({
+      eventId: two.eventId,
+      taskId: TASK,
+      turn: 2,
+      posted: false,
+    });
+
+    // Not quiet: the reply goes to the card, in the task's thread, for this turn.
+    answers["/agent-channel/v1/tasks/continue"] = [200, continued(false)];
+    from = seen.length;
+    const again = taskEvent(2, { eventId: "00000000-0000-4000-8000-0000000001f2" });
+    await cell.onEvent(TASK_EVENT, asEvent(again));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/tasks/continue",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+      `/agent-channel/v1/turns/${again.eventId}/done`,
+    ]);
+    expect(seen.at(-2)?.body).toMatchObject({
+      threadRootMessageId: again.thread.rootMessageId,
+      inReplyToMessageId: TASK_CARD_MSG,
+      eventId: again.eventId,
+    });
+    expect(String(seen.at(-2)?.body.text)).toMatch(/^Tool ocw_task_continue: continued/u);
+
+    // Turn 3: the factory finishes the task (always posted).
+    answers["/agent-channel/v1/tasks/finish"] = [200, { ok: true, status: "done" }];
+    from = seen.length;
+    const three = taskEvent(3);
+    await cell.onEvent(TASK_EVENT, asEvent(three));
+    expect(seen[from]).toEqual({
+      path: "/agent-channel/v1/tasks/finish",
+      body: {
+        eventId: three.eventId,
+        agentId: three.agent.id,
+        summary: "Read 3 of 4: done.",
+        outcome: "done",
+      },
+    });
+    expect(since(from).at(-1)).toBe(`/agent-channel/v1/turns/${three.eventId}/done`);
+    expect(seen.at(-1)?.body).toEqual({ agentId: three.agent.id, outcome: "replied" });
+    expect(ctxs).toEqual([
+      { turn: 2, maxTurns: 4 },
+      { turn: 2, maxTurns: 4 },
+      { turn: 3, maxTurns: 4 },
+    ]);
+  });
+
+  it("a task turn that posted nothing and neither continued nor finished reports failed; a start turn reports done after its reply", async () => {
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      autoDone: true,
+      taskCallsFor: () => [],
+    });
+    const failing = taskEvent(2, { eventId: "00000000-0000-4000-8000-0000000001f3" });
+    routes.push((_m, url, body) =>
+      url === "/agent-channel/v1/messages" && body.eventId === failing.eventId
+        ? [500, { error: { code: "internal", message: "x" } }]
+        : undefined,
+    );
+    await cell.onEvent(TASK_EVENT, asEvent(failing));
+    expect(cell.doneReports.at(-1)).toMatchObject({ eventId: failing.eventId, outcome: "failed" });
+    routes.length = 0;
+
+    answers["/agent-channel/v1/tasks/start"] = [200, START_OK];
+    answers["/agent-channel/v1/tasks/continue"] = [200, continued(false)];
+    const start = taskMention(`@scout ${taskDirectives("Summarise the pack", { of: 4 })}`, {
+      eventId: "00000000-0000-4000-8000-0000000001f4",
+    });
+    const from = seen.length;
+    await cell.onEvent("agent.mention.v1", asEvent(start));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/tasks/start",
+      "/agent-channel/v1/tasks/continue",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+      `/agent-channel/v1/turns/${start.eventId}/done`,
+    ]);
+    expect(seen[from + 1]?.body).toMatchObject({ progress: "Read 1 of 4", nextStep: "Read 2 of 4" });
+    expect(cell.doneReports.at(-1)).toMatchObject({ eventId: start.eventId, outcome: "replied" });
+  });
+
+  it("without autoReply a task event is not answered; a held bot's never is", async () => {
+    let from = seen.length;
+    await new FakeCellPlugin({ apiUrl, token: "cell-token", autoDone: true }).onEvent(
+      TASK_EVENT,
+      asEvent(taskEvent(2)),
+    );
+    expect(since(from)).toEqual([]);
+    from = seen.length;
+    await new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      autoDone: true,
+      holdAgents: new Set([taskEvent(2).agent.id]),
+      taskCallsFor: readPack({ of: 4 }),
+    }).onEvent(TASK_EVENT, asEvent(taskEvent(2)));
+    expect(since(from)).toEqual([]);
+  });
+
+  it("readPack continues with `Read n of N` (an optional wait) until finishAt, then finishes; taskDirectives builds the start", () => {
+    const at = (n: number) =>
+      readPack({ of: 4, finishAt: 4, afterSeconds: 600 })(taskEvent(n), { turn: n, maxTurns: 4 });
+    expect(at(2)).toEqual([
+      {
+        tool: "ocw_task_continue",
+        args: { progress: "Read 2 of 4", nextStep: "Read 3 of 4", afterSeconds: 600 },
+      },
+    ]);
+    expect(at(4)).toEqual([
+      { tool: "ocw_task_finish", args: { summary: "Read 4 of 4: done.", outcome: "done" } },
+    ]);
+    expect(readPack({ of: 4 })(taskEvent(9), { turn: 9, maxTurns: 4 })).toEqual([
+      { tool: "ocw_task_continue", args: { progress: "Read 9 of 4", nextStep: "Read 10 of 4" } },
+    ]);
+    expect(parseCallDirectives(taskDirectives("Summarise the pack", { of: 4, afterSeconds: 600 }))).toEqual([
+      { tool: "ocw_task_start", args: { goal: "Summarise the pack" } },
+      {
+        tool: "ocw_task_continue",
+        args: { progress: "Read 1 of 4", nextStep: "Read 2 of 4", afterSeconds: 600 },
+      },
+    ]);
   });
 });

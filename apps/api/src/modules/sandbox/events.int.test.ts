@@ -288,20 +288,42 @@ describe("replay after an API restart never double-counts (T-07.8-11-05)", () =>
       { bootId: B, events: [ev(1, 7)], nextSeq: 1 },
       { bootId: A, events: [ev(2, 999)], nextSeq: 2 },
     ];
+    // The consumer reads the feed's raw body (`stream`) and parses each event on its own (07.17.1.1.2-11, E25).
     const stub = {
       async call(op: string) {
         if (op === "policy") return { ok: true };
-        if (op !== "events") throw new Error(`unexpected ${op}`);
-        return script.shift() ?? { bootId: B, events: [], nextSeq: 1 };
+        throw new Error(`unexpected ${op}`);
       },
-      async stream() {
-        throw new Error("no stream");
+      async stream(op: string) {
+        if (op !== "events") throw new Error(`unexpected stream ${op}`);
+        return new Response(JSON.stringify(script.shift() ?? { bootId: B, events: [], nextSeq: 1 })).body;
       },
     } as unknown as SandboxdClient;
     const c = consumer(stub, KEY + 1);
     for (let i = 0; i < 3; i++) await c.runOnce();
     expect(await cpuOf(bee)).toBe(12);
     expect(await cursorOf(s.orgB)).toEqual({ boot_id: B, seq: 1 });
+    await c.stop();
+  });
+
+  it("an event of a type this API does not know is skipped: the known ones apply, the cursor moves past all (E25)", async () => {
+    const bot = await s.newBot("Skew Bot");
+    const c = consumer();
+    await c.runOnce();
+    usage(bot.id, 40);
+    // A newer sandboxd's event: not in this API's contract, and carrying a field nobody may log.
+    const unknown = emit({ type: "future_kind", target: target(bot.id), note: "SENTINEL-skew-3b7c" });
+    const third = usage(bot.id, 2);
+    const pass = await c.runOnce();
+    expect(pass).toMatchObject({ locked: true, applied: 2, skipped: 1 });
+    expect(await cpuOf(bot.id)).toBe(42);
+    expect((await cursorOf())?.seq).toBe(third);
+    expect(await c.runOnce()).toMatchObject({ applied: 0, skipped: 0 });
+    const warned = s.logs.filter((l) => l.includes("skipped a sandbox event of an unknown type"));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('"type":"future_kind"');
+    expect(warned[0]).toContain(`"seq":${unknown}`);
+    expect(s.logs.some((l) => l.includes("SENTINEL-skew-3b7c"))).toBe(false);
     await c.stop();
   });
 

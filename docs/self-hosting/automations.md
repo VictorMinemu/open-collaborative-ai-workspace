@@ -15,6 +15,11 @@ Nothing new runs for this: no extra container, no hosted service. Jobs live in P
 | `migrate` (one-shot) | `ocw_migrator` | Creates or upgrades the `pgboss` schema and every job queue, with the rest of the database. Runs before the API on every `docker compose up`. |
 | `api` | `ocw_app` | Serves the routes and runs the job workers: a one-minute tick for schedules, mailbox polls, watched-record checks, the inbound worker, the digest and Work Zone summaries, and a daily clean-up at 03:17 UTC. It never changes the `pgboss` schema. |
 | OpenClaw cell | its own container | Receives a run as the bot's turn and answers in the run card's thread. Its own cron and webhooks are off. |
+| `bot_task.continue` (job) | `api` | Gives a bot's long task its next turn in its thread, as the person it runs for: after the bot's last turn of the task ended, when its timer is up, or when the sandbox command or Work Zone session it waits on ends. The job carries ids only and delivers each turn once ([ADR-0042](../adr/0042-long-running-bot-tasks.md)). |
+| `bot_task.tick` (every minute) | `api` | Finds up to 100 tasks a minute that are due or stuck (a wait past its time, a turn that never reported back for 30 minutes, a task past its hours, a bot turned off) and continues or stops them. |
+
+Long bot tasks (v0.3.2) add only these two queues: the `migrate` service creates them, and the API's workers run them.
+Nothing extra to run or configure; their limits are in Settings › Bot policy › Long tasks.
 
 **`OCW_JOBS_WORKER`** (`on` by default; `off` under `NODE_ENV=test`). With several API replicas, every replica may run
 workers: each job runs once and each tick once a minute, whichever replica takes it. Set `OCW_JOBS_WORKER=off` on

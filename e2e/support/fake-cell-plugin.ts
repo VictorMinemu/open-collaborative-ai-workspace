@@ -4,6 +4,8 @@ import {
   BROWSER_TOOL_NAMES,
   BUILTIN_TOOLS,
   SANDBOX_TOOL_NAMES,
+  TASK_TOOL_NAMES,
+  type TaskToolName,
   type TurnAttachment,
   WORK_SESSION_TOOL_NAMES,
 } from "../../packages/contracts/src/bot-capabilities";
@@ -37,6 +39,12 @@ import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
  * `itemCallsFor` in the item's thread; a `turn_done` wake in such a thread runs `wakeCallsFor` and mentions the item's
  * escalation. Like the plugin's board tool, a tainted or session-read turn never reads the board: it moves its thread's
  * card at the version it last saw (1 for a just-opened card) and retries one 409 at the current version.
+ *
+ * Long tasks (07.17.1.1.2-13, D-02, D-14, PD-17): `[[call ocw_task_start {"goal":"…"}]]` (and `ocw_task_continue`,
+ * `ocw_task_finish`) posts exactly the plugin's body (`eventId`, `agentId` and the tool's own fields) to `POST
+ * /agent-channel/v1/tasks/<verb>`, each at most once per turn; an `agent.task.v1` turn runs `taskCallsFor` on the task
+ * card, in the task's thread; a turn whose continue answered `quiet: true` posts no reply; with `autoDone` every turn
+ * offered a task tool and every task turn reports `/turns/:eventId/done`.
  */
 
 export interface FakeCellEvent {
@@ -129,6 +137,16 @@ export interface MentionPayload {
      * name them by position (`{{attachment:N}}`), and the reply lists them (`turnAttachmentsSuffix`).
      */
     attachments?: TurnAttachment[];
+    /** 07.17.1.1.2 (PD-16): the bot's active task in this thread (its notes, the platform's numbers). */
+    task?: {
+      taskId: string;
+      status: string;
+      goal: string;
+      progress: string | null;
+      nextStep: string | null;
+      turnsUsed: number;
+      maxTurns: number;
+    };
   };
   /** 07.7 D-01: the turn answers a question another bot asked (the asking bot, its chain and this hop's depth). */
   origin?: Record<string, unknown>;
@@ -209,6 +227,55 @@ export interface AutomationItemPayload extends MentionPayload {
 /** One simulated tool call (a `[[call …]]` directive, or what a spec's hook decides). */
 export type SimulatedCall = { tool: string; args: Record<string, unknown> };
 
+/** `agent.task.v1` (07.17.1.1.2 D-02): the platform delivers the next turn of the bot's own task. */
+export const TASK_EVENT = "agent.task.v1";
+
+/**
+ * `agent.task.v1` (07.17.1.1.2 PD-11): built like a mention of the bot on its task card (`message.id` = the card,
+ * `message.author` = the person the task runs for, `message.text` = the server's sentence, never directives), with
+ * `turn.task` and why the turn came.
+ */
+export interface TaskEventPayload extends MentionPayload {
+  task: {
+    taskId: string;
+    reason: "continue" | "timer" | "process" | "nudge";
+    process?: { processId: string; status: string; exitCode: number | null; durationMs: number | null };
+  };
+}
+
+/** Which turn of the task this is (`turn.task.turnsUsed`, else the server sentence's "turn n of N"). */
+export interface TaskTurnContext {
+  turn: number;
+  maxTurns: number;
+}
+
+/** What one turn's task calls achieved, like the plugin's `ActiveTurn.task` (tool-guard.ts). */
+export interface TaskTurnOutcome {
+  started: boolean;
+  continued: boolean;
+  finished: boolean;
+  /** The continue answered `quiet: true` and no finish followed: the turn's reply is not posted (PD-10). */
+  quiet: boolean;
+}
+
+const isTaskTool = (name: string): name is TaskToolName =>
+  (TASK_TOOL_NAMES as readonly string[]).includes(name);
+const taskVerb = (tool: TaskToolName) => tool.slice("ocw_task_".length);
+/** The keys each task tool sends besides the turn's ids (apps/openclaw-channel's task-tools.ts, closed schemas). */
+const TASK_TOOL_KEYS: Record<TaskToolName, readonly string[]> = {
+  ocw_task_start: ["goal"],
+  ocw_task_continue: ["progress", "nextStep", "afterSeconds", "waitFor"],
+  ocw_task_finish: ["summary", "outcome"],
+};
+
+/** The turn numbers of a task turn: the turn's task block, else the sentence (`Continue your task (turn 2 of 4).`). */
+export function taskTurnOf(t: MentionPayload): TaskTurnContext {
+  const task = t.turn?.task;
+  if (task) return { turn: task.turnsUsed, maxTurns: task.maxTurns };
+  const m = /turn (\d+) of (\d+)/u.exec(t.message.text);
+  return { turn: Number(m?.[1] ?? 0), maxTurns: Number(m?.[2] ?? 0) };
+}
+
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
 export interface FakeDeviceAuthOptions {
   /** Base URL of e2e/support/fake-device-auth-server.ts (stands in for https://auth.openai.com). */
@@ -269,7 +336,9 @@ export interface FakeCellOptions {
   /**
    * Like the real bridge's `finally` (07.7-05/06): after answering a turn that can belong to a consult chain (offered
    * `ocw_consult_agent`, carrying `origin`, or an `agent.consult_reply.v1`), POST `/turns/:eventId/done` with `replied`
-   * (or `failed` when the reply could not be posted). Other turns report nothing. Off by default.
+   * (or `failed` when the reply could not be posted). 07.17.1.1.2 (PD-17, the bridge's `reportsDone`): so does every
+   * turn offered a task tool and every `agent.task.v1`, `replied` also when it posted nothing but continued or finished
+   * its task. Other turns report nothing. Off by default.
    */
   autoDone?: boolean;
   /** Never answer (nor report done) for these bot ids: their turns stay open (a Stop or timeout scenario). */
@@ -303,6 +372,15 @@ export interface FakeCellOptions {
    * the automation names nobody). Unset, or any other wake = the 07.16 answer.
    */
   wakeCallsFor?: (wake: WorkSessionWakePayload, ctx: { escalationHandles: string[] }) => SimulatedCall[];
+  /**
+   * 07.17.1.1.2-13 (D-02): the calls the persona makes on an `agent.task.v1` turn (its continue or finish), with the
+   * turn's numbers; the reply follows on the card unless the continue answered `quiet: true`. Unset = no calls (the
+   * identity reply, so the platform nudges the task).
+   */
+  taskCallsFor?: (
+    event: TaskEventPayload,
+    ctx: TaskTurnContext,
+  ) => SimulatedCall[] | Promise<SimulatedCall[]>;
 }
 
 /** 07.7: the consult tool (self-validated by `POST /consultations`, never `/tool-calls`). */
@@ -850,8 +928,13 @@ export class FakeCellPlugin {
    */
   private async answerTurn(m: MentionPayload, type: string, directives: boolean): Promise<void> {
     if (this.opts.holdAgents?.has(m.agent.id)) return;
-    const chainTurn =
-      (m.turn?.tools ?? []).includes(CONSULT_TOOL) || m.origin !== undefined || type === CONSULT_REPLY_EVENT;
+    const tools = m.turn?.tools ?? [];
+    // The bridge's `reportsDone` (PD-17): a turn that can belong to a consult chain, or that was offered a task tool.
+    const doneTurn =
+      tools.includes(CONSULT_TOOL) ||
+      m.origin !== undefined ||
+      type === CONSULT_REPLY_EVENT ||
+      tools.some(isTaskTool);
     let replied = false;
     try {
       const calls = [
@@ -862,6 +945,8 @@ export class FakeCellPlugin {
         calls.length > 0
           ? (await this.simulateToolCalls(m, calls)).join("\n")
           : (this.opts.replyText ?? identityReply)(m);
+      // PD-10: a turn whose continue answered quiet posts nothing (only a platform-delivered turn can be quiet).
+      if (this.taskOutcomes.get(m.eventId)?.quiet) return;
       const links = memberAccountLinks(m);
       await this.reply(
         m,
@@ -873,8 +958,127 @@ export class FakeCellPlugin {
       );
       replied = true;
     } finally {
-      if (chainTurn && this.opts.autoDone) await this.turnDone(m, replied ? "replied" : "failed");
+      if (doneTurn && this.opts.autoDone) {
+        await this.turnDone(m, replied || this.taskAnswered(m.eventId) ? "replied" : "failed");
+      }
     }
+  }
+
+  /** What each turn's task calls achieved, by event id (the plugin's `ActiveTurn.task`). */
+  private readonly taskOutcomes = new Map<string, TaskTurnOutcome>();
+
+  /** The task outcome of a turn (all false when it made no task call). */
+  taskOutcome(eventId: string): TaskTurnOutcome {
+    return (
+      this.taskOutcomes.get(eventId) ?? { started: false, continued: false, finished: false, quiet: false }
+    );
+  }
+
+  /** The turn continued or finished its task: silence is its answer, never a failure (D-14). */
+  private taskAnswered(eventId: string): boolean {
+    const o = this.taskOutcomes.get(eventId);
+    return o !== undefined && (o.continued || o.finished);
+  }
+
+  /** Every task turn (`agent.task.v1`) this cell answered: the task, the turn, its lines and whether it posted. */
+  readonly taskTurns: Array<{
+    eventId: string;
+    taskId: string;
+    reason: TaskEventPayload["task"]["reason"];
+    turn: number;
+    lines: string[];
+    posted: boolean;
+  }> = [];
+
+  /**
+   * PD-11, PD-17: the next turn of the bot's task, answered on its card in the task's thread (`reply`: the event's
+   * thread, `inReplyToMessageId` = the card, `eventId` = the turn). Only `taskCallsFor`'s calls run (the message is the
+   * server's sentence, never directives); the reply is dropped when the continue answered quiet; with `autoDone` the
+   * turn reports done, `replied` when it posted or continued or finished, else `failed`. Never for a held bot.
+   */
+  private async answerTask(t: TaskEventPayload): Promise<void> {
+    if (this.opts.holdAgents?.has(t.agent.id)) return;
+    const ctx = taskTurnOf(t);
+    let replied = false;
+    let lines: string[] = [];
+    try {
+      const calls = (await this.opts.taskCallsFor?.(t, ctx)) ?? [];
+      lines = calls.length > 0 ? await this.simulateToolCalls(t, calls) : [];
+      if (this.taskOutcomes.get(t.eventId)?.quiet) return;
+      const body = lines.length > 0 ? lines.join("\n") : (this.opts.replyText ?? identityReply)(t);
+      await this.reply(t, body + turnToolsSuffix(t) + turnContextSuffix(t));
+      replied = true;
+    } finally {
+      this.taskTurns.push({
+        eventId: t.eventId,
+        taskId: t.task?.taskId ?? "",
+        reason: t.task?.reason,
+        turn: ctx.turn,
+        lines,
+        posted: replied,
+      });
+      if (this.opts.autoDone) {
+        await this.turnDone(t, replied || this.taskAnswered(t.eventId) ? "replied" : "failed");
+      }
+    }
+  }
+
+  /** Every task route call (07.17.1.1.2-13): the tool, the route, the body sent exactly, the status and the answer. */
+  readonly taskRequests: Array<{
+    eventId: string;
+    tool: TaskToolName;
+    route: string;
+    sent: Record<string, unknown>;
+    status: number;
+    body: Loose | null;
+  }> = [];
+
+  /**
+   * `ocw_task_start | _continue | _finish` the way apps/openclaw-channel's task-tools.ts sends them (07.17.1.1.2-05):
+   * `POST /agent-channel/v1/tasks/<verb>` with the turn's `eventId` and `agentId` and only the tool's own keys the model
+   * gave (`TASK_TOOL_KEYS`; strings trimmed; `null` the same as absent), never a person, a conversation, a task or a
+   * budget. A tool that already succeeded this turn is refused locally (`once_per_turn`, nothing sent). Lines: `started
+   * (<maxTurns> turns)`, `continued (<next>, <turnsLeft> left)`, `finished (<status>)`, `refused (<code>)` (the
+   * answer's code, else the error envelope's, else the HTTP status).
+   */
+  private async taskCall(m: MentionPayload, tool: TaskToolName, args: Record<string, unknown>) {
+    const outcome = this.taskOutcomes.get(m.eventId) ?? {
+      started: false,
+      continued: false,
+      finished: false,
+      quiet: false,
+    };
+    this.taskOutcomes.set(m.eventId, outcome);
+    const done =
+      tool === BUILTIN_TOOLS.taskStart
+        ? outcome.started
+        : tool === BUILTIN_TOOLS.taskContinue
+          ? outcome.continued
+          : outcome.finished;
+    if (done) return "refused (once_per_turn)";
+    const route = `/tasks/${taskVerb(tool)}`;
+    const sent: Record<string, unknown> = { eventId: m.eventId, agentId: m.agent.id };
+    for (const key of TASK_TOOL_KEYS[tool]) {
+      const value = args[key];
+      if (value !== undefined && value !== null) sent[key] = typeof value === "string" ? value.trim() : value;
+    }
+    const res = await this.request<Loose | null>("POST", route, sent);
+    this.taskRequests.push({ eventId: m.eventId, tool, route, sent, status: res.status, body: res.body });
+    const b = res.body;
+    if (res.status !== 200 || b?.ok !== true) return `refused (${b?.code ?? b?.error?.code ?? res.status})`;
+    if (tool === BUILTIN_TOOLS.taskStart) {
+      outcome.started = true;
+      return `started (${b.maxTurns} turns)`;
+    }
+    if (tool === BUILTIN_TOOLS.taskContinue) {
+      outcome.continued = true;
+      // A finish always posts (the plugin's taskCallEnded): a continue after it never makes the turn quiet.
+      outcome.quiet = b.quiet === true && !outcome.finished;
+      return `continued (${b.next}, ${b.turnsLeft} left)`;
+    }
+    outcome.finished = true;
+    outcome.quiet = false;
+    return `finished (${b.status})`;
   }
 
   async onEvent(type: string, data: FakeCellEvent["data"]) {
@@ -890,6 +1094,9 @@ export class FakeCellPlugin {
       }
       if (type === WORK_SESSION_EVENT && this.opts.autoReply) {
         await this.answerWake(data as unknown as WorkSessionWakePayload);
+      }
+      if (type === TASK_EVENT && this.opts.autoReply) {
+        await this.answerTask(data as unknown as TaskEventPayload);
       }
       if (type === "agent.automation_run.v1" && this.opts.autoReply) {
         // A run is answered like a mention (07.6-06): on the anchor (`inReplyToMessageId` = the event's message) for its
@@ -964,7 +1171,8 @@ export class FakeCellPlugin {
    * (`workZoneCall`, 07.5-12); `ocw_work_session_start|prompt|read|stop` call `/agent-channel/v1/work-sessions/<verb>`
    * (`workSessionCall`, 07.16-21); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
    * (`sandbox` / `browser`, 07.8-08); `ocw_consult_agent` calls `/agent-channel/v1/consultations` (`consultCall`,
-   * 07.7-10); `ocw_attachment_read` calls `/agent-channel/v1/attachments/read` (`attachmentRead`, 07.15-09); any other
+   * 07.7-10); `ocw_attachment_read` calls `/agent-channel/v1/attachments/read` (`attachmentRead`, 07.15-09);
+   * `ocw_task_start|continue|finish` call `/agent-channel/v1/tasks/<verb>` (`taskCall`, 07.17.1.1.2-13); any other
    * tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
    * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. Before any of that, a
    * `{{attachment:N}}` argument becomes the turn's N-th file id (`withAttachmentIds`; outside the list the call is not
@@ -1054,6 +1262,10 @@ export class FakeCellPlugin {
       }
       if (isWorkSessionTool(name)) {
         lines.push(`Tool ${call.tool}: ${(await this.workSessionCall(m, name, call.args)).line}`);
+        continue;
+      }
+      if (isTaskTool(name)) {
+        lines.push(`Tool ${call.tool}: ${await this.taskCall(m, name, call.args)}`);
         continue;
       }
       const params: { query?: string; url?: string } = {};

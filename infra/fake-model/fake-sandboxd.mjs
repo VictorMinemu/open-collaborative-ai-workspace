@@ -5,7 +5,9 @@
 // counters hold call counts per op and per organization only.
 //
 // The exec interpreter is deliberately tiny: `sh -c "<a> && <b>; <c>"`, `echo`, `cat`, `ls`, `id -u`, `env`,
-// `sleep N`, `exit N`, `true`, `false`, and `>` / `>>` into the workspace. Anything else exits 127.
+// `sleep N`, `exit N`, `true`, `false`, and `>` / `>>` into the workspace. Anything else exits 127. A command that
+// sleeps past its yield answers `running` with a process id; when its time passes (or a poll or kill ends it) it emits
+// one `process` event (exited with its exit code, or killed), like sandboxd (07.17.1.1.2-11).
 //
 // The browser (07.8-08) mirrors infra/sandbox/browser/agent.mjs over a two-page fake site: `https://<host>/…` shows a
 // sign-in form (Email, a redacted Password, Sign in, an Export link to evil.fake.test, a Download link) or, once signed
@@ -308,7 +310,10 @@ export function createFakeSandboxd(opts = {}) {
   let bootId = randomUUID();
   /** `${org}/${agent}` → { target, state, startedAt, lastActiveAt, files: Map<path, {content, modifiedAt}>, dirs: Set } */
   let sandboxes = new Map();
-  /** process id → { key, endsAt, exitCode, stdout, stderr, startedAt } */
+  /**
+   * process id → { key, target, endsAt, result, started, reported }: a command answered `running`. `reported` once its
+   * one `process` event went out (07.17.1.1.2-11).
+   */
   let processes = new Map();
   let events = [];
   let seq = 0;
@@ -748,6 +753,31 @@ export function createFakeSandboxd(opts = {}) {
     };
   };
 
+  /**
+   * 07.17.1.1.2-11 (D-03, PD-13): a command sandboxd answered `running` for ended (exited or killed): one `process`
+   * event, ids and numbers only, never argv or output, at most once per command.
+   */
+  function reportProcess(processId, p, status, exitCode, endedAt) {
+    if (p.reported) return;
+    p.reported = true;
+    pushEvent({
+      type: "process",
+      target: p.target,
+      processId,
+      status,
+      exitCode,
+      durationMs: Math.max(0, Math.round(endedAt - p.started)),
+    });
+  }
+
+  /** Every background command whose time passed reports its end (on each events poll, and by its own timer). */
+  function reapProcesses() {
+    const t = Date.now();
+    for (const [id, p] of processes) {
+      if (!p.reported && t >= p.endsAt) reportProcess(id, p, "exited", p.result.code, p.endsAt);
+    }
+  }
+
   function exec(body) {
     const target = targetOf(body);
     if (!Array.isArray(body.argv) || body.argv.length === 0 || body.argv.length > 64) throw invalid("argv");
@@ -763,7 +793,16 @@ export function createFakeSandboxd(opts = {}) {
     const r = interpret(box, body.argv);
     if (r.sleepMs > yieldMs) {
       const processId = randomUUID().replaceAll("-", "").slice(0, 24);
-      processes.set(processId, { key: keyOf(target), endsAt: started + r.sleepMs, result: r, started });
+      processes.set(processId, {
+        key: keyOf(target),
+        target: { orgId: target.orgId, agentId: target.agentId },
+        endsAt: started + r.sleepMs,
+        result: r,
+        started,
+        reported: false,
+      });
+      // The end is reported without anyone polling, like sandboxd's stream end (a waiting long poll wakes on it).
+      setTimeout(reapProcesses, r.sleepMs + 1).unref?.();
       return execResult({ code: 0, out: "", err: "" }, started, { status: "running", processId });
     }
     return execResult(r, started, { status: "exited", exitCode: r.code });
@@ -774,6 +813,7 @@ export function createFakeSandboxd(opts = {}) {
     const p = processes.get(body.processId);
     if (!p || p.key !== keyOf(target)) throw new OpError(404, "not_found", "no such process");
     if (body.action === "kill") {
+      reportProcess(body.processId, p, "killed", 137, Date.now());
       processes.delete(body.processId);
       return execResult({ code: 137, out: "", err: "" }, p.started, { status: "exited", exitCode: 137 });
     }
@@ -783,6 +823,7 @@ export function createFakeSandboxd(opts = {}) {
         processId: body.processId,
       });
     }
+    reportProcess(body.processId, p, "exited", p.result.code, p.endsAt);
     processes.delete(body.processId);
     return execResult(p.result, p.started, { status: "exited", exitCode: p.result.code });
   }
@@ -1313,6 +1354,7 @@ export function createFakeSandboxd(opts = {}) {
       case "packageRemove":
         return packageRemove(body);
       case "events": {
+        reapProcesses();
         const after = Number(url.searchParams.get("after") ?? "0");
         const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? "25000")));
         const pending = () => events.filter((e) => e.seq > after);

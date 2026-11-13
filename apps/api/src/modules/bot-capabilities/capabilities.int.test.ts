@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { TASK_TOOL_NAMES } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { createPermissionService } from "../organization";
-import { currentTurnTools, findBot, governanceList } from "./index";
+import { currentTurn, currentTurnTools, findBot, governanceList, loadPolicy, loadTaskPolicy } from "./index";
 
 /**
  * 03.1-03 (BOT-04, BOT-05, BOT-10, SC4): bot capabilities, the org policy and personal-bot governance through
@@ -518,6 +519,11 @@ describe("per-turn policy (D-07, SC4)", () => {
    * `automation.create` in their DM with the bot or a channel they may post in. Never in the cell-wide view.
    */
   const AUTOMATIONS = ["ocw_automation_propose"];
+  /**
+   * 07.17.1.1.2 (PD-07): the three task tools, last, on every person's turn in a thread without the bot's task (long
+   * tasks are on by default). Turn-scoped: never in the cell-wide view nor in `currentTurnTools`.
+   */
+  const TASKS: string[] = [...TASK_TOOL_NAMES];
   const DM_TURN = [...DM_TOOLS, ...WORK_ZONE, ...AUTOMATIONS];
 
   it("Sam's DM message carries the effective turn and an agent_turns row in the same transaction", async () => {
@@ -525,7 +531,7 @@ describe("per-turn policy (D-07, SC4)", () => {
     const messageId = await say(sam, samDmId, "What's new today?");
     const ev = await lastMention(samBotId, messageId);
     expect(ev.turn).toMatchObject({
-      tools: DM_TURN,
+      tools: [...DM_TURN, ...TASKS],
       toolFlags: {
         web_search: WEB_FLAGS,
         web_fetch: WEB_FLAGS,
@@ -556,7 +562,7 @@ describe("per-turn policy (D-07, SC4)", () => {
       conversation_id: samDmId,
       conversation_kind: "dm",
       message_id: messageId,
-      tools: DM_TURN,
+      tools: [...DM_TURN, ...TASKS],
       tool_calls: 0,
       web_calls: 0,
       tainted: false,
@@ -575,7 +581,12 @@ describe("per-turn policy (D-07, SC4)", () => {
         core.env,
       ),
     );
-    expect(now).toEqual({ tools: ev.turn.tools, toolFlags: ev.turn.toolFlags });
+    // The turn-scoped task tools are decided at delivery only (PD-07); everything else is the same set.
+    const tools = (ev.turn.tools as string[]).filter((t) => !TASKS.includes(t));
+    const toolFlags = Object.fromEntries(
+      Object.entries(ev.turn.toolFlags as Record<string, unknown>).filter(([t]) => !TASKS.includes(t)),
+    );
+    expect(now).toEqual({ tools, toolFlags });
   });
 
   it("denying internet to personal bots bites on the very next DM message, before any cell reconcile", async () => {
@@ -587,10 +598,10 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const messageId = await say(sam, samDmId, "And now?");
       const ev = await lastMention(samBotId, messageId);
-      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS]);
+      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS, ...TASKS]);
       // jsonb orders object keys by length: compare as a set.
       expect(Object.keys(ev.turn.toolFlags).sort()).toEqual(
-        [...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS].sort(),
+        [...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS, ...TASKS].sort(),
       );
     } finally {
       await ok(
@@ -626,6 +637,7 @@ describe("per-turn policy (D-07, SC4)", () => {
       "ocw_agent_card",
       ...WORK_ZONE,
       ...AUTOMATIONS,
+      ...TASKS,
     ]);
     expect(evAdmin.conversation.kind).toBe("channel");
 
@@ -633,12 +645,18 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const fromSam = await say(sam, channelId, "@archie and for me?", mention);
       const evSam = await lastMention(teamBotId, fromSam);
-      expect(evSam.turn.tools).toEqual([...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS]);
+      expect(evSam.turn.tools).toEqual([
+        ...SHARED_MEMORY,
+        "ocw_agent_card",
+        ...WORK_ZONE,
+        ...AUTOMATIONS,
+        ...TASKS,
+      ]);
       const row = (
         await su.query("select tools, user_id from app.agent_turns where event_id = $1", [evSam.eventId])
       ).rows[0];
       expect(row).toEqual({
-        tools: [...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS],
+        tools: [...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS, ...TASKS],
         user_id: samId,
       });
 
@@ -650,6 +668,7 @@ describe("per-turn policy (D-07, SC4)", () => {
         "ocw_agent_card",
         ...WORK_ZONE,
         ...AUTOMATIONS,
+        ...TASKS,
       ]);
     } finally {
       await drop();
@@ -664,13 +683,13 @@ describe("per-turn policy (D-07, SC4)", () => {
     );
     const messageId = await say(sam, samDmId, "Echo please");
     const ev = await lastMention(samBotId, messageId);
-    expect(ev.turn.tools).toEqual([...DM_TURN, `${SAFE}__echo`]);
+    expect(ev.turn.tools).toEqual([...DM_TURN, `${SAFE}__echo`, ...TASKS]);
     expect(ev.turn.toolFlags[`${SAFE}__echo`]).toEqual({ untrustedOutput: true, sideEffecting: false });
 
     const drop = await rule("deny", "user", samId, "bot.tool.use", `${SAFE}__echo`);
     try {
       const denied = await say(sam, samDmId, "Echo again");
-      expect((await lastMention(samBotId, denied)).turn.tools).toEqual(DM_TURN);
+      expect((await lastMention(samBotId, denied)).turn.tools).toEqual([...DM_TURN, ...TASKS]);
     } finally {
       await drop();
     }
@@ -715,12 +734,14 @@ describe("per-turn policy (D-07, SC4)", () => {
       "ocw_agent_card",
       ...WORK_ZONE,
       ...AUTOMATIONS,
+      ...TASKS,
     ]);
     const inChannel = await say(admin, channelId, "@mute hello", [{ kind: "agent", id: mute.id }]);
     expect((await lastMention(mute.id, inChannel)).turn.tools).toEqual([
       "ocw_agent_card",
       ...WORK_ZONE,
       ...AUTOMATIONS,
+      ...TASKS,
     ]);
   });
 
@@ -754,5 +775,218 @@ describe("per-turn policy (D-07, SC4)", () => {
     for (const a of snap.agents as Json[]) {
       for (const name of SESSION_TOOLS) expect(a.capabilities.tools).not.toContain(name);
     }
+  });
+});
+
+// ---------------------------------------------------------------- 07.17.1.1.2-04: "Allow long tasks" and its limits
+
+describe("long tasks policy (07.17.1.1.2 D-04, E11, E22)", () => {
+  let adminId: string;
+  let orgB: string;
+  let userB: string;
+
+  const putPolicy = (body: Json) => admin.request("PUT", "/api/v1/bot-policy", body);
+  const taskPolicyOf = async (agentId: string) => {
+    const { db } = stack.built.core;
+    return db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+      const row = await findBot(tx, agentId);
+      if (!row) throw new Error("bot not found");
+      return loadTaskPolicy(tx, row);
+    });
+  };
+  const longTasksOnTurn = async (agentId: string, humanUserId: string, conversationKind: string) => {
+    const { core } = stack.built;
+    const turn = await core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      currentTurn(tx, createPermissionService(core), { agentId, humanUserId, conversationKind }, core.env),
+    );
+    return turn.longTasks;
+  };
+
+  beforeAll(async () => {
+    adminId = (
+      await su.query("select user_id from app.org_members where organization_id = $1 and role = 'admin'", [
+        orgId,
+      ])
+    ).rows[0].user_id as string;
+    orgB = randomUUID();
+    userB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, 'Bea', $2)", [
+      userB,
+      `${userB}@other.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Bea', 'admin')",
+      [orgB, userB],
+    );
+  });
+
+  it("an organization that never chose answers long tasks allowed with 40 turns, 8 hours and 10 running", async () => {
+    const p = await ok(admin.request("GET", "/api/v1/bot-policy"));
+    expect(p.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(p.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+  });
+
+  it("a PUT of one limit saves only it, audited as tasks.maxTurns; out-of-range limits are 400; members 403", async () => {
+    const before = (await audits("bot_policy.updated")).length;
+    const p = await ok(putPolicy({ tasks: { maxTurns: 12 } }));
+    expect(p.tasks).toEqual({ maxTurns: 12, maxHours: 8, maxRunning: 10 });
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).tasks).toEqual({
+      maxTurns: 12,
+      maxHours: 8,
+      maxRunning: 10,
+    });
+    const rows = await audits("bot_policy.updated");
+    expect(rows).toHaveLength(before + 1);
+    expect(rows.at(-1)!.metadata.changed).toEqual(["tasks.maxTurns"]);
+    const stored = (
+      await su.query(
+        "select task_max_turns, task_max_hours, max_running_tasks from app.bot_policies where organization_id = $1",
+        [orgId],
+      )
+    ).rows[0];
+    expect(stored).toEqual({ task_max_turns: 12, task_max_hours: 8, max_running_tasks: 10 });
+
+    for (const tasks of [{ maxTurns: 201 }, { maxHours: 0 }, { maxRunning: 101 }]) {
+      expect((await putPolicy({ tasks })).status, JSON.stringify(tasks)).toBe(400);
+    }
+    expect((await sam.request("PUT", "/api/v1/bot-policy", { tasks: { maxTurns: 200 } })).status).toBe(403);
+    expect((await ok(admin.request("GET", "/api/v1/bot-policy"))).tasks.maxTurns).toBe(12);
+    expect(await audits("bot_policy.updated")).toHaveLength(before + 1);
+  });
+
+  it("loadTaskPolicy: the bot's toggle, then the organization's switch, then the personal one, with the limits", async () => {
+    expect(await taskPolicyOf(teamBotId)).toEqual({
+      enabled: true,
+      reason: null,
+      maxTurns: 12,
+      maxHours: 8,
+      maxRunning: 10,
+    });
+    await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: false } } }));
+    try {
+      expect(await taskPolicyOf(samBotId)).toMatchObject({ enabled: false, reason: "personal_policy" });
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: true, reason: null });
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: false, personal: false } } }));
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: "org_policy" });
+      const rows = await audits("bot_policy.updated");
+      expect(rows.at(-1)!.metadata.changed).toEqual(["capabilities.longTasks"]);
+    } finally {
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } }));
+    }
+    const stored = (await su.query("select capabilities from app.agents where id = $1", [teamBotId])).rows[0]
+      .capabilities as Json;
+    await su.query("update app.agents set capabilities = $2 where id = $1", [
+      teamBotId,
+      { ...stored, longTasks: false },
+    ]);
+    try {
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: null });
+    } finally {
+      await su.query("update app.agents set capabilities = $2 where id = $1", [teamBotId, stored]);
+    }
+  });
+
+  it("every turn knows whether its bot may run a long task (computeTurn.longTasks)", async () => {
+    expect(await longTasksOnTurn(teamBotId, adminId, "channel")).toBe(true);
+    await ok(putPolicy({ capabilities: { longTasks: { orgWide: false, personal: true } } }));
+    try {
+      expect(await longTasksOnTurn(teamBotId, adminId, "channel")).toBe(false);
+      expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(false);
+    } finally {
+      await ok(putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } }));
+    }
+    expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(true);
+  });
+
+  it("the bot's view: a stored bot without the key reads Long tasks on and effective", async () => {
+    const stored = (await su.query("select capabilities from app.agents where id = $1", [teamBotId])).rows[0]
+      .capabilities as Json;
+    expect(stored).not.toHaveProperty("longTasks");
+    const v = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+    expect(v.capabilities.longTasks).toBe(true);
+    expect(v.effective.longTasks).toEqual({ enabled: true, effective: true, reason: null });
+  });
+
+  it("PATCH longTasks is saved and audited like internet; others are refused like internet (403 / 404)", async () => {
+    const audited = async () =>
+      (await audits("agent.capabilities_updated")).filter((r) => r.resource_id === samBotId);
+    const before = (await audited()).length;
+    const v = await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: false }));
+    expect(v.capabilities.longTasks).toBe(false);
+    expect(v.effective.longTasks).toEqual({ enabled: false, effective: false, reason: null });
+    const row = (await su.query("select capabilities from app.agents where id = $1", [samBotId])).rows[0];
+    expect(row.capabilities).toMatchObject({ longTasks: false });
+    const rows = await audited();
+    expect(rows).toHaveLength(before + 1);
+    expect(rows.at(-1)!.user_id).toBe(samId);
+    expect(rows.at(-1)!.metadata.changed).toEqual(["longTasks"]);
+    expect(await taskPolicyOf(samBotId)).toMatchObject({ enabled: false, reason: null });
+    expect(await longTasksOnTurn(samBotId, samId, "dm")).toBe(false);
+
+    // A no-op PATCH neither audits nor changes anything.
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: false }));
+    expect(await audited()).toHaveLength(before + 1);
+
+    expect(
+      (await sam.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { longTasks: false })).status,
+    ).toBe(403);
+    expect(
+      (await admin.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: true })).status,
+    ).toBe(404);
+    const { db } = stack.built.core;
+    expect(
+      await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => findBot(tx, samBotId)),
+    ).toBeNull();
+    await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { longTasks: true }));
+  });
+
+  it("with the organization switch off, the toggle is answered as internet's under org_policy", async () => {
+    await ok(admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { longTasks: false }));
+    const internetBefore = (await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`)))
+      .capabilities.internet as boolean;
+    const denied = { orgWide: false, personal: true };
+    await ok(putPolicy({ capabilities: { longTasks: denied, internet: denied } }));
+    try {
+      const off = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+      expect(off.effective.longTasks).toEqual({ enabled: false, effective: false, reason: "org_policy" });
+      const patched = await admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+        longTasks: true,
+      });
+      const internet = await admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, {
+        internet: !internetBefore,
+      });
+      // Both switches under org_policy: stored, and never effective while the organization says no.
+      expect([patched.status, codeOf(patched)]).toEqual([internet.status, codeOf(internet)]);
+      expect((internet.body as Json).effective.internet.reason).toBe("org_policy");
+      expect((patched.body as Json).effective.longTasks).toEqual({
+        enabled: true,
+        effective: false,
+        reason: "org_policy",
+      });
+      expect(await taskPolicyOf(teamBotId)).toMatchObject({ enabled: false, reason: "org_policy" });
+    } finally {
+      const allow = { orgWide: true, personal: true };
+      await ok(putPolicy({ capabilities: { longTasks: allow, internet: allow } }));
+      await ok(
+        admin.request("PATCH", `/api/v1/agents/${teamBotId}/capabilities`, { internet: internetBefore }),
+      );
+    }
+    const back = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+    expect(back.effective.longTasks).toEqual({ enabled: true, effective: true, reason: null });
+  });
+
+  it("organization B reads its own defaults after A saved limits (E22)", async () => {
+    const { db } = stack.built.core;
+    const policyB = await db.withTenant({ organizationId: orgB, userId: userB }, (tx) => loadPolicy(tx));
+    expect(policyB.tasks).toEqual({ maxTurns: 40, maxHours: 8, maxRunning: 10 });
+    expect(policyB.capabilities.longTasks).toEqual({ orgWide: true, personal: true });
+    expect(policyB.updatedAt).toBeNull();
+    // Not vacuous: A's saved limit is read in A.
+    const policyA = await db.withTenant({ organizationId: orgId, userId: adminId }, (tx) => loadPolicy(tx));
+    expect(policyA.tasks.maxTurns).toBe(12);
   });
 });

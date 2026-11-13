@@ -493,6 +493,8 @@ export const SANDBOX_LICENSE_POLICY = {
     "AGPL-3.0-or-later",
     "CC-BY-4.0",
     "WTFPL",
+    "MIT-CMU",
+    "PSF-2.0",
   ],
   deny: ["GPL-2.0-only", "SSPL-*", "BUSL-*", "Elastic-2.0", "CC-BY-NC-*", "UNLICENSED", "Unknown"],
 } as const;

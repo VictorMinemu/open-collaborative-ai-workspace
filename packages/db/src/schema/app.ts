@@ -701,6 +701,14 @@ export const botPolicies = appSchema.table(
     minScheduleMinutes: integer("min_schedule_minutes").notNull().default(5),
     maxInboundPerHour: integer("max_inbound_per_hour").notNull().default(30),
     maxRunsPerDayCap: integer("max_runs_per_day_cap").notNull().default(288),
+    /**
+     * Phase 07.17.1.1.2 (D-04, PD-09; ADR-0042): the organization's long-task limits. A task snapshots the turns and
+     * hours at its start (`bot_tasks.max_turns`, `deadline_at`); `max_running_tasks` bounds the organization's active
+     * tasks at a start (0 = none may start).
+     */
+    taskMaxTurns: integer("task_max_turns").notNull().default(40),
+    taskMaxHours: integer("task_max_hours").notNull().default(8),
+    maxRunningTasks: integer("max_running_tasks").notNull().default(10),
   },
   (t) => [
     check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`),
@@ -708,6 +716,9 @@ export const botPolicies = appSchema.table(
     check("bot_policies_min_schedule_minutes_check", sql`${t.minScheduleMinutes} between 1 and 1440`),
     check("bot_policies_max_inbound_per_hour_check", sql`${t.maxInboundPerHour} between 1 and 3600`),
     check("bot_policies_max_runs_per_day_cap_check", sql`${t.maxRunsPerDayCap} between 1 and 288`),
+    check("bot_policies_task_max_turns_check", sql`${t.taskMaxTurns} between 1 and 200`),
+    check("bot_policies_task_max_hours_check", sql`${t.taskMaxHours} between 1 and 24`),
+    check("bot_policies_max_running_tasks_check", sql`${t.maxRunningTasks} between 0 and 100`),
   ],
 );
 
@@ -772,11 +783,18 @@ export const agentTurns = appSchema.table(
      * may carry outside content into a session.
      */
     sessionOutputRead: boolean("session_output_read").notNull().default(false),
+    /**
+     * Phase 07.17.1.1.2 (D-01, PD-07; ADR-0042): the long task this turn belongs to (its start turn, a continuation or
+     * a person's control turn). A plain ledger id like `chain_id` (no foreign key: the ledger outlives the task).
+     */
+    taskId: uuid("task_id"),
   },
   (t) => [
     index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
     /** The turns of one chain (07.7 completion rule). */
     index("agent_turns_chain_idx").on(t.chainId).where(sql`chain_id is not null`),
+    /** The turns of one long task (07.17.1.1.2). */
+    index("agent_turns_task_idx").on(t.taskId).where(sql`task_id is not null`),
     check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
     check("agent_turns_attachment_reads_check", sql`${t.attachmentReads} >= 0`),
     check("agent_turns_attachment_chars_check", sql`${t.attachmentChars} >= 0`),
@@ -2037,6 +2055,12 @@ export const botWorkSessions = appSchema.table(
     lastWokenPromptId: uuid("last_woken_prompt_id"),
     stoppedByAgent: boolean("stopped_by_agent").notNull().default(false),
     createdAt: createdAt(),
+    /**
+     * Phase 07.17.1.1.2 (D-03, PD-05; ADR-0042): the long task that started this session, so its end can wake the task
+     * (`waitFor: { workSessionId }`). Null for a session started outside a task; no foreign key, like
+     * `agent_turns.task_id`.
+     */
+    taskId: uuid("task_id"),
   },
   (t) => [
     foreignKey({
@@ -2061,6 +2085,7 @@ export const botWorkSessions = appSchema.table(
       foreignColumns: [conversations.organizationId, conversations.id],
     }).onDelete("cascade"),
     index("bot_work_sessions_agent_idx").on(t.organizationId, t.agentId),
+    index("bot_work_sessions_task_idx").on(t.organizationId, t.taskId).where(sql`task_id is not null`),
     check("bot_work_sessions_wakes_used_ck", sql`${t.wakesUsed} >= 0`),
   ],
 );
@@ -2583,6 +2608,185 @@ export const aiMessageContext = appSchema.table(
 );
 
 /**
+ * Phase 07.17.1.1.2 (D-01, D-02, D-04, D-12, PD-05, PD-09; ADR-0042): a bot's long task, the platform entity that keeps
+ * a bot working across turns in one conversation thread. The platform schedules every continuation, never the cell: a
+ * `running` task has a turn in flight (`current_event_id`), a `waiting` one waits for its next turn (`wait_kind`,
+ * `wait_ref`, `wake_at`; `wait_seq` is bumped on every wait and every terminal transition, so a stale job finds nothing
+ * to deliver). At most one active task per bot and thread (`bot_tasks_one_active_idx`; `thread_root_id` is null in a
+ * `dm` or `group`, where the conversation is the thread). Budgets are snapshotted at the start (`max_turns`,
+ * `deadline_at`). Short, bounded text only (goal, progress, next step, summary), never audit or log text (P1). Deleting
+ * the bot or its conversation deletes its tasks; tenant isolation comes from post-migrate.
+ */
+export const botTasks = appSchema.table(
+  "bot_tasks",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    /** The thread the task lives in; null in a `dm` or `group` (the conversation is the thread). */
+    threadRootId: uuid("thread_root_id"),
+    /** The platform-owned live `task` card's message (null until posted). */
+    cardMessageId: uuid("card_message_id"),
+    /** The person the task runs for: every continuation is re-decided as them. */
+    requesterUserId: uuid("requester_user_id").notNull(),
+    startedEventId: uuid("started_event_id").notNull(),
+    /** The turn that may control the task now (its one execution authority, PD-05). */
+    currentEventId: uuid("current_event_id").notNull(),
+    status: text("status", { enum: ["running", "waiting", "done", "failed", "stopped"] })
+      .notNull()
+      .default("running"),
+    outcome: text("outcome", {
+      enum: [
+        "done",
+        "blocked",
+        "budget_turns",
+        "budget_time",
+        "daily_limit",
+        "access_lost",
+        "bot_unavailable",
+        "policy_off",
+        "stopped_by_person",
+        "no_progress",
+        "error",
+      ],
+    }),
+    goal: text("goal").notNull(),
+    progress: text("progress"),
+    nextStep: text("next_step"),
+    summary: text("summary"),
+    turnsUsed: integer("turns_used").notNull().default(1),
+    maxTurns: integer("max_turns").notNull(),
+    startedAt: ts("started_at").notNull().defaultNow(),
+    deadlineAt: ts("deadline_at").notNull(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    finishedAt: ts("finished_at"),
+    waitKind: text("wait_kind", { enum: ["turn", "timer", "process", "session", "nudge"] }),
+    /** The awaited process or Work Zone session id, as text; never a command, a path or output. */
+    waitRef: text("wait_ref"),
+    wakeAt: ts("wake_at"),
+    waitSeq: integer("wait_seq").notNull().default(0),
+    /** Sticky: a turn of this task read outside content (D-08). */
+    tainted: boolean("tainted").notNull().default(false),
+    /** D-12: the task already got its one nudge after a turn that neither continued nor finished. */
+    nudged: boolean("nudged").notNull().default(false),
+    lastPostTurn: integer("last_post_turn").notNull().default(1),
+    lastPostAt: ts("last_post_at"),
+    stoppedByUserId: uuid("stopped_by_user_id"),
+  },
+  (t) => [
+    foreignKey({
+      name: "bot_tasks_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "bot_tasks_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    /** Target of the processes' composite foreign key (FKs bypass RLS). */
+    unique("bot_tasks_org_id_uq").on(t.organizationId, t.id),
+    uniqueIndex("bot_tasks_one_active_idx")
+      .on(
+        t.organizationId,
+        t.agentId,
+        t.conversationId,
+        sql`coalesce(${t.threadRootId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      )
+      .where(sql`status in ('running','waiting')`),
+    /** The tick's waiting scan (`app.due_bot_tasks`). */
+    index("bot_tasks_due_idx").on(t.status, t.wakeAt).where(sql`status = 'waiting'`),
+    /** The organization's active count at a start (PD-09). */
+    index("bot_tasks_org_active_idx").on(t.organizationId).where(sql`status in ('running','waiting')`),
+    check("bot_tasks_status_ck", sql`${t.status} in ('running','waiting','done','failed','stopped')`),
+    // Every finished task has an outcome; an active one has none.
+    check(
+      "bot_tasks_outcome_ck",
+      sql`(${t.outcome} is null) = (${t.status} in ('running','waiting')) and (${t.outcome} is null or ${t.outcome} in ('done','blocked','budget_turns','budget_time','daily_limit','access_lost','bot_unavailable','policy_off','stopped_by_person','no_progress','error'))`,
+    ),
+    check(
+      "bot_tasks_wait_kind_ck",
+      sql`${t.waitKind} is null or ${t.waitKind} in ('turn','timer','process','session','nudge')`,
+    ),
+    check("bot_tasks_goal_ck", sql`char_length(${t.goal}) between 1 and 200`),
+    check(
+      "bot_tasks_progress_ck",
+      sql`${t.progress} is null or char_length(${t.progress}) between 1 and 500`,
+    ),
+    check(
+      "bot_tasks_next_step_ck",
+      sql`${t.nextStep} is null or char_length(${t.nextStep}) between 1 and 500`,
+    ),
+    check("bot_tasks_summary_ck", sql`${t.summary} is null or char_length(${t.summary}) between 1 and 1000`),
+    check("bot_tasks_wait_ref_ck", sql`${t.waitRef} is null or char_length(${t.waitRef}) between 1 and 64`),
+    check("bot_tasks_turns_used_ck", sql`${t.turnsUsed} >= 0`),
+    check("bot_tasks_max_turns_ck", sql`${t.maxTurns} between 1 and 200`),
+    check("bot_tasks_wait_seq_ck", sql`${t.waitSeq} >= 0`),
+    check("bot_tasks_last_post_turn_ck", sql`${t.lastPostTurn} >= 0`),
+    check(
+      "bot_tasks_finished_at_ck",
+      sql`(${t.finishedAt} is null) = (${t.status} in ('running','waiting'))`,
+    ),
+  ],
+);
+
+/**
+ * Phase 07.17.1.1.2 (D-03, PD-05, PD-06; ADR-0042): a background sandbox process a task may wait for, linked when the
+ * bot's `/sandbox/exec` started it in a task turn. sandboxd's `process` event ends it (`exited | killed | timed_out`,
+ * ids and numbers only: never argv, a path or output); one still running past `deadline_at` is taken as `lost`.
+ * Deleting the task deletes its rows; tenant isolation comes from post-migrate. Code review WR-02: an end that came
+ * before its link (the command ended within milliseconds of its yield) is kept unlinked (`task_id` and `event_id`
+ * null, never `running`) for the link to take; an unclaimed one is pruned after an hour.
+ */
+export const botTaskProcesses = appSchema.table(
+  "bot_task_processes",
+  {
+    id: id(),
+    organizationId: orgId(),
+    /** Null only on an end not linked yet (code review WR-02). */
+    taskId: uuid("task_id"),
+    agentId: uuid("agent_id").notNull(),
+    /** sandboxd's process id (`SandboxProcessId`). */
+    processId: text("process_id").notNull(),
+    /** The task turn whose exec started the process (null while unlinked). */
+    eventId: uuid("event_id"),
+    status: text("status", { enum: ["running", "exited", "killed", "timed_out", "lost"] })
+      .notNull()
+      .default("running"),
+    exitCode: integer("exit_code"),
+    durationMs: integer("duration_ms"),
+    /** The exec's timeout plus a grace period: past it, a still-running row is taken as lost. */
+    deadlineAt: ts("deadline_at").notNull(),
+    createdAt: createdAt(),
+    endedAt: ts("ended_at"),
+    /** When the end was listed to the task's next turn (`finishedProcesses`). */
+    reportedAt: ts("reported_at"),
+  },
+  (t) => [
+    foreignKey({
+      name: "bot_task_processes_task_fk",
+      columns: [t.organizationId, t.taskId],
+      foreignColumns: [botTasks.organizationId, botTasks.id],
+    }).onDelete("cascade"),
+    unique("bot_task_processes_process_uq").on(t.organizationId, t.agentId, t.processId),
+    index("bot_task_processes_task_idx").on(t.organizationId, t.taskId),
+    check(
+      "bot_task_processes_status_ck",
+      sql`${t.status} in ('running','exited','killed','timed_out','lost')`,
+    ),
+    check("bot_task_processes_process_id_ck", sql`char_length(${t.processId}) between 1 and 64`),
+    check("bot_task_processes_duration_ms_ck", sql`${t.durationMs} is null or ${t.durationMs} >= 0`),
+    // Code review WR-02: an unlinked row is an end waiting for its link: both ids or neither, and never running.
+    check(
+      "bot_task_processes_link_ck",
+      sql`(${t.taskId} is null) = (${t.eventId} is null) and (${t.taskId} is not null or ${t.status} <> 'running')`,
+    ),
+    index("bot_task_processes_unlinked_idx").on(t.organizationId, t.endedAt).where(sql`task_id is null`),
+  ],
+);
+
+/**
  * Agent Cards (AGENT-04, P-11), keyed by their message: the message body is the plain-text summary (search and
  * notifications keep working; card JSON never enters `search_tsv`). Only the posting agent updates a card, with
  * optimistic `version`; one decision per card.
@@ -2600,7 +2804,10 @@ export const messageCards = appSchema.table(
     agentId: uuid("agent_id")
       .notNull()
       .references(() => agents.id),
-    /** Phase 07.8 (UI-SPEC R1): `browser` is the platform-owned sign-in card (never an agent's own post). */
+    /**
+     * Phase 07.8 (UI-SPEC R1): `browser` is the platform-owned sign-in card (never an agent's own post). Phase
+     * 07.17.1.1.2 (D-05): `task` is the platform-owned live card of a long bot task, likewise.
+     */
     kind: text("kind", {
       enum: [
         "work_zone",
@@ -2612,6 +2819,7 @@ export const messageCards = appSchema.table(
         "pr",
         "generic",
         "browser",
+        "task",
       ],
     }).notNull(),
     title: text("title").notNull(),
@@ -2659,7 +2867,7 @@ export const messageCards = appSchema.table(
     ),
     check(
       "message_cards_kind_check",
-      sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic','browser')`,
+      sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic','browser','task')`,
     ),
     check(
       "message_cards_status_check",

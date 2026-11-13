@@ -1199,6 +1199,96 @@ Plans:
 - [x] 07.17.1.1-14-PLAN.md — Wave 8: The browser journey e2e (upload, download, limit refusal; desktop and mobile)
 - [x] 07.17.1.1-15-PLAN.md — Wave 9: Docs, guard, proxy body check and the phase gate (signed VALIDATION)
 
+### Phase 07.17.1.1.2: Long-running bot tasks: a bot keeps working across turns on its own (bounded, visible, stoppable) and is woken when its sandbox processes finish (INSERTED)
+
+**Goal:** A bot takes on a request that needs many turns and keeps working on it by itself until it is done, without a
+person re-prompting: it starts a task, the platform delivers its next turn in the same thread, it is woken when its long
+sandbox processes or its Work Zone sessions finish (or after a timer), it reports progress on a live task card people
+can stop, and budgets (turns, hours, running tasks, the daily limit) stop it so it never runs away. No more "no tengo
+ejecución en segundo plano".
+
+- **Tools:** `ocw_task_start`, `ocw_task_continue`, `ocw_task_finish` (not side-effecting, outside the 8 calls).
+- **Scheduling:** the API only (`bot_task.continue`, derived event ids, the turn-done release, a minute tick); OpenClaw
+  cron and heartbeat stay off; every turn re-decided as the person who asked, taint sticky, no browser.
+- **Visible and bounded:** a platform task card with Stop; one progress message per 5 turns or 10 minutes; Settings ›
+  Bot policy "Long tasks" (40 turns, 8 h, 10 running by default); AI chats out.
+
+**Requirements**: BTASK-01, BTASK-02, BTASK-03, BTASK-04, BTASK-05, BTASK-06, BTASK-07, BTASK-08, BTASK-09, BTASK-10, BTASK-11
+**Depends on:** Phase 07.17.1.1; runs after Phase 07.17.1.1.1 on the same branch (`feat/0.3.2-bot-files-and-long-tasks`)
+**ADR:** 0042
+**Success Criteria** (what must be TRUE):
+
+  1. Asked for a job that needs many turns, a bot starts a task and keeps working in the thread by itself until it
+     finishes or is blocked; nobody re-prompts it and it never claims background work it has not scheduled
+  2. Its long sandbox commands and its Work Zone sessions wake it when they finish; it can wait on a timer
+  3. A live task card shows the goal, status, turns used of max, elapsed time and the last progress; the person it runs
+     for, the thread's moderators and the bot's managers can Stop it, and stopping is immediate
+  4. Budgets stop a task with one message mentioning the person; Settings › Bot policy has "Long tasks" and its limits;
+     the bot's capabilities show it
+  5. Integration tests (single delivery, budgets, safety, tenant isolation), the cell smoke and an e2e spec pass on
+     desktop and mobile; ADR-0042 records the decisions
+
+**Plans:** 14/14 plans executed
+
+Plans:
+
+- [x] 07.17.1.1.2-01-PLAN.md — Wave 1: Contracts and the plugin mirror (tools, bodies, `TurnTask`, `agent.task.v1`, task card, sandboxd `process` event) + the phase hub
+- [x] 07.17.1.1.2-02-PLAN.md — Wave 1: ADR-0042, the AGENTS.md row in place, the BTASK requirements
+- [x] 07.17.1.1.2-03-PLAN.md — Wave 1: The migration (`bot_tasks`, `bot_task_processes`, `task_id` columns, policy limits, card kind, tick lister, two queues)
+- [x] 07.17.1.1.2-04-PLAN.md — Wave 2: Policy and capability ("Allow long tasks", limits, `loadTaskPolicy`, Settings and the capabilities row)
+- [x] 07.17.1.1.2-05-PLAN.md — Wave 2: The plugin (three tools, gate, bridge quiet/done, "Your task" block, persona paragraph)
+- [x] 07.17.1.1.2-06-PLAN.md — Wave 3: The real-cell smoke (scenario `bot_tasks`, every scenario's tool lists)
+- [x] 07.17.1.1.2-07-PLAN.md — Wave 3: The offer (`taskOfferFor`, the `task` trigger, task tools, `turn.task`, ledger link)
+- [x] 07.17.1.1.2-08-PLAN.md — Wave 4: The cell routes and Stop (state machine, card, org cap, audit; the phase's API end to end, start)
+- [x] 07.17.1.1.2-09-PLAN.md — Wave 5: The continuation (three transactions, turn-done hook, tick, budgets, nudge, safety; API end to end, continuation)
+- [x] 07.17.1.1.2-10-PLAN.md — Wave 5: The card's task link, `viewerCan.stop` and the web task card with Stop
+- [x] 07.17.1.1.2-11-PLAN.md — Wave 6: Sandbox process wake-ups (fake and real sandboxd `process` event → tolerant consumer → task)
+- [x] 07.17.1.1.2-12-PLAN.md — Wave 6: Work Zone session wake-ups (`bot_work_sessions.task_id`, the wake as a task turn)
+- [x] 07.17.1.1.2-13-PLAN.md — Wave 7: The browser journey e2e (fake cell task tools; desktop and mobile, axe)
+- [x] 07.17.1.1.2-14-PLAN.md — Wave 8: Docs and v0.3.2 notes, guard (Semgrep rule, CODEOWNERS), security walk, phase gate and owner UAT
+
+### Phase 07.17.1.1.1: Sandbox document toolkit: bots read PDFs (incl. scanned, OCR), images, Office files and archives with tools baked into the sbx image (INSERTED)
+
+**Goal:** A bot reads, converts and searches the files people give it inside its own sandbox without installing
+anything: PDFs with a text layer, scanned PDFs and images (OCR in Spanish and English), Word, Excel, PowerPoint and
+OpenDocument files, CSV/JSON/XML/HTML, e-mails and archives, through a toolkit baked into the `sbx` image at build
+time and one helper, `ocw-extract`, that prints bounded UTF-8 text of any supported file and reads whole folders in
+resumable chunks; the bot is told the toolkit exists, and existing bots get it at their sandbox's next start.
+
+- **Toolkit:** poppler, qpdf, tesseract eng+spa, LibreOffice nogui (finalized no-macro config), ImageMagick with an
+  allow-list policy, 7zip, exiftool, catdoc, unrtf, msgconvert; a hash-locked Python venv at `/opt/ocw-tools`.
+- **Rules:** Debian bookworm `main` only, wheels with hashes, licenses guarded, packages approved before merge on
+  scripted evidence; the
+  egress proxy and package approval flow unchanged; everything runs as 10001 inside the sandbox limits.
+
+**Requirements**: DOC-01, DOC-02, DOC-03, DOC-04, DOC-05, DOC-06, DOC-07, DOC-08, DOC-09
+**Depends on:** Phase 07.17.1.1
+**ADR:** 0043
+**Success Criteria** (what must be TRUE):
+
+  1. Through sandboxd as 10001, on runc and gVisor, `ocw-extract` returns the text of a scanned PDF (OCR), a text PDF,
+     a Spanish PNG, docx, xlsx, pptx, odt, an e-mail and a zip listing; stdout fits the 16 KiB tail
+  2. `ocw-extract --batch` mirrors a folder or archive into `.txt` files and an index under /workspace without
+     touching the originals and resumes in chunks under 600 s (exit 75 until done); archive bombs, traversal and
+     links are refused
+  3. A document macro never runs under conversion (with a positive control or a stated configuration-only proof);
+     ImageMagick refuses PS/PDF/URL/MSL/TEXT; no gs, Java, Firebird or GStreamer; the image stays ≤ 1300 MiB
+  4. A stopped bot shell on an old image or environment is re-created with its volumes; a running one is never cut
+  5. The bot's exec tool and attachments how-to name the toolkit; ADR-0043 records the decisions and the
+     LibreOffice residual risk; the owner's UAT: Gertru reads the knowledge pack's 589 PDFs, scans included
+
+**Plans:** 7/7 plans executed
+
+Plans:
+
+- [x] 07.17.1.1.1-01-PLAN.md — Wave 1: The image: Debian toolkit, ImageMagick policy, LibreOffice finalized config, image tests in CI, `SHELL_ENV` (+ the phase hub)
+- [x] 07.17.1.1.1-02-PLAN.md — Wave 1: The Python supply chain: hash lock, license records, guard for Python locks, scripted pre-install evidence (age ≥ 14 days, yanked, OSV, legitimacy, closure)
+- [x] 07.17.1.1.1-03-PLAN.md — Wave 2: The venv layer and `ocw-extract` (every type, OCR, bounds, batch with resume and archive caps; TDD in the image)
+- [x] 07.17.1.1.1-04-PLAN.md — Wave 2: sandboxd re-creates a stopped shell on image or env drift (fake Docker)
+- [x] 07.17.1.1.1-05-PLAN.md — Wave 3: Real-Docker smokes: `docs` through sandboxd on runc and gVisor (the phase end to end), the macro control, `drift`
+- [x] 07.17.1.1.1-06-PLAN.md — Wave 3: The bot is told (exec tool description, attachments clause)
+- [x] 07.17.1.1.1-07-PLAN.md — Wave 4: ADR-0043, requirements, AGENTS.md row, docs, v0.3.2 notes, signed VALIDATION, phase gate with the supply-chain approval before merge (blocking, on evidence) and the owner's UAT
+
 ### Phase 07.13: Work Zone local browser (INSERTED)
 
 **Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and

@@ -31,6 +31,10 @@ export const JOB_QUEUE_NAMES = [
   "work_session.bot_sync",
   // 07.17 (D-04, PD-09): one opened item's own bot turn (ids only).
   "automation.item",
+  // 07.17.1.1.2 (D-02, D-03, ADR-0042): a long task's next turn, and the minute tick that finds lost wakes, overdue
+  // turns and expired tasks (ids only; the workers are registered by 07.17.1.1.2-09).
+  "bot_task.continue",
+  "bot_task.tick",
 ] as const;
 export type JobQueueName = (typeof JOB_QUEUE_NAMES)[number];
 
