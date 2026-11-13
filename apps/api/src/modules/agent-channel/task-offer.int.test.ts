@@ -4,6 +4,7 @@ import {
   BUILTIN_TOOLS,
   TASK_TOOL_FLAGS,
   TASK_TOOL_NAMES,
+  TURN_TOOLS_MAX,
   TurnTask,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
@@ -685,6 +686,210 @@ describe("a task turn of a bot with an active Work Zone profile carries its sess
       await expectControl(ev as Json, t.id);
       // The wake is not the task's current turn: it only sees the task.
       await expectView(wake as Json, t.id);
+    } finally {
+      await endTask(t.id);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: finished processes, the cap, organization B
+
+describe("finished processes are reported on the task's own turns, once each (PD-13)", () => {
+  it("12 ended processes: the 10 oldest on Sam's control turn, none on Alex's view, the other 2 on Sam's next turn", async () => {
+    const root = await post(s.sam, engId, "Run the long reconciliation");
+    const t = await seedTask({ threadRootId: root });
+    const statuses = ["exited", "killed", "timed_out", "lost"] as const;
+    for (let i = 0; i < 12; i++) {
+      await s.su.query(
+        `insert into app.bot_task_processes (organization_id, task_id, agent_id, process_id, event_id, status, exit_code,
+           duration_ms, deadline_at, ended_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, now() + interval '1 hour', now() - make_interval(mins => $9))`,
+        [
+          s.orgA,
+          t.id,
+          s.scoutId,
+          `proc-${String(i).padStart(2, "0")}`,
+          t.currentEventId,
+          statuses[i % 4],
+          statuses[i % 4] === "exited" ? i : null,
+          statuses[i % 4] === "lost" ? null : 1000 + i,
+          60 - i,
+        ],
+      );
+    }
+    await s.su.query(
+      `insert into app.bot_task_processes (organization_id, task_id, agent_id, process_id, event_id, deadline_at)
+       values ($1, $2, $3, 'proc-running', $4, now() + interval '1 hour')`,
+      [s.orgA, t.id, s.scoutId, t.currentEventId],
+    );
+    const reported = async () =>
+      (
+        await s.su.query(
+          "select process_id from app.bot_task_processes where task_id = $1 and reported_at is not null order by process_id",
+          [t.id],
+        )
+      ).rows.map((r) => r.process_id as string);
+    const ids = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, k) => `proc-${String(from + k).padStart(2, "0")}`);
+    try {
+      const first = await expectControl(await mention(s.sam, { threadRootId: root }), t.id);
+      expect(first.finishedProcesses.map((p) => p.processId)).toEqual(ids(0, 10));
+      expect(first.finishedProcesses[0]).toEqual({
+        processId: "proc-00",
+        status: "exited",
+        exitCode: 0,
+        durationMs: 1000,
+      });
+      expect(first.finishedProcesses[3]).toEqual({
+        processId: "proc-03",
+        status: "lost",
+        exitCode: null,
+        durationMs: null,
+      });
+      expect(await reported()).toEqual(ids(0, 10));
+
+      const view = await expectView(await mention(s.alex, { threadRootId: root }), t.id);
+      expect(view.finishedProcesses).toEqual([]);
+      expect(await reported()).toEqual(ids(0, 10));
+
+      const second = await expectControl(await mention(s.sam, { threadRootId: root }), t.id);
+      expect(second.finishedProcesses.map((p) => p.processId)).toEqual(ids(10, 12));
+      expect(await reported()).toEqual(ids(0, 12));
+      // The running process is never listed, and nothing is listed twice.
+      const third = await expectControl(await mention(s.sam, { threadRootId: root }), t.id);
+      expect(third.finishedProcesses).toEqual([]);
+    } finally {
+      await endTask(t.id);
+    }
+  });
+
+  it("long tasks off: the turn lists nothing and marks nothing", async () => {
+    const root = await post(s.sam, engId, "Run the export");
+    const t = await seedTask({ threadRootId: root });
+    await s.su.query(
+      `insert into app.bot_task_processes (organization_id, task_id, agent_id, process_id, event_id, status, deadline_at, ended_at)
+       values ($1, $2, $3, 'proc-off', $4, 'exited', now() + interval '1 hour', now())`,
+      [s.orgA, t.id, s.scoutId, t.currentEventId],
+    );
+    await putPolicy({ capabilities: { longTasks: { orgWide: false, personal: false } } });
+    try {
+      expectNoTask(await mention(s.sam, { threadRootId: root }));
+      const r = await s.su.query(
+        "select reported_at from app.bot_task_processes where process_id = 'proc-off'",
+      );
+      expect(r.rows[0].reported_at).toBeNull();
+    } finally {
+      await putPolicy({ capabilities: { longTasks: { orgWide: true, personal: true } } });
+      await endTask(t.id);
+    }
+  });
+});
+
+describe("the task tools never evict a platform tool (TURN_TOOLS_MAX, P5)", () => {
+  it("TURN_TOOLS_MAX - 1 usable tools: the last two connector tools give their places to the three task tools", async () => {
+    const bot = await s.newBot(`Bulky ${randomUUID().slice(0, 4)}`);
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${engId}/members`, {
+        kind: "agent",
+        id: bot.id,
+      }) as Promise<Res>,
+    );
+    const handle = (await s.su.query("select username from app.agents where id = $1", [bot.id])).rows[0]
+      .username as string;
+    const turn = () => mention(s.victor, { handle, agentId: bot.id });
+    const plain = await turn();
+    await expectStart(plain);
+    const platform = (plain.turn.tools as string[]).filter((t) => t.startsWith("ocw_"));
+    const base = (plain.turn.tools as string[]).length - TASK_TOOL_NAMES.length;
+
+    const serverMcp = randomUUID();
+    await s.su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+       values ($1, $2, 'Bulk', 'bulk', 'streamable-http', 'https://bulk.example.test/mcp', 'ready', 'org_secret')`,
+      [serverMcp, s.orgA],
+    );
+    const names = Array.from(
+      { length: TURN_TOOLS_MAX - 1 - base },
+      (_, i) => `bulk__t${String(i).padStart(3, "0")}`,
+    );
+    for (const name of names) {
+      await s.su.query(
+        "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
+        [s.orgA, serverMcp, name.slice("bulk__".length), name],
+      );
+    }
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${bot.id}/capabilities`, {
+        tools: names.map((tool) => ({ sourceKind: "mcp", sourceId: serverMcp, tool })),
+      }) as Promise<Res>,
+    );
+    const full = await turn();
+    expect(full.turn.tools).toHaveLength(TURN_TOOLS_MAX);
+    await expectStart(full);
+    for (const name of platform) expect(full.turn.tools).toContain(name);
+    for (const name of names.slice(-2)) {
+      expect(full.turn.tools).not.toContain(name);
+      expect(full.turn.toolFlags).not.toHaveProperty(name);
+    }
+    for (const name of names.slice(0, -2)) expect(full.turn.tools).toContain(name);
+    expect((await ledger(full.eventId as string)).tools).toEqual(full.turn.tools);
+  });
+});
+
+describe("organization B never sees organization A's task (E22)", () => {
+  it("A's ids in B's tenant transaction find no task; B's own bot gets a start offer only", async () => {
+    const t = await seedTask({ conversationId: s.samDm, threadRootId: null });
+    try {
+      const inB = await s.stack.built.core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+        taskOfferFor(tx, {
+          agentId: s.scoutId,
+          conversationId: s.samDm,
+          conversationKind: "dm",
+          threadRootId: null,
+          askerUserId: s.samId,
+          trigger: "mention",
+          eventId: t.currentEventId,
+        }),
+      );
+      expect(inB).toEqual({ offer: "start", task: null, taskId: null, reportedProcessIds: [] });
+      // In A, the same call finds the task.
+      const inA = await s.stack.built.core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+        taskOfferFor(tx, {
+          agentId: s.scoutId,
+          conversationId: s.samDm,
+          conversationKind: "dm",
+          threadRootId: null,
+          askerUserId: s.samId,
+          trigger: "mention",
+          eventId: t.currentEventId,
+        }),
+      );
+      expect(inA?.offer).toBe("control");
+      expect(inA?.taskId).toBe(t.id);
+
+      const bot = await ok(
+        s.eve.request("POST", "/api/v1/agents", {
+          name: "Ledger",
+          username: "ledger",
+          instructions: "You are Ledger.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }) as Promise<Res>,
+      );
+      await s.su.query("update app.agents set status = 'ready' where id = $1", [bot.id]);
+      const dm = (
+        await ok(
+          s.eve.request("POST", "/api/v1/dms", {
+            participants: [{ kind: "agent", id: bot.id }],
+          }) as Promise<Res>,
+        )
+      ).id as string;
+      await s.su.query("delete from app.agent_usage_daily");
+      const msg = await post(s.eve, dm, "Reconcile our invoices");
+      const ev = await deliveredTo(msg, bot.id as string);
+      for (const name of TASK_TOOL_NAMES) expect(ev.turn.tools).toContain(name);
+      expect(ev.turn).not.toHaveProperty("task");
+      expect(JSON.stringify(ev)).not.toContain(t.id);
     } finally {
       await endTask(t.id);
     }
