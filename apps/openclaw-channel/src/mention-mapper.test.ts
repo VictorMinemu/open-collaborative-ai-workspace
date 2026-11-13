@@ -2337,9 +2337,12 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     "You are working on your task (see 'Your task'). Do as much as you can this turn, then call ocw_task_continue or ocw_task_finish. On task turns reply only at milestones; the task card shows your progress.";
   const VIEW =
     "A task of yours for another person runs in this thread (see 'Your task'). Answer this person; do not continue that task.";
+  // Code review WR-08: the person the task runs for wrote while it waits.
+  const PERSON =
+    "The person your task runs for wrote this message while the task waits (see 'Your task'). Answer them first; then call ocw_task_continue or ocw_task_finish.";
 
-  it("TASK_GUIDANCE holds the hub's three paragraphs verbatim", () => {
-    expect(TASK_GUIDANCE).toEqual({ offer: OFFER, active: ACTIVE, view: VIEW });
+  it("TASK_GUIDANCE holds the hub's paragraphs verbatim", () => {
+    expect(TASK_GUIDANCE).toEqual({ offer: OFFER, active: ACTIVE, person: PERSON, view: VIEW });
   });
 
   it("without tasks (null or absent) the prompt is byte-identical to before, in a thread, a DM, an AI chat and for a bare bot", () => {
@@ -2378,6 +2381,7 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     for (const [tasks, paragraph] of [
       ["offer", OFFER],
       ["active", ACTIVE],
+      ["person", PERSON],
       ["view", VIEW],
     ] as const) {
       expect(buildPersonaPrompt(BOT, { tasks })).toBe(
@@ -2392,17 +2396,19 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     }
   });
 
-  it("mapMention derives tasks from the turn: start offered → offer; turn.task with continue → active; turn.task without it → view", () => {
+  it("mapMention derives tasks from the turn: start offered → offer; turn.task with continue → person (the requester's own message, WR-08); turn.task without it → view", () => {
     const offer = mapMention(mention({ turn: turnWith(TASK_TOOLS) } as never), TASK_BOT);
     expect(offer.personaPrompt).toContain(OFFER);
     expect(taskOf(offer)).toBeUndefined();
-    const active = mapMention(
+    const person = mapMention(
       mention({ turn: turnWith(TASK_TOOLS.slice(1), { task: task() }) } as never),
       TASK_BOT,
     );
-    expect(active.personaPrompt).toContain(ACTIVE);
-    expect(active.personaPrompt).not.toContain(OFFER);
-    expect(taskOf(active)?.label).toBe("Your task (your own notes)");
+    expect(person.personaPrompt).toContain(PERSON);
+    // Code review WR-08: never the milestones rule on a person's own message.
+    expect(person.personaPrompt).not.toContain(ACTIVE);
+    expect(person.personaPrompt).not.toContain(OFFER);
+    expect(taskOf(person)?.label).toBe("Your task (your own notes)");
     const view = mapMention(mention({ turn: turnWith([], { task: task() }) } as never), TASK_BOT);
     expect(view.personaPrompt).toContain(VIEW);
     expect(taskOf(view)).toBeDefined();
@@ -2504,6 +2510,7 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     expect(m.sessionThreadId).toBe("msg-root");
     expect(m.allowedTools).toEqual(["ocw_agent_card", "ocw_task_continue", "ocw_task_finish"]);
     expect(m.personaPrompt).toContain(ACTIVE);
+    expect(m.personaPrompt).not.toContain(PERSON);
     const blocks = m.contextBlocks.filter((b) => b.type === "task");
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.payload).toMatchObject({
@@ -2514,5 +2521,24 @@ describe("long tasks (07.17.1.1.2 D-02, D-06, PD-16, PD-26, E25): the persona pa
     expect(() =>
       mapTaskEvent({ ...event, task: { ...event.task, reason: "soon" } } as never, TASK_BOT),
     ).toThrow();
+  });
+
+  it("code review WR-08: a Work Zone wake that is the task's own turn keeps the milestones rule", () => {
+    const wakeTurn = AgentWorkSessionEvent.parse({
+      ...mention({ turn: turnWith(TASK_TOOLS.slice(1), { task: task() }) } as never),
+      eventId: "evt-wake-task",
+      type: "agent.work_session.v1",
+      workSession: {
+        workSessionId: "0199b000-0000-7000-8000-0000000000a1",
+        transition: "turn_done",
+        status: "idle",
+        summary: "The session finished a turn.",
+        pendingApprovals: 0,
+        deciders: [],
+      },
+    });
+    const m = mapWorkSessionEvent(wakeTurn, TASK_BOT);
+    expect(m.personaPrompt).toContain(ACTIVE);
+    expect(m.personaPrompt).not.toContain(PERSON);
   });
 });

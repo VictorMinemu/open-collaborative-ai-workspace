@@ -104,9 +104,11 @@ export function parseTarget(raw: string): { conversationId: string; threadRootId
 
 /**
  * 07.17.1.1.2 (D-06, PD-16): what the bot is told about long tasks, by what the turn may do with them: `offer` (it may
- * start one), `active` (this turn controls its task), `view` (its task in this thread runs for another person or
- * another turn). Fixed sentences; the proactive part is the owner's ask: keep going instead of asking "¿continúo?",
- * never claim background work that is not scheduled, report when done or blocked.
+ * start one), `active` (a turn of the task itself: a continuation or a Work Zone wake that took its wait), `person`
+ * (code review WR-08: the person it runs for wrote while it waits; they get an answer, the milestones rule is for task
+ * turns only), `view` (its task in this thread runs for another person or another turn). Fixed sentences; the proactive
+ * part is the owner's ask: keep going instead of asking "¿continúo?", never claim background work that is not
+ * scheduled, report when done or blocked.
  */
 export const TASK_GUIDANCE = {
   offer:
@@ -119,6 +121,9 @@ export const TASK_GUIDANCE = {
   active:
     "You are working on your task (see 'Your task'). Do as much as you can this turn, then call ocw_task_continue or " +
     "ocw_task_finish. On task turns reply only at milestones; the task card shows your progress.",
+  person:
+    "The person your task runs for wrote this message while the task waits (see 'Your task'). Answer them first; " +
+    "then call ocw_task_continue or ocw_task_finish.",
   view:
     "A task of yours for another person runs in this thread (see 'Your task'). Answer this person; do not continue " +
     "that task.",
@@ -460,9 +465,16 @@ export function taskBlock(
   };
 }
 
-/** What the persona is told about long tasks on this turn (PD-16), from the tools the run may use and `turn.task`. */
-function taskGuidanceFor(turn: TurnContext, allowedTools: readonly string[]): TaskGuidance | null {
-  if (turn.task && allowedTools.includes(TASK_CONTINUE_TOOL)) return "active";
+/**
+ * What the persona is told about long tasks on this turn (PD-16), from the tools the run may use and `turn.task`;
+ * `taskTurn`: the delivery is a turn of the task itself (`agent.task.v1`, a Work Zone wake), not a person's message.
+ */
+function taskGuidanceFor(
+  turn: TurnContext,
+  allowedTools: readonly string[],
+  taskTurn: boolean,
+): TaskGuidance | null {
+  if (turn.task && allowedTools.includes(TASK_CONTINUE_TOOL)) return taskTurn ? "active" : "person";
   if (allowedTools.includes(TASK_START_TOOL)) return "offer";
   return turn.task ? "view" : null;
 }
@@ -758,7 +770,11 @@ export function mapMention(
    * 07.7: the chain's human when the event carries it outside `origin` (a consult reply): the turn's requester and
    * sender, named in the turn blocks.
    */
-  opts: { onBehalfOf?: AgentTurnOrigin["onBehalfOf"] } = {},
+  opts: {
+    onBehalfOf?: AgentTurnOrigin["onBehalfOf"];
+    /** Code review WR-08: a turn of the task itself (a continuation, a Work Zone wake), not a person's message. */
+    taskTurn?: boolean;
+  } = {},
 ): MappedMention {
   const direct = event.conversation.kind === "dm";
   const aiChat = event.conversation.kind === AI_CHAT;
@@ -839,7 +855,7 @@ export function mapMention(
     })),
     personaPrompt: buildPersonaPrompt(
       bot ?? { displayName: event.agent.displayName, handle: event.agent.handle, instructions: "" },
-      { direct, aiChat, tasks: taskGuidanceFor(turn, allowedTools) },
+      { direct, aiChat, tasks: taskGuidanceFor(turn, allowedTools, opts.taskTurn === true) },
     ),
     turn,
     agentTools,
@@ -1324,7 +1340,7 @@ function workSessionUpdateText(
  */
 export function mapWorkSessionEvent(event: AgentWorkSessionEvent, bot: CellAgent | undefined): MappedMention {
   const { workSession, ...rest } = AgentWorkSessionEvent.parse(event);
-  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot, { taskTurn: true });
   const sessionId = blockId(workSession.workSessionId);
   const deciders = [...new Set(workSession.deciders.map((d) => `@${blockHandle(d.handle)}`))];
   const block: ContextBlock = {
@@ -1353,7 +1369,7 @@ export function mapWorkSessionEvent(event: AgentWorkSessionEvent, bot: CellAgent
  */
 export function mapTaskEvent(event: AgentTaskEvent, bot: CellAgent | undefined): MappedMention {
   const { task, ...rest } = AgentTaskEvent.parse(event);
-  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot, { taskTurn: true });
   if (!base.turn.task) return base;
   const block = taskBlock(base.turn.task, {
     control: base.turn.tools.includes(TASK_CONTINUE_TOOL),
