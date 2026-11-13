@@ -224,6 +224,19 @@ describe("the process event of a background command", () => {
     expect(processEvents()).toEqual([expect.objectContaining({ processId, status: "timed_out" })]);
   }, 12_000);
 
+  it("07.17.1.1.2 code review IN-06: a command whose shell went away (its exit code unknown) is reported killed, never exited", async () => {
+    const { docker, sandboxes, processEvents } = await eventStack();
+    timedCommand(docker, 150, 0);
+    const started = await run(sandboxes);
+    const processId = (started as { processId: string }).processId;
+    // The container is gone (disk full, the kill switch, a purge): Docker no longer knows the exec.
+    docker.execs.clear();
+    await until(() => processEvents().length > 0);
+    expect(processEvents()).toEqual([
+      expect.objectContaining({ processId, status: "killed", exitCode: null }),
+    ]);
+  });
+
   it("a command that ended within its yield emits no process event", async () => {
     const { docker, sandboxes, processEvents } = await eventStack();
     docker.onExec = () => ({ exitCode: 0 });

@@ -927,9 +927,11 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     const durationMs = Math.max(0, Math.round((rec.endedAt ?? clock.now()) - rec.startedAt));
     void (rec.killing ?? Promise.resolve()).then(() => {
       // Precedence: the backstop's kill, a requested kill, then ocw-run's own timeout (the end came at its deadline).
+      // 07.17.1.1.2 code review IN-06: an exit code nobody could read (the shell went away: disk full, the kill
+      // switch, a purge) is a killed command, never `exited` (ADR-0042 § 5).
       const status = rec.timedOut
         ? "timed_out"
-        : rec.killed
+        : rec.killed || !rec.exitKnown
           ? "killed"
           : durationMs >= rec.timeoutSeconds * 1000
             ? "timed_out"
