@@ -10,6 +10,7 @@ import {
   taskContinueSentence,
 } from "@ocw/contracts";
 import {
+  agents,
   agentTurns,
   botTasks,
   conversationMembers,
@@ -23,12 +24,21 @@ import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import type { JobData } from "../../lib/jobs";
 import { findAgent } from "../agent";
+import { loadTaskPolicy } from "../bot-capabilities";
 import { createConversationAccess } from "../chat";
 import type { MemoryService } from "../memory";
 import type { PermissionService } from "../organization";
 import { buildMentionEvents } from "./mentions";
 import { refreshTaskCard } from "./task-card";
-import { auditTask, type BotTaskRow, consumeWait, isActiveTask, lockTask } from "./tasks";
+import {
+  auditTask,
+  type BotTaskRow,
+  consumeWait,
+  isActiveTask,
+  lockTask,
+  stopTask,
+  type TaskStopOutcome,
+} from "./tasks";
 
 /**
  * Phase 07.17.1.1.2 (D-02, D-03, D-04, D-07, D-08, D-12; PD-05, PD-06, PD-09, PD-11, PD-15, PD-18; ADR-0042): the
@@ -150,6 +160,22 @@ async function decide(tx: Tx, core: Core, taskId: string): Promise<Decision> {
     await consumeWait(tx, task, { eventId, reason });
     return { kind: "none" };
   }
+
+  // D-04, PD-09 (Pitfall 1): every budget and the policy, under the row lock, before the turn is metered. Each ends the
+  // task with its card notice and one message mentioning the requester (PD-18).
+  const [agent] = await tx
+    .select({ scope: agents.scope, capabilities: agents.capabilities })
+    .from(agents)
+    .where(and(eq(agents.id, task.agentId), isNull(agents.deletedAt)))
+    .limit(1);
+  const stop = async (outcome: TaskStopOutcome, notify = true): Promise<Decision> => {
+    await stopTask(tx, core, task, outcome, { notify });
+    return { kind: "stopped" };
+  };
+  if (!agent) return stop("bot_unavailable", false);
+  if (task.turnsUsed >= task.maxTurns) return stop("budget_turns");
+  if (clock.pastDeadline) return stop("budget_time");
+  if (!(await loadTaskPolicy(tx, agent)).enabled) return stop("policy_off");
 
   const previous: Reserved = {
     turnsUsed: task.turnsUsed,
@@ -332,8 +358,55 @@ export async function continueBotTask(
     throw err;
   }
   if (out.delivered) return "delivered";
-  await core.db.withTenant({ organizationId, userId: null }, (tx) => release(tx, core, plan));
-  return "skipped";
+  const reason = out.reason;
+  return core.db.withTenant({ organizationId, userId: null }, async (tx): Promise<TaskContinueOutcome> => {
+    // The turn that was not delivered is not counted: the wait is given back first, then decided.
+    await release(tx, core, plan);
+    if (reason !== "daily_limit") return "skipped";
+    // PD-09 (Pitfall 5): the daily limit is not a transient skip (the task would retry every minute until midnight):
+    // the task stops with its one message; the generic limit notice was skipped (`onLimitReached`).
+    const task = await lockTask(tx, plan.task.id);
+    if (!task || !isActiveTask(task)) return "none";
+    await stopTask(tx, core, task, "daily_limit");
+    return "stopped";
+  });
+}
+
+/**
+ * D-12: the task's current turn ended without `ocw_task_continue` or `ocw_task_finish` (its done, or the tick for a turn
+ * lost for 30 minutes), on `task` locked by the caller and `running`. The first time the task gets one nudge turn
+ * (`waiting`, kind `nudge`, about 5 s, `nudged`); the second time in a row (no continue in between resets `nudged`) it
+ * stops `no_progress` (failed, "Blocked") with one message mentioning the requester.
+ */
+async function nudgeOrStop(tx: Tx, core: Core, task: BotTaskRow): Promise<"nudged" | "stopped"> {
+  if (task.nudged) {
+    await stopTask(tx, core, task, "no_progress");
+    return "stopped";
+  }
+  const [row] = await tx
+    .update(botTasks)
+    .set({
+      status: "waiting",
+      waitKind: "nudge",
+      waitRef: null,
+      wakeAt: sql`least(now() + make_interval(secs => ${BOT_TASK_LIMITS.minGapSeconds}), ${botTasks.deadlineAt})`,
+      waitSeq: sql`${botTasks.waitSeq} + 1`,
+      nudged: true,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(eq(botTasks.organizationId, orgOf(tx)), eq(botTasks.id, task.id), eq(botTasks.status, "running")),
+    )
+    .returning();
+  if (!row) return "nudged";
+  await refreshTaskCard(tx, core, row);
+  await core.jobs.sendInTx(
+    tx,
+    "bot_task.continue",
+    { organizationId: row.organizationId, taskId: row.id },
+    { startAfter: new Date(Date.now() + GAP_MS) },
+  );
+  return "nudged";
 }
 
 /** The minimum gap before a released wait is delivered (PD-28). */
@@ -396,15 +469,94 @@ export async function taskTurnDone(
         { organizationId: task.organizationId, taskId: task.id },
         { startAfter: new Date(at) },
       );
+      return;
     }
+    // D-12: the task's own current turn ended and left it running (no continue, no finish).
+    if (task.currentEventId === turn.eventId) await nudgeOrStop(tx, core, task);
   });
 }
 
+/** What one tick did (counts only, for the log and tests). */
+export interface TaskTickResult {
+  queued: number;
+  nudged: number;
+  stopped: number;
+}
+
 /**
- * Wires the workers once (from the module factory, before `core.jobs` starts). Workers run only with
- * `OCW_JOBS_WORKER=on`; tests drive `core.jobs.drain("bot_task.continue")`. Logs carry ids and error names only.
+ * One task of the tick, in its organization's own user-less transaction, re-read by id under its row lock (the listing
+ * is never trusted): the bot disabled or archived → `bot_unavailable` without a message (the card says so); past its
+ * deadline → `budget_time` with one message; a waiting task whose wait has come (its job was lost) → one
+ * `bot_task.continue` job now; a running task whose current turn ended or was lost for 30 minutes → D-12.
+ */
+async function tickTask(tx: Tx, core: Core, taskId: string): Promise<keyof TaskTickResult | null> {
+  const task = await lockTask(tx, taskId);
+  if (!task || !isActiveTask(task)) return null;
+  const agent = await findAgent(tx, task.agentId);
+  if (!agent || agent.status === "disabled") {
+    await stopTask(tx, core, task, "bot_unavailable", { notify: false });
+    return "stopped";
+  }
+  const clock = await clockOf(tx, task);
+  if (clock.pastDeadline) {
+    await stopTask(tx, core, task, "budget_time");
+    return "stopped";
+  }
+  if (task.status === "waiting") {
+    if (!clock.due) return null;
+    await core.jobs.sendInTx(tx, "bot_task.continue", {
+      organizationId: task.organizationId,
+      taskId: task.id,
+    });
+    return "queued";
+  }
+  if (!clock.currentDone) return null;
+  return nudgeOrStop(tx, core, task);
+}
+
+/**
+ * The minute tick (PD-06, Pitfall 7): the ids-only `app.due_bot_tasks` lists, across organizations, waiting tasks due
+ * for a minute, running tasks untouched for 30 minutes, tasks past their deadline and tasks of disabled or archived
+ * bots (at most `tickBatch`); each is decided in its own organization's transaction (`tickTask`). One task's failure
+ * is logged with ids and never stops the others.
+ */
+export async function tickBotTasks(
+  core: Core,
+  _deps: TaskWakesDeps,
+  now: Date = new Date(),
+): Promise<TaskTickResult> {
+  const due = await core.db.pool.query<{ id: string; organization_id: string }>(
+    "select id, organization_id from app.due_bot_tasks($1, $2)",
+    [BOT_TASK_LIMITS.tickBatch, now.toISOString()],
+  );
+  const out: TaskTickResult = { queued: 0, nudged: 0, stopped: 0 };
+  for (const row of due.rows) {
+    try {
+      const done = await core.db.withTenant({ organizationId: row.organization_id, userId: null }, (tx) =>
+        tickTask(tx, core, row.id),
+      );
+      if (done) out[done]++;
+    } catch (err) {
+      core.log.error(
+        { taskId: row.id, organizationId: row.organization_id, err: { name: (err as Error)?.name } },
+        "bot task tick failed",
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Wires the workers once (from the module factory, before `core.jobs` starts): the continuation, and the one-minute UTC
+ * `bot_task.tick` (evaluated once across replicas, an empty payload). Workers run only with `OCW_JOBS_WORKER=on`;
+ * tests drive `core.jobs.drain("bot_task.continue")` and `tickBotTasks`. Logs carry ids, counts and error names only.
  */
 export function registerTaskWakes(core: Core, deps: TaskWakesDeps): void {
+  core.jobs.schedule("bot_task.tick", "* * * * *");
+  core.jobs.work("bot_task.tick", async () => {
+    const out = await tickBotTasks(core, deps);
+    if (out.queued + out.nudged + out.stopped > 0) core.log.info({ ...out }, "bot task tick");
+  });
   core.jobs.work("bot_task.continue", async (data) => {
     try {
       await continueBotTask(core, deps, data);
