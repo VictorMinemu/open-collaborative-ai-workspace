@@ -322,6 +322,11 @@ export const AgentCardTaskLink = z.object({
   requesterId: Id,
   requesterName: z.string().max(200),
   waiting: BotTaskWaitKind.nullable(),
+  /**
+   * 07.17.1.1.2-10 (additive, PD-21): when a waiting task's next turn is due ("Waiting until 14:05" for a timer), null
+   * while it runs; absent from an older API.
+   */
+  wakeAt: IsoDateTime.nullable().optional(),
 });
 export type AgentCardTaskLink = z.infer<typeof AgentCardTaskLink>;
 

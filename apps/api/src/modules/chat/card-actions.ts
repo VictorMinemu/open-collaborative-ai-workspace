@@ -7,6 +7,7 @@ import {
   AgentCardParams,
   type AgentCardPatch,
   AgentCardStatus,
+  type AgentCardTaskLink,
   EventTypes,
   type Message,
 } from "@ocw/contracts";
@@ -60,7 +61,7 @@ let decider: Pick<PermissionService, "decide"> | null = null;
  * The bridge whose `linkedCards()` knows which platform-owned cards mirror an approval (07.2-06). Set with `decider`;
  * unset or without a provider = no card is linked (no `approval`, never `decide`: fail closed).
  */
-let bridge: Pick<ChatAgentBridge, "linkedCards" | "signInCards"> | null = null;
+let bridge: Pick<ChatAgentBridge, "linkedCards" | "signInCards" | "taskCards"> | null = null;
 
 /** The approval links of the platform-owned cards among `rows` (one query through the provider). */
 async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardInfo>> {
@@ -81,6 +82,21 @@ async function signInsOf(tx: Tx, rows: CardRow[]): Promise<Map<string, AgentCard
 /** A sign-in card's link, when there is one (absent on every other card, so their snapshots keep their shape). */
 const signInLink = (link: AgentCardBrowserSignInLink | undefined): Pick<AgentCard, "browserSignIn"> =>
   link ? { browserSignIn: link } : {};
+
+/**
+ * The task links of the platform-owned `task` cards among `rows` (07.17.1.1.2-10, PD-11; one query through
+ * agent-channel's provider). No provider = no link (the card renders as a generic one).
+ */
+async function tasksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, AgentCardTaskLink>> {
+  const ids = rows.filter((r) => r.platformOwned && r.kind === "task").map((r) => r.messageId);
+  const provider = bridge?.taskCards();
+  if (ids.length === 0 || !provider) return new Map();
+  return provider.linkOf(tx, ids);
+}
+
+/** A task card's link, when there is one (absent on every other card, so their snapshots keep their shape). */
+const taskLink = (link: AgentCardTaskLink | undefined): Pick<AgentCard, "task"> =>
+  link ? { task: link } : {};
 
 /** The requester of a waiting sign-in may open the live view to sign in (UI-SPEC Surface 2, `viewerCan.sign_in`). */
 const maySignIn = (link: AgentCardBrowserSignInLink | undefined, viewerId: string | null): boolean =>
@@ -147,6 +163,7 @@ export async function cardOf(tx: Tx, messageId: string): Promise<AgentCard | nul
     ...cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null, link),
     ...approvalLink(link),
     ...signInLink((await signInsOf(tx, [row])).get(row.messageId)),
+    ...taskLink((await tasksOf(tx, [row])).get(row.messageId)),
   };
 }
 
@@ -213,21 +230,35 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
   // approver list are not consulted. A platform-owned card without a link offers no decision.
   const links = await linksOf(tx, rows);
   const signIns = await signInsOf(tx, rows);
+  const tasks = await tasksOf(tx, rows);
   const linked = bridge?.linkedCards();
   const linkedDeciders =
     viewerId && linked && links.size > 0
       ? await linked.canDecide(tx, [...links.keys()], viewerId)
       : new Set<string>();
+  // 07.17.1.1.2-10 (PD-12): Stop on an active task, for exactly the readers `mayStopTask` allows (REST only).
+  const taskCards = bridge?.taskCards();
+  const active = [...tasks].filter(([, t]) => t.status === "running" || t.status === "waiting");
+  const stoppers =
+    viewerId && taskCards && active.length > 0
+      ? await taskCards.canStop(
+          tx,
+          active.map(([id]) => id),
+          viewerId,
+        )
+      : new Set<string>();
   const cards = new Map<string, AgentCard>();
   for (const row of rows) {
-    const viewerCan: Array<"follow" | "decide" | "sign_in"> = viewerId ? ["follow"] : [];
+    const viewerCan: NonNullable<AgentCard["viewerCan"]> = viewerId ? ["follow"] : [];
     const link = links.get(row.messageId);
     const signIn = signIns.get(row.messageId);
+    const task = tasks.get(row.messageId);
     if (row.platformOwned) {
       if (link && link.status === "pending" && !row.decision && linkedDeciders.has(row.messageId)) {
         viewerCan.push("decide");
       }
       if (maySignIn(signIn, viewerId)) viewerCan.push("sign_in");
+      if (task && stoppers.has(row.messageId)) viewerCan.push("stop");
     } else if (viewerId && decisionBlock(row, viewerId) === null && (await mayApprove(row.conversationId))) {
       viewerCan.push("decide");
     }
@@ -235,6 +266,7 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
       ...cardFromRow(row, dir, link),
       ...approvalLink(link),
       ...signInLink(signIn),
+      ...taskLink(task),
       following: following.has(row.messageId),
       viewerCan,
     });

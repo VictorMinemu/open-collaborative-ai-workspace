@@ -8,6 +8,8 @@ import {
   type AgentCardStatus,
   APPROVAL_NOTE_MAX,
   type ApprovalRequestStatus,
+  taskCardStatus,
+  taskStatusLabel,
   type WorkZoneProposalView,
   workSessionCardOf,
 } from "@ocw/contracts";
@@ -90,6 +92,7 @@ import { decideCard, followCard, refreshCard, useAgentCard } from "@/lib/card-qu
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useDevices, useWorkZoneOrgSync } from "@/lib/workzone-queries";
+import { TaskCard } from "./task-card";
 import { WorkSessionCard, WorkSessionCardHeading, workSessionStatusWord } from "./work-session-card";
 
 /**
@@ -111,7 +114,7 @@ const KIND: Record<AgentCardKind, { label: string; icon: ComponentType<{ classNa
   generic: { label: "Card", icon: LayoutGrid },
   // Phase 07.8 (UI-SPEC R1, Surface 2): the platform-owned sign-in card (body: `SignInCardBody`, 07.8-26).
   browser: { label: "Sign-in", icon: LogIn },
-  // Phase 07.17.1.1.2 (D-05): the platform-owned task card (its body arrives with 07.17.1.1.2-10).
+  // Phase 07.17.1.1.2 (D-05): the platform-owned task card (body: `TaskCard`, 07.17.1.1.2-10).
   task: { label: "Task", icon: ListChecks },
 };
 
@@ -1988,10 +1991,16 @@ export function AgentCardView({
   // 07.16 (D-12, PD-20): the live card of a bot-started session (platform-owned, no approval, Open to the session)
   // renders as `WorkSessionCard` inside this shell; every other card, proposals included, is unchanged.
   const live = !link && !signIn && workSessionCardOf(card) !== null;
+  // 07.17.1.1.2-10 (D-05, PD-20): a platform task card with its server-composed task renders as `TaskCard` inside this
+  // shell, its pill from the task itself; a task card without `card.task` (an older API) stays a generic card (PD-21).
+  const task = platform && card.kind === "task" && !link && !signIn && !live ? (card.task ?? null) : null;
+  const pillStatus = task ? taskCardStatus(task.status) : card.status;
   const statusLabel = platform
     ? live
       ? workSessionStatusWord(card.status, card.statusLabel)
-      : card.statusLabel
+      : task
+        ? taskStatusLabel(task.status, task.outcome)
+        : card.statusLabel
     : undefined;
   const notices = platform && !linkedKind && !signIn ? (card.notices ?? []) : [];
 
@@ -2046,11 +2055,7 @@ export function AgentCardView({
           ) : link ? (
             <ApprovalStatusPill key={link.status} status={link.status} />
           ) : (
-            <StatusPill
-              key={`${card.status}:${statusLabel ?? ""}`}
-              status={card.status}
-              label={statusLabel}
-            />
+            <StatusPill key={`${pillStatus}:${statusLabel ?? ""}`} status={pillStatus} label={statusLabel} />
           )}
         </div>
         {live ? (
@@ -2079,7 +2084,7 @@ export function AgentCardView({
             </span>
           </p>
         ) : null}
-        {card.fields.length > 0 && !linkedKind && !signIn && !live ? (
+        {card.fields.length > 0 && !linkedKind && !signIn && !live && !task ? (
           <dl
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
@@ -2130,6 +2135,8 @@ export function AgentCardView({
         <LinkedFooter messageId={messageId} card={card} link={link} openTarget={openTarget} />
       ) : live ? (
         <WorkSessionCard messageId={messageId} card={card} />
+      ) : task ? (
+        <TaskCard messageId={messageId} card={card} task={task} />
       ) : hasActions || card.decision ? (
         <div
           data-testid="agent-card-actions"

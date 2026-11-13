@@ -22,6 +22,7 @@ import { createConversationAccess } from "../chat";
 import type { PermissionService } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
+import { createTaskCards } from "./task-card";
 import {
   auditTaskRefused,
   type BotTaskRow,
@@ -322,6 +323,8 @@ const TASK_NOT_FOUND = "Task not found";
  * in-flight turn finishes and its later continue answers `task_stopped`; no further turn is delivered.
  */
 export function registerTaskUserRoutes(app: App, core: Core, deps: { perms: PermissionService }): void {
+  // 07.17.1.1.2-10 (PD-11, PD-12): every read of a task card gets its task link and, per reader, Stop.
+  core.chatAgent.registerTaskCards(createTaskCards(core, deps.perms));
   app.register(
     async (raw) => {
       // Child scopes lose the Zod type provider in their inferred type; restore it.

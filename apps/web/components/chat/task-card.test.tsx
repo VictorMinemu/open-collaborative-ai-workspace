@@ -78,7 +78,7 @@ describe("Stop on the task card (tracer, PD-12)", () => {
     expect(button).not.toBeNull();
     expect(button).toContain(`aria-label="Stop task: ${GOAL}"`);
     expect(button).toContain("max-lg:h-11");
-    expect(button).not.toContain("disabled");
+    expect(button).not.toMatch(/\sdisabled=""/);
   });
 
   it("no Stop without stop in viewerCan, and none once the task stopped (whatever a cache says)", () => {

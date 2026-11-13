@@ -3,6 +3,7 @@ import type {
   AgentCardBrowserSignInLink,
   AgentCardInput,
   AgentCardKind,
+  AgentCardTaskLink,
   ApprovalRequestStatus,
   ApprovalSummary,
   BotTaskWakeReason,
@@ -220,6 +221,17 @@ export interface SignInCards {
   skip(tx: Tx, input: { messageId: string; userId: string }): Promise<void>;
 }
 
+/**
+ * Phase 07.17.1.1.2 (07.17.1.1.2-10; D-05, PD-11, PD-12): registered by agent-channel, so chat shows a `task` card's
+ * task and offers Stop without importing agent-channel. No registration = no task link and never `stop` (fail closed).
+ */
+export interface TaskCards {
+  /** The task each `task` card among `messageIds` mirrors, composed from its row (no viewer field: every reader sees it). */
+  linkOf(tx: Tx, messageIds: readonly string[]): Promise<Map<string, AgentCardTaskLink>>;
+  /** The cards among `messageIds` whose task is active and that `viewerId` may stop now (`mayStopTask`). */
+  canStop(tx: Tx, messageIds: readonly string[], viewerId: string): Promise<Set<string>>;
+}
+
 /** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */
 interface LinkedCardBase {
   id: string;
@@ -321,6 +333,9 @@ export interface ChatAgentBridge {
   registerSignInCards(provider: SignInCards): void;
   /** The browser module's sign-in cards, or null (no sign-in link is shown, "Not now" is refused). */
   signInCards(): SignInCards | null;
+  registerTaskCards(provider: TaskCards): void;
+  /** Agent-channel's task cards, or null (no task link is shown, nobody is offered Stop). */
+  taskCards(): TaskCards | null;
 }
 
 export function createChatAgentBridge(): ChatAgentBridge {
@@ -330,6 +345,7 @@ export function createChatAgentBridge(): ChatAgentBridge {
   let posterIn: AgentPosterIn | undefined;
   let linked: LinkedCards | null = null;
   let signIns: SignInCards | null = null;
+  let tasks: TaskCards | null = null;
   let context: ThreadContextProvider | undefined;
   let typing: AgentTyping | undefined;
   return {
@@ -380,5 +396,9 @@ export function createChatAgentBridge(): ChatAgentBridge {
       signIns = provider;
     },
     signInCards: () => signIns,
+    registerTaskCards(provider) {
+      tasks = provider;
+    },
+    taskCards: () => tasks,
   };
 }

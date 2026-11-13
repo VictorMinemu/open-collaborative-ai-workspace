@@ -2,6 +2,8 @@ import {
   AGENT_CARD_TITLE_MAX,
   type AgentCardField,
   type AgentCardNotice,
+  type AgentCardTaskLink,
+  BOT_TASK_ACTIVE,
   type BotTaskOutcome,
   type BotTaskStatus,
   TASK_CARD_FIELD_LABELS,
@@ -9,11 +11,15 @@ import {
   taskStatusLabel,
   taskStopNotice,
 } from "@ocw/contracts";
-import { messageCards, messages, type Tx } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { botTasks, messageCards, messages, type Tx } from "@ocw/db";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Core } from "../../core";
+import type { TaskCards } from "../../lib/chat-agent-bridge";
+import { loadDirectory } from "../chat";
+import type { PermissionService } from "../organization";
 import { updatePlatformCardNotified } from "./card-followers";
 import type { AgentTurnRow } from "./claim";
+import { type BotTaskRow, mayStopTask } from "./tasks";
 
 /**
  * Phase 07.17.1.1.2 (D-05, PD-11; ADR-0042): the live `task` card of a long bot task, composed by the platform from the
@@ -151,4 +157,72 @@ export async function refreshTaskCard(
     fields: card.fields,
     notices: card.notices,
   });
+}
+
+/** `AgentCardTaskLink.requesterName`'s bound. */
+const REQUESTER_NAME_MAX = 200;
+
+const isoOf = (v: string | Date): string => new Date(v).toISOString();
+
+/** The card link of one task row (pure): the numbers, the times, the requester and the wait; no viewer field. */
+export function taskLinkOf(row: BotTaskRow, requesterName: string): AgentCardTaskLink {
+  const waiting = row.status === "waiting";
+  return {
+    taskId: row.id,
+    status: row.status,
+    outcome: row.outcome ?? null,
+    turnsUsed: row.turnsUsed,
+    maxTurns: row.maxTurns,
+    startedAt: isoOf(row.startedAt),
+    deadlineAt: isoOf(row.deadlineAt),
+    finishedAt: row.finishedAt ? isoOf(row.finishedAt) : null,
+    requesterId: row.requesterUserId,
+    requesterName: requesterName.slice(0, REQUESTER_NAME_MAX),
+    waiting: waiting ? (row.waitKind ?? null) : null,
+    wakeAt: waiting && row.wakeAt ? isoOf(row.wakeAt) : null,
+  };
+}
+
+/**
+ * Phase 07.17.1.1.2-10 (D-05, PD-11, PD-12): the provider behind every read of a `task` card, registered on the
+ * chat-agent bridge by `registerTaskUserRoutes`. `linkOf` composes `card.task` from the task rows (one query, in the
+ * reader's tenant transaction, so RLS hides another organization's tasks; the requester's name from the directory);
+ * `canStop` offers Stop on an active task to exactly the readers `mayStopTask` allows (the Stop route decides again).
+ */
+export function createTaskCards(core: Core, perms: PermissionService): TaskCards {
+  const tasksOf = (tx: Tx, messageIds: readonly string[], activeOnly: boolean) =>
+    tx
+      .select()
+      .from(botTasks)
+      .where(
+        and(
+          inArray(botTasks.cardMessageId, [...messageIds]),
+          activeOnly ? inArray(botTasks.status, [...BOT_TASK_ACTIVE]) : undefined,
+        ),
+      );
+  return {
+    async linkOf(tx, messageIds) {
+      const out = new Map<string, AgentCardTaskLink>();
+      if (messageIds.length === 0) return out;
+      const rows = await tasksOf(tx, messageIds, false);
+      if (rows.length === 0) return out;
+      const dir = await loadDirectory(tx);
+      for (const row of rows) {
+        if (!row.cardMessageId) continue;
+        const name = dir.users.get(row.requesterUserId)?.displayName ?? "Former member";
+        out.set(row.cardMessageId, taskLinkOf(row, name));
+      }
+      return out;
+    },
+    async canStop(tx, messageIds, viewerId) {
+      const out = new Set<string>();
+      if (messageIds.length === 0) return out;
+      for (const row of await tasksOf(tx, messageIds, true)) {
+        if (row.cardMessageId && (await mayStopTask(tx, core, perms, row, viewerId))) {
+          out.add(row.cardMessageId);
+        }
+      }
+      return out;
+    },
+  };
 }
