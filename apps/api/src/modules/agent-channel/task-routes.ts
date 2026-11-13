@@ -1,4 +1,8 @@
 import {
+  AgentChannelTaskContinue,
+  AgentChannelTaskContinueResponse,
+  AgentChannelTaskFinish,
+  AgentChannelTaskFinishResponse,
   AgentChannelTaskStart,
   AgentChannelTaskStartResponse,
   BOT_TASK_SENTENCES,
@@ -14,7 +18,19 @@ import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
 import { type CellPrincipal, cellOf } from "./auth";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
-import { auditTaskRefused, type BotTaskRow, startTask } from "./tasks";
+import {
+  auditTaskRefused,
+  type BotTaskRow,
+  continueTask,
+  finishTask,
+  isActiveTask,
+  lockTask,
+  startTask,
+  type TaskAuditMetadata,
+  type TaskSessionFact,
+  taskOfTurn,
+  taskSessionOf,
+} from "./tasks";
 
 /**
  * Phase 07.17.1.1.2 (D-01, D-02, D-04, D-05, D-07, D-13; PD-05, PD-08 … PD-12, PD-18, PD-19; ADR-0042): the long task's
@@ -36,6 +52,8 @@ import { auditTaskRefused, type BotTaskRow, startTask } from "./tasks";
 const tags = ["agent-channel"];
 const bearer = [{ cellToken: [] as string[] }];
 const START = BUILTIN_TOOLS.taskStart;
+const CONTINUE = BUILTIN_TOOLS.taskContinue;
+const FINISH = BUILTIN_TOOLS.taskFinish;
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
 const UNKNOWN: unique symbol = Symbol("unknown_turn");
 
@@ -55,6 +73,8 @@ export function registerTaskRoutes(scope: App, core: Core): void {
       tool: TaskToolName;
       task: string | null;
       reason: string | null;
+      /** Counts and kinds of the call (P1: never the goal, a note or the summary). */
+      extra?: TaskAuditMetadata;
     },
   ): Promise<void> {
     const claimed = await claimToolCall(tx, core, {
@@ -70,7 +90,7 @@ export function registerTaskRoutes(scope: App, core: Core): void {
       countCall: false,
       uncapped: true,
       // Ids only (P1): never the goal, a note or the summary.
-      metadata: { eventId: p.turn.eventId, ...(p.task ? { taskId: p.task } : {}) },
+      metadata: { eventId: p.turn.eventId, ...(p.task ? { taskId: p.task } : {}), ...p.extra },
     });
     // An uncapped, non-side-effecting claim always passes: anything else is a bug, never a silent allow.
     if (p.reason === null && !claimed.allowed) throw new Error(`task claim refused: ${claimed.reason}`);
@@ -99,39 +119,66 @@ export function registerTaskRoutes(scope: App, core: Core): void {
   }
 
   /**
-   * The two transactions every task call opens (above): `decide` runs in tx1 on the live turn; an unknown or no longer
-   * live turn answers 404 `unknown_turn`.
+   * The two transactions every task call opens (above): `prefetch` runs in tx0 (user-less reads the person could not
+   * make, e.g. a bot Work Zone session's state), `decide` in tx1 on the live turn; an unknown or no longer live turn
+   * answers 404 `unknown_turn`.
    */
-  async function onTurn<R>(
+  async function onTurn<R, F = null>(
     cell: CellPrincipal,
     body: { eventId: string; agentId: string },
     tool: TaskToolName,
-    decide: (tx: Tx, turn: AgentTurnRow) => Promise<R>,
+    decide: (tx: Tx, turn: AgentTurnRow, fetched: F | null) => Promise<R>,
+    prefetch?: (tx: Tx) => Promise<F | null>,
   ): Promise<R> {
     const metadata = { eventId: body.eventId };
     const unknownTurn = async (tx: Tx): Promise<typeof UNKNOWN> => {
       await auditUnknownTurn(tx, core, { cell, tool, reason: "unknown_turn", metadata });
       return UNKNOWN;
     };
-    const userId = await core.db.withTenant(
+    const found = await core.db.withTenant(
       { organizationId: cell.organizationId, userId: null },
-      async (tx): Promise<string | typeof UNKNOWN> => {
+      async (tx): Promise<{ userId: string; fetched: F | null } | typeof UNKNOWN> => {
         const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, body.eventId));
         if (!turn || turn.agentId !== body.agentId) return unknownTurn(tx);
-        return turn.userId;
+        return { userId: turn.userId, fetched: prefetch ? await prefetch(tx) : null };
       },
     );
-    if (userId === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");
+    if (found === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");
     const out = await core.db.withTenant(
-      { organizationId: cell.organizationId, userId },
+      { organizationId: cell.organizationId, userId: found.userId },
       async (tx): Promise<R | typeof UNKNOWN> => {
         const turn = await liveTurn(tx, core, body);
         if (!turn) return unknownTurn(tx);
-        return decide(tx, turn);
+        return decide(tx, turn, found.fetched);
       },
     );
     if (out === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");
     return out;
+  }
+
+  /**
+   * The checks of a continue or finish (PD-05, PD-08), in order: the tool on the turn (`not_in_turn`), the turn's task
+   * (`no_task`), under its lock: ended (`task_stopped`), another person's (`not_requester`), and the busy rule (one
+   * execution authority: while the task runs, only its current turn controls it; while it waits, its requester's turns
+   * may, `task_busy`). The locked row, or the recorded refusal.
+   */
+  async function control(
+    tx: Tx,
+    base: { cell: CellPrincipal; turn: AgentTurnRow; tool: TaskToolName },
+  ): Promise<{ task: BotTaskRow } | { refusal: BotTaskRefused }> {
+    const { turn } = base;
+    const no = async (code: BotTaskRefusal, task: Pick<BotTaskRow, "id"> | null) => ({
+      refusal: await refuse(tx, { ...base, code, task }),
+    });
+    if (!turn.tools.includes(base.tool)) return no("not_in_turn", null);
+    const linked = await taskOfTurn(tx, turn.eventId);
+    const task = linked ? await lockTask(tx, linked.id) : null;
+    if (!task) return no("no_task", null);
+    if (!isActiveTask(task)) return no("task_stopped", task);
+    if (task.requesterUserId !== turn.userId || task.agentId !== turn.agentId)
+      return no("not_requester", task);
+    if (task.status === "running" && task.currentEventId !== turn.eventId) return no("task_busy", task);
+    return { task };
   }
 
   scope.post(
@@ -160,6 +207,93 @@ export function registerTaskRoutes(scope: App, core: Core): void {
           maxTurns: started.task.maxTurns,
           deadlineAt: new Date(started.task.deadlineAt).toISOString(),
         };
+      });
+    },
+  );
+
+  scope.post(
+    "/tasks/continue",
+    {
+      config: { authz: "cell" as const },
+      schema: {
+        tags,
+        security: bearer,
+        body: AgentChannelTaskContinue,
+        response: { 200: AgentChannelTaskContinueResponse },
+      },
+    },
+    async (req): Promise<AgentChannelTaskContinueResponse> => {
+      const cell = cellOf(req);
+      const body = req.body;
+      const sessionId = body.waitFor && "workSessionId" in body.waitFor ? body.waitFor.workSessionId : null;
+      return onTurn<AgentChannelTaskContinueResponse, TaskSessionFact>(
+        cell,
+        body,
+        CONTINUE,
+        async (tx, turn, session) => {
+          const base = { cell, turn, tool: CONTINUE } as const;
+          const checked = await control(tx, base);
+          if ("refusal" in checked) return checked.refusal;
+          const out = await continueTask(tx, core, checked.task, {
+            turn,
+            progress: body.progress,
+            nextStep: body.nextStep,
+            afterSeconds: body.afterSeconds,
+            waitFor: body.waitFor,
+            session,
+            auditBase: cellAuditBase(cell),
+          });
+          if (!out.ok) return refuse(tx, { ...base, code: out.code, task: checked.task });
+          await claim(tx, {
+            ...base,
+            task: out.task.id,
+            reason: null,
+            extra: {
+              turnsUsed: out.task.turnsUsed,
+              maxTurns: out.task.maxTurns,
+              ...(out.task.waitKind ? { waitKind: out.task.waitKind } : {}),
+            },
+          });
+          return { ok: true, next: out.next, at: out.at, turnsLeft: out.turnsLeft, quiet: out.quiet };
+        },
+        sessionId ? (tx) => taskSessionOf(tx, sessionId) : undefined,
+      );
+    },
+  );
+
+  scope.post(
+    "/tasks/finish",
+    {
+      config: { authz: "cell" as const },
+      schema: {
+        tags,
+        security: bearer,
+        body: AgentChannelTaskFinish,
+        response: { 200: AgentChannelTaskFinishResponse },
+      },
+    },
+    async (req): Promise<AgentChannelTaskFinishResponse> => {
+      const cell = cellOf(req);
+      const body = req.body;
+      return onTurn(cell, body, FINISH, async (tx, turn): Promise<AgentChannelTaskFinishResponse> => {
+        const base = { cell, turn, tool: FINISH } as const;
+        const checked = await control(tx, base);
+        if ("refusal" in checked) return checked.refusal;
+        const ended = await finishTask(tx, core, checked.task, {
+          turn,
+          summary: body.summary,
+          outcome: body.outcome,
+          auditBase: cellAuditBase(cell),
+        });
+        // The row was locked active above: it cannot have ended in between.
+        if (!ended) throw new Error("bot task ended under its lock");
+        await claim(tx, {
+          ...base,
+          task: ended.id,
+          reason: null,
+          extra: { outcome: body.outcome, turnsUsed: ended.turnsUsed, maxTurns: ended.maxTurns },
+        });
+        return { ok: true, status: ended.status === "done" ? "done" : "failed" };
       });
     },
   );
