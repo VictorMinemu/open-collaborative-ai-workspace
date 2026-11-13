@@ -48,7 +48,28 @@ import { CONSULT_TOOL_NAME, TASK_CONTINUE_TOOL, TASK_TOOL_NAMES } from "./turn-s
  * What a run reports back besides its replies (07.17.1.1.2 PD-17): the outcome of the turn's task calls, read from the
  * gate's active turn when the run ended (null when the turn made none, or the run lost its turn).
  */
-export type TurnRun = { task: TaskTurnOutcome | null };
+export type TurnRun = {
+  task: TaskTurnOutcome | null;
+  /**
+   * Code review WR-01: the model ran (it made at least one tool call this attempt). Such a turn is never dispatched
+   * again: a retry would be a second full model run that repeats its tools. Absent (an older port) reads as false.
+   */
+  ran?: boolean;
+};
+
+/**
+ * Code review WR-01: the run failed after the model had already made a tool call (the port's wrapper of the cause), with
+ * the turn's task outcome at that moment. Never retried.
+ */
+export class TurnRanError extends Error {
+  constructor(
+    cause: unknown,
+    readonly task: TaskTurnOutcome | null,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "TurnRanError";
+  }
+}
 
 /**
  * Everything the bridge needs from OpenClaw. The real implementation (openclaw-port.ts) wraps the
@@ -164,6 +185,14 @@ export function isOpenClawGenericFailure(text: string): boolean {
 
 export function isOpenClawAuthFailure(text: string): boolean {
   return OPENCLAW_AUTH_FAILURE.test(text.trim());
+}
+
+/** Code review WR-01: the run ended silent after its model ran (a tool call): not retried. */
+class SilentRunError extends Error {
+  constructor() {
+    super("the agent ran but produced no visible reply");
+    this.name = "SilentRunError";
+  }
 }
 
 /** A turn that failed for a reason retrying cannot fix; `reply` is what the bot posts instead. */
@@ -475,12 +504,26 @@ export function createBridge(opts: BridgeOptions) {
           // OpenClaw can end a turn without delivering anything and without throwing (e.g. "Embedded
           // agent failed before reply"): treat silence as a failed attempt so it is retried and, if it
           // keeps failing, the asker gets a visible notice instead of nothing. A turn that continued or
-          // finished its task (07.17.1.1.2 D-14) may end silently: the task card shows it.
-          if (index === 0 && !taskAnswered) throw new Error("the agent produced no visible reply");
+          // finished its task (07.17.1.1.2 D-14) may end silently: the task card shows it. Code review WR-01:
+          // a silent run whose model already ran (a tool call) is never retried; a task turn's nudge is the API's.
+          if (index === 0 && !taskAnswered) {
+            if (run?.ran === true) throw new SilentRunError();
+            throw new Error("the agent produced no visible reply");
+          }
           break;
         } catch (error) {
+          if (error instanceof TurnRanError) {
+            taskAnswered = error.task !== null && (error.task.continued || error.task.finished);
+          }
           if (index > 0 || opts.signal.aborted || attempt >= dispatchAttempts) throw error;
-          if (error instanceof TerminalTurnError) throw error;
+          // Code review WR-01: only a failure before the model produced anything is retried.
+          if (
+            error instanceof TerminalTurnError ||
+            error instanceof TurnRanError ||
+            error instanceof SilentRunError
+          ) {
+            throw error;
+          }
           log.warn?.(
             `${label} ${event.eventId}: turn attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying`,
           );
@@ -492,7 +535,10 @@ export function createBridge(opts: BridgeOptions) {
       log.error?.(
         `${label} ${event.eventId}: turn failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      if (index === 0) {
+      // Code review WR-01: a turn that continued or finished its task answered (the card shows it); a task turn whose
+      // model ran and went silent is nudged by the API, so neither gets the generic failure reply.
+      const nudged = error instanceof SilentRunError && event.type === AgentChannelEventTypes.task;
+      if (index === 0 && !taskAnswered && !nudged) {
         await opts.client
           .postMessage(
             {

@@ -45,7 +45,13 @@ import {
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
 import { resetBoardToolState } from "./board-tool.js";
-import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
+import {
+  AUTH_FAILURE_REPLY,
+  createBridge,
+  FAILURE_REPLY,
+  type OpenClawPort,
+  TurnRanError,
+} from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { CONSULT_TOOL_NAME, consultIdempotencyKey } from "./consult-tool.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
@@ -977,6 +983,31 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     await p.dispatchMention({ ...base, startsTainted: false }, async () => {}, signal);
     await p.dispatchMention({ ...base, startsTainted: true }, async () => {}, signal);
     expect(seen).toEqual([false, false, true]);
+  });
+
+  it("code review WR-01: a run that made a tool call says so (ran), and a throw after one is a TurnRanError; a run without one is not", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let callTool = true;
+    let fail = false;
+    const { runtime } = fakeRuntime(async (params) => {
+      const sessionKey = (params.route as { sessionKey: string }).sessionKey;
+      if (callTool)
+        await guard.beforeToolCall({ toolName: "web_search", params: { query: "q" } }, { sessionKey });
+      if (fail) throw new Error("provider stream cut");
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    const m = mapMention(event({ turn: TURN } as never), {
+      ...ARCHIE,
+      capabilities: { tools: ["web_search"] },
+    });
+    const signal = new AbortController().signal;
+    expect(await p.dispatchMention(m, async () => {}, signal)).toMatchObject({ ran: true });
+    callTool = false;
+    expect(await p.dispatchMention(m, async () => {}, signal)).toMatchObject({ ran: false });
+    fail = true;
+    await expect(p.dispatchMention(m, async () => {}, signal)).rejects.not.toBeInstanceOf(TurnRanError);
+    callTool = true;
+    await expect(p.dispatchMention(m, async () => {}, signal)).rejects.toBeInstanceOf(TurnRanError);
   });
 
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {

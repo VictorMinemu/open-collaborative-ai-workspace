@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import type { CellSnapshot } from "./agent-channel-protocol.js";
-import type { OpenClawPort, TurnRun } from "./bridge.js";
+import { type OpenClawPort, TurnRanError, type TurnRun } from "./bridge.js";
 import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
 import {
   agentStateDirFor,
@@ -357,6 +357,12 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       signal,
     );
     let task: TaskTurnOutcome | null = null;
+    let ran = false;
+    /** Code review WR-01: whether this turn's model made a tool call (read before the turn ends). */
+    const modelRan = () => {
+      const t = guard.activeTurn(sessionKey);
+      return t?.eventId === m.eventId && t.toolCallsSeen > 0;
+    };
     try {
       await runDetached(() =>
         runtime.channel.inbound.dispatch({
@@ -385,14 +391,22 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           },
         }),
       );
+    } catch (error) {
+      // Code review WR-01: a failure after the model already ran is never retried by the bridge.
+      if (modelRan()) {
+        const t = guard.activeTurn(sessionKey);
+        throw new TurnRanError(error, t ? { ...t.task } : null);
+      }
+      throw error;
     } finally {
       // 07.17.1.1.2 (PD-17): what the turn's task calls achieved, read before the turn ends (only this turn's, never a
       // later one of the same session).
       const ended = guard.activeTurn(sessionKey);
       task = ended?.eventId === m.eventId ? { ...ended.task } : null;
+      ran = modelRan();
       guard.endTurn(sessionKey);
     }
-    return { task };
+    return { task, ran };
   }
 
   return port;

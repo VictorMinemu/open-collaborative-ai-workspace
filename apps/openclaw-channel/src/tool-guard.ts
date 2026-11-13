@@ -150,6 +150,11 @@ export interface ActiveTurn {
   taskCalls: Set<string>;
   /** Code review WR-06: refused calls of each task tool this turn (at most `TASK_REFUSALS_PER_TOOL`, then no retry). */
   taskRefusals: Map<string, number>;
+  /**
+   * Code review WR-01: tool calls the model made this turn, allowed or not (any `before_tool_call` that reached the
+   * gate). Above zero, the model ran: the bridge never dispatches the turn again (a retry would re-run its tools).
+   */
+  toolCallsSeen: number;
 }
 
 /** Code review WR-06: refused calls of one task tool a turn may make before its slot stays taken. */
@@ -672,6 +677,7 @@ export function createToolGuard(
         task: noTaskOutcome(),
         taskCalls: new Set(),
         taskRefusals: new Map(),
+        toolCallsSeen: 0,
       });
       signal?.addEventListener(
         "abort",
@@ -752,6 +758,8 @@ export function createToolGuard(
     async beforeToolCall(event: ToolCallEvent, ctx: ToolCallContext): Promise<ToolBlock | undefined> {
       const t = state.turns.get(keyOf(ctx.sessionKey));
       if (!t) return block(`Tool ${event.toolName} blocked: no active OCW turn for this session.`);
+      // Code review WR-01: the model produced a call, so this turn ran (allowed or not, it is never re-dispatched).
+      t.toolCallsSeen++;
       // OpenClaw hands the hook a lower-cased policy name (`normalizeToolPolicyName`), while MCP tools keep the
       // server's casing (`m…__getFile`): resolve to the turn's exact name, the one the API decides on.
       const tool = canonicalToolName(t.turn.tools, event.toolName);

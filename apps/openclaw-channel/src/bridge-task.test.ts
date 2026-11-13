@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import { createAgentChannelClient } from "./api-client.js";
-import { createBridge, FAILURE_REPLY, type OpenClawPort, type TurnRun } from "./bridge.js";
+import { createBridge, FAILURE_REPLY, type OpenClawPort, TurnRanError, type TurnRun } from "./bridge.js";
 import type { MappedMention } from "./mention-mapper.js";
 import { planReconcile } from "./reconciler.js";
 import { type FakeAgentChannelApi, startFakeAgentChannelApi } from "./testing/fake-agent-channel-api.js";
@@ -108,7 +108,8 @@ function mentionEvent(n: number, tools: string[]): Record<string, unknown> {
   };
 }
 
-type Attempt = { texts: string[]; task: TaskTurnOutcome | null };
+/** One scripted attempt: its replies, its task outcome, whether the model ran (made a tool call), or what it throws. */
+type Attempt = { texts: string[]; task: TaskTurnOutcome | null; ran?: boolean; throws?: Error };
 const outcome = (over: Partial<TaskTurnOutcome> = {}): TaskTurnOutcome => ({
   started: false,
   continued: false,
@@ -127,7 +128,8 @@ function scriptedPort(): ScriptedPort {
       port.dispatched.push(m);
       const attempt = port.script.shift() ?? { texts: ["On it."], task: null };
       for (const text of attempt.texts) await deliver(text);
-      return { task: attempt.task };
+      if (attempt.throws) throw attempt.throws;
+      return { task: attempt.task, ...(attempt.ran !== undefined ? { ran: attempt.ran } : {}) };
     },
     async reconcile(cell: CellSnapshot) {
       const plan = planReconcile({}, cell);
@@ -271,6 +273,60 @@ describe("agent.task.v1 (07.17.1.1.2 D-02, D-14, PD-17): a continuation is the b
     expect(api.turnsDone).toEqual([
       { eventId: "evt-task-4", agentId: GERTRU.id, outcome: "failed", status: 204 },
     ]);
+  });
+});
+
+describe("code review WR-01: a turn whose model already ran is never dispatched again", () => {
+  it("a task turn that ran tools and ended silent without continue: one model run, no failure reply, done failed (the API nudges)", async () => {
+    const b = await bridge();
+    port.script.push({ texts: [], task: outcome(), ran: true }, { texts: ["Should not run."], task: null });
+    await b.handleFrame({ seq: 1, type: "agent.task.v1", data: taskEvent(1) });
+
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages).toEqual([]);
+    expect(api.turnsDone.map((d) => [d.eventId, d.outcome])).toEqual([["evt-task-1", "failed"]]);
+  });
+
+  it("a person's mention that ran tools and ended silent: one model run, then the failure reply once", async () => {
+    const b = await bridge();
+    port.script.push({ texts: [], task: null, ran: true }, { texts: ["Should not run."], task: null });
+    await b.handleFrame({ seq: 1, type: "agent.mention.v1", data: mentionEvent(1, TASK_TOOLS) });
+
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages.map((m) => m.text)).toEqual([FAILURE_REPLY]);
+  });
+
+  it("a run that failed after a tool call (TurnRanError) is not retried; one whose task continued posts no failure reply", async () => {
+    const b = await bridge();
+    port.script.push(
+      { texts: [], task: null, throws: new TurnRanError(new Error("provider stream cut"), null) },
+      { texts: ["Should not run."], task: null },
+    );
+    await b.handleFrame({ seq: 1, type: "agent.mention.v1", data: mentionEvent(1, []) });
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages.map((m) => m.text)).toEqual([FAILURE_REPLY]);
+
+    port.script.length = 0;
+    port.script.push({
+      texts: [],
+      task: null,
+      throws: new TurnRanError(new Error("provider stream cut"), outcome({ continued: true })),
+    });
+    await b.handleFrame({ seq: 2, type: "agent.task.v1", data: taskEvent(2) });
+    expect(port.dispatched).toHaveLength(2);
+    expect(api.messages.map((m) => m.text)).toEqual([FAILURE_REPLY]);
+    expect(api.turnsDone.at(-1)).toMatchObject({ eventId: "evt-task-2", outcome: "replied" });
+  });
+
+  it("a failure before the model produced anything is still retried, with a new inbound id per attempt", async () => {
+    const b = await bridge();
+    port.script.push(
+      { texts: [], task: null, throws: new Error("OpenClaw ingress refused the turn (busy)") },
+      { texts: ["Here it is."], task: null },
+    );
+    await b.handleFrame({ seq: 1, type: "agent.mention.v1", data: mentionEvent(1, []) });
+    expect(port.dispatched.map((m) => m.inboundMessageId)).toEqual(["evt-mention-1", "evt-mention-1:2"]);
+    expect(api.messages.map((m) => m.text)).toEqual(["Here it is."]);
   });
 });
 
