@@ -538,7 +538,7 @@ describe("07.17.1.1.2 tasks: labels, cadence and sentences (D-05, D-11, D-12, PD
     expect(taskStopSentence("no_progress", p)).toBe(
       "I stopped this task: two turns in a row ended without progress. The card shows where it got to.",
     );
-    expect(taskStopSentence("blocked", p)).toBe("I need you to go on with this task. See my last message.");
+    expect(taskStopSentence("blocked", p)).toBe("I need you to go on with this task. See my reply in this conversation.");
     // Code review WR-03: a delivery error that persisted tells the person once.
     expect(taskStopSentence("error", p)).toBe(
       "I stopped this task: an error kept me from going on. The card shows where it got to.",

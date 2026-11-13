@@ -439,7 +439,9 @@ export function taskStopSentence(
     case "error":
       return "I stopped this task: an error kept me from going on. The card shows where it got to.";
     case "blocked":
-      return "I need you to go on with this task. See my last message.";
+      // Code review IN-10: posted as the finish commits, often before the bot's own reply (held to the run's end), so
+      // it names no order.
+      return "I need you to go on with this task. See my reply in this conversation.";
     default:
       return null;
   }

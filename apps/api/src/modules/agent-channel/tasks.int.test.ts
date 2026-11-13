@@ -699,7 +699,7 @@ describe("finish (D-02, PD-18)", () => {
       return m.length > 0 ? m : undefined;
     });
     expect(posted.map((m) => m.body)).toEqual([
-      "@sam I need you to go on with this task. See my last message.",
+      "@sam I need you to go on with this task. See my reply in this conversation.",
     ]);
     const finished = await auditsOf("bot.task_finished", taskId);
     expect(finished).toHaveLength(1);
