@@ -1190,6 +1190,59 @@ server updated to this runtime (Settings › Devices › the server › Runtime 
 6. **Audit.** The rows show ids, sizes and hashes only, never a path:
    `select action, result, metadata from app.audit_events where action in ('bot.work_session_upload', 'bot.work_session_download', 'bot.work_session_refused') order by occurred_at desc limit 10;`
 
+## Long-running bot tasks (Phase 07.17.1.1.2)
+
+Phase 07.17.1.1.2 (ADR-0042). A bot no longer stops after each answer or asks "shall I continue?": when a request
+needs more than one turn, it starts a task and keeps going in the thread by itself.
+
+- **Start, continue, finish.** The bot calls `ocw_task_start` with a one-line goal, then `ocw_task_continue` with its
+  progress and next step at the end of each turn, and `ocw_task_finish` (done, or blocked when it needs the person).
+  The platform delivers its next turn in the same thread 5 s after the last one ended. A turn that ends without
+  either call gets one nudge turn; a second one in a row stops the task as blocked.
+- **Waits.** `waitFor: { processId }` waits for a background sandbox command (`ocw-extract --batch` with
+  `background true`, `timeoutSeconds 600`): the bot is woken with its exit code (75: run the same batch again; 8: no
+  progress; 0: done). `waitFor: { workSessionId }` waits for a Work Zone session the task started. `afterSeconds`
+  waits up to an hour.
+- **The card.** A live task card in the thread: goal, state, "Turn n of N", elapsed time, the wait, progress and next
+  step, updated in place every turn. A visible message at most every 5 turns or 10 minutes, and one at the end. A
+  person's own message in the thread is answered as usual and never pauses or ends the task.
+- **Stop.** On the card, for the person the task runs for, the channel's moderators and the bot's managers (its owner
+  for a personal bot, bot admins and the unit's leads for a team bot). No new turn starts; a turn already running
+  finishes.
+- **Limits.** Settings › Bot policy › **Long tasks** (on by default, team and personal columns), **Turns per task**
+  (40, 1–200), **Hours per task** (8, 1–24), **Tasks running at once** (10, 0–100; 0 turns long tasks off). Per bot:
+  Bots › the bot › Capabilities › **Long tasks**. Every task turn runs as, and is paid by, the person who started it,
+  and counts in the bot's daily limit. When a limit ends the task, the bot posts one message mentioning that person.
+- **Safety.** Each turn is re-decided as that person; the taint is sticky; continuations have no browser tools; not
+  in AI chats. Losing access to the conversation, or the bot turned off or removed, stops the task.
+- **Audit.** `bot.task_started`, `bot.task_continued`, `bot.task_finished`, `bot.task_stopped` and
+  `bot.task_refused` carry ids, counts, reasons and durations, never the goal, the notes or the summary.
+
+The automated tests use a fake cell (e2e: a task over four turns stopped by a 4-turn budget, a second one stopped from
+the card) and a real OpenClaw cell (smoke).
+
+**Owner check** (never run by an agent: it needs `https://ocw.autofy.ing` on v0.3.2, the bot "Gertru", the 3,030-file
+knowledge pack and a real model; record the results in
+`.planning/phases/07.17.1.1.2-long-running-bot-tasks-a-bot-keeps-working-across-turns-on-i/07.17.1.1.2-VALIDATION.md` ›
+Manual-Only Verifications). After the upgrade, with Gertru's sandbox on the new image (07.17.1.1.1):
+
+1. **It starts a task.** In a channel thread, attach or point Gertru to the knowledge pack and ask it to read all of
+   it. It says it started a task, and a task card appears. It does not say it has no background execution and does not
+   ask "¿continúo?".
+2. **It keeps going.** Leave the thread alone. Over many turns the card's "Turn n of N" and its progress move by
+   themselves, with a message in the thread only now and then.
+3. **A sandbox batch wakes it.** While `ocw-extract --batch` runs in the background, the card says "Waiting for a
+   background command"; when the chunk ends, the next turn starts by itself (and runs the batch again after exit 75).
+4. **People and Stop.** Write in the thread mid-task: Gertru answers you and the task goes on. Signed in as a plain
+   member who did not start it (Ben in the e2e), the card has no **Stop**. As the person who asked, press **Stop**:
+   the card says Stopped and no new turn starts.
+5. **The cadence.** Over a long task, the visible messages (at most every 5 turns or 10 minutes) feel right: neither
+   spam nor silence.
+6. **The cost.** Check the usage of a whole task on the subscription. Lower **Turns per task** to 3 in Settings › Bot
+   policy, start a new task: it stops after 3 turns with one message mentioning you. Put the limit back.
+7. **Audit.** The rows carry ids and counts only, never the goal or a note:
+   `select action, result, metadata from app.audit_events where action like 'bot.task_%' order by occurred_at desc limit 20;`
+
 ## Troubleshooting
 
 | Symptom | Fix |

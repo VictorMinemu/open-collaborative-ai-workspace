@@ -246,3 +246,36 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   Limits: the bookworm LibreOffice, poppler and ImageMagick CVEs are contained, not fixed, with trixie as a follow-up.
   No audio or video transcription, and no OCR languages beyond Spanish and English (ADR-0043,
   docs/self-hosting/sandbox.md › Documents in the sandbox).
+- **07.17.1.1.2 Long-running bot tasks:** a bot keeps working on a request that needs many turns, by itself, in the
+  same thread, scheduled only by the platform.
+  - A task is a platform entity (`app.bot_tasks`, tenant RLS, one active task per bot per thread by a partial unique
+    index; `running` and `waiting`, then `done`, `failed` or `stopped`), run for and paid by the person who started
+    it, whose rights `turnPolicy` re-decides on every turn.
+  - Three turn-scoped tools, not side-effecting and outside the 8 calls: `ocw_task_start`, `ocw_task_continue` and
+    `ocw_task_finish` (`POST /agent-channel/v1/tasks/start|continue|finish`, strict ids-and-notes bodies that cannot
+    name a person, conversation, budget or time), offered as `start`, `control` or `view`.
+  - A continuation is the fourth server-originated trigger, `agent.task.v1`, whose text is a fixed server sentence.
+    The bot's own notes travel only in `turn.task`. Its event id derives from the task and its wait sequence, so a
+    retry, the backstop, the tick and a wake all deliver one turn.
+  - The API is the only scheduler: the ids-only `bot_task.continue` job, the minute `bot_task.tick` (a `SECURITY
+    DEFINER` lister of ids, 100 a tick) and the turn-done release (5 s after the bot's turn ends, a 30-minute
+    backstop). OpenClaw's cron, heartbeat and plugin timers stay off.
+  - Waits: a timer (up to 3 600 s), a sandbox background process (sandboxd's new ids-only `process` event, linked in
+    `app.bot_task_processes`; a lost process wakes it at its deadline) or a Work Zone session the task started
+    (`bot_work_sessions.task_id`; its 07.16 wake becomes the task's turn within budget).
+  - Budgets snapshotted at start: 40 turns and 8 h by default (up to 200 and 24 h), 10 running per organization (0 to
+    100, counted under an advisory lock), every turn in the bot's daily limit; one nudge turn, then `no_progress`. A
+    stop posts one fixed sentence mentioning the person (none when access was lost).
+  - A platform-owned `task` Agent Card shows the goal, "Turn n of N", the elapsed time, the wait, progress and next
+    step, updated in place; a visible progress post at most every 5 turns or 10 minutes (the plugin drops quiet
+    turns). **Stop** (`POST /api/v1/bot-tasks/:id/stop`) for the requester, channel moderators and the bot's
+    managers (`viewerCan.stop`).
+  - The taint is sticky and continuations have no browser tools. Settings › Bot policy › Long tasks (the switch and
+    three limits) and the bot's Long tasks capability. The persona prompt gets one paragraph per offer (never claim
+    work that was not scheduled).
+  - Audit (`bot.task_started|continued|finished|stopped|refused`) carries ids and counts only, guarded by Semgrep
+    `ocw.bot-task-text-in-audit`; CODEOWNERS covers the four task modules. Fix: the plugin keys OpenClaw's inbound
+    dedupe per delivery and attempt, so Work Zone wakes and continuations on one card are no longer dropped.
+
+  Limits: not in AI chats; no cross-conversation tasks or task list page; a turn in flight finishes after Stop
+  (ADR-0042, docs/self-hosting/automations.md).
