@@ -1228,7 +1228,7 @@ ejecución en segundo plano".
   5. Integration tests (single delivery, budgets, safety, tenant isolation), the cell smoke and an e2e spec pass on
      desktop and mobile; ADR-0042 records the decisions
 
-**Plans:** 11/14 plans executed
+**Plans:** 12/14 plans executed
 
 Plans:
 
@@ -1243,7 +1243,7 @@ Plans:
 - [x] 07.17.1.1.2-09-PLAN.md — Wave 5: The continuation (three transactions, turn-done hook, tick, budgets, nudge, safety; API end to end, continuation)
 - [x] 07.17.1.1.2-10-PLAN.md — Wave 5: The card's task link, `viewerCan.stop` and the web task card with Stop
 - [x] 07.17.1.1.2-11-PLAN.md — Wave 6: Sandbox process wake-ups (fake and real sandboxd `process` event → tolerant consumer → task)
-- [ ] 07.17.1.1.2-12-PLAN.md — Wave 6: Work Zone session wake-ups (`bot_work_sessions.task_id`, the wake as a task turn)
+- [x] 07.17.1.1.2-12-PLAN.md — Wave 6: Work Zone session wake-ups (`bot_work_sessions.task_id`, the wake as a task turn)
 - [ ] 07.17.1.1.2-13-PLAN.md — Wave 7: The browser journey e2e (fake cell task tools; desktop and mobile, axe)
 - [ ] 07.17.1.1.2-14-PLAN.md — Wave 8: Docs and v0.3.2 notes, guard (Semgrep rule, CODEOWNERS), security walk, phase gate and owner UAT
 
