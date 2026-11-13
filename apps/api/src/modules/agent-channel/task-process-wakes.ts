@@ -1,6 +1,6 @@
-import { BOT_TASK_LIMITS, type SandboxdEvent, type TaskProcessFact } from "@ocw/contracts";
+import { BOT_TASK_ACTIVE, BOT_TASK_LIMITS, type SandboxdEvent, type TaskProcessFact } from "@ocw/contracts";
 import { botTaskProcesses, botTasks, type Tx, tenantOf } from "@ocw/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentTurnRow } from "./claim";
 import { type BotTaskRow, lockTask } from "./tasks";
@@ -16,7 +16,9 @@ import { type BotTaskRow, lockTask } from "./tasks";
  *   timeout + 60 s). A turn without a task records nothing (P5).
  * - `onProcessEvent`: the bot's own `running` row by (organization, bot, process id) gets its end; a task waiting on
  *   exactly that process is due now and gets one ids-only `bot_task.continue` job. A process that ends while its task
- *   waits on something else is only recorded: the next task turn lists it once (`finishedProcesses`).
+ *   waits on something else is only recorded: the next task turn lists it once (`finishedProcesses`). Code review
+ *   WR-02: an end that comes before its link (the link's transaction not committed yet) is kept unlinked, and the link
+ *   takes it, so the event and the link may come in either order.
  * - `processWakeOf`: what the continuation of a `process` wait says (the ended command's facts, or `lost` when the row
  *   is still `running` past its deadline: sandboxd restarted with a new boot id, or the shell was killed).
  *
@@ -51,9 +53,41 @@ export async function linkTaskProcess(
       eventId: p.turn.eventId,
       deadlineAt: sql`now() + make_interval(secs => ${seconds})`,
     })
-    .onConflictDoNothing()
+    // Code review WR-02: the command's end may already be here, unlinked (its event came first): the link takes it and
+    // keeps the end; a row linked already (a retried call) is left as it is.
+    .onConflictDoUpdate({
+      target: [botTaskProcesses.organizationId, botTaskProcesses.agentId, botTaskProcesses.processId],
+      set: {
+        taskId: sql`excluded.task_id`,
+        eventId: sql`excluded.event_id`,
+        deadlineAt: sql`excluded.deadline_at`,
+      },
+      setWhere: isNull(botTaskProcesses.taskId),
+    })
     .returning({ id: botTaskProcesses.id });
   return rows.length > 0;
+}
+
+/** An unlinked end nobody claimed within this long is dropped (its link would have come within seconds). */
+const UNLINKED_KEEP = "1 hour";
+
+/**
+ * Whether `agentId` has a task in this organization that a command's link could still come for (code review WR-02):
+ * only then is an end with no link yet kept, so another organization's event or a bot without a task stores nothing.
+ */
+async function mayLinkLater(tx: Tx, agentId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: botTasks.id })
+    .from(botTasks)
+    .where(
+      and(
+        eq(botTasks.organizationId, orgOf(tx)),
+        eq(botTasks.agentId, agentId),
+        inArray(botTasks.status, [...BOT_TASK_ACTIVE]),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
 }
 
 type ProcessEvent = Extract<SandboxdEvent, { type: "process" }>;
@@ -64,14 +98,15 @@ type ProcessEvent = Extract<SandboxdEvent, { type: "process" }>;
  * organization's event finds nothing here (RLS and an explicit filter, E22); a replay finds the row already ended.
  */
 export async function onProcessEvent(tx: Tx, core: Core, event: ProcessEvent): Promise<void> {
-  const [row] = await tx
+  const end = {
+    status: event.status,
+    exitCode: event.exitCode,
+    durationMs: Math.min(event.durationMs, MAX_DURATION_MS),
+    endedAt: sql`now()`,
+  };
+  let [row] = await tx
     .update(botTaskProcesses)
-    .set({
-      status: event.status,
-      exitCode: event.exitCode,
-      durationMs: Math.min(event.durationMs, MAX_DURATION_MS),
-      endedAt: sql`now()`,
-    })
+    .set(end)
     .where(
       and(
         eq(botTaskProcesses.organizationId, orgOf(tx)),
@@ -81,7 +116,38 @@ export async function onProcessEvent(tx: Tx, core: Core, event: ProcessEvent): P
       ),
     )
     .returning({ taskId: botTaskProcesses.taskId });
-  if (!row) return;
+  if (!row && (await mayLinkLater(tx, event.target.agentId))) {
+    // Code review WR-02: no running link yet. Its outcome transaction may still be open (the command ended within
+    // milliseconds of its yield): the end is kept unlinked for the link to take. Inserting waits on that open link's
+    // key, then ends it like the update above; a replay finds the row ended and changes nothing.
+    [row] = await tx
+      .insert(botTaskProcesses)
+      .values({
+        organizationId: orgOf(tx),
+        agentId: event.target.agentId,
+        processId: event.processId,
+        taskId: null,
+        eventId: null,
+        ...end,
+        deadlineAt: sql`now()`,
+      })
+      .onConflictDoUpdate({
+        target: [botTaskProcesses.organizationId, botTaskProcesses.agentId, botTaskProcesses.processId],
+        set: end,
+        setWhere: eq(botTaskProcesses.status, "running"),
+      })
+      .returning({ taskId: botTaskProcesses.taskId });
+    await tx
+      .delete(botTaskProcesses)
+      .where(
+        and(
+          eq(botTaskProcesses.organizationId, orgOf(tx)),
+          isNull(botTaskProcesses.taskId),
+          sql`${botTaskProcesses.endedAt} < now() - ${UNLINKED_KEEP}::interval`,
+        ),
+      );
+  }
+  if (!row?.taskId) return;
   const task = await lockTask(tx, row.taskId);
   if (task?.status !== "waiting" || task.waitKind !== "process" || task.waitRef !== event.processId) return;
   const [woken] = await tx

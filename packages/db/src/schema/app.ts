@@ -2735,19 +2735,22 @@ export const botTasks = appSchema.table(
  * Phase 07.17.1.1.2 (D-03, PD-05, PD-06; ADR-0042): a background sandbox process a task may wait for, linked when the
  * bot's `/sandbox/exec` started it in a task turn. sandboxd's `process` event ends it (`exited | killed | timed_out`,
  * ids and numbers only: never argv, a path or output); one still running past `deadline_at` is taken as `lost`.
- * Deleting the task deletes its rows; tenant isolation comes from post-migrate.
+ * Deleting the task deletes its rows; tenant isolation comes from post-migrate. Code review WR-02: an end that came
+ * before its link (the command ended within milliseconds of its yield) is kept unlinked (`task_id` and `event_id`
+ * null, never `running`) for the link to take; an unclaimed one is pruned after an hour.
  */
 export const botTaskProcesses = appSchema.table(
   "bot_task_processes",
   {
     id: id(),
     organizationId: orgId(),
-    taskId: uuid("task_id").notNull(),
+    /** Null only on an end not linked yet (code review WR-02). */
+    taskId: uuid("task_id"),
     agentId: uuid("agent_id").notNull(),
     /** sandboxd's process id (`SandboxProcessId`). */
     processId: text("process_id").notNull(),
-    /** The task turn whose exec started the process. */
-    eventId: uuid("event_id").notNull(),
+    /** The task turn whose exec started the process (null while unlinked). */
+    eventId: uuid("event_id"),
     status: text("status", { enum: ["running", "exited", "killed", "timed_out", "lost"] })
       .notNull()
       .default("running"),
@@ -2774,6 +2777,12 @@ export const botTaskProcesses = appSchema.table(
     ),
     check("bot_task_processes_process_id_ck", sql`char_length(${t.processId}) between 1 and 64`),
     check("bot_task_processes_duration_ms_ck", sql`${t.durationMs} is null or ${t.durationMs} >= 0`),
+    // Code review WR-02: an unlinked row is an end waiting for its link: both ids or neither, and never running.
+    check(
+      "bot_task_processes_link_ck",
+      sql`(${t.taskId} is null) = (${t.eventId} is null) and (${t.taskId} is not null or ${t.status} <> 'running')`,
+    ),
+    index("bot_task_processes_unlinked_idx").on(t.organizationId, t.endedAt).where(sql`task_id is null`),
   ],
 );
 

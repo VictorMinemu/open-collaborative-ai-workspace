@@ -429,6 +429,9 @@ describe("bot task checks and the organization's limits (07.17.1.1.2, D-04, PD-0
       [{ process_id: "" }, "bot_task_processes_process_id_ck"],
       [{ process_id: "x".repeat(65) }, "bot_task_processes_process_id_ck"],
       [{ duration_ms: -1 }, "bot_task_processes_duration_ms_ck"],
+      // Code review WR-02: an unlinked end has neither id and is never running.
+      [{ task_id: null, event_id: null }, "bot_task_processes_link_ck"],
+      [{ task_id: null, status: "exited" }, "bot_task_processes_link_ck"],
     ];
     for (const [cols, constraint] of cases) {
       await refused(processRow(A, t, cols), { constraint });
@@ -436,6 +439,7 @@ describe("bot task checks and the organization's limits (07.17.1.1.2, D-04, PD-0
     for (const status of ["running", "exited", "killed", "timed_out", "lost"]) {
       await processRow(A, t, { status });
     }
+    await processRow(A, t, { task_id: null, event_id: null, status: "exited", exit_code: 0 });
     const fresh = await processRow(A, t);
     const row = await db.query(
       "select status, exit_code, duration_ms, ended_at, reported_at from app.bot_task_processes where id = $1",

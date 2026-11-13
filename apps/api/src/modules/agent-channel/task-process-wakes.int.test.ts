@@ -21,7 +21,7 @@ import {
   taskRow,
 } from "../../testing-tasks";
 import { createSandboxEventsConsumer, type SandboxdClient } from "../sandbox";
-import { onProcessEvent } from "./task-process-wakes";
+import { linkTaskProcess, onProcessEvent } from "./task-process-wakes";
 
 /**
  * Phase 07.17.1.1.2-11 (D-03, PD-13; BTASK-04, BTASK-11): a background sandbox command a task waits on wakes the task
@@ -292,6 +292,122 @@ describe("a lost command: sandboxd restarted, no event before the deadline (E20)
     expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "lost" });
     await drainTaskJobs(s);
     expect(await taskEvents(s, taskId)).toHaveLength(1);
+  });
+});
+
+describe("code review WR-02: a command that ends before its link commits", () => {
+  const core = () => s.stack.built.core;
+  const ended = (processId: string, agentId = s.scoutId) => ({
+    seq: 1,
+    at: new Date().toISOString(),
+    type: "process" as const,
+    target: { orgId: s.orgA, agentId },
+    processId,
+    status: "exited" as const,
+    exitCode: 75,
+    durationMs: 40,
+  });
+
+  it("the early event is kept and the link takes it: the bot learns the real exit code on its next turn", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const processId = `early-${Date.now()}`;
+    // sandboxd's event is applied before the exec's outcome transaction wrote the link.
+    await core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) =>
+      onProcessEvent(tx, core(), ended(processId)),
+    );
+    await core().db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+      linkTaskProcess(tx, {
+        turn: { eventId: start.eventId as string, agentId: s.scoutId, taskId },
+        processId,
+        timeoutSeconds: 300,
+      }),
+    );
+    const rows = await processRowsOf(s, taskId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      task_id: taskId,
+      event_id: start.eventId,
+      process_id: processId,
+      status: "exited",
+      exit_code: 75,
+      duration_ms: 40,
+    });
+    // Waiting on it now goes on after the turn, and the next turn lists its end once.
+    expect((await continueAs(s, start, { waitFor: { processId } })).body).toMatchObject({
+      ok: true,
+      next: "after_turn",
+    });
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const [next] = await taskEvents(s, taskId);
+    expect(next?.turn.task.finishedProcesses).toEqual([
+      { processId, status: "exited", exitCode: 75, durationMs: 40 },
+    ]);
+  });
+
+  it("the event lands while the link's transaction is still open: it waits for the link, then ends it", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const processId = `race-${Date.now()}`;
+    let commitLink: () => void = () => {};
+    const linked = new Promise<void>((r) => {
+      commitLink = r;
+    });
+    let written: () => void = () => {};
+    const inserted = new Promise<void>((r) => {
+      written = r;
+    });
+    const link = core().db.withTenant({ organizationId: s.orgA, userId: s.samId }, async (tx) => {
+      await linkTaskProcess(tx, {
+        turn: { eventId: start.eventId as string, agentId: s.scoutId, taskId },
+        processId,
+        timeoutSeconds: 300,
+      });
+      written();
+      await linked;
+    });
+    await inserted;
+    const applied = core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) =>
+      onProcessEvent(tx, core(), ended(processId)),
+    );
+    await pause(150);
+    commitLink();
+    await Promise.all([link, applied]);
+    const rows = await processRowsOf(s, taskId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      process_id: processId,
+      task_id: taskId,
+      status: "exited",
+      exit_code: 75,
+    });
+  });
+
+  it("a link written first still gets its end as before; an unclaimed early end of a bot without a task is not kept", async () => {
+    const { taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const processId = `late-${Date.now()}`;
+    await core().db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+      linkTaskProcess(tx, {
+        turn: { eventId: start.eventId as string, agentId: s.scoutId, taskId },
+        processId,
+        timeoutSeconds: 300,
+      }),
+    );
+    await core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) =>
+      onProcessEvent(tx, core(), ended(processId)),
+    );
+    expect((await processRowsOf(s, taskId))[0]).toMatchObject({ status: "exited", exit_code: 75 });
+
+    const idle = await s.newBot("Idle Bot");
+    await core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) =>
+      onProcessEvent(tx, core(), ended(`idle-${Date.now()}`, idle.id)),
+    );
+    expect(
+      (
+        await s.su.query("select count(*)::int as n from app.bot_task_processes where agent_id = $1", [
+          idle.id,
+        ])
+      ).rows[0]?.n,
+    ).toBe(0);
   });
 });
 
