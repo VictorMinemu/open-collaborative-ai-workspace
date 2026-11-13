@@ -500,13 +500,27 @@ export async function turnDone(
   );
   if (!found) throw notFound(UNKNOWN_TURN, "unknown_turn");
   // Phase 07.17.1.1.2 (PD-06): a long task's turn ended. Its wait is released (or the nudge decided) before the chain
-  // half, which runs unchanged; a turn outside any task changes nothing there.
-  await taskTurnDone(core, {
-    organizationId: cell.organizationId,
-    eventId,
-    agentId: body.agentId,
-    outcome: body.outcome,
-  });
+  // half, which runs unchanged; a turn outside any task changes nothing there. Code review IN-05: its own transaction,
+  // and a failure there is logged with ids only and never stops the chain half (the tick recovers the task: a waiting
+  // task's lost job, or a running task's lost turn after 30 minutes).
+  try {
+    await taskTurnDone(core, {
+      organizationId: cell.organizationId,
+      eventId,
+      agentId: body.agentId,
+      outcome: body.outcome,
+    });
+  } catch (err) {
+    core.log.warn(
+      {
+        eventId,
+        agentId: body.agentId,
+        organizationId: cell.organizationId,
+        err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code },
+      },
+      "task turn done failed",
+    );
+  }
   const { chainId } = found;
   if (!chainId) return;
   await core.db.withTenant({ organizationId: cell.organizationId, userId: found.userId }, async (tx) => {

@@ -430,6 +430,38 @@ describe("tracer: Bea answers, reports done, and Archie gets the answer back as 
   });
 });
 
+describe("07.17.1.1.2 code review IN-05: a failing task half of the done never blocks the chain half", () => {
+  it("Bea's turn also belongs to a task whose update fails: her hop is still answered and Archie gets his reply", async () => {
+    const { answer, bea } = await consulted();
+    await ok(post(bea, ANSWER));
+    const taskId = randomUUID();
+    await su.query(
+      `insert into app.bot_tasks (id, organization_id, agent_id, conversation_id, thread_root_id, requester_user_id,
+         started_event_id, current_event_id, status, goal, turns_used, max_turns, deadline_at, wait_kind, wake_at, wait_seq)
+       values ($1, $2, $3, $4, null, $5, $6, $6, 'waiting', 'Answer Archie', 1, 40, now() + interval '8 hours',
+         'turn', now() + interval '30 minutes', 1)`,
+      [taskId, orgId, beaId, opsId, victorId, bea.eventId],
+    );
+    await su.query("update app.agent_turns set task_id = $1 where event_id = $2", [taskId, bea.eventId]);
+    await su.query(`create or replace function app.test_in05_fail() returns trigger language plpgsql as $f$
+      begin raise exception 'injected task failure'; end $f$`);
+    await su.query(
+      `create trigger test_in05_fail before update on app.bot_tasks for each row
+         when (old.id = '${taskId}'::uuid) execute function app.test_in05_fail()`,
+    );
+    try {
+      const r = await done(bea);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect((await hopRow(answer.hopId)).status).toBe("answered");
+      expect(await replyFor(answer.hopId)).toBeDefined();
+    } finally {
+      await su.query("drop trigger if exists test_in05_fail on app.bot_tasks");
+      await su.query("drop function if exists app.test_in05_fail()");
+      await su.query("delete from app.bot_tasks where id = $1", [taskId]);
+    }
+  });
+});
+
 describe("a chain completes only once none of its turns still runs (CR-A-07)", () => {
   it("Bea answers before Archie's first turn ends: its late done leaves the return turn its consult", async () => {
     const { archie, answer, bea } = await consulted({ conversationId: trioId });
