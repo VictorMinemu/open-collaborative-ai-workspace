@@ -1,7 +1,19 @@
+import { createHash, randomUUID } from "node:crypto";
 import { BUILTIN_TOOLS } from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eventually } from "../../testing-device";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
-import { deliverTaskTurn, startTaskFor, TASK_GOAL, taskRow } from "../../testing-tasks";
+import {
+  continueAs,
+  deliverTaskTurn,
+  finishAs,
+  setTask,
+  startTaskFor,
+  TASK_GOAL,
+  TASK_NEXT_STEP,
+  TASK_PROGRESS,
+  taskRow,
+} from "../../testing-tasks";
 
 /**
  * Phase 07.17.1.1.2-08 (D-01, D-02, D-05, D-13; PD-05, PD-08, PD-11, PD-19; BTASK-01, BTASK-02, BTASK-09): a bot's long
@@ -31,6 +43,8 @@ beforeAll(async () => {
   ]) {
     await ok(s.victor.request("POST", `/api/v1/channels/${engId}/members`, member) as Promise<Res>);
   }
+  // This suite leaves many tasks running: the organization's cap (default 10) is raised to its maximum.
+  await ok(s.victor.request("PUT", "/api/v1/bot-policy", { tasks: { maxRunning: 100 } }) as Promise<Res>);
 }, 240_000);
 
 afterAll(async () => {
@@ -200,5 +214,407 @@ describe("tracer: a delivered turn starts a task (PD-08, PD-11)", () => {
     // … and a new message at the channel's root is another thread.
     const other = await startTaskFor(s, { who: s.alex, conversationId: engId });
     expect((await taskRow(s, other.taskId)).requester_user_id).toBe(s.alexId);
+  });
+});
+
+// ---------------------------------------------------------------- continue and finish (Task 2)
+
+const CONTINUE = BUILTIN_TOOLS.taskContinue;
+const MIN = 60_000;
+
+/** `at` within `slackMs` of `expected` (both epoch ms). */
+function near(at: unknown, expected: number, slackMs = 5_000) {
+  const ms = new Date(at as string).getTime();
+  expect(
+    Math.abs(ms - expected),
+    `${new Date(ms).toISOString()} vs ${new Date(expected).toISOString()}`,
+  ).toBeLessThan(slackMs);
+}
+
+const jobsOf = async (taskId: string) =>
+  (
+    await s.su.query(
+      "select data, start_after from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1 order by created_on",
+      [taskId],
+    )
+  ).rows as Array<{ data: Json; start_after: string }>;
+
+/** The bot's plain (card-less) messages in the task's thread (or its DM). */
+async function botMessagesOf(taskId: string): Promise<Json[]> {
+  const row = await taskRow(s, taskId);
+  return (
+    await s.su.query(
+      `select m.body from app.messages m left join app.message_cards c on c.message_id = m.id
+        where m.conversation_id = $1 and m.author_kind = 'agent' and c.message_id is null
+          and m.thread_id is not distinct from $2 order by m.created_at`,
+      [row.conversation_id, row.thread_root_id],
+    )
+  ).rows as Json[];
+}
+
+/** A task started in a new #eng thread, then continued on its start turn: it waits, so Sam's next turn controls it. */
+async function waitingTask(): Promise<{ taskId: string; start: Json }> {
+  const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+  const res = await continueAs(s, event);
+  expect(res.body, JSON.stringify(res.body)).toMatchObject({ ok: true });
+  return { taskId, start: event };
+}
+
+/** Sam's own message in the task's thread while it waits: a control turn (continue and finish, the ledger link). */
+async function controlTurn(start: Json): Promise<Json> {
+  const ev = await deliverTaskTurn(s, { who: s.sam, conversationId: engId, threadRootId: start.message.id });
+  expect(ev.turn.tools).toContain(CONTINUE);
+  return ev;
+}
+
+/** A bot Work Zone session in organization A (device, project, conversation, session), linked to `taskId`. */
+async function seedSession(taskId: string | null): Promise<string> {
+  const dev = randomUUID();
+  const proj = randomUUID();
+  const conv = randomUUID();
+  const ws = randomUUID();
+  await s.su.query(
+    "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'mac', 'darwin', $4, true, 'online', '[]')",
+    [dev, s.orgA, s.victorId, createHash("sha256").update(randomUUID()).digest("hex")],
+  );
+  await s.su.query(
+    "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, $4, 'pack')",
+    [proj, s.orgA, dev, `l-${proj.slice(0, 8)}`],
+  );
+  await s.su.query(
+    "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'work_session', 'pack')",
+    [conv, s.orgA],
+  );
+  await s.su.query(
+    "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by, status, started_by_agent_id) values ($1, $2, $3, $4, $5, 'Pack', $6, 'running', $7)",
+    [ws, s.orgA, conv, proj, dev, s.victorId, s.scoutId],
+  );
+  await s.su.query(
+    "insert into app.bot_work_sessions (work_session_id, organization_id, agent_id, sponsor_user_id, requester_user_id, origin_conversation_id, origin_message_id, origin_event_id, task_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    [ws, s.orgA, s.scoutId, s.victorId, s.samId, engId, randomUUID(), randomUUID(), taskId],
+  );
+  return ws;
+}
+
+describe("continue: the waits (PD-05)", () => {
+  it("on the start turn without a wait: after_turn, the 30-minute backstop, one ids-only job, the card Waiting", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const before = Date.now();
+    const res = await continueAs(s, event);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, next: "after_turn", at: null, turnsLeft: 39, quiet: false });
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({
+      status: "waiting",
+      wait_kind: "turn",
+      wait_ref: null,
+      wait_seq: 1,
+      nudged: false,
+      progress: TASK_PROGRESS,
+      next_step: TASK_NEXT_STEP,
+      turns_used: 1,
+    });
+    near(row.wake_at, before + 30 * MIN);
+    const jobs = await jobsOf(taskId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.data).toEqual({ organizationId: s.orgA, taskId });
+    near(jobs[0]?.start_after, new Date(row.wake_at as string).getTime(), 1_000);
+    const card = (
+      await s.su.query("select status, status_label, fields from app.message_cards where message_id = $1", [
+        row.card_message_id,
+      ])
+    ).rows[0] as Json;
+    expect(card).toEqual({
+      status: "running",
+      status_label: "Waiting",
+      fields: [
+        { label: "Progress", value: TASK_PROGRESS },
+        { label: "Next step", value: TASK_NEXT_STEP },
+      ],
+    });
+    // D-13: neither the start nor the continue counted on the turn.
+    expect(
+      (await s.su.query("select tool_calls from app.agent_turns where event_id = $1", [event.eventId]))
+        .rows[0],
+    ).toEqual({ tool_calls: 0 });
+  });
+
+  it("timers: 120 s, capped at the deadline, at least the 5-second gap", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    let before = Date.now();
+    const timer = await continueAs(s, event, { afterSeconds: 120 });
+    expect(timer.body).toMatchObject({ ok: true, next: "at", turnsLeft: 39 });
+    let row = await taskRow(s, taskId);
+    expect(row.wait_kind).toBe("timer");
+    near(row.wake_at, before + 120_000);
+    near(timer.body?.at, new Date(row.wake_at as string).getTime(), 1);
+
+    const deadline = new Date(Date.now() + 60_000);
+    await setTask(s, taskId, { deadline_at: deadline });
+    const capped = await continueAs(s, event, { afterSeconds: 120 });
+    expect(capped.body).toMatchObject({ ok: true, next: "at" });
+    row = await taskRow(s, taskId);
+    expect(new Date(row.wake_at as string).getTime()).toBe(deadline.getTime());
+
+    await setTask(s, taskId, { deadline_at: new Date(Date.now() + 8 * 60 * MIN) });
+    before = Date.now();
+    await continueAs(s, event, { afterSeconds: 3 });
+    row = await taskRow(s, taskId);
+    near(row.wake_at, before + 5_000, 2_000);
+    expect(row.wait_seq).toBe(3);
+  });
+
+  it("waitFor a process of this task: running waits for it, ended goes on after the turn, others are unknown", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const other = await startTaskFor(s, { who: s.alex, conversationId: engId });
+    const processDeadline = new Date(Date.now() + 15 * MIN);
+    const seed = (task: string, processId: string, status: string) =>
+      s.su.query(
+        `insert into app.bot_task_processes (organization_id, task_id, agent_id, process_id, event_id, status, deadline_at, ended_at)
+         values ($1, $2, $3, $4, $5, $6::text, $7, case when $6::text = 'running' then null else now() end)`,
+        [s.orgA, task, s.scoutId, processId, randomUUID(), status, processDeadline.toISOString()],
+      );
+    await seed(taskId, "p-running-1", "running");
+    await seed(taskId, "p-ended-1", "exited");
+    await seed(other.taskId, "p-other-1", "running");
+
+    const running = await continueAs(s, event, { waitFor: { processId: "p-running-1" } });
+    expect(running.body).toMatchObject({ ok: true, next: "on_process" });
+    let row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ wait_kind: "process", wait_ref: "p-running-1" });
+    expect(new Date(row.wake_at as string).getTime()).toBe(processDeadline.getTime());
+
+    const ended = await continueAs(s, event, { waitFor: { processId: "p-ended-1" } });
+    expect(ended.body).toMatchObject({ ok: true, next: "after_turn" });
+    expect((await taskRow(s, taskId)).wait_kind).toBe("turn");
+
+    const seqBefore = (await taskRow(s, taskId)).wait_seq;
+    for (const processId of ["p-other-1", "p-missing-1"]) {
+      const unknown = await continueAs(s, event, { waitFor: { processId } });
+      expect(unknown.body).toMatchObject({ ok: false, code: "wait_unknown" });
+    }
+    row = await taskRow(s, taskId);
+    expect(row.wait_seq).toBe(seqBefore);
+  });
+
+  it("waitFor a Work Zone session this task started: on_session for an hour; another session is unknown", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const mine = await seedSession(taskId);
+    const theirs = await seedSession(null);
+    const before = Date.now();
+    const res = await continueAs(s, event, { waitFor: { workSessionId: mine } });
+    expect(res.body).toMatchObject({ ok: true, next: "on_session" });
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ wait_kind: "session", wait_ref: mine });
+    near(row.wake_at, before + 60 * MIN);
+    const unknown = await continueAs(s, event, { waitFor: { workSessionId: theirs } });
+    expect(unknown.body).toMatchObject({ ok: false, code: "wait_unknown" });
+  });
+});
+
+describe("continue: the cadence, the busy rule, no task (D-11, PD-10, E16, E23)", () => {
+  it("a platform-delivered task turn is quiet inside the cadence and posts at the fifth turn or after 10 minutes", async () => {
+    const { taskId, start } = await waitingTask();
+    const turn = await controlTurn(start);
+    // As 09 will deliver it: this turn is the task's current turn, three turns in, last post two minutes ago.
+    const asDelivered = async (patch: Record<string, unknown>) =>
+      setTask(s, taskId, {
+        status: "running",
+        wait_kind: null,
+        wake_at: null,
+        current_event_id: turn.eventId,
+        ...patch,
+      });
+    await asDelivered({ turns_used: 3, last_post_turn: 1, last_post_at: new Date(Date.now() - 2 * MIN) });
+    const quiet = await continueAs(s, turn);
+    expect(quiet.body).toMatchObject({ ok: true, quiet: true, turnsLeft: 37 });
+    let row = await taskRow(s, taskId);
+    expect(row.last_post_turn).toBe(1);
+
+    await asDelivered({ turns_used: 6, last_post_turn: 1, last_post_at: new Date(Date.now() - 2 * MIN) });
+    const fifth = await continueAs(s, turn);
+    expect(fifth.body).toMatchObject({ ok: true, quiet: false });
+    row = await taskRow(s, taskId);
+    expect(row.last_post_turn).toBe(6);
+    near(row.last_post_at, Date.now());
+
+    await asDelivered({ turns_used: 7, last_post_turn: 6, last_post_at: new Date(Date.now() - 11 * MIN) });
+    expect((await continueAs(s, turn)).body).toMatchObject({ ok: true, quiet: false });
+  });
+
+  it("Sam's own control turn while the task waits is never quiet", async () => {
+    const { taskId, start } = await waitingTask();
+    await setTask(s, taskId, { turns_used: 3, last_post_turn: 1, last_post_at: new Date() });
+    const turn = await controlTurn(start);
+    expect((await continueAs(s, turn)).body).toMatchObject({ ok: true, quiet: false });
+    expect((await taskRow(s, taskId)).last_post_turn).toBe(3);
+  });
+
+  it("busy: while another turn of the task runs, Sam's control turn is refused and the row is unchanged", async () => {
+    const { taskId, start } = await waitingTask();
+    const turn = await controlTurn(start);
+    await setTask(s, taskId, {
+      status: "running",
+      wait_kind: null,
+      wake_at: null,
+      current_event_id: randomUUID(),
+    });
+    const before = await taskRow(s, taskId);
+    const res = await continueAs(s, turn);
+    expect(res.body).toMatchObject({ ok: false, code: "task_busy" });
+    expect(await taskRow(s, taskId)).toEqual(before);
+  });
+
+  it("continue or finish on a turn without a task: no_task", async () => {
+    const event = await deliverTaskTurn(s, { who: s.sam, conversationId: engId });
+    expect((await continueAs(s, event)).body).toMatchObject({ ok: false, code: "no_task" });
+    expect((await finishAs(s, event, { summary: "Nothing", outcome: "done" })).body).toMatchObject({
+      ok: false,
+      code: "no_task",
+    });
+  });
+});
+
+describe("continue: the budgets and the policy stop the task with one message (D-04, PD-09, PD-18, E7, E8, E11)", () => {
+  async function expectStopped(taskId: string, outcome: string, notice: string, sentence: string) {
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "stopped", outcome, wait_kind: null, wake_at: null });
+    expect(row.finished_at).not.toBeNull();
+    const card = (
+      await s.su.query("select status, status_label, notices from app.message_cards where message_id = $1", [
+        row.card_message_id,
+      ])
+    ).rows[0] as Json;
+    expect(card).toEqual({
+      status: "cancelled",
+      status_label: "Stopped",
+      notices: [{ tone: "neutral", text: notice }],
+    });
+    const posted = await eventually(async () => {
+      const m = await botMessagesOf(taskId);
+      return m.length > 0 ? m : undefined;
+    });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body).toBe(`@sam ${sentence}`);
+    const stops = await auditsOf("bot.task_stopped", taskId);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.metadata).toMatchObject({ taskId, outcome, turnsUsed: row.turns_used });
+    expect(await jobsOf(taskId)).toEqual([]);
+  }
+
+  it("all its turns used: budget_turns, stopped, the card's notice and @sam once", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    await setTask(s, taskId, { turns_used: 40 });
+    const seq = (await taskRow(s, taskId)).wait_seq as number;
+    const res = await continueAs(s, event);
+    expect(res.body).toMatchObject({ ok: false, code: "budget_turns" });
+    await expectStopped(
+      taskId,
+      "budget_turns",
+      "Stopped: it used its 40 turns.",
+      "I stopped this task after 40 turns, the limit for one task. The card shows where it got to.",
+    );
+    expect((await taskRow(s, taskId)).wait_seq).toBe(seq + 1);
+  });
+
+  it("past its deadline: budget_time", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const row = await taskRow(s, taskId);
+    // Eight hours from start, moved into the past together (the task's hour budget stays 8).
+    const shift = 9 * 60 * MIN;
+    await setTask(s, taskId, {
+      started_at: new Date(new Date(row.started_at as string).getTime() - shift),
+      deadline_at: new Date(new Date(row.deadline_at as string).getTime() - shift),
+    });
+    const res = await continueAs(s, event);
+    expect(res.body).toMatchObject({ ok: false, code: "budget_time" });
+    await expectStopped(
+      taskId,
+      "budget_time",
+      "Stopped: it ran for 8 h.",
+      "I stopped this task after 8 h, the limit for one task. The card shows where it got to.",
+    );
+  });
+
+  it("long tasks turned off for the bot since the start: policy_off", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    await s.su.query(
+      "update app.agents set capabilities = capabilities || jsonb_build_object('longTasks', false) where id = $1",
+      [s.scoutId],
+    );
+    try {
+      const res = await continueAs(s, event);
+      expect(res.body).toMatchObject({ ok: false, code: "policy_off" });
+      await expectStopped(
+        taskId,
+        "policy_off",
+        "Stopped: long tasks were turned off.",
+        "I stopped this task: long tasks were turned off for me.",
+      );
+    } finally {
+      await s.su.query(
+        "update app.agents set capabilities = capabilities || jsonb_build_object('longTasks', true) where id = $1",
+        [s.scoutId],
+      );
+    }
+  });
+});
+
+describe("finish (D-02, PD-18)", () => {
+  it("done: the card Done and succeeded, Sam notified as a follower, no message; a second finish is task_stopped", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const card = (await taskRow(s, taskId)).card_message_id as string;
+    await s.su.query("delete from app.notifications where user_id = $1 and message_id = $2", [s.samId, card]);
+    const summary = "Summarised the pack:\nthree findings";
+    const res = await finishAs(s, event, { summary, outcome: "done" });
+    expect(res.body).toEqual({ ok: true, status: "done" });
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "done", outcome: "done", summary, wait_kind: null });
+    expect(row.finished_at).not.toBeNull();
+    expect(
+      (await s.su.query("select status, status_label from app.message_cards where message_id = $1", [card]))
+        .rows[0],
+    ).toEqual({ status: "succeeded", status_label: "Done" });
+    expect(
+      (
+        await s.su.query("select kind from app.notifications where user_id = $1 and message_id = $2", [
+          s.samId,
+          card,
+        ])
+      ).rows,
+    ).toEqual([{ kind: "card_updated" }]);
+    expect(await auditsOf("bot.task_finished", taskId)).toHaveLength(1);
+
+    const again = await finishAs(s, event, { summary: "Again", outcome: "done" });
+    expect(again.body).toMatchObject({ ok: false, code: "task_stopped" });
+    expect((await continueAs(s, event)).body).toMatchObject({ ok: false, code: "task_stopped" });
+    // A finish done posts nothing besides the card.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await botMessagesOf(taskId)).toEqual([]);
+  });
+
+  it("blocked: failed, the card Blocked, one message mentioning Sam", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    const res = await finishAs(s, event, { summary: "I need the export password", outcome: "blocked" });
+    expect(res.body).toEqual({ ok: true, status: "failed" });
+    const row = await taskRow(s, taskId);
+    expect(row).toMatchObject({ status: "failed", outcome: "blocked" });
+    expect(
+      (
+        await s.su.query("select status, status_label from app.message_cards where message_id = $1", [
+          row.card_message_id,
+        ])
+      ).rows[0],
+    ).toEqual({ status: "failed", status_label: "Blocked" });
+    const posted = await eventually(async () => {
+      const m = await botMessagesOf(taskId);
+      return m.length > 0 ? m : undefined;
+    });
+    expect(posted.map((m) => m.body)).toEqual([
+      "@sam I need you to go on with this task. See my last message.",
+    ]);
+    const finished = await auditsOf("bot.task_finished", taskId);
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.metadata).toMatchObject({ taskId, outcome: "blocked" });
   });
 });
