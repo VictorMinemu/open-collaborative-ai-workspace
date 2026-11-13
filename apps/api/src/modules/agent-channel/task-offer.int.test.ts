@@ -328,6 +328,20 @@ describe("tracer: a person's mention carries the three task tools; a waiting tas
     await expectStart(await mention(s.sam));
   });
 
+  it("code review IN-02: with no task allowed to run (maxRunning 0) no start is offered; a waiting task's control turn keeps continue and finish", async () => {
+    const root = await post(s.sam, engId, "Reconcile the receipts");
+    const t = await seedTask({ threadRootId: root });
+    await putPolicy({ tasks: { maxRunning: 0 } });
+    try {
+      expectNoTask(await mention(s.sam));
+      await expectControl(await mention(s.sam, { threadRootId: root }), t.id);
+    } finally {
+      await putPolicy({ tasks: { maxRunning: 10 } });
+      await endTask(t.id);
+    }
+    await expectStart(await mention(s.sam));
+  });
+
   it("with the bot's own Long tasks toggle off: none either", async () => {
     await ok(
       s.victor.request("PATCH", `/api/v1/agents/${s.scoutId}/capabilities`, {

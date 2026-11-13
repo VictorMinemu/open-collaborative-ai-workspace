@@ -435,6 +435,11 @@ interface ComputedTurn extends TurnTools {
    * already loaded). Adds no tool here; the task offer (07) is gated on it.
    */
   longTasks: boolean;
+  /**
+   * Code review IN-02: a task may start in the organization at all (`maxRunning` > 0). At 0 the start is never offered
+   * (it could only answer `org_cap`); tasks already running keep their continue and finish.
+   */
+  longTaskStarts: boolean;
 }
 
 /**
@@ -701,6 +706,7 @@ async function computeTurn(
     sandboxOffered,
     imageModel: modelAcceptsImages(row.modelProvider, row.modelId),
     longTasks: taskPolicyFor({ scope: row.scope, caps, policy }).enabled,
+    longTaskStarts: policy.tasks.maxRunning > 0,
     ...assembled,
   };
 }
@@ -1221,7 +1227,9 @@ export async function turnPolicy(
   // says why the start is missing (`turn_full`). A turn of a running task (control) makes room for continue and
   // finish, as the conversation-open rule does: the last non-platform tools give their places, each listed as
   // withheld `turn_full`, so the persona knows a granted tool is missing.
-  const task = computed.longTasks ? (p.task ?? null) : null;
+  const offered = computed.longTasks ? (p.task ?? null) : null;
+  // Code review IN-02: no start where no task may run (`maxRunning` 0).
+  const task = offered?.offer === "start" && !computed.longTaskStarts ? null : offered;
   if (task) {
     const missing = TASK_OFFER_TOOLS[task.offer].filter((name) => !computed.toolFlags[name]);
     const fits = computed.tools.length + missing.length <= MAX_TURN_TOOLS;
