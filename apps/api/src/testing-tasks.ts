@@ -156,3 +156,38 @@ export async function taskRow(s: SandboxStack, taskId: string): Promise<Json> {
   expect(rows).toHaveLength(1);
   return rows[0] as Json;
 }
+
+/**
+ * Runs every queued long-task job now (07.17.1.1.2-09): the superuser moves `start_after` of the `bot_task.*` jobs to
+ * `now()` (tests do not wait out a 5 s gap, a timer or the 30-minute backstop), then drains the tick and the
+ * continuation queues. Returns how many continuation jobs ran. A job that is not due stays queued when only
+ * `core.jobs.drain` is called, as in production.
+ */
+export async function drainTaskJobs(s: SandboxStack): Promise<number> {
+  await s.su.query(
+    "update pgboss.job set start_after = now() where name like 'bot_task.%' and state in ('created', 'retry')",
+  );
+  const jobs = s.stack.built.core.jobs;
+  await jobs.drain("bot_task.tick");
+  return jobs.drain("bot_task.continue");
+}
+
+/** The cell's `POST /turns/:eventId/done` for a delivered turn (the bridge's report at the end of every task turn). */
+export function reportTurnDone(
+  s: SandboxStack,
+  eventId: string,
+  outcome: "replied" | "failed" = "replied",
+  opts: { agentId?: string; token?: string } = {},
+): Promise<Res> {
+  return cellCall(s, `/turns/${eventId}/done`, { agentId: opts.agentId ?? s.scoutId, outcome }, opts.token);
+}
+
+/** The `agent.task.v1` events of one task on organization A's cell stream (or `organizationId`'s), oldest first. */
+export async function taskEvents(s: SandboxStack, taskId: string, organizationId?: string): Promise<Json[]> {
+  return (
+    await s.su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.task.v1' and payload->'task'->>'taskId' = $2 order by seq",
+      [`cell:${organizationId ?? s.orgA}`, taskId],
+    )
+  ).rows.map((r) => r.payload as Json);
+}

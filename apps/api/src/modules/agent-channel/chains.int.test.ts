@@ -570,6 +570,40 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
     // An ordinary turn's reply is not recorded on the ledger (chain turns only).
     expect((await turnRow(ev.eventId)).reply_message_id).toBeNull();
   });
+
+  it("07.17.1.1.2-09: a done for a chain turn that is also a long task's turn closes its hop and releases its task's wait", async () => {
+    const { root, answer, bea } = await consulted();
+    await ok(post(bea, ANSWER));
+    // Bea's question turn belongs to a task of hers that waits for this turn to end (seeded: the task routes are not
+    // this suite's subject). The wait is the 30-minute backstop until the done shortens it.
+    const [task] = await rows(
+      `insert into app.bot_tasks (organization_id, agent_id, conversation_id, thread_root_id, requester_user_id,
+         started_event_id, current_event_id, status, goal, turns_used, max_turns, deadline_at, updated_at, wait_kind,
+         wake_at, wait_seq)
+       values ($1, $2, $3, $4, $5, $6, $6, 'waiting', 'Check the pump order', 1, 40, now() + interval '8 hours', now(),
+         'turn', now() + interval '30 minutes', 1)
+       returning id`,
+      [orgId, beaId, opsId, root, victorId, bea.eventId],
+    );
+    await su.query("update app.agent_turns set task_id = $1 where event_id = $2", [task?.id, bea.eventId]);
+
+    const before = Date.now();
+    expect((await done(bea)).status).toBe(200);
+    // The chain half, unchanged: the hop is answered and Archie gets the answer back.
+    expect((await hopRow(answer.hopId)).status).toBe("answered");
+    expect((await replies(archieId)).filter((p) => p.consultReply.hopId === answer.hopId)).toHaveLength(1);
+    // The task half: the wait now ends about 5 s after the done, and one continuation job is queued.
+    const [after] = await rows("select status, wake_at from app.bot_tasks where id = $1", [task?.id]);
+    expect(after?.status).toBe("waiting");
+    const wake = new Date(after?.wake_at as Date).getTime();
+    expect(wake).toBeLessThanOrEqual(Date.now() + 10_000);
+    expect(wake).toBeGreaterThanOrEqual(before - 1_000);
+    const jobs = await rows(
+      "select 1 from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1 and data->>'organizationId' = $2",
+      [task?.id, orgId],
+    );
+    expect(jobs.length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("the hop's answer is the consulted bot's whole reply, never a failure notice (CR-A-03, CR-A-04)", () => {

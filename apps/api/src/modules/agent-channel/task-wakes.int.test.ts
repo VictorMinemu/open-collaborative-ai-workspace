@@ -1,0 +1,235 @@
+import { AgentTaskEvent, BUILTIN_TOOLS } from "@ocw/contracts";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import {
+  continueAs,
+  deliverTaskTurn,
+  drainTaskJobs,
+  reportTurnDone,
+  startTaskFor,
+  taskEvents,
+  taskRow,
+} from "../../testing-tasks";
+import { taskEventId } from "./task-wakes";
+
+/**
+ * Phase 07.17.1.1.2-09 (D-01, D-02, D-07; PD-05, PD-06, PD-11; BTASK-01, BTASK-03, BTASK-06): the phase's API end to end,
+ * continuation. A bot's turn calls `ocw_task_continue`; the cell reports the turn done; the `bot_task.continue` job
+ * delivers exactly one `agent.task.v1` in the card's thread, for the requester, built like a mention of the bot on its
+ * task card: a fixed server sentence as the message, the task's notes in `turn.task`, the continue and finish tools.
+ *
+ * People: Sam Lee asks (the requester); Alex Kim is another member of #eng. Scout is the team bot.
+ */
+
+let s: SandboxStack;
+let engId: string;
+
+const CONTINUE = BUILTIN_TOOLS.taskContinue;
+const FINISH = BUILTIN_TOOLS.taskFinish;
+const START = BUILTIN_TOOLS.taskStart;
+
+beforeAll(async () => {
+  s = await startSandboxStack();
+  engId = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" }) as Promise<Res>,
+    )
+  ).id as string;
+  for (const member of [
+    { kind: "agent", id: s.scoutId },
+    { kind: "user", id: s.samId },
+    { kind: "user", id: s.alexId },
+  ]) {
+    await ok(s.victor.request("POST", `/api/v1/channels/${engId}/members`, member) as Promise<Res>);
+  }
+  // This suite leaves many tasks running: the organization's cap (default 10) is raised to its maximum.
+  await ok(s.victor.request("PUT", "/api/v1/bot-policy", { tasks: { maxRunning: 100 } }) as Promise<Res>);
+}, 240_000);
+
+afterAll(async () => {
+  await s?.stop();
+});
+
+const auditsOf = async (action: string, resourceId: string) =>
+  (
+    await s.su.query(
+      "select actor_kind, actor_id, agent_id, user_id, resource_type, resource_id, result, metadata from app.audit_events where action = $1 and resource_id = $2 order by occurred_at",
+      [action, resourceId],
+    )
+  ).rows as Json[];
+
+const turnOf = async (eventId: string) =>
+  (
+    await s.su.query(
+      "select event_id, user_id, task_id, done_at, tainted, session_output_read from app.agent_turns where event_id = $1",
+      [eventId],
+    )
+  ).rows[0] as Json | undefined;
+
+const queuedJobs = async (taskId: string) =>
+  (
+    await s.su.query(
+      "select id, start_after from pgboss.job where name = 'bot_task.continue' and data->>'taskId' = $1 and state = 'created'",
+      [taskId],
+    )
+  ).rows as Json[];
+
+const usageTurns = async (agentId: string) =>
+  ((
+    await s.su.query(
+      "select coalesce(sum(turns), 0)::int as n from app.agent_usage_daily where agent_id = $1",
+      [agentId],
+    )
+  ).rows[0]?.n ?? 0) as number;
+
+describe("tracer: continue → done → the job → exactly one agent.task.v1 in the card's thread (D-02, PD-05, PD-06)", () => {
+  let taskId: string;
+  let start: Json;
+  let first: Json;
+
+  it("before the turn reports done, nothing is delivered (the backstop not due; due but the turn still running)", async () => {
+    ({ taskId, event: start } = await startTaskFor(s, { who: s.sam, conversationId: engId }));
+    const c = await continueAs(s, start);
+    expect(c.body).toMatchObject({ ok: true, next: "after_turn" });
+    // The backstop job is due in 30 minutes: a plain drain runs nothing.
+    expect(await s.stack.built.core.jobs.drain("bot_task.continue")).toBe(0);
+    // Forced due, the current turn has not reported done (and is younger than 30 min): nothing (PD-06).
+    expect(await drainTaskJobs(s)).toBeGreaterThan(0);
+    expect(await taskEvents(s, taskId)).toEqual([]);
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "waiting", turns_used: 1, wait_kind: "turn" });
+  });
+
+  it("the cell's done marks the turn, shortens the wait to about 5 s and queues one job", async () => {
+    const before = Date.now();
+    const r = await reportTurnDone(s, start.eventId as string);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect((await turnOf(start.eventId as string))?.done_at).toBeInstanceOf(Date);
+    const row = await taskRow(s, taskId);
+    const wake = (row.wake_at as Date).getTime();
+    expect(wake).toBeGreaterThanOrEqual(before - 1_000);
+    expect(wake).toBeLessThanOrEqual(Date.now() + 10_000);
+    expect((await queuedJobs(taskId)).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("the drained job delivers one agent.task.v1: the requester, the card, the sentence, the task tools", async () => {
+    expect(await drainTaskJobs(s)).toBeGreaterThan(0);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(1);
+    first = events[0] as Json;
+    const row = await taskRow(s, taskId);
+    const eventId = taskEventId(taskId, 1);
+    expect(AgentTaskEvent.safeParse({ ...first, seq: 1 }).success).toBe(true);
+    expect(first).toMatchObject({
+      type: "agent.task.v1",
+      eventId,
+      agent: { id: s.scoutId },
+      conversation: { id: engId },
+      thread: { rootMessageId: row.thread_root_id },
+      message: {
+        id: row.card_message_id,
+        text: "Continue your task (turn 2 of 40).",
+        author: { kind: "user", id: s.samId },
+      },
+      task: { taskId, reason: "continue" },
+    });
+    expect(first.turn.task).toMatchObject({ taskId, turnsUsed: 2, maxTurns: 40, status: "running" });
+    const tools = first.turn.tools as string[];
+    expect(tools).toContain(CONTINUE);
+    expect(tools).toContain(FINISH);
+    expect(tools).not.toContain(START);
+    // Nobody watches a continuation: no browser tools (D-09).
+    expect(tools.filter((t) => t.startsWith("ocw_browser_"))).toEqual([]);
+
+    expect(row).toMatchObject({
+      status: "running",
+      turns_used: 2,
+      current_event_id: eventId,
+      wait_kind: null,
+    });
+    expect(await turnOf(eventId)).toMatchObject({ user_id: s.samId, task_id: taskId });
+    const continued = await auditsOf("bot.task_continued", taskId);
+    expect(continued).toHaveLength(1);
+    expect(continued[0]).toMatchObject({
+      actor_kind: "agent",
+      actor_id: s.scoutId,
+      agent_id: s.scoutId,
+      user_id: s.samId,
+      resource_type: "bot_task",
+      result: "success",
+      metadata: { taskId, eventId, turnsUsed: 2, reason: "continue" },
+    });
+  });
+
+  it("a second drain and a second done deliver nothing more", async () => {
+    await drainTaskJobs(s);
+    expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    expect(await taskEvents(s, taskId)).toHaveLength(1);
+  });
+
+  it("the delivered turn continues and reports done: a third turn, turn 3 of 40", async () => {
+    const c = await continueAs(s, first);
+    expect(c.body).toMatchObject({ ok: true });
+    expect((await reportTurnDone(s, first.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const events = await taskEvents(s, taskId);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      eventId: taskEventId(taskId, 3),
+      message: { text: "Continue your task (turn 3 of 40)." },
+      task: { taskId, reason: "continue" },
+    });
+    expect(await taskRow(s, taskId)).toMatchObject({ status: "running", turns_used: 3 });
+  });
+});
+
+describe("a DM task (PD-11)", () => {
+  it("the continuation's thread root is the card message itself", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: s.samDm, handle: null });
+    expect((await continueAs(s, event)).body).toMatchObject({ ok: true });
+    expect((await reportTurnDone(s, event.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const row = await taskRow(s, taskId);
+    expect(row.thread_root_id).toBeNull();
+    const [ev] = await taskEvents(s, taskId);
+    expect(ev).toMatchObject({
+      conversation: { id: s.samDm },
+      thread: { rootMessageId: row.card_message_id },
+      message: { id: row.card_message_id, author: { id: s.samId } },
+    });
+  });
+});
+
+describe("who the turn is for and who pays (D-01, D-07, ADR-0019)", () => {
+  it("Alex writes in the thread meanwhile: his own turn is a view turn for him; the continuation is Sam's and meters once", async () => {
+    const { taskId, event } = await startTaskFor(s, { who: s.sam, conversationId: engId });
+    expect((await continueAs(s, event)).body).toMatchObject({ ok: true });
+    const row0 = await taskRow(s, taskId);
+
+    // Alex mentions the bot in the task's thread before the continuation is delivered (this clears today's usage).
+    const alexTurn = await deliverTaskTurn(s, {
+      who: s.alex,
+      conversationId: engId,
+      threadRootId: row0.thread_root_id as string,
+    });
+    expect(await turnOf(alexTurn.eventId as string)).toMatchObject({ user_id: s.alexId, task_id: null });
+    expect(alexTurn.turn.task).toMatchObject({ taskId });
+    expect((alexTurn.turn.tools as string[]).filter((t) => t.startsWith("ocw_task_"))).toEqual([]);
+    const meteredBefore = await usageTurns(s.scoutId);
+    expect(meteredBefore).toBe(1);
+
+    expect((await reportTurnDone(s, event.eventId as string)).status).toBe(200);
+    await drainTaskJobs(s);
+    const [ev] = await taskEvents(s, taskId);
+    expect(ev?.message.author).toMatchObject({ kind: "user", id: s.samId });
+    expect(await turnOf(ev?.eventId as string)).toMatchObject({ user_id: s.samId, task_id: taskId });
+    expect(await usageTurns(s.scoutId)).toBe(meteredBefore + 1);
+    // Cell turns write no AI usage record; none is attributed to Alex.
+    const usage = (
+      await s.su.query("select count(*)::int as n from app.ai_usage_records where requester_user_id = $1", [
+        s.alexId,
+      ])
+    ).rows[0] as { n: number };
+    expect(usage.n).toBe(0);
+  });
+});
