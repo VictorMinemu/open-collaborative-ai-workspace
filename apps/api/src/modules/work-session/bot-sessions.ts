@@ -587,6 +587,9 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         originMessageId: turn.messageId,
         originEventId: turn.eventId,
         cardMessageId: posted.messageId,
+        // Phase 07.17.1.1.2-12 (D-03, PD-14): a session a task turn starts belongs to that task (its 07.16 wakes then
+        // wake the task, `work-session-wakes.ts`); a turn outside any task leaves it null.
+        taskId: turn.taskId ?? null,
       });
 
       await auditBotWorkSession(tx, core, {

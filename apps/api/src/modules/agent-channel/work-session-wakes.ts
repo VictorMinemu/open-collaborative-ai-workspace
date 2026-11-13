@@ -15,8 +15,10 @@ import {
   type WorkSessionTransition,
 } from "@ocw/contracts";
 import {
+  agents,
   agentToolCalls,
   agentTurns,
+  botTasks,
   botWorkSessions,
   botWorkZoneProfiles,
   conversationMembers,
@@ -34,6 +36,7 @@ import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import type { JobData } from "../../lib/jobs";
 import { findAgent } from "../agent";
+import { loadTaskPolicy } from "../bot-capabilities";
 import { createConversationAccess } from "../chat";
 import type { MemoryService } from "../memory";
 import type { PermissionService } from "../organization";
@@ -41,6 +44,16 @@ import { composeWorkSessionCard, sessionDeciders, wsTopic } from "../work-sessio
 import { requeueAfterSession } from "./automation-items";
 import { updatePlatformCardNotified } from "./card-followers";
 import { buildMentionEvents } from "./mentions";
+import { refreshTaskCard } from "./task-card";
+import {
+  auditTask,
+  type BotTaskRow,
+  consumeWait,
+  isActiveTask,
+  lockTask,
+  stopTask,
+  type TaskStopOutcome,
+} from "./tasks";
 
 /**
  * Phase 07.16-20 (D-09, D-10, D-12, D-17; PD-12, PD-16, PD-22; ADR-0028): the bot orchestrates its Work Zone session
@@ -60,6 +73,15 @@ import { buildMentionEvents } from "./mentions";
  * 3. tx3, user-less, only when tx2 delivered nothing (or failed): the budget is given back, the card says why when the
  *    person can no longer be posted for, and `bot.work_session_wake_skipped` names the reason. A failure also restores
  *    the woken pair, so the job's retry decides again.
+ *
+ * Phase 07.17.1.1.2-12 (D-03, D-04, D-07; PD-14): a session a task turn started (`bot_work_sessions.task_id`) belongs to
+ * that task. In tx2, after the checks above and before the turn is built, the task row is locked (after the session's
+ * row in tx1: the session, then the task), and only when it is this bot's task, in the session's conversation, for the
+ * session's requester: a waiting task within its budgets has its wait consumed with the wake's own event id
+ * (`consumeWait`), so 07's offer makes the wake the task's own control turn (`turn.task`, continue and finish,
+ * `agent_turns.task_id`), tainted when any turn of the task was; past a budget (or with long tasks off) the task stops
+ * with its one message and the wake goes out plain; a running task makes the wake a view turn. A delivery given back
+ * (no event) restores the consumed wait exactly, in the same transaction; a failure rolls it back with the rest.
  *
  * The summary is composed from structured facts only (transition, repository name, turn number, counts), never runtime
  * text (no branch, no tool name: code review WR-01), so a wake turn does not start as a read of the session's output. No job row, audit row or log line carries a prompt or an output (P1). The bot never approves anything: the
@@ -510,6 +532,119 @@ async function decide(
 
 type DeliverResult = { delivered: true; eventId: string } | { delivered: false; reason: WakeSkipReason };
 
+/** The task fields `consumeWait` changes, as they were, so a delivery given back restores them exactly. */
+type TaskWaitBefore = Pick<
+  BotTaskRow,
+  "turnsUsed" | "currentEventId" | "waitSeq" | "waitKind" | "waitRef" | "wakeAt" | "updatedAt"
+>;
+
+/** What the session's task makes of this wake (PD-14). */
+interface TaskWake {
+  /** Set when the session belongs to the bot's task for this requester: the offer is then keyed on that task. */
+  task: { taskId: string } | null;
+  /** The wait this wake consumed (it is the task's own turn), or null. */
+  consumed: { task: BotTaskRow; before: TaskWaitBefore } | null;
+  /** A turn of the task read outside content (D-08, PD-15): the wake's turn starts tainted. */
+  tainted: boolean;
+}
+
+const NO_TASK: TaskWake = { task: null, consumed: null, tainted: false };
+
+/**
+ * tx2, PD-14: the session's task under its row lock. Another bot's, another conversation's or another person's task
+ * (T-07.17.1.1.2-12-03) changes nothing: the wake is the 07.16 wake of a session without a task. An ended task: a plain
+ * wake that starts nothing; a running one: a view turn. A waiting one is re-decided first (D-04, PD-09: long tasks off,
+ * every turn used, past its deadline by the database's clock), then consumed with the wake's event id.
+ */
+async function taskWakeOf(tx: Tx, core: Core, bot: BotRow, eventId: string): Promise<TaskWake> {
+  if (!bot.taskId) return NO_TASK;
+  const task = await lockTask(tx, bot.taskId);
+  if (
+    !task ||
+    task.agentId !== bot.agentId ||
+    task.conversationId !== bot.originConversationId ||
+    task.requesterUserId !== bot.requesterUserId
+  ) {
+    return NO_TASK;
+  }
+  const bound = { task: { taskId: task.id }, consumed: null, tainted: false };
+  if (!isActiveTask(task) || task.status !== "waiting") return bound;
+
+  const stop = async (outcome: TaskStopOutcome): Promise<TaskWake> => {
+    await stopTask(tx, core, task, outcome, { eventId });
+    return bound;
+  };
+  const [agent] = await tx
+    .select({ scope: agents.scope, capabilities: agents.capabilities })
+    .from(agents)
+    .where(eq(agents.id, task.agentId))
+    .limit(1);
+  if (!agent || !(await loadTaskPolicy(tx, agent)).enabled) return stop("policy_off");
+  if (task.turnsUsed >= task.maxTurns) return stop("budget_turns");
+  const clock = await tx.execute(sql`select (${task.deadlineAt}::timestamptz <= now()) as past`);
+  if ((clock.rows[0] as { past: boolean }).past) return stop("budget_time");
+
+  // D-08, PD-15: taint is sticky across the task's turns, a wake's included.
+  let tainted = task.tainted;
+  if (!tainted) {
+    const [taintedTurn] = await tx
+      .select({ id: agentTurns.eventId })
+      .from(agentTurns)
+      .where(
+        and(
+          eq(agentTurns.organizationId, task.organizationId),
+          eq(agentTurns.taskId, task.id),
+          eq(agentTurns.tainted, true),
+        ),
+      )
+      .limit(1);
+    if (taintedTurn) {
+      tainted = true;
+      await tx
+        .update(botTasks)
+        .set({ tainted: true })
+        .where(and(eq(botTasks.organizationId, task.organizationId), eq(botTasks.id, task.id)));
+    }
+  }
+  const before: TaskWaitBefore = {
+    turnsUsed: task.turnsUsed,
+    currentEventId: task.currentEventId,
+    waitSeq: task.waitSeq,
+    waitKind: task.waitKind,
+    waitRef: task.waitRef,
+    wakeAt: task.wakeAt,
+    updatedAt: task.updatedAt,
+  };
+  if (!(await consumeWait(tx, task, { eventId, reason: "continue" }))) return bound;
+  const reserved = await lockTask(tx, task.id);
+  if (!reserved) return bound;
+  await refreshTaskCard(tx, core, reserved);
+  return { task: bound.task, consumed: { task: reserved, before }, tainted };
+}
+
+/** A consumed wait whose wake was not delivered as the task's turn: restored exactly while the row still holds it. */
+async function giveBackTaskWait(
+  tx: Tx,
+  core: Core,
+  consumed: NonNullable<TaskWake["consumed"]>,
+): Promise<void> {
+  const { task, before } = consumed;
+  const [row] = await tx
+    .update(botTasks)
+    .set({ status: "waiting", ...before })
+    .where(
+      and(
+        eq(botTasks.organizationId, task.organizationId),
+        eq(botTasks.id, task.id),
+        eq(botTasks.status, "running"),
+        eq(botTasks.currentEventId, task.currentEventId),
+        eq(botTasks.waitSeq, before.waitSeq + 1),
+      ),
+    )
+    .returning();
+  if (row) await refreshTaskCard(tx, core, row);
+}
+
 /** tx2: the wake itself, as the requester (D-17). */
 async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePlan): Promise<DeliverResult> {
   const { bot } = w;
@@ -552,6 +687,8 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
     )
     .limit(1);
   if (!membership) return { delivered: false, reason: "agent_unavailable" };
+  // PD-14: the session's task, locked after the session's row (tx1) and before anything the turn writes.
+  const taskWake = await taskWakeOf(tx, core, bot, w.eventId);
 
   const direct = DIRECT_KINDS.has(conv.kind);
   const organizationId = bot.organizationId;
@@ -567,10 +704,12 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
     createdAt: new Date().toISOString(),
     delivery: direct ? "dm" : "thread",
     trigger: "work_session",
-    // T-07.16-20-06: a session that took outside content keeps its taint across every wake.
-    taintedAtStart: w.session.tainted,
+    // T-07.16-20-06: a session that took outside content keeps its taint across every wake; PD-15: so does its task.
+    taintedAtStart: w.session.tainted || taskWake.tainted,
     // WR-09: the wake's own id, so it is delivered at most once whatever retries or runs concurrently.
     eventId: w.eventId,
+    // PD-14: the session's task keys the offer (control only through the consumed wait; never a new start).
+    ...(taskWake.task ? { task: taskWake.task } : {}),
   };
   const events = await buildMentionEvents(tx, mention, {
     core,
@@ -580,7 +719,30 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
   });
   const [ev] = events;
   // The bot is live, a member, and the person reads here: no event means the bot's daily limit (its notice follows).
-  if (!ev) return { delivered: false, reason: "daily_limit" };
+  if (!ev) {
+    // PD-14: the wake is given back (transient), and so is the task's wait it consumed.
+    if (taskWake.consumed) await giveBackTaskWait(tx, core, taskWake.consumed);
+    return { delivered: false, reason: "daily_limit" };
+  }
+  if (taskWake.consumed) {
+    const [linked] = await tx
+      .select({ taskId: agentTurns.taskId })
+      .from(agentTurns)
+      .where(eq(agentTurns.eventId, ev.eventId))
+      .limit(1);
+    if (linked?.taskId === taskWake.consumed.task.id) {
+      // Ids, counts and the reason only (P1), as for every delivered continuation (PD-04).
+      await auditTask(tx, core, "bot.task_continued", taskWake.consumed.task, {
+        eventId: ev.eventId,
+        turnsUsed: taskWake.consumed.task.turnsUsed,
+        maxTurns: taskWake.consumed.task.maxTurns,
+        reason: "work_session",
+      });
+    } else {
+      // Delivered, but not as the task's turn (the offer withheld the task): the task keeps waiting, nothing counted.
+      await giveBackTaskWait(tx, core, taskWake.consumed);
+    }
+  }
   // D-20 (code review WR-02): the wake resumes the conversation's OpenClaw context. When the bot already read this
   // session's output from a turn here, that output is in it, so the wake starts with the mark (set before the append,
   // like a re-run's taint): it can read, prompt the session it read and stop, nothing else side-effecting.
