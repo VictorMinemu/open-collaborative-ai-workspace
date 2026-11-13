@@ -205,6 +205,19 @@ export function settingsSummary(s: {
     .join(" · ");
 }
 
+/**
+ * The Isolated worktree switch for the chosen repository (quick 261113-hu7): a worktree needs git, so on a repository
+ * its device said is in no git repository the switch is off and disabled (the viewer's choice is kept for the next one).
+ * Absent `git` (an older device) leaves the choice as it is.
+ */
+export function worktreeChoice(
+  project: Pick<Project, "git"> | null,
+  wanted: boolean,
+): { checked: boolean; disabled: boolean } {
+  const noGit = project?.git === false;
+  return { checked: wanted && !noGit, disabled: noGit };
+}
+
 /** One step of the form: a heading, an optional action on its right and an optional hint under it. */
 function Step({
   title,
@@ -401,6 +414,7 @@ export function NewSessionDialog({
     runtimeReady,
   });
   const canSubmit = !!project && isStartable(project) && runtimeReady && !create.isPending;
+  const tree = worktreeChoice(project, worktree);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -413,7 +427,7 @@ export function NewSessionDialog({
         projectId: project.id,
         runtime,
         permissionMode: mode,
-        worktree,
+        worktree: tree.checked,
         ...(visibility ? { visibility } : {}),
         ...(model !== "default" ? { model } : {}),
         ...(effort !== "default" ? { effort } : {}),
@@ -445,7 +459,7 @@ export function NewSessionDialog({
     modelLabel: model === "default" ? null : (chosenModel?.displayName ?? null),
     effortLabel: effort === "default" ? null : (EFFORT_LABELS[effort] ?? effort),
     modeLabel: modeMeta?.label ?? mode,
-    worktree,
+    worktree: tree.checked,
   });
   const noRuntimeReady = !!device && RUNTIME_IDS.every((id) => !cardState(id).ready);
   const runtimeStop =
@@ -802,18 +816,26 @@ export function NewSessionDialog({
                         </div>
 
                         {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
-                        <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-lg border px-3 py-2.5">
+                        <label
+                          className={cn(
+                            "flex min-h-11 items-center justify-between gap-4 rounded-lg border px-3 py-2.5",
+                            tree.disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+                          )}
+                        >
                           <span className="grid gap-0.5">
                             <span className="font-medium text-[13px]">Isolated worktree</span>
                             <span
                               id="new-session-worktree-hint"
                               className="text-muted-foreground text-xs leading-snug"
                             >
-                              Work on a separate git branch so the device's checkout stays untouched.
+                              {tree.disabled
+                                ? "This project has no git repository"
+                                : "Work on a separate git branch so the device's checkout stays untouched."}
                             </span>
                           </span>
                           <Switch
-                            checked={worktree}
+                            checked={tree.checked}
+                            disabled={tree.disabled}
                             onCheckedChange={setWorktree}
                             aria-label="Isolated worktree"
                             aria-describedby="new-session-worktree-hint"
