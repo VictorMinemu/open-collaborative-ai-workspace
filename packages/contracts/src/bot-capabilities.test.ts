@@ -23,8 +23,10 @@ import {
   DEFAULT_BOT_POLICY,
   DEFAULT_CAPABILITIES,
   isApprovableTool,
+  isConnectorLogicalTool,
   isDangerousToolName,
   MAX_SANDBOX_CALLS_PER_TURN,
+  openClawToolCount,
   SANDBOX_REFUSED_TOOL_NAMES,
   SANDBOX_TOOL_NAMES,
   TASK_TOOL_FLAGS,
@@ -32,6 +34,7 @@ import {
   ToolPattern,
   TURN_ATTACHMENT_NOTES,
   TURN_CATALOG_TOOLS_MAX,
+  TURN_CONNECTOR_TOOLS_MAX,
   TURN_PLATFORM_RESERVE,
   TURN_TOOLS_MAX,
   TurnAttachment,
@@ -328,9 +331,34 @@ describe("agent channel additions are backward compatible", () => {
     const parsed = AgentMentionEvent.parse({ ...mentionEvent, turn });
     expect(parsed.turn).toEqual(turn);
     expect(AgentMentionEvent.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
-    expect(TurnContext.safeParse({ ...turn, tools: Array(TURN_TOOLS_MAX + 1).fill("x") }).success).toBe(
-      false,
-    );
+    const over = TURN_TOOLS_MAX + TURN_CONNECTOR_TOOLS_MAX + 1;
+    expect(TurnContext.safeParse({ ...turn, tools: Array(over).fill("x") }).success).toBe(false);
+  });
+
+  it("a turn carries 128 OpenClaw tools plus a big proxied server's 300 logical tools (quick 261116-k3p)", () => {
+    const openClaw = Array.from({ length: TURN_TOOLS_MAX }, (_, i) => `ocw_x_${i}`);
+    const logical = Array.from({ length: 300 }, (_, i) => `m1a2b3c4d__tool_${i}`);
+    expect(TurnContext.safeParse({ ...turn, tools: [...openClaw, ...logical] }).success).toBe(true);
+    expect(TURN_CONNECTOR_TOOLS_MAX).toBe(1000);
+  });
+
+  it("isConnectorLogicalTool: the `m<8 hex>__<tool>` shape only", () => {
+    expect(isConnectorLogicalTool("m1a2b3c4d__whoami")).toBe(true);
+    expect(isConnectorLogicalTool("m1a2b3c4d__")).toBe(false);
+    expect(isConnectorLogicalTool("m1a2b3c4__whoami")).toBe(false);
+    expect(isConnectorLogicalTool("M1A2B3C4D__whoami")).toBe(false);
+    expect(isConnectorLogicalTool("ocw_connector_call")).toBe(false);
+    expect(isConnectorLogicalTool("web_fetch")).toBe(false);
+  });
+
+  it("openClawToolCount: every name but the turn's proxied logical tools (in-cell MCP tools share their shape)", () => {
+    const tools = ["web_fetch", "ocw_connector_call", "m5e0c0de1__echo", "m1a2b3c4d__a", "m1a2b3c4d__b"];
+    const proxied = new Set(["m1a2b3c4d__a", "m1a2b3c4d__b"]);
+    expect(openClawToolCount(tools, proxied)).toBe(3);
+    // The in-cell (org) MCP tool `m5e0c0de1__echo` is an OpenClaw tool: shape alone never decides.
+    expect(openClawToolCount(tools, new Set())).toBe(5);
+    // A name in the set without the logical shape still counts (a platform tool never leaves the provider limit).
+    expect(openClawToolCount(tools, new Set(["web_fetch"]))).toBe(5);
   });
 
   it("a turn's catalog tools leave room for every turn-scoped platform tool (TURN_PLATFORM_RESERVE)", () => {
