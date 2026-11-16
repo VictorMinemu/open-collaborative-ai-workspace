@@ -399,6 +399,11 @@ describe("Agent Channel connector tools (D-02, D-07: the requester is the stored
     expect(AgentChannelConnectorListResponse.parse({ connectors: [entry] }).connectors[0]).toEqual(entry);
     const counted = { ...entry, toolCount: 200, more: true };
     expect(AgentChannelConnectorListResponse.parse({ connectors: [counted] }).connectors[0]).toEqual(counted);
+    // Whether the listing carries argument schemas (absent on older payloads).
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [counted] }).schemas).toBeUndefined();
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [counted], schemas: false }).schemas).toBe(
+      false,
+    );
     expect(
       AgentChannelConnectorListResponse.safeParse({ connectors: [{ ...entry, toolCount: -1 }] }).success,
     ).toBe(false);

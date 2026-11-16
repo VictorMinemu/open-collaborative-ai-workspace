@@ -1318,6 +1318,12 @@ export const AgentChannelConnectorListResponse = z.object({
   connectors: z.array(AgentChannelConnectorEntry).max(CONNECTOR_TOOL_LIMITS.connectors),
   /** Keychain handles the turn's bot may use with `ocw_http_request`: never a value. */
   keys: z.array(AgentVaultKey).max(CONNECTOR_TOOL_LIMITS.keys).default([]),
+  /**
+   * Quick 261116-k3p part 2: whether the listed tools carry their argument schemas (a named `tool`, or at most
+   * `CONNECTOR_LIST_LIMITS.schemasUpTo` tools listed). False: a null `inputSchema` means "ask for this tool", not "no
+   * arguments". Absent on older payloads, where every tool carried its schema.
+   */
+  schemas: z.boolean().optional(),
 });
 export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
 
