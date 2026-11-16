@@ -328,6 +328,77 @@ describe("ocw_connector_list and ocw_http_request (07.4 D-07, CONN-05)", () => {
     expect(guard.activeTurn(SESSION)?.tainted).toBe(true);
   });
 
+  it("ocw_connector_list takes typed, closed filters and the descriptions explain the flow (quick 261116-k3p part 2)", () => {
+    const { tool } = setup2();
+    const list = tool("ocw_connector_list");
+    expect(list.parameters).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        connector: { type: "string", pattern: "^m[0-9a-f]{8}$" },
+        query: { type: "string", maxLength: 100 },
+        tool: { type: "string", maxLength: 128 },
+      },
+    });
+    expect(
+      (list.parameters.properties as Record<string, { description?: string }>).tool?.description,
+    ).toMatch(/exact tool name.*argument schema/i);
+    expect(list.description).toMatch(/query/);
+    expect(list.description).toMatch(/\btool\b/);
+    expect(tool("ocw_connector_call").description).toMatch(/query/);
+    expect(tool("ocw_connector_call").description).toMatch(/tool/);
+  });
+
+  it("ocw_connector_list forwards its filters; refuses bad ones locally", async () => {
+    const { lists, begin, tool } = setup2();
+    begin();
+    const list = tool("ocw_connector_list");
+    await list.execute("tc-1", {
+      connector: "m1a2b3c4d",
+      query: "  expedientes ",
+      tool: "listar_expedientes",
+    });
+    expect(lists).toEqual([
+      {
+        eventId: "evt-1",
+        agentId: BOT,
+        connector: "m1a2b3c4d",
+        query: "expedientes",
+        tool: "listar_expedientes",
+      },
+    ]);
+    expect(text(await list.execute("tc-2", { tool: "listar_expedientes" }))).toMatch(/connector/i);
+    expect(text(await list.execute("tc-3", { connector: "Acme" }))).toMatch(/connector/i);
+    expect(text(await list.execute("tc-4", { query: "x".repeat(101) }))).toMatch(/query/i);
+    expect(lists).toHaveLength(1);
+  });
+
+  it("a big connector's listing names its count, says it was cut, and how to get a tool's arguments", async () => {
+    const big: AgentChannelConnectorListResponse = {
+      connectors: [
+        {
+          connector: "m1a2b3c4d",
+          name: "ERP",
+          status: "connected",
+          toolCount: 300,
+          more: true,
+          tools: [{ name: "listar_expedientes", description: "Lista expedientes", inputSchema: null }],
+        },
+      ],
+      keys: [],
+      schemas: false,
+    };
+    const { begin, tool } = setup2({ list: async () => big });
+    begin();
+    const r = text(await tool("ocw_connector_list").execute("tc-1", {}));
+    expect(r).toContain("ERP [m1a2b3c4d] — connected — 300 tools, 1 listed");
+    expect(r).toMatch(/query/);
+    expect(r).toContain("  - listar_expedientes: Lista expedientes");
+    // A left-out schema is never shown as "no arguments".
+    expect(r).not.toContain("Arguments: {}");
+    expect(r).toMatch(/connector and tool.*arguments/i);
+  });
+
   it("an empty list says so", async () => {
     const { begin, tool } = setup2({ list: async () => ({ connectors: [], keys: [] }) });
     begin();
