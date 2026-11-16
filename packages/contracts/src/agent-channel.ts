@@ -1262,13 +1262,40 @@ export const CONNECTOR_TOOL_LIMITS = {
   keys: 32,
 } as const;
 
-/** `POST /agent-channel/v1/connectors/list`: the turn's per-member connectors, their tools and the turn's keys. */
-export const AgentChannelConnectorList = z.object({ eventId: Id, agentId: Id });
+/**
+ * Quick 261116-k3p part 2: the bounds of `ocw_connector_list`'s filters. `queryChars`: the longest search text;
+ * `schemasUpTo`: a listing of at most this many tools carries their argument schemas (a named `tool` always does), so
+ * a big connector's listing stays small and the model asks for one tool's schema before calling it.
+ */
+export const CONNECTOR_LIST_LIMITS = {
+  queryChars: 100,
+  schemasUpTo: 8,
+} as const;
+
+/**
+ * `POST /agent-channel/v1/connectors/list`: the turn's proxied connectors, their tools and the turn's keys. Optional
+ * filters (quick 261116-k3p part 2): one `connector` (its safe name), a `query` (case-insensitive, over tool names and
+ * descriptions) and one `tool` of that connector (its exact name: the answer carries its argument schema). A filter
+ * never widens the listing: only the turn's own tools are ever listed.
+ */
+export const AgentChannelConnectorList = z
+  .object({
+    eventId: Id,
+    agentId: Id,
+    connector: ConnectorSafeName.optional(),
+    query: z.string().trim().min(1).max(CONNECTOR_LIST_LIMITS.queryChars).optional(),
+    tool: z.string().min(1).max(128).optional(),
+  })
+  .refine((v) => v.tool === undefined || v.connector !== undefined, {
+    message: "tool needs its connector",
+    path: ["tool"],
+  });
 export type AgentChannelConnectorList = z.infer<typeof AgentChannelConnectorList>;
 
 export const AgentChannelConnectorTool = z.object({
   name: z.string().min(1).max(128),
   description: z.string().max(CONNECTOR_TOOL_LIMITS.descriptionChars),
+  /** Null unless the request named this tool or the listing has at most `CONNECTOR_LIST_LIMITS.schemasUpTo` tools. */
   inputSchema: z.record(z.string(), z.unknown()).nullable(),
 });
 export type AgentChannelConnectorTool = z.infer<typeof AgentChannelConnectorTool>;
@@ -1280,6 +1307,10 @@ export const AgentChannelConnectorEntry = z.object({
   /** The asker's connection: `not_connected` / `needs_reconnect` tools answer with that refusal. */
   status: ConnectionStatus,
   tools: z.array(AgentChannelConnectorTool).max(CONNECTOR_TOOL_LIMITS.toolsPerConnector),
+  /** Quick 261116-k3p part 2: every tool of this connector offered on the turn, listed or not. */
+  toolCount: z.number().int().nonnegative().optional(),
+  /** More tools match than `tools` lists: search with `query` or name one `tool`. */
+  more: z.boolean().optional(),
 });
 export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEntry>;
 
@@ -1287,6 +1318,12 @@ export const AgentChannelConnectorListResponse = z.object({
   connectors: z.array(AgentChannelConnectorEntry).max(CONNECTOR_TOOL_LIMITS.connectors),
   /** Keychain handles the turn's bot may use with `ocw_http_request`: never a value. */
   keys: z.array(AgentVaultKey).max(CONNECTOR_TOOL_LIMITS.keys).default([]),
+  /**
+   * Quick 261116-k3p part 2: whether the listed tools carry their argument schemas (a named `tool`, or at most
+   * `CONNECTOR_LIST_LIMITS.schemasUpTo` tools listed). False: a null `inputSchema` means "ask for this tool", not "no
+   * arguments". Absent on older payloads, where every tool carried its schema.
+   */
+  schemas: z.boolean().optional(),
 });
 export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
 

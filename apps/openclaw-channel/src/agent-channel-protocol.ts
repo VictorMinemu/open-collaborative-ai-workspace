@@ -2336,8 +2336,20 @@ export const HTTP_TOOL_LIMITS = {
 export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type AgentChannelHttpMethod = (typeof HTTP_METHODS)[number];
 
-/** `POST /connectors/list` */
-export type AgentChannelConnectorList = { eventId: string; agentId: string };
+/**
+ * `POST /connectors/list`. Quick 261116-k3p part 2: optional filters, one `connector`, a `query` over tool names and
+ * descriptions, one `tool` of that connector (its argument schema).
+ */
+export type AgentChannelConnectorList = {
+  eventId: string;
+  agentId: string;
+  connector?: string;
+  query?: string;
+  tool?: string;
+};
+
+/** Bounds of the list filters (contracts `CONNECTOR_LIST_LIMITS`). */
+export const CONNECTOR_LIST_LIMITS = { queryChars: 100 } as const;
 
 export const AgentChannelConnectorTool = z.object({
   name: z.string().min(1),
@@ -2352,6 +2364,10 @@ export const AgentChannelConnectorEntry = z.object({
   /** The asker's connection: `connected`, `not_connected` or `needs_reconnect` (a newer status stays a string). */
   status: z.string().max(64),
   tools: z.array(AgentChannelConnectorTool).default([]),
+  /** Every tool of this connector the turn offers (absent from older APIs). */
+  toolCount: z.number().int().nonnegative().optional().catch(undefined),
+  /** More tools match than `tools` lists. */
+  more: z.boolean().optional().catch(undefined),
 });
 export type AgentChannelConnectorEntry = z.infer<typeof AgentChannelConnectorEntry>;
 
@@ -2365,6 +2381,8 @@ export type AgentVaultKey = z.infer<typeof AgentVaultKey>;
 export const AgentChannelConnectorListResponse = z.object({
   connectors: z.array(AgentChannelConnectorEntry).default([]),
   keys: z.array(AgentVaultKey).default([]),
+  /** False: a null `inputSchema` was left out (ask for that tool), not "no arguments". Absent from older APIs. */
+  schemas: z.boolean().optional().catch(undefined),
 });
 export type AgentChannelConnectorListResponse = z.infer<typeof AgentChannelConnectorListResponse>;
 

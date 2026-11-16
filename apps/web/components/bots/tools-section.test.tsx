@@ -102,6 +102,10 @@ describe("ToolsSection", () => {
     // Organization tools have a share of the turn, so the platform's own tools always keep their slots (quick 261113-e6s).
     expect(html).toContain("at most 101 tools from MCP servers and plugins");
     expect(html).toContain("own tools always fit");
+    // Connectors with a member's or the organization's account are proxied: their tools are never limited (261116-k3p).
+    expect(html).toContain(
+      "connectors that use a member&#x27;s or the organization&#x27;s account never count",
+    );
     expect(render(view({ toolsOverLimit: 0 }))).not.toContain("tools-over-limit");
     expect(render(view())).not.toContain("tools-over-limit");
   });

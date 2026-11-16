@@ -150,7 +150,8 @@ export function ToolsSection({
               ? "1 tool that is on does not fit in a bot turn, so the bot cannot use it."
               : `${view.toolsOverLimit} tools that are on do not fit in a bot turn, so the bot cannot use them.`}{" "}
             A turn carries at most {TURN_CATALOG_TOOLS_MAX} tools from MCP servers and plugins, so the
-            platform's own tools always fit. Turn off the ones this bot does not need.
+            platform's own tools always fit; tools of connectors that use a member's or the organization's
+            account never count. Turn off the ones this bot does not need.
           </span>
         </p>
       ) : null}

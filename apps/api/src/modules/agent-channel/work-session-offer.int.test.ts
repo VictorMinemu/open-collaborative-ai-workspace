@@ -3,6 +3,7 @@ import {
   type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
   CONVERSATION_OPEN_FLAGS,
+  openClawToolCount,
   type SessionAudienceInput,
   TASK_TOOL_NAMES,
   TURN_CATALOG_TOOLS_MAX,
@@ -649,6 +650,67 @@ describe("organization tools never take the six tools' slots (TURN_CATALOG_TOOLS
       );
     } finally {
       await grant([]);
+    }
+  });
+
+  it("a proxied server's tools never take a slot (quick 261116-k3p): all 100 offered beside the six, the task tools and the in-cell catalog share", async () => {
+    // An organization-account server (proxied by the API, reached through ocw_connector_call) sorted first, and an
+    // in-cell server whose tools have the same `m<8 hex>__` shape (OpenClaw function tools: they count).
+    const proxied = randomUUID();
+    const inCell = randomUUID();
+    await su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+       values ($1, $3, 'Aaa ERP', 'm0e1a2b3c', 'streamable-http', 'https://erp.example.test/mcp', 'ready', 'org_client_credentials'),
+              ($2, $3, 'Zz Bulk', 'm9f8e7d6c', 'streamable-http', 'https://bulk.example.test/mcp', 'ready', 'org_secret')`,
+      [proxied, inCell, orgId],
+    );
+    // 200 grants, the most one PATCH carries: 100 proxied tools alone used to fill the catalog share and lose the rest.
+    const logical = Array.from({ length: 100 }, (_, i) => `m0e1a2b3c__p${String(i).padStart(3, "0")}`);
+    const cellTools = Array.from({ length: 100 }, (_, i) => `m9f8e7d6c__t${String(i).padStart(3, "0")}`);
+    for (const [serverId, names] of [
+      [proxied, logical],
+      [inCell, cellTools],
+    ] as const) {
+      for (const name of names) {
+        await su.query(
+          "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
+          [orgId, serverId, name.slice("m0e1a2b3c__".length), name],
+        );
+      }
+    }
+    const grant = (tools: { sourceId: string; tool: string }[]) =>
+      ok(
+        victor.request("PATCH", `/api/v1/agents/${atlasId}/capabilities`, {
+          tools: tools.map((t) => ({ sourceKind: "mcp", ...t })),
+        }),
+      );
+    try {
+      const view = await grant([
+        ...logical.map((tool) => ({ sourceId: proxied, tool })),
+        ...cellTools.map((tool) => ({ sourceId: inCell, tool })),
+      ]);
+      const full = await mentionTurn(atlasId);
+      // Every proxied tool, past the provider's 128, through the one static tool.
+      expect(full.turn.tools).toEqual(expect.arrayContaining([...logical, BUILTIN_TOOLS.connectorCall]));
+      expect(full.turn.tools.length).toBeGreaterThan(TURN_TOOLS_MAX);
+      expect(openClawToolCount(full.turn.tools, new Set(logical))).toBeLessThanOrEqual(TURN_TOOLS_MAX);
+      // The platform's reserved tools keep their slots.
+      await expectOffer(full);
+      expect(full.turn.tools).toEqual(
+        expect.arrayContaining([...WORK_SESSION_TOOL_NAMES, ...TASK_TOOL_NAMES]),
+      );
+      // The in-cell tools still fill the catalog share only, in order; the ones past it are left out (and counted).
+      const kept = cellTools.filter((name) => full.turn.tools.includes(name));
+      expect(kept.length).toBeGreaterThan(0);
+      expect(kept.length).toBeLessThan(TURN_CATALOG_TOOLS_MAX);
+      expect(kept).toEqual(cellTools.slice(0, kept.length));
+      // The bot sheet counts only in-cell tools left out: a proxied tool is never over the limit.
+      expect(view.toolsOverLimit).toBeGreaterThan(0);
+      expect(view.toolsOverLimit).toBeLessThanOrEqual(cellTools.length);
+      expect(await ledgerTools(full.eventId as string)).toEqual(expect.arrayContaining(logical));
+    } finally {
+      await grant([]);
+      await su.query("delete from app.mcp_servers where id = any($1::uuid[])", [[proxied, inCell]]);
     }
   });
 });

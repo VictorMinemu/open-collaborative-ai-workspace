@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { CONNECTOR_TOOL_LIMITS, TURN_TOOLS_MAX } from "@ocw/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoGlobalFetch,
@@ -253,6 +254,149 @@ describe("tracer: every member's bot uses the organization's account", () => {
 
 const list = (ev: Json) => cell("POST", "/connectors/list", { eventId: ev.eventId, agentId: scoutId });
 const listed = (r: Res) => (r.body?.connectors as Json[] | undefined)?.find((c) => c.connector === safe);
+
+describe("a big organization-account server: every enabled tool is callable (quick 261116-k3p)", () => {
+  it("197 more tools enabled (200 grants): the turn carries them all, and the one sorted past 128 is called with the organization's grant", async () => {
+    const extra = Array.from({ length: 197 }, (_, i) => `a${String(i).padStart(3, "0")}`);
+    for (const name of extra) {
+      await s.su.query(
+        "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, $3, $4, true)",
+        [s.orgA, server.id, name, `${safe}__${name}`],
+      );
+    }
+    const caps = await ok(s.victor.request("GET", `/api/v1/agents/${scoutId}/capabilities`));
+    const before = caps.tools
+      .filter((t: Json) => t.granted)
+      .map((t: Json) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool }));
+    try {
+      await grant(extra.map((t) => ({ sourceId: server.id, tool: `${safe}__${t}` })));
+      const ev = await turnOf(s.sam, opsId, true);
+      const logical = (ev.turn.tools as string[]).filter((t) => t.startsWith(`${safe}__`));
+      expect(logical).toHaveLength(200);
+      // `whoami` sorts after the 197 others: past the provider's 128 turn tools, where it used to be cut off.
+      expect((ev.turn.tools as string[]).indexOf(`${safe}__whoami`)).toBeGreaterThan(TURN_TOOLS_MAX);
+      const answer = await call(ev);
+      expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+      expect(JSON.parse(answer.body?.content as string).subject).toBe(await orgSubjectOf(server.id));
+      // The listing keeps its per-connector bound; a tool past it is still callable when named (above).
+      const r = await list(ev);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect((listed(r)?.tools ?? []) as Json[]).toHaveLength(CONNECTOR_TOOL_LIMITS.toolsPerConnector);
+    } finally {
+      await ok(s.victor.request("PATCH", `/api/v1/agents/${scoutId}/capabilities`, { tools: before }));
+      await s.su.query("delete from app.mcp_server_tools where server_id = $1 and name = any($2::text[])", [
+        server.id,
+        extra,
+      ]);
+    }
+  });
+});
+
+describe("a big connector's listing scales: counts, search, one tool's schema (quick 261116-k3p part 2)", () => {
+  const extra = Array.from({ length: 297 }, (_, i) => `b${String(i).padStart(3, "0")}`);
+  const SCHEMA = { type: "object", properties: { buscar: { type: "string" } } };
+  let before: Json[] = [];
+  let ev: Json;
+  let otherId = "";
+  const listWith = (filters: Json) =>
+    cell("POST", "/connectors/list", { eventId: ev.eventId, agentId: scoutId, ...filters });
+  const toolsOf = (r: Res) => (listed(r)?.tools ?? []) as Json[];
+
+  beforeAll(async () => {
+    for (const name of extra) {
+      await s.su.query(
+        `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, description, read_only, input_schema)
+         values ($1, $2, $3, $4, $5, true, $6)`,
+        [
+          s.orgA,
+          server.id,
+          name,
+          `${safe}__${name}`,
+          name === "b150" ? "Lista los EXPEDIENTES abiertos" : `Tool ${name}`,
+          name === "b150" ? SCHEMA : null,
+        ],
+      );
+    }
+    // Another proxied server the bot has no grant on: never listed, whatever the filter.
+    const other = await registerOrgConnector(s, { name: "Zeta Vault" });
+    otherId = other.id;
+    const caps = await ok(s.victor.request("GET", `/api/v1/agents/${scoutId}/capabilities`));
+    before = caps.tools
+      .filter((t: Json) => t.granted)
+      .map((t: Json) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool }));
+    // 300 grants: over the old 200 bound of the request.
+    await grant(extra.map((t) => ({ sourceId: server.id, tool: `${safe}__${t}` })));
+    ev = await turnOf(s.sam, opsId, true);
+    expect((ev.turn.tools as string[]).filter((t) => t.startsWith(`${safe}__`))).toHaveLength(300);
+  });
+
+  afterAll(async () => {
+    await ok(s.victor.request("PATCH", `/api/v1/agents/${scoutId}/capabilities`, { tools: before }));
+    await s.su.query("delete from app.mcp_server_tools where server_id = $1 and name = any($2::text[])", [
+      server.id,
+      extra,
+    ]);
+    await s.su.query("delete from app.mcp_servers where id = $1", [otherId]);
+  });
+
+  it("no filter: the connector with its count, its first tools by name, no schemas, and more", async () => {
+    const r = await list(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(listed(r)).toMatchObject({ toolCount: 300, more: true, status: "connected" });
+    expect(toolsOf(r)).toHaveLength(CONNECTOR_TOOL_LIMITS.toolsPerConnector);
+    expect(toolsOf(r).every((t) => t.inputSchema === null)).toBe(true);
+    // The model is told the schemas were left out (not that the tools take no arguments).
+    expect(r.body?.schemas).toBe(false);
+    expect(toolsOf(r)[0]?.name).toBe("b000");
+    expect(((r.body?.connectors ?? []) as Json[]).map((c) => c.connector)).toEqual([safe]);
+  });
+
+  it("query finds a tool past the listing bound, case-insensitive over descriptions, with its schema (few results)", async () => {
+    const r = await listWith({ connector: safe, query: "expedientes" });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(listed(r)).toMatchObject({ toolCount: 300 });
+    expect(listed(r)?.more ?? false).toBe(false);
+    expect(toolsOf(r)).toEqual([
+      { name: "b150", description: "Lista los EXPEDIENTES abiertos", inputSchema: SCHEMA },
+    ]);
+    // By name, without a connector: every connector of the turn is searched.
+    const byName = await listWith({ query: "WHOAMI" });
+    expect(toolsOf(byName).map((t) => t.name)).toEqual(["whoami"]);
+    // A broad query is cut at the bound and says so; no schemas then.
+    const broad = await listWith({ connector: safe, query: "tool b" });
+    expect(toolsOf(broad)).toHaveLength(CONNECTOR_TOOL_LIMITS.toolsPerConnector);
+    expect(listed(broad)?.more).toBe(true);
+    expect(toolsOf(broad).every((t) => t.inputSchema === null)).toBe(true);
+  });
+
+  it("tool: that one tool with its argument schema; an unknown one lists nothing", async () => {
+    const r = await listWith({ connector: safe, tool: "b150" });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body?.schemas).toBe(true);
+    expect(toolsOf(r)).toEqual([
+      { name: "b150", description: "Lista los EXPEDIENTES abiertos", inputSchema: SCHEMA },
+    ]);
+    expect(toolsOf(await listWith({ connector: safe, tool: "nope" }))).toEqual([]);
+    expect((await listWith({ tool: "b150" })).status).toBe(400);
+  });
+
+  it("a connector the turn does not offer is never listed, by name or by search", async () => {
+    const other = (await s.su.query("select safe_name from app.mcp_servers where id = $1", [otherId])).rows[0]
+      .safe_name as string;
+    ev = await turnOf(s.sam, opsId, true); // a fresh turn: the earlier listings used most of its 8 tool calls
+    for (const filters of [
+      {},
+      { connector: other },
+      { connector: other, query: "whoami" },
+      { query: "whoami" },
+    ]) {
+      const r = await listWith(filters);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(((r.body?.connectors ?? []) as Json[]).map((c) => c.connector)).not.toContain(other);
+    }
+    expect((await listWith({ connector: "m00000000" })).body?.connectors).toEqual([]);
+  });
+});
 
 describe("ocw_connector_list and per-tool approvals on the organization's account", () => {
   it("ocw_connector_list lists the organization connector as connected for every asker", async () => {

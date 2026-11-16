@@ -319,6 +319,14 @@ export const BotCapabilityView = z.object({
 export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
 
 /**
+ * Quick 261116-k3p: the most logical connector tools (`<connector>__<tool>`: per-member connectors and
+ * organization-account servers, proxied by the API) one turn carries. They are reached through the one
+ * `ocw_connector_call` and are never OpenClaw function tools, so they have their own bound, not the provider's 128
+ * (`TURN_TOOLS_MAX`, which the API enforces on every other name of the turn).
+ */
+export const TURN_CONNECTOR_TOOLS_MAX = 1000;
+
+/**
  * `PATCH /api/v1/agents/:id/capabilities`. `tools`, when present, REPLACES the bot's grant set. The 07.8 switches are
  * plain optionals here: a patch that does not name them never resets them to their default.
  */
@@ -326,7 +334,11 @@ export const UpdateBotCapabilitiesRequest = BotCapabilities.partial().extend({
   sandbox: z.boolean().optional(),
   browser: z.boolean().optional(),
   longTasks: z.boolean().optional(),
-  tools: z.array(ToolGrant).max(200).optional(),
+  /**
+   * Quick 261116-k3p part 2: up to `TURN_CONNECTOR_TOOLS_MAX` grants (was 200), so every tool of a big connector can be
+   * on. In-cell tools stay limited per turn (`TURN_CATALOG_TOOLS_MAX`, the sheet warns); proxied tools are not.
+   */
+  tools: z.array(ToolGrant).max(TURN_CONNECTOR_TOOLS_MAX).optional(),
 });
 export type UpdateBotCapabilitiesRequest = z.infer<typeof UpdateBotCapabilitiesRequest>;
 
@@ -517,8 +529,32 @@ export const ATTACHMENT_READ_LIMITS = {
  */
 export const TURN_TOOLS_MAX = 128;
 
+/** The shape of a logical connector tool as a turn lists it: an MCP server's `m` + 8 hex name, `__`, the tool. */
+const CONNECTOR_LOGICAL_TOOL = /^m[0-9a-f]{8}__\S/u;
+
+/**
+ * Whether a turn tool name has the logical connector shape. In-cell (organization) MCP tools share it (OpenClaw names
+ * them the same way), so the shape alone never says a name is proxied: see `openClawToolCount`.
+ */
+export function isConnectorLogicalTool(name: string): boolean {
+  return CONNECTOR_LOGICAL_TOOL.test(name);
+}
+
+/**
+ * How many of a turn's tools are OpenClaw function tools (what `TURN_TOOLS_MAX` bounds): every name but the turn's
+ * proxied logical connector tools (`connectorTools`, decided by the API from the catalog). A name in the set without
+ * the logical shape still counts.
+ */
+export function openClawToolCount(tools: readonly string[], connectorTools: ReadonlySet<string>): number {
+  let count = 0;
+  for (const name of tools) {
+    if (!(connectorTools.has(name) && isConnectorLogicalTool(name))) count++;
+  }
+  return count;
+}
+
 export const TurnContext = z.object({
-  tools: z.array(z.string()).max(TURN_TOOLS_MAX),
+  tools: z.array(z.string()).max(TURN_TOOLS_MAX + TURN_CONNECTOR_TOOLS_MAX),
   toolFlags: z.record(z.string(), TurnToolFlags),
   memory: z.array(MemoryItem).max(50),
   now: TurnNow.nullable(),

@@ -9,7 +9,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompatFlag } from "./devices-settings";
 import {
   compatFlag,
@@ -405,9 +405,17 @@ const cliRows = (html: string) => html.match(/<li data-testid="runtime-update-ro
 
 describe("the 07.11 rows", () => {
   it("render the same markup as before the Runtime row", () => {
-    const rows = cliRows(render(<DeviceRuntimeUpdates device={device()} />));
-    expect(rows).toHaveLength(2);
-    expect(rows.join("\n")).toMatchSnapshot();
+    // The rows say how long ago they were checked: pin the clock to the recording's ("2 weeks ago"), so the snapshot
+    // does not change as real time passes.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW + 14 * 24 * 60 * MIN);
+    try {
+      const rows = cliRows(render(<DeviceRuntimeUpdates device={device()} />));
+      expect(rows).toHaveLength(2);
+      expect(rows.join("\n")).toMatchSnapshot();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("render the same markup on a service device that shows the Runtime row", () => {

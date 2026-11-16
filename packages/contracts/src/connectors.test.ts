@@ -18,6 +18,7 @@ import {
   authFailureFix,
   CELL_MODES,
   ClientCredentialsInput,
+  CONNECTOR_LIST_LIMITS,
   CONNECTOR_PROXY_MODES,
   ConnectionStatus,
   ConnectorAuthFailure,
@@ -361,6 +362,51 @@ describe("Agent Channel connector tools (D-02, D-07: the requester is the stored
       eventId: ID,
       agentId: ID2,
     });
+  });
+
+  it("the list body takes optional filters: a connector, a search query, one tool (quick 261116-k3p part 2)", () => {
+    const base = { eventId: ID, agentId: ID2 };
+    expect(AgentChannelConnectorList.parse({ ...base, connector: "m1a2b3c4d" })).toEqual({
+      ...base,
+      connector: "m1a2b3c4d",
+    });
+    expect(AgentChannelConnectorList.parse({ ...base, query: "  expedientes " })).toEqual({
+      ...base,
+      query: "expedientes",
+    });
+    expect(
+      AgentChannelConnectorList.parse({ ...base, connector: "m1a2b3c4d", tool: "listar_expedientes" }),
+    ).toEqual({ ...base, connector: "m1a2b3c4d", tool: "listar_expedientes" });
+    // `tool` names one connector's tool: never without its connector.
+    expect(AgentChannelConnectorList.safeParse({ ...base, tool: "listar_expedientes" }).success).toBe(false);
+    expect(AgentChannelConnectorList.safeParse({ ...base, connector: "Acme" }).success).toBe(false);
+    expect(
+      AgentChannelConnectorList.safeParse({
+        ...base,
+        query: "x".repeat(CONNECTOR_LIST_LIMITS.queryChars + 1),
+      }).success,
+    ).toBe(false);
+    expect(AgentChannelConnectorList.safeParse({ ...base, query: "   " }).success).toBe(false);
+  });
+
+  it("a listed connector may say how many tools it offers and that the list was cut (both optional)", () => {
+    const entry = {
+      connector: "m1a2b3c4d",
+      name: "ERP",
+      status: "connected",
+      tools: [{ name: "listar_expedientes", description: "Lista expedientes", inputSchema: null }],
+    };
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [entry] }).connectors[0]).toEqual(entry);
+    const counted = { ...entry, toolCount: 200, more: true };
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [counted] }).connectors[0]).toEqual(counted);
+    // Whether the listing carries argument schemas (absent on older payloads).
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [counted] }).schemas).toBeUndefined();
+    expect(AgentChannelConnectorListResponse.parse({ connectors: [counted], schemas: false }).schemas).toBe(
+      false,
+    );
+    expect(
+      AgentChannelConnectorListResponse.safeParse({ connectors: [{ ...entry, toolCount: -1 }] }).success,
+    ).toBe(false);
   });
 
   it("the call response is bounded text", () => {
