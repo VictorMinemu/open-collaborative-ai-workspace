@@ -133,6 +133,14 @@ describe("update requests", () => {
     expect(UpdateBotCapabilitiesRequest.safeParse({ replyMode: "sometimes" }).success).toBe(false);
   });
 
+  it("a grant set may hold a big connector's tools: up to TURN_CONNECTOR_TOOLS_MAX (quick 261116-k3p part 2)", () => {
+    const grant = (i: number) => ({ sourceKind: "mcp", sourceId: ID, tool: `m3f9a12c4__t${i}` });
+    const many = Array.from({ length: TURN_CONNECTOR_TOOLS_MAX }, (_, i) => grant(i));
+    expect(UpdateBotCapabilitiesRequest.safeParse({ tools: many.slice(0, 300) }).success).toBe(true);
+    expect(UpdateBotCapabilitiesRequest.safeParse({ tools: many }).success).toBe(true);
+    expect(UpdateBotCapabilitiesRequest.safeParse({ tools: [...many, grant(-1)] }).success).toBe(false);
+  });
+
   it("policy updates are partial and bounded", () => {
     expect(UpdateBotPolicyRequest.parse({}).searchProvider).toBeUndefined();
     expect(UpdateBotPolicyRequest.safeParse({ maxPersonalBotsPerUser: 21 }).success).toBe(false);
