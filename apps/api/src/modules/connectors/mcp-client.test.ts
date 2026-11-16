@@ -1,5 +1,22 @@
+import { TURN_CONNECTOR_TOOLS_MAX } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { capSchema, redactSecrets, shapeTool, shapeToolResult, stripControl } from "./mcp-client";
+import {
+  capSchema,
+  DISCOVERY_LIMITS,
+  redactSecrets,
+  shapeTool,
+  shapeToolResult,
+  stripControl,
+} from "./mcp-client";
+
+describe("DISCOVERY_LIMITS", () => {
+  // Quick 261116-k3p: a big server's tools past the discovery cap could never be enabled; discovery keeps as many tools
+  // as a bot may hold (`TURN_CONNECTOR_TOOLS_MAX`), and enough pages to reach them.
+  it("keeps every tool a bot may hold", () => {
+    expect(DISCOVERY_LIMITS.tools).toBe(TURN_CONNECTOR_TOOLS_MAX);
+    expect(DISCOVERY_LIMITS.pages).toBeGreaterThanOrEqual(50);
+  });
+});
 
 /** The shaping of whatever a remote MCP server returns before it reaches a model, an audit row or a log (D-06). */
 

@@ -2,7 +2,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { CONNECTOR_TOOL_LIMITS, jsonBytes, MCP_INPUT_SCHEMA_MAX_BYTES } from "@ocw/contracts";
+import {
+  CONNECTOR_TOOL_LIMITS,
+  jsonBytes,
+  MCP_INPUT_SCHEMA_MAX_BYTES,
+  TURN_CONNECTOR_TOOLS_MAX,
+} from "@ocw/contracts";
 import { type Egress, EgressRefusedError, hostPortOf } from "../../lib/egress";
 
 /**
@@ -24,8 +29,13 @@ const TRANSPORT_MAX_BYTES = 4 * 1024 * 1024;
 const CONTENT_MAX_BYTES = CONNECTOR_TOOL_LIMITS.contentBytes;
 const DESCRIPTION_MAX_CHARS = CONNECTOR_TOOL_LIMITS.descriptionChars;
 const CHALLENGE_MAX_CHARS = 1024;
-const MAX_PAGES = 10;
-const MAX_TOOLS = 256;
+/**
+ * Quick 261116-k3p: discovery keeps as many tools as a bot may hold (`TURN_CONNECTOR_TOOLS_MAX`); a big server's tools
+ * past a smaller cap could never be enabled. Pages bound the `tools/list` round trips.
+ */
+export const DISCOVERY_LIMITS = { tools: TURN_CONNECTOR_TOOLS_MAX, pages: 50 } as const;
+const MAX_PAGES = DISCOVERY_LIMITS.pages;
+const MAX_TOOLS = DISCOVERY_LIMITS.tools;
 const CLOSE_WITHIN_MS = 2_000;
 const CLIENT_INFO = { name: "ocw-connectors", version: "1.0.0" };
 const REDACTED = "[redacted]";
