@@ -12,16 +12,19 @@ import {
   CONVERSATION_OPEN_FLAGS,
   type ConfinedToolName,
   type ConsultTarget,
+  isConnectorLogicalTool,
   isPerMemberMode,
   MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
   modelAcceptsImages,
+  openClawToolCount,
   SANDBOX_TOOL_NAMES,
   TASK_TOOL_FLAGS,
   TASK_TOOL_NAMES,
   type TaskToolName,
   TURN_CATALOG_TOOLS_MAX,
+  TURN_CONNECTOR_TOOLS_MAX,
   TURN_TOOLS_MAX,
   type TurnAttachment,
   type TurnContext,
@@ -91,6 +94,13 @@ import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 type TurnTools = { tools: string[]; toolFlags: Record<string, TurnToolFlags> };
 
 /**
+ * `assemble`'s answer: the turn's tools plus which of them are proxied logical connector tools (quick 261116-k3p).
+ * Those are reached through `ocw_connector_call` and are never OpenClaw function tools, so they never take one of the
+ * provider's `TURN_TOOLS_MAX` slots (`openClawToolCount`) and are never evicted to make room.
+ */
+type AssembledTools = TurnTools & { connectorTools: ReadonlySet<string> };
+
+/**
  * What a turn's keychain decision produced (07.4-11): the keys usable here, and the member's own keys the audience rule
  * withholds here (`member_account`). Server-side only: the turn payload names withheld keys by id and name, never more.
  */
@@ -151,6 +161,14 @@ const PLATFORM_TOOLS: ReadonlySet<string> = new Set(Object.values(BUILTIN_TOOLS)
 
 /** A tool of the platform (built in, `ocw_*` or a web tool) rather than an organization MCP server's tool. */
 const isPlatformTool = (name: string): boolean => PLATFORM_TOOLS.has(name) || name.startsWith("ocw_");
+
+/** How many of a turn's tools take a provider slot (`MAX_TURN_TOOLS`): every one but its logical connector tools. */
+const slotsOf = (t: { tools: readonly string[]; connectorTools: ReadonlySet<string> }): number =>
+  openClawToolCount(t.tools, t.connectorTools);
+
+/** A tool a full turn may give up for a platform tool: an in-cell organization tool, never a platform or proxied one. */
+const evictable = (t: { connectorTools: ReadonlySet<string> }) => (name: string) =>
+  !isPlatformTool(name) && !t.connectorTools.has(name);
 
 const WEB_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 const MEMORY_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
@@ -317,13 +335,24 @@ function assemble(
   automations = false,
   /** The turn's message is in the thread of a card this bot watches with an update tool (07.6-14). */
   recordUpdate = false,
-): TurnTools {
+): AssembledTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
+  const connectorTools = new Set<string>();
+  /** The provider slots taken so far: every tool but the logical connector tools. */
+  let slots = 0;
   const add = (name: string, flags: TurnToolFlags) => {
-    if (toolFlags[name] || tools.length >= MAX_TURN_TOOLS) return;
+    if (toolFlags[name] || slots >= MAX_TURN_TOOLS) return;
     tools.push(name);
     toolFlags[name] = flags;
+    slots++;
+  };
+  /** A proxied logical tool: its own bound (`TURN_CONNECTOR_TOOLS_MAX`), never a provider slot (quick 261116-k3p). */
+  const addConnector = (name: string, flags: TurnToolFlags) => {
+    if (toolFlags[name] || connectorTools.size >= TURN_CONNECTOR_TOOLS_MAX) return;
+    tools.push(name);
+    toolFlags[name] = flags;
+    connectorTools.add(name);
   };
   if (effective.internet.effective) {
     add(BUILTIN_TOOLS.webSearch, WEB_FLAGS);
@@ -384,19 +413,23 @@ function assemble(
       sideEffecting: memberTools.some((f) => f.sideEffecting),
     });
   }
-  // The bot's MCP and plugin tools last, up to `TURN_CATALOG_TOOLS_MAX` turn tools (quick 261113-e6s): the rest of the
-  // turn is kept for the turn-scoped platform tools `computeTurn` adds afterwards (`TURN_PLATFORM_RESERVE`), so an
-  // organization tool never takes a platform capability's place.
+  // The bot's MCP and plugin tools last, up to `TURN_CATALOG_TOOLS_MAX` provider slots (quick 261113-e6s): the rest of
+  // the turn is kept for the turn-scoped platform tools `computeTurn` adds afterwards (`TURN_PLATFORM_RESERVE`), so an
+  // organization tool never takes a platform capability's place. A proxied source's logical tools are not OpenClaw
+  // tools (the plugin reaches every one through `ocw_connector_call`): they take no slot and are never cut by the cap,
+  // only by `TURN_CONNECTOR_TOOLS_MAX` (quick 261116-k3p). Before, a big organization-account server's tools past the
+  // cap were dropped from the turn and refused although enabled.
   for (const source of catalog) {
-    if (cellWide && proxiedSource(source)) continue;
+    const proxied = proxiedSource(source);
+    if (cellWide && proxied) continue;
     for (const t of source.tools) {
-      if (tools.length >= TURN_CATALOG_TOOLS_MAX) break;
-      if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
-        add(t.name, catalogFlags(source, t.sideEffecting));
-      }
+      if (!effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) continue;
+      const flags = catalogFlags(source, t.sideEffecting);
+      if (proxied && isConnectorLogicalTool(t.name)) addConnector(t.name, flags);
+      else if (slots < TURN_CATALOG_TOOLS_MAX) add(t.name, flags);
     }
   }
-  return { tools, toolFlags };
+  return { tools, toolFlags, connectorTools };
 }
 
 /**
@@ -404,6 +437,9 @@ function assemble(
  * tools `assemble` adds first). The bot sheet shows it (`BotCapabilityView.toolsOverLimit`): a tool past the cap is never
  * offered, so the bot cannot call it. The turn-scoped platform tools (sandbox, Work Zone sessions, tasks, ...) have
  * their own reserved slots; a board, automation or record tool `assemble` adds on some turns takes one of the catalog's.
+ * Only in-cell tools (organization MCP servers rendered in the cell, plugins) are ever over it: per-member connectors'
+ * and organization-account servers' tools are proxied, take no slot and have their own bound
+ * (`TURN_CONNECTOR_TOOLS_MAX`, above any grant set), quick 261116-k3p.
  */
 export function toolsOverLimit(
   effective: BotCapabilityView["effective"],
@@ -424,7 +460,7 @@ export function toolsOverLimit(
 const toolKey = (t: { sourceKind: string; sourceId: string; tool: string }) =>
   `${t.sourceKind}:${t.sourceId}:${t.tool}`;
 
-interface ComputedTurn extends TurnTools {
+interface ComputedTurn extends AssembledTools {
   keys: TurnKeys;
   effective: BotCapabilityView["effective"];
   /** The bot's display name and the daily limit that applies today (D-11). */
@@ -685,7 +721,7 @@ async function computeTurn(
         continue;
       }
       for (const name of family.tools) {
-        if (assembled.toolFlags[name] || assembled.tools.length >= MAX_TURN_TOOLS) continue;
+        if (assembled.toolFlags[name] || slotsOf(assembled) >= MAX_TURN_TOOLS) continue;
         const { untrustedOutput, sideEffecting } = CONFINED_TOOL_FLAGS[name];
         assembled.tools.push(name);
         assembled.toolFlags[name] = { untrustedOutput, sideEffecting };
@@ -1164,7 +1200,7 @@ export async function turnPolicy(
     consultTargetsHere.length > 0 &&
     depth < A2A_MAX_DEPTH &&
     p.taintedAtStart !== true &&
-    computed.tools.length < MAX_TURN_TOOLS &&
+    slotsOf(computed) < MAX_TURN_TOOLS &&
     (await inChannel(tx, p.conversationId));
   if (consult && !computed.toolFlags[BUILTIN_TOOLS.consultAgent]) {
     computed.tools.push(BUILTIN_TOOLS.consultAgent);
@@ -1186,7 +1222,10 @@ export async function turnPolicy(
   // They replace the 07.5 proposal tools: offered both, the model kept proposing (a card the person had to start) and
   // told them it could not start sessions. The start route still falls back to a proposal after outside content.
   const proposalTools: readonly string[] = [BUILTIN_TOOLS.workZoneProjects, BUILTIN_TOOLS.startWorkZone];
-  const kept = computed.tools.filter((name) => !proposalTools.includes(name)).length;
+  const kept = openClawToolCount(
+    computed.tools.filter((name) => !proposalTools.includes(name)),
+    computed.connectorTools,
+  );
   const workZone = p.workZone && kept + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS ? p.workZone : null;
   if (workZone) {
     for (const name of proposalTools) {
@@ -1210,9 +1249,9 @@ export async function turnPolicy(
   if (
     p.conversationOpen &&
     !computed.toolFlags[BUILTIN_TOOLS.conversationOpen] &&
-    computed.tools.length >= MAX_TURN_TOOLS
+    slotsOf(computed) >= MAX_TURN_TOOLS
   ) {
-    const evict = computed.tools.findLastIndex((name) => !isPlatformTool(name));
+    const evict = computed.tools.findLastIndex(evictable(computed));
     if (evict >= 0) {
       const [name] = computed.tools.splice(evict, 1);
       if (name) delete computed.toolFlags[name];
@@ -1221,7 +1260,7 @@ export async function turnPolicy(
   if (
     p.conversationOpen &&
     !computed.toolFlags[BUILTIN_TOOLS.conversationOpen] &&
-    computed.tools.length < MAX_TURN_TOOLS
+    slotsOf(computed) < MAX_TURN_TOOLS
   ) {
     computed.tools.push(BUILTIN_TOOLS.conversationOpen);
     computed.toolFlags[BUILTIN_TOOLS.conversationOpen] = CONVERSATION_OPEN_FLAGS;
@@ -1238,13 +1277,13 @@ export async function turnPolicy(
   const task = offered?.offer === "start" && !computed.longTaskStarts ? null : offered;
   if (task) {
     const missing = TASK_OFFER_TOOLS[task.offer].filter((name) => !computed.toolFlags[name]);
-    const fits = computed.tools.length + missing.length <= MAX_TURN_TOOLS;
-    const evictable = computed.tools.filter((name) => !isPlatformTool(name)).length;
+    const fits = slotsOf(computed) + missing.length <= MAX_TURN_TOOLS;
+    const evictableCount = computed.tools.filter(evictable(computed)).length;
     const makeRoom =
-      task.offer === "control" && computed.tools.length - evictable + missing.length <= MAX_TURN_TOOLS;
+      task.offer === "control" && slotsOf(computed) - evictableCount + missing.length <= MAX_TURN_TOOLS;
     if (missing.length > 0 && (fits || makeRoom)) {
-      while (computed.tools.length + missing.length > MAX_TURN_TOOLS) {
-        const evict = computed.tools.findLastIndex((name) => !isPlatformTool(name));
+      while (slotsOf(computed) + missing.length > MAX_TURN_TOOLS) {
+        const evict = computed.tools.findLastIndex(evictable(computed));
         const [name] = computed.tools.splice(evict, 1);
         if (name) {
           delete computed.toolFlags[name];
@@ -1368,8 +1407,7 @@ async function turnAttachments(
   });
   const readable = listed.attachments.some((a) => a.access === "read");
   const offerRead =
-    readable &&
-    (computed.tools.length < MAX_TURN_TOOLS || computed.tools.includes(BUILTIN_TOOLS.attachmentRead));
+    readable && (slotsOf(computed) < MAX_TURN_TOOLS || computed.tools.includes(BUILTIN_TOOLS.attachmentRead));
   // IN-01: a full tool list leaves no slot for the read tool; the files then say so instead of `read`.
   if (readable && !offerRead)
     return { ...listed, attachments: withoutReadTool(listed.attachments), offerRead };
