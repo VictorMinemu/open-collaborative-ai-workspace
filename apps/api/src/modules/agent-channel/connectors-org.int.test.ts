@@ -348,7 +348,7 @@ describe("a big connector's listing scales: counts, search, one tool's schema (q
     // The model is told the schemas were left out (not that the tools take no arguments).
     expect(r.body?.schemas).toBe(false);
     expect(toolsOf(r)[0]?.name).toBe("b000");
-    expect((r.body?.connectors as Json[]).map((c) => c.connector)).toEqual([safe]);
+    expect(((r.body?.connectors ?? []) as Json[]).map((c) => c.connector)).toEqual([safe]);
   });
 
   it("query finds a tool past the listing bound, case-insensitive over descriptions, with its schema (few results)", async () => {
@@ -392,7 +392,7 @@ describe("a big connector's listing scales: counts, search, one tool's schema (q
     ]) {
       const r = await listWith(filters);
       expect(r.status, JSON.stringify(r.body)).toBe(200);
-      expect((r.body?.connectors as Json[]).map((c) => c.connector)).not.toContain(other);
+      expect(((r.body?.connectors ?? []) as Json[]).map((c) => c.connector)).not.toContain(other);
     }
     expect((await listWith({ connector: "m00000000" })).body?.connectors).toEqual([]);
   });
