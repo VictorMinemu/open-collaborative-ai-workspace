@@ -104,3 +104,96 @@ e2e tests were run.
 - `f0776158` fix(api): proxied connector tools never take a turn's tool slots (quick 261116-k3p)
 
 ## Self-Check: PASSED
+
+## Part 2: big connectors are fully usable (PLAN-2)
+
+### What changed
+
+- **Grant limit** (`packages/contracts/src/bot-capabilities.ts`): `UpdateBotCapabilitiesRequest.tools` is now bounded
+  by `TURN_CONNECTOR_TOOLS_MAX` (1000), up from 200. The constant moved above that schema so it is defined before use.
+  No other bound on a grant set exists: the API route, the DB, the web sheet's `bulkGrants` and the cell snapshot have
+  none. The web needed no change.
+- **Listing contracts** (`agent-channel.ts`):
+  - `AgentChannelConnectorList` takes optional filters: `connector` (safe name), `query` (trimmed, 1 to 100
+    characters) and `tool` (1 to 128 characters). `tool` requires `connector`, checked with a refine.
+  - `AgentChannelConnectorEntry` gets optional `toolCount` and `more` fields.
+  - The response gets an optional `schemas` boolean (see deviation 1).
+  - New `CONNECTOR_LIST_LIMITS` = `{ queryChars: 100, schemasUpTo: 8 }`.
+  - A request without the new fields parses exactly as before.
+- **API** (`agent-channel/connectors.ts`, `listedConnectors`):
+  - The `connector` filter narrows the turn's offered names.
+  - `tool` matches the exact name first, then the one case-insensitive match `ocw_connector_call` would resolve.
+  - `query` is a case-insensitive substring match over the tool name plus its description or title.
+  - With `query` or `tool`, only connectors that have a match are listed. Without them, every connector of the turn is
+    listed with its `toolCount`.
+  - Each connector lists at most `toolsPerConnector` tools (still 64), sets `more` when it cuts, and always reports
+    `toolCount`.
+  - Schemas are sent only for a named `tool`, or when the whole listing has 8 tools or fewer.
+  - The route now lists only tools that are both in the delivered turn and in the current decision. Before, it used the
+    current decision alone. This narrows what is listed; a call already needed both.
+  - Tool-call metadata is unchanged: counts only, never the query.
+- **Plugin** (`connector-tools.ts`, `agent-channel-protocol.ts`):
+  - `ocw_connector_list` has closed, typed parameters `connector` (pattern), `query` (maxLength 100) and `tool`
+    (maxLength 128, described as the exact tool name to get its argument schema).
+  - `listFiltersOf` checks them locally (`bad_params`, nothing posted) and forwards them.
+  - The rendered list shows `N tools, M listed (search the rest with query)`. When `schemas === false` it drops
+    `Arguments: {}` and adds one line on how to get a tool's arguments.
+  - `LIST_DESCRIPTION` and `CALL_DESCRIPTION` explain the flow: list, search with `query`, get the schema with
+    `connector` + `tool`, call.
+  - Taint and flags logic is untouched.
+  - The protocol mirror gained the request fields and the optional `toolCount`, `more` and `schemas`, each with
+    `.catch(undefined)`.
+
+### Deviations (part 2)
+
+1. **`schemas` flag added to the list response.** The plan did not ask for it. Without it, a null `inputSchema` left
+   out on purpose would look exactly like a tool with no arguments: the plugin used to render that as `Arguments: {}`.
+   The flag is optional and additive.
+2. **When schemas are sent.** I read "the filtered result has ≤ 8 tools" as the whole listing having 8 tools or fewer,
+   whether or not a filter is used. A small setup (for example 3 tools) therefore keeps getting its schemas in one call,
+   as it did before. Every existing test that expected schemas still passes. A big connector without filters never gets
+   schemas.
+3. **Search across connectors.** `query` also works without `connector` and searches every connector of the turn.
+   `tool` still requires `connector`.
+4. **Listing intersects the delivered turn with the current decision**, as described above. This is a tightening, not a
+   loosening.
+
+### Not changed (follow-up)
+
+- **Probe cap of 256 tools per server.** The API-side MCP probe for proxied servers
+  (`apps/api/src/modules/connectors/mcp-client.ts`, `MAX_TOOLS = 256`, `MAX_PAGES = 10`) stores at most 256 tools per
+  server. A server with more tools than that is truncated in the catalog itself, so its extra tools can never be
+  enabled. Raising this touches the probe and storage bounds, so I left it out of this plan.
+- The rule-dialog and watched-record tool listings already cut each server at 200 (`GROUP_TOOLS_MAX`, `own.slice`).
+  That is a display bound only and has no effect on grants or calls.
+
+### Tests (part 2, failing first then green)
+
+- Contracts: request filters, the 100-character query cap, `tool` without `connector` refused, `toolCount`/`more`/
+  `schemas`, grant sets of 300 and 1000 accepted and 1001 refused. All red first.
+- API `connectors-org.int.test.ts`: a new describe with 297 extra tools, so 300 grants are accepted. It covers:
+  - no filter: `toolCount` 300, 64 tools, no schemas, `schemas: false`, `more`;
+  - `query` "expedientes" finds `b150` (position 151) through its description, with its schema;
+  - `query` "WHOAMI" without a connector finds `whoami`;
+  - a broad query is cut and sets `more`;
+  - `tool` returns that tool's schema, an unknown tool lists nothing, and `tool` without `connector` gets 400;
+  - an ungranted proxied server and a made-up connector id are never listed.
+  All four tests were red first.
+- Plugin `connector-tools.test.ts`: parameter schema, descriptions, forwarding plus local refusals, and the big-listing
+  rendering. All red first.
+
+Final runs (part 2):
+- `pnpm exec vitest run apps/api/src/modules/bot-capabilities apps/api/src/modules/agent-channel`: 71 files,
+  **1213 passed**. After a lint-only test edit, `connectors-org.int.test.ts` was re-run: 22 passed.
+- `pnpm exec vitest run packages/contracts apps/openclaw-channel apps/web/components/bots`: 84 files, **2037 passed**.
+- `pnpm lint`: exit 0. The only 4 warnings are the existing ones in `apps/local-runtime`, which this work did not touch.
+- `pnpm typecheck`: exit 0, 11/11.
+
+### Commits (part 2)
+
+- `39bde77c` docs(quick-261116-k3p): plan part 2: grant limit and a connector listing that scales (cherry-picked)
+- `59e48d6e` feat(contracts): connector listing filters and a grant set up to 1000 tools (quick 261116-k3p part 2)
+- `7122e9fd` feat(contracts): the connector listing says whether it carries argument schemas (quick 261116-k3p part 2)
+- `caf5379e` feat(api): ocw_connector_list scales to big connectors (quick 261116-k3p part 2)
+- `cf68bb14` feat(openclaw-channel): ocw_connector_list searches big connectors and fetches one tool's arguments (quick 261116-k3p part 2)
+- `cb50067f` test(api): connector listing assertions without unsafe optional chaining (quick 261116-k3p part 2)
