@@ -117,6 +117,33 @@ describe("ocw_connector_call (07.4 D-07, C-01): a thin, credential-free caller o
     expect(t.description).toMatch(/ocw_connector_list/);
   });
 
+  it("keeps `arguments` explicitly open, so OpenClaw's validator never closes it (quick 261116-k3p)", () => {
+    const { tool } = setup();
+    const props = tool("ocw_connector_call").parameters.properties as Record<string, Record<string, unknown>>;
+    // OpenClaw only defaults `additionalProperties` when the key is absent, and closed it: `schema is false`.
+    expect(props.arguments).toMatchObject({ type: "object", additionalProperties: true });
+  });
+
+  it("a logical tool far past the provider's 128 tools is allowed and posted (quick 261116-k3p)", async () => {
+    const { calls, begin, tool } = setup();
+    const platform = Array.from({ length: 120 }, (_, i) => `ocw_x_${i}`);
+    const logical = Array.from({ length: 300 }, (_, i) => `m1a2b3c4d__tool_${i}`);
+    begin(
+      turn({
+        tools: ["ocw_connector_list", "ocw_connector_call", ...platform, ...logical],
+        toolFlags: { ocw_connector_list: LIST, ocw_connector_call: READ, m1a2b3c4d__tool_299: READ },
+      }),
+    );
+    const r = await tool("ocw_connector_call").execute("tc-1", {
+      connector: "m1a2b3c4d",
+      tool: "tool_299",
+      arguments: { buscar: "x" },
+    });
+    expect(text(r)).not.toMatch(/not available|blocked/i);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ tool: "tool_299", arguments: { buscar: "x" } });
+  });
+
   it("posts exactly {eventId, agentId, connector, tool, arguments} and answers with the API's content", async () => {
     const { calls, begin, tool, logs } = setup();
     begin();

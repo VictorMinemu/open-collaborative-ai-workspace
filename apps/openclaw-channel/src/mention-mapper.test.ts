@@ -382,6 +382,17 @@ describe("per-turn tools and context (D-07, D-08)", () => {
     expect(noCall.connectorTools).toEqual([]);
   });
 
+  it("a big proxied server (300 logical tools) beside 120 OpenClaw tools: none of the 300 reaches OpenClaw (quick 261116-k3p)", () => {
+    const openClaw = ["ocw_connector_call", ...Array.from({ length: 119 }, (_, i) => `m5e0c0de1__t${i}`)];
+    const logical = Array.from({ length: 300 }, (_, i) => `m1a2b3c4d__tool_${i}`);
+    const bigTurn = { ...turn, tools: [...openClaw, ...logical] };
+    const bot = { ...BOT, capabilities: { tools: openClaw } };
+    const m = mapMention(mention({ turn: bigTurn } as never), bot);
+    expect(m.allowedTools.filter((t) => openClaw.includes(t))).toHaveLength(120);
+    expect(m.allowedTools.some((t) => t.startsWith("m1a2b3c4d__"))).toBe(false);
+    expect(m.connectorTools).toEqual(logical);
+  });
+
   it("an invalid turn block parses as no turn", () => {
     const parsed = AgentMentionEvent.parse({ ...mention(), turn: { tools: "web_search" } });
     expect(parsed.turn).toBeUndefined();

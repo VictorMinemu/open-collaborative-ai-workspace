@@ -241,8 +241,12 @@ function callTool(deps: Deps, ctx: ConnectorToolContext): OpenClawAgentTool {
           maxLength: CONNECTOR_TOOL_LIMITS.toolChars,
           description: "The connector tool's name, e.g. search_contacts.",
         },
+        // Explicitly open (quick 261116-k3p): OpenClaw's normalizers default `additionalProperties` only when the key is
+        // absent and ended up closing it, so every call with arguments failed validation (`schema is false`). The
+        // connector tool's own schema is checked by the server; the API bounds the size.
         arguments: {
           type: "object",
+          additionalProperties: true,
           description: "The tool's arguments, following its argument schema from ocw_connector_list.",
         },
       },
