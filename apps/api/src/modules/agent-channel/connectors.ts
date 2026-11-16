@@ -6,6 +6,7 @@ import {
   AgentChannelConnectorListResponse,
   type AgentChannelToolRefusal,
   BUILTIN_TOOLS,
+  CONNECTOR_LIST_LIMITS,
   CONNECTOR_PROXY_MODES,
   CONNECTOR_TOOL_LIMITS,
   isOrgCredentialMode,
@@ -265,18 +266,61 @@ const stricter = (a: TurnToolFlags | undefined, b: TurnToolFlags | undefined): T
   sideEffecting: (a?.sideEffecting ?? false) || (b?.sideEffecting ?? false),
 });
 
+/** `ocw_connector_list`'s optional filters (quick 261116-k3p part 2), as the request carries them. */
+type ListFilter = Pick<AgentChannelConnectorList, "connector" | "query" | "tool">;
+
+/** A connector tool's name as the model uses it (its logical name without `<safe>__`). */
+const shortName = (server: ServerRow, tool: ToolRow) => tool.openclawName.slice(server.safeName.length + 2);
+
+/**
+ * The tools of one connector the filter keeps, in catalog (name) order: the named `tool` (exact, else the one
+ * case-insensitive match `ocw_connector_call` would resolve), then the `query` as a case-insensitive substring of the
+ * name or the description.
+ */
+function filteredTools(server: ServerRow, tools: readonly ToolRow[], filter: ListFilter): ToolRow[] {
+  let kept = [...tools];
+  if (filter.tool !== undefined) {
+    const named = filter.tool;
+    const exact = kept.filter((t) => shortName(server, t) === named);
+    kept =
+      exact.length > 0
+        ? exact
+        : kept.filter((t) => shortName(server, t).toLowerCase() === named.toLowerCase());
+    kept = kept.slice(0, 1);
+  }
+  if (filter.query !== undefined) {
+    const q = filter.query.toLowerCase();
+    kept = kept.filter((t) =>
+      `${shortName(server, t)}\n${t.description ?? t.title ?? ""}`.toLowerCase().includes(q),
+    );
+  }
+  return kept;
+}
+
 /**
  * The proxied connectors whose logical tools are in `tools`, each with those tools (catalog order) and the status of the
  * credential a call would use: the asker's own connection for a member mode, the organization's for an org mode
  * (07.14). Descriptions and schemas are the probe's (third-party) values, bounded by the contract.
+ *
+ * Quick 261116-k3p part 2: a big connector's listing stays small. Each connector says how many of its tools the turn
+ * offers (`toolCount`) and lists at most `toolsPerConnector` of the ones the filter keeps (`more` when cut). Argument
+ * schemas travel only for a named `tool` or when the whole listing has at most `CONNECTOR_LIST_LIMITS.schemasUpTo`
+ * tools. A filter only narrows: `tools` (the turn's offer) is the only source, so nothing else is ever listed.
  */
 async function listedConnectors(
   tx: Tx,
   ctx: { organizationId: string; userId: string },
   tools: readonly string[],
-): Promise<AgentChannelConnectorEntry[]> {
-  const offered = new Set(tools.filter((t) => /^m[0-9a-f]{8}__/u.test(t)));
-  if (offered.size === 0) return [];
+  filter: ListFilter = {},
+): Promise<{ connectors: AgentChannelConnectorEntry[]; schemas: boolean }> {
+  const offered = new Set(
+    tools.filter(
+      (t) =>
+        /^m[0-9a-f]{8}__/u.test(t) &&
+        (filter.connector === undefined || t.startsWith(`${filter.connector}__`)),
+    ),
+  );
+  if (offered.size === 0) return { connectors: [], schemas: true };
   const rows = await tx
     .select({ server: mcpServers, tool: mcpServerTools })
     .from(mcpServerTools)
@@ -294,7 +338,17 @@ async function listedConnectors(
     entry.tools.push(r.tool);
     byServer.set(r.server.id, entry);
   }
-  const groups = [...byServer.values()].slice(0, CONNECTOR_TOOL_LIMITS.connectors);
+  const filtering = filter.query !== undefined || filter.tool !== undefined;
+  const groups = [...byServer.values()]
+    .map((g) => ({ ...g, kept: filteredTools(g.server, g.tools, filter) }))
+    // A search lists only the connectors with a match; without one, every connector of the turn (with its count).
+    .filter((g) => !filtering || g.kept.length > 0)
+    .slice(0, CONNECTOR_TOOL_LIMITS.connectors);
+  const listedCount = groups.reduce(
+    (n, g) => n + Math.min(g.kept.length, CONNECTOR_TOOL_LIMITS.toolsPerConnector),
+    0,
+  );
+  const withSchemas = filter.tool !== undefined || listedCount <= CONNECTOR_LIST_LIMITS.schemasUpTo;
   const isOrg = (g: { server: ServerRow }) => isOrgCredentialMode(g.server.authMode);
   // Member modes in one query; each org-mode server reads its one organization row.
   const statuses = await connectionStatusFor(
@@ -305,16 +359,19 @@ async function listedConnectors(
   for (const g of groups.filter(isOrg)) {
     statuses.set(g.server.id, await credentialStatusFor(tx, credentialKeyOf(g.server, ctx)));
   }
-  return groups.map(({ server, tools: serverTools }) => ({
+  const connectors = groups.map(({ server, tools: serverTools, kept }) => ({
     connector: server.safeName,
     name: server.name,
     status: statuses.get(server.id) ?? "not_connected",
-    tools: serverTools.slice(0, CONNECTOR_TOOL_LIMITS.toolsPerConnector).map((t) => ({
-      name: t.openclawName.slice(server.safeName.length + 2),
+    tools: kept.slice(0, CONNECTOR_TOOL_LIMITS.toolsPerConnector).map((t) => ({
+      name: shortName(server, t),
       description: (t.description ?? t.title ?? "").slice(0, CONNECTOR_TOOL_LIMITS.descriptionChars),
-      inputSchema: t.inputSchema ?? null,
+      inputSchema: withSchemas ? (t.inputSchema ?? null) : null,
     })),
+    toolCount: serverTools.length,
+    ...(kept.length > CONNECTOR_TOOL_LIMITS.toolsPerConnector ? { more: true } : {}),
   }));
+  return { connectors, schemas: withSchemas };
 }
 
 export function registerConnectorRoutes(
@@ -616,10 +673,13 @@ export function registerConnectorRoutes(
           const started = Date.now();
           const claim = await claimWith(null);
           if (!claim.allowed) return { refused: claim.reason as Refusal };
-          const connectors = await listedConnectors(
+          // Only what this turn offers and still offers now (a call needs both); the filters only narrow it.
+          const offeredOnTurn = new Set(turn.tools);
+          const { connectors, schemas } = await listedConnectors(
             tx,
             { organizationId: cell.organizationId, userId: turn.userId },
-            now.tools,
+            now.tools.filter((t) => offeredOnTurn.has(t)),
+            { connector: body.connector, query: body.query, tool: body.tool },
           );
           const keys = now.keys.usable.slice(0, CONNECTOR_TOOL_LIMITS.keys).map((k) => ({
             handle: k.handle,
@@ -633,7 +693,7 @@ export function registerConnectorRoutes(
             durationMs: Date.now() - started,
             metadata: { connectors: connectors.length, keys: keys.length },
           });
-          return { list: { connectors, keys } };
+          return { list: { connectors, keys, schemas } };
         },
       );
       if ("refused" in decided) {
