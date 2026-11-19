@@ -451,4 +451,49 @@ describe("ProjectRegistry: projects without git", () => {
       { localId: p.localId, name: "repo", gitRemote: null, defaultBranch: "main", git: true },
     ]);
   });
+
+  // Quick 261119-ngw: the server decides a bot session's worktree from the announced flag, so it is re-detected live:
+  // an entry written before the flag, or a folder whose git changed since it was added, is announced as it is now.
+  it("refreshGit re-detects every project's git, saves it, and leaves a missing folder as it was", async () => {
+    const root = realpathSync(home());
+    const ocw = join(root, "ocw");
+    mkdirSync(ocw);
+    const plain = join(root, "plain");
+    mkdirSync(plain);
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    const entry = (localId: string, path: string, git?: boolean) => ({
+      localId,
+      path,
+      name: localId,
+      gitRemote: null,
+      defaultBranch: null,
+      ...(git === undefined ? {} : { git }),
+      addedAt: "2026-01-01T00:00:00.000Z",
+    });
+    writeFileSync(
+      join(ocw, "projects.json"),
+      JSON.stringify({
+        projects: [
+          entry("lp_plain", plain),
+          entry("lp_repo", repo, false),
+          entry("lp_gone", join(root, "gone"), true),
+        ],
+      }),
+    );
+    const reg = new ProjectRegistry(ocw);
+    await reg.load();
+    expect(await reg.refreshGit()).toBe(true);
+    expect(reg.toSynced().map((p) => [p.localId, p.git])).toEqual([
+      ["lp_plain", false],
+      ["lp_repo", true],
+      ["lp_gone", true],
+    ]);
+    const saved = JSON.parse(readFileSync(join(ocw, "projects.json"), "utf8")) as {
+      projects: Array<{ localId: string; git?: boolean }>;
+    };
+    expect(saved.projects.map((p) => p.git)).toEqual([false, true, true]);
+    expect(await reg.refreshGit()).toBe(false);
+  });
 });
