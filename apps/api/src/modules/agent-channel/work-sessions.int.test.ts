@@ -5,6 +5,7 @@ import {
   BOT_WORK_SESSION_SENTENCES,
   type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
+  NO_GIT_WORKTREE_MESSAGE,
   type TurnToolFlags,
   WORK_SESSION_CARD_LABELS,
 } from "@ocw/contracts";
@@ -619,6 +620,54 @@ describe("an isolated worktree only where the project is in git (quick 261113-hu
     expect(rows.map((r) => r.worktree)).toEqual([true, true]);
     const cmd = (await server.command("session.start", unknown.workSessionId)) as Json;
     expect(cmd.payload.worktree).toBe(true);
+  });
+
+  // Quick 261119-ngw: a device that never said (older daemon, or an entry registered before the flag) refuses the
+  // worktree; the API learns from that refusal, so the bot's next start in that project runs on the checkout.
+  it("a worktree refused for no git marks the project without git; the next start runs in place", async () => {
+    const before = await rowsOf("select git from app.projects where id = $1", [ledgerId]);
+    expect(before).toEqual([{ git: null }]);
+    try {
+      const first = await started(await askAtlas(), { projectId: ledgerId });
+      const cmd = (await server.command("session.start", first.workSessionId)) as Json;
+      expect(cmd.payload.worktree).toBe(true);
+      server.ack(cmd.id as string, false, `GitError: ${NO_GIT_WORKTREE_MESSAGE}`);
+      await eventually(async () => {
+        const [s] = await rowsOf("select status from app.work_sessions where id = $1", [first.workSessionId]);
+        return s?.status === "failed";
+      });
+      expect(await rowsOf("select git from app.projects where id = $1", [ledgerId])).toEqual([
+        { git: false },
+      ]);
+      // What the bot reads when it checks the failure says that a new start works.
+      const [failed] = await rowsOf("select last_error from app.work_sessions where id = $1", [
+        first.workSessionId,
+      ]);
+      expect(failed!.last_error).toContain(NO_GIT_WORKTREE_MESSAGE);
+      expect(failed!.last_error).toContain("a new session there runs in the project folder");
+
+      const second = await started(await askAtlas(), { projectId: ledgerId });
+      const [s] = await rowsOf("select worktree from app.work_sessions where id = $1", [
+        second.workSessionId,
+      ]);
+      expect(s).toEqual({ worktree: false });
+      const next = (await server.command("session.start", second.workSessionId)) as Json;
+      expect(next.payload.worktree).toBeUndefined();
+      server.ack(next.id as string);
+    } finally {
+      await su.query("update app.projects set git = null where id = $1", [ledgerId]);
+    }
+  });
+
+  it("any other refusal, or one for a session without a worktree, leaves the project's git as it was", async () => {
+    const first = await started(await askAtlas(), { projectId: ledgerId });
+    const cmd = (await server.command("session.start", first.workSessionId)) as Json;
+    server.ack(cmd.id as string, false, "runtime claude-code is not available on this device");
+    await eventually(async () => {
+      const [s] = await rowsOf("select status from app.work_sessions where id = $1", [first.workSessionId]);
+      return s?.status === "failed";
+    });
+    expect(await rowsOf("select git from app.projects where id = $1", [ledgerId])).toEqual([{ git: null }]);
   });
 });
 

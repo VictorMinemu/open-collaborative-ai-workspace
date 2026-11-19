@@ -314,6 +314,32 @@ export class ProjectRegistry {
     }));
   }
 
+  /**
+   * Quick 261119-ngw: re-detects whether each project is in a git repository, with the same check an isolated worktree
+   * makes, so the server learns it for entries written before the flag and for folders whose git changed since they
+   * were added (it decides a bot session's worktree from it). A folder that is gone keeps its flag. Saves on a change;
+   * true when something changed.
+   */
+  async refreshGit(): Promise<boolean> {
+    let changed = false;
+    for (const p of this.projects) {
+      if (
+        !(await stat(p.path).then(
+          (s) => s.isDirectory(),
+          () => false,
+        ))
+      )
+        continue;
+      const git = await isGitRepo(p.path);
+      if (p.git !== git) {
+        p.git = git;
+        changed = true;
+      }
+    }
+    if (changed) await this.save();
+    return changed;
+  }
+
   async add(path: string, name?: string): Promise<LocalProject> {
     const abs = await realpath(resolve(path)).catch(() => {
       throw new Error("path does not exist");

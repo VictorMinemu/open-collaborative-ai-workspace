@@ -625,6 +625,31 @@ describe("Daemon <-> Device Link", () => {
     expect(JSON.stringify(server.last.frames)).not.toContain(home);
   });
 
+  // Quick 261119-ngw: a project registered before the flag existed was announced without it, so the server could not
+  // tell that a bot session in it must run in place; every announcement now re-detects it.
+  it("announces a project's git as it is now, also for an entry written before the flag", async () => {
+    const plain = join(home, "notes");
+    mkdirSync(plain);
+    const entry = { gitRemote: null, defaultBranch: null, addedAt: "2026-01-01T00:00:00.000Z" };
+    writeFileSync(
+      join(home, "projects.json"),
+      JSON.stringify({
+        projects: [
+          { ...entry, localId: "lp_notes", path: plain, name: "notes" },
+          { ...entry, localId: "lp_acme", path: project, name: "acme", git: false },
+        ],
+      }),
+    );
+    await daemon.registry.load();
+    await daemon.start();
+    const sync = await server.frame("projects.sync", (f) => f.projects.length === 2);
+    expect(sync.projects).toEqual([
+      { localId: "lp_notes", name: "notes", gitRemote: null, defaultBranch: null, git: false },
+      { localId: "lp_acme", name: "acme", gitRemote: null, defaultBranch: null, git: true },
+    ]);
+    expect(JSON.stringify(server.last.frames)).not.toContain(home);
+  });
+
   it("sends the runtimes' catalogs in a capabilities frame after connect (sanitised, opt-in off)", async () => {
     await daemon.start();
     const caps = await server.frame("capabilities");

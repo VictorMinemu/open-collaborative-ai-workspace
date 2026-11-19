@@ -802,6 +802,7 @@ export class Daemon {
       // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
       isolatedServer: this.reportedIsolated,
     };
+    await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [
       hello,
       // 07.17.1 (PD-12): the run the last restart carried over, right after hello, until it went out once.
@@ -853,10 +854,26 @@ export class Daemon {
     this.link?.send(frame);
   }
 
-  private syncProjects(): void {
+  private async syncProjects(): Promise<void> {
     // Offline changes are covered by the handshake on reconnect; never queue a stale list.
     if (!this.isConnected) return;
+    await this.refreshProjectsGit();
+    if (!this.isConnected) return;
     this.send({ type: "projects.sync", projects: this.registry.toSynced() });
+  }
+
+  /**
+   * Quick 261119-ngw: every announcement carries each project's git as it is now (the server runs a bot session in
+   * place when a project has no git). A failure keeps the flags as they were and never holds the announcement back.
+   */
+  private async refreshProjectsGit(): Promise<void> {
+    try {
+      await this.registry.refreshGit();
+    } catch (err) {
+      this.log.warn("project git check failed", {
+        error: sanitizeString(errorMessage(err), [this.home, ...this.registry.list().map((p) => p.path)]),
+      });
+    }
   }
 
   private rootsFor(cwd: string, project?: LocalProject): string[] {
@@ -1588,12 +1605,12 @@ export class Daemon {
         return this.registry.list();
       case "addProject": {
         const project = await this.registry.add(req.path, req.name);
-        this.syncProjects();
+        await this.syncProjects();
         return project;
       }
       case "removeProject": {
         const removed = await this.registry.remove(req.localId);
-        if (removed) this.syncProjects();
+        if (removed) await this.syncProjects();
         return { removed };
       }
       case "reloadConfig":

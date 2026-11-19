@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { DiffFile } from "@ocw/contracts";
+import { type DiffFile, NO_GIT_WORKTREE_MESSAGE } from "@ocw/contracts";
 import { redact, truncateBytes } from "./sanitize.js";
 
 export const PATCH_MAX_BYTES = 500 * 1024;
@@ -225,7 +225,7 @@ export async function unifiedPatch(
   return { patch: text, truncated };
 }
 
-export const NO_GIT_WORKTREE_MESSAGE = "this project has no git repository; isolated worktrees need git";
+export { NO_GIT_WORKTREE_MESSAGE };
 
 export interface WorktreeResult {
   path: string;

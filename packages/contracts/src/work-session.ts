@@ -339,6 +339,12 @@ export const WorkSessionDiff = z.object({
 export type WorkSessionDiff = z.infer<typeof WorkSessionDiff>;
 
 /**
+ * The error a device gives when a session asks for an isolated worktree in a project with no git repository. The API
+ * reads it to learn that the project has no git (quick 261119-ngw), so the next bot start there runs in place.
+ */
+export const NO_GIT_WORKTREE_MESSAGE = "this project has no git repository; isolated worktrees need git";
+
+/**
  * Payloads of the durable events on stream `ws:<id>` (see EventTypes):
  * - `work_session.event` → WorkSessionEventPayload (runtime event from the device)
  * - `work_session.updated` → WorkSession

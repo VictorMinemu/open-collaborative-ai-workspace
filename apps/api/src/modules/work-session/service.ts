@@ -7,6 +7,7 @@ import {
   EventTypes,
   type HelloFrame,
   isFullAccessReport,
+  NO_GIT_WORKTREE_MESSAGE,
   onlyRelativePaths,
   type SessionEvent,
   SessionTitle,
@@ -1374,8 +1375,21 @@ export class WorkSessionService implements DeviceSessionHandler {
       }
       if (cmd.kind === "session.start") {
         if (!ok) {
+          // Quick 261119-ngw: a worktree the device refused because the project has no git teaches the API that it
+          // has none (an older daemon may never have said so), so the next bot start there runs in place.
+          const noGit = cmd.payload.worktree === true && (error ?? "").includes(NO_GIT_WORKTREE_MESSAGE);
+          if (noGit) {
+            await tx
+              .update(projects)
+              .set({ git: false })
+              .where(and(eq(projects.id, s.projectId), eq(projects.deviceId, device.deviceId)));
+          }
           await this.failInFlight(tx, s, "The session could not start");
-          await this.setStatus(tx, s, "failed", { lastError: error ?? "The session could not start" });
+          await this.setStatus(tx, s, "failed", {
+            lastError: noGit
+              ? `${NO_GIT_WORKTREE_MESSAGE}. The project is now known to have no git: a new session there runs in the project folder, without a worktree.`
+              : (error ?? "The session could not start"),
+          });
         } else if (s.status === "provisioning" || s.status === "host_offline") {
           await this.setStatus(tx, s, "idle");
           await this.tryDispatch(tx, s);
