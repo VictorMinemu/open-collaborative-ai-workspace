@@ -106,6 +106,8 @@ export const REQUIRED_AREAS = [
   { area: "bot tasks: continuation scheduler", file: "apps/api/src/modules/agent-channel/task-wakes.ts" },
   { area: "bot tasks: routes", file: "apps/api/src/modules/agent-channel/task-routes.ts" },
   { area: "bot tasks: process wakes", file: "apps/api/src/modules/agent-channel/task-process-wakes.ts" },
+  // Phase 07.18 (ADR-0044): the only seal and open of the subscription pool's Claude setup-tokens.
+  { area: "sealed pool tokens", file: "apps/api/src/modules/account-pool/tokens.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
