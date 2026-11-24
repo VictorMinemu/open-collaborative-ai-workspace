@@ -31,7 +31,7 @@ import { createJobs } from "./lib/jobs";
 import { redisRateLimitStore } from "./lib/rate-limit-store";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
-import { createAccountPoolModule } from "./modules/account-pool";
+import { createAccountPoolModule, createDeviceAccountHandler } from "./modules/account-pool";
 import { createAgentModule } from "./modules/agent";
 import {
   type BrowserBudgets,
@@ -352,6 +352,9 @@ export async function buildApp(
     ...(opts.botFileDeadlineMs ? { botFileDeadlineMs: opts.botFileDeadlineMs } : {}),
     ...(opts.botFileTransferIdleMs ? { botFileTransferIdleMs: opts.botFileTransferIdleMs } : {}),
   });
+  // Phase 07.18 (D-09, PD-09): the device's account frames (usage readings now; Codex slots and sign-ins in 07.18-13)
+  // go to the account-pool module, next to the work-session handler the hub already has.
+  deviceModule.hub.setAccountHandler(createDeviceAccountHandler(core));
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.
   const sandbox = createSandboxModule(core);

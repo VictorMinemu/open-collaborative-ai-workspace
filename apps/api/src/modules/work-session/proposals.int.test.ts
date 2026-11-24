@@ -558,6 +558,36 @@ describe("refusals before any card (D-03, P-08, APPROVE-04)", () => {
     await refused(await freshTurn(), signedOut, "runtime_unavailable");
   });
 
+  it("07.18 (D-15, PD-17): a signed-out pool-capable device with a ready pool account counts as available", async () => {
+    const t = await seedDevice({
+      owner: samId,
+      name: "Pool Mac",
+      runtimeInfo: [{ ...CLAUDE_READY, loggedIn: false }],
+      project: "pool-repo",
+    });
+    await su.query("update app.devices set account_pool_version = 1 where id = $1", [t.deviceId]);
+    // No pool account yet: today's answer.
+    await refused(await freshTurn(), t, "runtime_unavailable");
+    // Token-shaped value joined at runtime, so no credential-shaped literal sits whole in the repository.
+    const token = ["sk", "ant", "oat01", "P".repeat(48)].join("-");
+    const account = await ok(
+      victor.request("POST", "/api/v1/account-pool/claude/accounts", { label: "Pool", token }),
+    );
+    try {
+      const eventId = await freshTurn();
+      const list = await cell("/work-zone/projects", { eventId, agentId: samBotId });
+      expect((list.body.projects as Json[]).find((p) => p.projectId === t.projectId)?.runtimes).toEqual([
+        { id: "claude-code", label: "Claude Code", available: true },
+      ]);
+      await expirePending();
+      const p = await proposed(t);
+      expect((await detail(sam, p.approvalId)).view).toMatchObject({ startBlocked: null });
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${account.id}`));
+      await expirePending();
+    }
+  });
+
   it("prompt_not_allowed: a slash command, also behind spaces or a newline", async () => {
     for (const prompt of ["/permissions bypass", "  /permissions", "\n/model x"]) {
       await refused(await freshTurn(), { prompt }, "prompt_not_allowed");

@@ -34,6 +34,7 @@ import { z } from "zod";
 import type { Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import { conflict } from "../../lib/errors";
+import { previewAccountSources } from "../account-pool";
 import type { ApplyResult, ApprovalKind, ApprovalService } from "../approval";
 import { deviceFacts, loadDeviceAccess } from "../device";
 import { orgResource, type PermissionService } from "../organization";
@@ -103,6 +104,22 @@ export const TAINTED_PROPOSAL_NOTICE =
 const MAX_PROJECTS = 50;
 
 const runtimesOf = (d: DeviceRow): RuntimeInfo[] => z.array(RuntimeInfo).catch([]).parse(d.runtimeInfo);
+
+/**
+ * Which installed runtimes of the device can run a session now (07.18, D-15, PD-16, PD-17): the rule
+ * `createWorkSession` decides with, read only (no rotation moved). A ready pool account serves a runtime that is not
+ * signed in on a pool-capable device; otherwise its own login must be signed in and the policy must allow it (a pool
+ * with no ready account and fallback off serves nothing). A device without pool support: its own login, as before.
+ */
+async function availableRuntimes(tx: Tx, d: DeviceRow): Promise<Map<RuntimeId, boolean>> {
+  const preview = await previewAccountSources(tx, { deviceId: d.id, now: new Date() });
+  const out = new Map<RuntimeId, boolean>();
+  for (const r of runtimesOf(d)) {
+    const source = preview?.[r.id].source;
+    out.set(r.id, r.installed && (source === "pool" || (source === "device_login" && r.loggedIn)));
+  }
+  return out;
+}
 
 /** The card's prompt excerpt: at most 500 UTF-16 units, never a split surrogate pair. */
 function excerpt(prompt: string): string {
@@ -200,8 +217,7 @@ async function liveState(tx: Tx, perms: PermissionService, p: ProposalRow): Prom
   const [dev] = await tx.select().from(devices).where(eq(devices.id, p.deviceId)).limit(1);
   const allowed = await mayCreate(tx, perms, p.requestedForUserId);
   const usable = dev ? await mayUse(tx, perms, p.requestedForUserId, dev) : false;
-  const rt = dev ? runtimesOf(dev).find((r) => r.id === p.runtime) : undefined;
-  const available = rt?.installed === true && rt.loggedIn === true;
+  const available = dev ? (await availableRuntimes(tx, dev)).get(p.runtime) === true : false;
   const removed = !proj || proj.removedAt !== null || proj.deviceId !== p.deviceId;
   const online = dev?.status === "online";
   // D-13 (P-12), in `createWorkSession`'s order: a repository of a team project also needs project access.
@@ -452,8 +468,8 @@ export async function proposeWorkZone(
   // D-13 (P-12): a repository of a team project the human is not in reads as missing.
   if (!(await mayOpenRepoProject(tx, perms, human, found.p.id))) return refuse("project_not_found");
   if (d.status !== "online") return refuse("device_offline");
-  const rt = runtimesOf(d).find((r) => r.id === runtime);
-  if (!rt?.installed || !rt.loggedIn) return refuse("runtime_unavailable");
+  // 07.18 (D-15, PD-17): a ready pool account counts as available, as it does for a person's start.
+  if ((await availableRuntimes(tx, d)).get(runtime) !== true) return refuse("runtime_unavailable");
 
   // Serialise this bot's proposals for this human: the retry and the cap below are exact under concurrency.
   await tx.execute(
@@ -590,6 +606,7 @@ export async function listProposableProjects(
   const access = await loadDeviceAccess(tx, human);
   const usable = new Map<string, boolean>();
   const inProject = new Map<string, boolean>();
+  const runtimesReady = new Map<string, Map<RuntimeId, boolean>>();
   const out: AgentChannelWorkZoneProjectsResponse["projects"] = [];
   for (const { p: project, d, unitId, unitPath } of rows) {
     if (out.length >= MAX_PROJECTS) break;
@@ -622,6 +639,11 @@ export async function listProposableProjects(
       }
       if (!open) continue;
     }
+    let ready = runtimesReady.get(d.id);
+    if (ready === undefined) {
+      ready = await availableRuntimes(tx, d);
+      runtimesReady.set(d.id, ready);
+    }
     out.push({
       projectId: project.id,
       name: project.name.slice(0, 200),
@@ -629,7 +651,7 @@ export async function listProposableProjects(
       runtimes: runtimesOf(d)
         .filter((r) => r.installed)
         .slice(0, 4)
-        .map((r) => ({ id: r.id, label: RUNTIME_LABEL[r.id], available: r.loggedIn })),
+        .map((r) => ({ id: r.id, label: RUNTIME_LABEL[r.id], available: ready.get(r.id) === true })),
     });
   }
   return { projects: out };

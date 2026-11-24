@@ -1,4 +1,7 @@
 import {
+  type AccountLoginFrame,
+  type AccountsSyncFrame,
+  type AccountUsageFrame,
   type AckFrame,
   type CapabilitiesFrame,
   type CommandKind,
@@ -14,6 +17,7 @@ import {
   type RuntimeUpdateRunFrame,
   type RuntimeUpdatesLevel,
   type ServerToDeviceFrame,
+  type SessionAccountLimitedFrame,
   stripImageData,
   type TitleResultFrame,
 } from "@ocw/contracts";
@@ -50,6 +54,12 @@ export interface DeviceSessionHandler {
   /** The device stayed disconnected past the grace period. */
   onOffline(device: DeviceRef): Promise<void>;
   onEvent(device: DeviceRef, frame: EventFrame): Promise<void>;
+  /**
+   * 07.18 (D-07, D-08, PD-05): the device's runtime says a session's account reached its limit (or its sign-in failed),
+   * before the turn's `prompt.completed`. The handler decides whether the frame may act at all (the session is this
+   * device's and uses that account) and re-runs the turn on the next account.
+   */
+  onAccountLimited?(device: DeviceRef, frame: SessionAccountLimitedFrame): Promise<void>;
   /**
    * A command's outcome: the device's ack (`origin: "device"`), or the hub failing it before it was sent
    * (`origin: "hub"`, 06.1: `error` is then the reason, e.g. `image_unavailable`; never device-supplied text).
@@ -89,6 +99,27 @@ export interface DeviceSessionHandler {
     command: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>>;
+}
+
+/**
+ * 07.18 (D-02, D-09, PD-09, PD-10): the device's account frames, registered with `hub.setAccountHandler` by the
+ * account-pool module. Every method is optional: a frame without its method is ignored. Called sequentially per device
+ * socket, in frame order, with the device the link authenticated (never an organization the frame names).
+ */
+export interface DeviceAccountHandler {
+  /** The device's Codex slots (latest wins). */
+  onAccountsSync?(device: DeviceRef, frame: AccountsSyncFrame): Promise<void>;
+  /** A usage reading for one pool account or slot. */
+  onAccountUsage?(device: DeviceRef, frame: AccountUsageFrame): Promise<void>;
+  /** Progress of an `account.login` command (device code, then completed or failed). */
+  onAccountLogin?(device: DeviceRef, frame: AccountLoginFrame): Promise<void>;
+  /** The outcome of an `account.login` or `account.logout` command (the device's ack). */
+  onAccountCommandResult?(
+    device: DeviceRef,
+    command: DeviceCommandRow,
+    ok: boolean,
+    error: string | null,
+  ): Promise<void>;
 }
 
 /**
@@ -133,6 +164,9 @@ const FILE_COMMAND_KINDS: ReadonlySet<string> = new Set<CommandKind>([
   "session.file.read",
 ]);
 const isFileCommand = (row: Pick<DeviceCommandRow, "kind">) => FILE_COMMAND_KINDS.has(row.kind);
+/** 07.18: the device-level account commands: their ack goes to the account handler, never to the session handler. */
+const ACCOUNT_COMMAND_KINDS: ReadonlySet<string> = new Set<CommandKind>(["account.login", "account.logout"]);
+const isAccountCommand = (row: Pick<DeviceCommandRow, "kind">) => ACCOUNT_COMMAND_KINDS.has(row.kind);
 
 /** The outcome of a file command as the waiting route reads it: the device's ack, or the hub's failure reason. */
 export interface FileCommandAck {
@@ -206,6 +240,7 @@ export class DeviceHub {
   private readonly links = new Map<string, LocalLink>();
   private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
   private handler: DeviceSessionHandler | null = null;
+  private accounts: DeviceAccountHandler | null = null;
   readonly offlineGraceMs: number;
   private readonly maxFrameBytes: number;
   /** What session start and the device DTO decide compatibility with (07.11 D-04, PD-12, PD-13). */
@@ -234,6 +269,15 @@ export class DeviceHub {
 
   setSessionHandler(handler: DeviceSessionHandler): void {
     this.handler = handler;
+  }
+
+  /** 07.18: where the device's account frames and the acks of its `account.*` commands go (the account-pool module). */
+  setAccountHandler(handler: DeviceAccountHandler): void {
+    this.accounts = handler;
+  }
+
+  get accountHandler(): DeviceAccountHandler | null {
+    return this.accounts;
   }
 
   /**
@@ -592,6 +636,11 @@ export class DeviceHub {
     if (!row || row.kind === "runtime.update") return;
     // 07.17.1.1 (PD-18): a file command's ack goes to the route waiting for it; no session state changes with it.
     if (isFileCommand(row)) return this.publishFileAck(row.id, { ok, error });
+    // 07.18: a device-level account command (a Codex slot's sign-in or sign-out) has no session.
+    if (isAccountCommand(row)) {
+      await this.accounts?.onAccountCommandResult?.(device, row, ok, error);
+      return;
+    }
     await this.handler?.onCommandResult(device, row, ok, error);
   }
 
