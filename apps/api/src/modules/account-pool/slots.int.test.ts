@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { AccountsSyncFrame, AccountUsageSnapshot } from "@ocw/contracts";
+import type { Tx } from "@ocw/db";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -83,10 +85,10 @@ const auditFor = async (org: string, resourceId: string) =>
     )
   ).rows as Json[];
 
-const inOrgA = <T>(fn: Parameters<TestStack["built"]["core"]["db"]["withTenant"]>[1]) =>
-  stack.built.core.db.withTenant({ organizationId: orgA, userId: null }, fn) as Promise<T>;
+const inOrgA = <T>(fn: (tx: Tx) => Promise<T>): Promise<T> =>
+  stack.built.core.db.withTenant({ organizationId: orgA, userId: null }, fn);
 
-const snapshot = (usedPercent: number) => ({
+const snapshot = (usedPercent: number): AccountUsageSnapshot => ({
   windows: [{ kind: "primary", usedPercent, resetsAt: "2026-12-01T10:00:00.000Z" }],
   at: "2026-11-24T10:00:00.000Z",
 });
@@ -296,13 +298,13 @@ describe("a device's slots and the pool stay in step (07.18-13 T2)", () => {
 
   it("the same sync twice writes nothing the second time; a running sign-in's slot and an unknown signed-out slot are left alone", async () => {
     const slotId = randomUUID();
-    const frame = {
-      type: "accounts.sync" as const,
+    const frame: AccountsSyncFrame = {
+      type: "accounts.sync",
       codexSlots: [
         {
           slotId,
           label: "same@acme",
-          origin: "cli" as const,
+          origin: "cli",
           signedIn: true,
           planType: "pro",
           usage: snapshot(10),
