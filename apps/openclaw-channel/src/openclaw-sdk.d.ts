@@ -266,6 +266,14 @@ declare module "openclaw/plugin-sdk/provider-auth-login-flow-runtime" {
     ownerPluginId: string;
     /** Save the credential only; never change the default model. */
     credentialOnly: boolean;
+    /**
+     * 07.18 probe A-03 (holds), read from the pinned 2026.9.7 `dist/auth-BShLso3q.mjs`: `runModelsAuthLoginFlow`
+     * spreads its options into `runProviderAuthMethod`, whose `resolveReloginProfileIdentity` stores the method's one
+     * returned profile under `requestedProfileId` (the CLI's `models auth login --profile-id`). Absent = the method's
+     * own id (`openai:<email>`, or the matching existing profile on a re-login). A requested id with a method that
+     * returns several profiles throws.
+     */
+    profileId?: string;
     /** Agent whose auth store receives the credential (`main` = the shared store). */
     agent: string;
     config: Record<string, unknown>;

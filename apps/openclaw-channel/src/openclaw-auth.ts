@@ -1,7 +1,7 @@
-import type { SubscriptionProviderId } from "./agent-channel-protocol.js";
+import type { CellAuthProfileReport, SubscriptionProviderId } from "./agent-channel-protocol.js";
 import type { EventStreamLogger } from "./event-stream.js";
 import type { PluginRuntimeLike } from "./openclaw-port.js";
-import type { SubscriptionAccount, SubscriptionAuthDriver } from "./subscription-auth.js";
+import type { SubscriptionAccount, SubscriptionAuthDriver, SubscriptionSignIn } from "./subscription-auth.js";
 
 /**
  * Subscription sign-in backed by OpenClaw itself (ADR-0006). OpenClaw 2026.9.7 implements ChatGPT/Codex
@@ -10,6 +10,10 @@ import type { SubscriptionAccount, SubscriptionAuthDriver } from "./subscription
  * auth store, refreshing it on use. We drive the very same flow its channel `/login` command and Control
  * UI use (`runModelsAuthLoginFlow`), with a prompter that hands the code to the OCW web UI instead of a
  * terminal. Verified on a real 2026.9.7 gateway (code issued by auth.openai.com).
+ *
+ * 07.18 (D-02, PD-12): several ChatGPT accounts live side by side in the same store, each under its own profile id
+ * (`openai:pool-<accountId>`, asked through the flow's `profileId`, probe A-03 in openclaw-sdk.d.ts); `profiles` lists
+ * every one of them and `logout` can remove only some.
  */
 
 const TARGET: Record<SubscriptionProviderId, { provider: string; method: string; ownerPluginId: string }> = {
@@ -40,6 +44,33 @@ export function emailFromProfileId(profileId: string): string | null {
   return rest.includes("@") ? rest : null;
 }
 
+function isUsable(cred: StoredCredential): boolean {
+  return Boolean(cred.refresh || cred.access);
+}
+
+function accountOf(id: string, cred: StoredCredential): SubscriptionAccount {
+  return {
+    email: typeof cred.email === "string" && cred.email ? cred.email : emailFromProfileId(id),
+    planType: typeof cred.chatgptPlanType === "string" ? cred.chatgptPlanType : null,
+  };
+}
+
+/**
+ * 07.18 (PD-12): every OAuth profile of `provider` in an auth store snapshot, in store order, with whether it can be
+ * used (a refresh or an access token is present). Identity only, never a token (pure; unit-tested).
+ */
+export function profilesFromStore(
+  store: { profiles?: Record<string, StoredCredential> } | undefined,
+  provider: string,
+): CellAuthProfileReport[] {
+  const out: CellAuthProfileReport[] = [];
+  for (const [id, cred] of Object.entries(store?.profiles ?? {})) {
+    if (cred?.provider !== provider || cred.type !== "oauth") continue;
+    out.push({ profileId: id, ...accountOf(id, cred), usable: isUsable(cred) });
+  }
+  return out;
+}
+
 /** First usable OAuth credential of `provider` in an auth store snapshot (pure; unit-tested). */
 export function accountFromStore(
   store: { profiles?: Record<string, StoredCredential> } | undefined,
@@ -47,11 +78,8 @@ export function accountFromStore(
 ): SubscriptionAccount | null {
   for (const [id, cred] of Object.entries(store?.profiles ?? {})) {
     if (cred?.provider !== provider || cred.type !== "oauth") continue;
-    if (!cred.refresh && !cred.access) continue;
-    return {
-      email: typeof cred.email === "string" && cred.email ? cred.email : emailFromProfileId(id),
-      planType: typeof cred.chatgptPlanType === "string" ? cred.chatgptPlanType : null,
-    };
+    if (!isUsable(cred)) continue;
+    return accountOf(id, cred);
   }
   return null;
 }
@@ -91,7 +119,7 @@ export function createOpenClawAuthDriver(opts: {
   }
 
   const driver: SubscriptionAuthDriver = {
-    async login({ provider, signal, onDeviceCode }) {
+    async login({ provider, profileId, signal, onDeviceCode }): Promise<SubscriptionSignIn> {
       const target = TARGET[provider];
       const flow = await loginFlow();
       let verificationUrl: string | null = null;
@@ -104,6 +132,8 @@ export function createOpenClawAuthDriver(opts: {
         method: target.method,
         ownerPluginId: target.ownerPluginId,
         credentialOnly: true,
+        // 07.18 (A-03): the flow stores its one returned profile under this id; absent = today's id (`openai:<email>`).
+        ...(profileId ? { profileId } : {}),
         agent: AUTH_AGENT_ID,
         config: runtime.config.current(),
         // OpenClaw's own progress/notes would echo the URL; the code goes ONLY through onDeviceCode.
@@ -152,12 +182,24 @@ export function createOpenClawAuthDriver(opts: {
       if (result.authRefresh !== "refreshed") {
         opts.log?.warn?.(`sign-in saved but the gateway refresh reported ${result.authRefresh}`);
       }
-      const stored = accountFromStore(readStore() as never, target.provider);
-      return stored ?? { email: emailFromProfileId(profile.profileId), planType: null };
+      // The account this flow signed in (several may be stored now), else the first usable one as before.
+      const store = readStore() as { profiles?: Record<string, StoredCredential> } | undefined;
+      const cred = store?.profiles?.[profile.profileId];
+      const account = cred
+        ? accountOf(profile.profileId, cred)
+        : (accountFromStore(store, target.provider) ?? {
+            email: emailFromProfileId(profile.profileId),
+            planType: null,
+          });
+      return { ...account, profileId: profile.profileId };
     },
 
     async status(provider) {
       return accountFromStore(readStore() as never, TARGET[provider].provider);
+    },
+
+    async profiles(provider) {
+      return profilesFromStore(readStore() as never, TARGET[provider].provider);
     },
 
     async logout(provider) {

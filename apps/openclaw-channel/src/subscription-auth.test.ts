@@ -19,6 +19,10 @@ import { type FakeAgentChannelApi, startFakeAgentChannelApi } from "./testing/fa
 
 const FLOW = "0199a000-0000-7000-8000-00000000f001";
 const ACCOUNT: SubscriptionAccount = { email: "owner@example.test", planType: "plus" };
+/** 07.18: a second ChatGPT account for bots, signed in as its pool profile. */
+const FLOW_B = "0199a000-0000-7000-8000-00000000f002";
+const PROFILE_B = "openai:pool-0199a000-0000-7000-8000-0000000000b2";
+const BOTS_ACCOUNT: SubscriptionAccount = { email: "bots@example.test", planType: "pro" };
 const CODEX: CellSubscription = {
   id: "openai-codex",
   kind: "openai-codex",
@@ -40,16 +44,24 @@ const BOT: CellAgent = {
 
 type FakeDriver = {
   stored: Map<string, SubscriptionAccount>;
+  /** 07.18 (`{ profiles: true }`): every profile the fake store holds, in sign-in order. */
+  profileStore: Map<string, SubscriptionAccount & { usable: boolean }>;
+  /** The profile id each login was asked for (undefined = the provider's default). */
+  loginProfileIds: Array<string | undefined>;
   logins: number;
   logouts: number;
+  logoutCalls: Array<readonly string[] | undefined>;
   prompt: DeviceCodePrompt;
   approve(a?: SubscriptionAccount): void;
   fail(message: string): void;
   driver: SubscriptionAuthDriver;
 };
 
-/** In-memory stand-in for OpenClaw's device-code login + auth store. */
-function fakeDriver(): FakeDriver {
+/**
+ * In-memory stand-in for OpenClaw's device-code login + auth store. `profiles: true` models the 07.18 store with several
+ * profiles of one provider (status = the first usable one, `profiles` lists them all, `logout` can take profile ids).
+ */
+function fakeDriver(opts: { profiles?: boolean } = {}): FakeDriver {
   let approve: ((a: SubscriptionAccount) => void) | null = null;
   let fail: ((e: Error) => void) | null = null;
   // The test may approve/fail as soon as the fake API has *received* the pending report, before the
@@ -57,8 +69,11 @@ function fakeDriver(): FakeDriver {
   let early: { account: SubscriptionAccount } | { error: Error } | null = null;
   const d: FakeDriver = {
     stored: new Map<string, SubscriptionAccount>(),
+    profileStore: new Map(),
+    loginProfileIds: [],
     logins: 0,
     logouts: 0,
+    logoutCalls: [],
     prompt: {
       verificationUrl: "https://auth.openai.com/codex/device",
       userCode: "ABCD-EFGHI",
@@ -73,8 +88,9 @@ function fakeDriver(): FakeDriver {
       else early = { error: new Error(message) };
     },
     driver: {
-      async login({ provider, signal, onDeviceCode }) {
+      async login({ provider, profileId, signal, onDeviceCode }) {
         d.logins++;
+        d.loginProfileIds.push(profileId);
         await onDeviceCode(d.prompt);
         const account = await new Promise<SubscriptionAccount>((resolve, reject) => {
           approve = resolve;
@@ -90,16 +106,38 @@ function fakeDriver(): FakeDriver {
           approve = null;
           fail = null;
         });
-        d.stored.set(provider, account);
-        return account;
+        const stored = profileId ?? `openai:${account.email}`;
+        if (opts.profiles) d.profileStore.set(stored, { ...account, usable: true });
+        else d.stored.set(provider, account);
+        return { ...account, profileId: stored };
       },
       async status(provider) {
-        return d.stored.get(provider) ?? null;
+        if (!opts.profiles) return d.stored.get(provider) ?? null;
+        const first = [...d.profileStore.values()].find((p) => p.usable);
+        return first ? { email: first.email, planType: first.planType } : null;
       },
-      async logout(provider) {
+      async logout(provider, profileIds) {
         d.logouts++;
-        d.stored.delete(provider);
+        d.logoutCalls.push(profileIds);
+        if (!opts.profiles) {
+          d.stored.delete(provider);
+          return;
+        }
+        if (profileIds === undefined) d.profileStore.clear();
+        else for (const id of profileIds) d.profileStore.delete(id);
       },
+      ...(opts.profiles
+        ? {
+            async profiles() {
+              return [...d.profileStore].map(([profileId, p]) => ({
+                profileId,
+                email: p.email,
+                planType: p.planType,
+                usable: p.usable,
+              }));
+            },
+          }
+        : {}),
     },
   };
   return d;
@@ -175,6 +213,49 @@ describe("subscription sign-in in the cell", () => {
     });
     expect(logs.join("\n")).not.toContain("ABCD-EFGHI");
     expect(await driver.driver.status("openai-codex")).toEqual(ACCOUNT);
+  });
+
+  it("a pool start signs in under its profile id; connected carries it; a second account joins the first (PD-12)", async () => {
+    const { auth, driver } = setup(fakeDriver({ profiles: true }));
+    // The pre-07.18 sign-in (no profile id) …
+    auth.handleStart(start());
+    await api.waitFor(() => api.authReports.length >= 1);
+    driver.approve(ACCOUNT);
+    await api.waitFor(() => api.authReports.length >= 2);
+    expect(api.authReports[1]).toEqual({
+      provider: "openai-codex",
+      flowId: FLOW,
+      reporterId: "cell-test-1",
+      state: "connected",
+      account: ACCOUNT,
+    });
+    // … then a pool account for bots under `openai:pool-<accountId>`.
+    auth.handleStart(start({ flowId: FLOW_B, profileId: PROFILE_B }));
+    await api.waitFor(() => api.authReports.length >= 3);
+    driver.approve(BOTS_ACCOUNT);
+    await api.waitFor(() => api.authReports.length >= 4);
+    expect(driver.loginProfileIds).toEqual([undefined, PROFILE_B]);
+    expect(api.authReports[3]).toEqual({
+      provider: "openai-codex",
+      flowId: FLOW_B,
+      reporterId: "cell-test-1",
+      state: "connected",
+      account: BOTS_ACCOUNT,
+      profileId: PROFILE_B,
+    });
+
+    // The next credential state report lists both profiles (never a token).
+    await auth.sync({ subscriptions: [CODEX] });
+    const state = api.authReports.at(-1);
+    expect(state).toMatchObject({ flowId: null, state: "connected", account: ACCOUNT });
+    expect(state?.profiles).toEqual([
+      { profileId: "openai:owner@example.test", email: ACCOUNT.email, planType: "plus", usable: true },
+      { profileId: PROFILE_B, email: BOTS_ACCOUNT.email, planType: "pro", usable: true },
+    ]);
+    // Unchanged on the next sync: no new report.
+    const count = api.authReports.length;
+    await auth.sync({ subscriptions: [CODEX] });
+    expect(api.authReports).toHaveLength(count);
   });
 
   it("ignores stale (replayed) start commands", async () => {
