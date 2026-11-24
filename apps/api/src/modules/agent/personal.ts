@@ -12,7 +12,7 @@ import { badRequest, conflict } from "../../lib/errors";
 import { ensureDm } from "../chat";
 import { createPermissionService } from "../organization";
 import { nextFreeUsername, slugifyUsername } from "./providers";
-import { allowedModels, notifyCell, publishAgent, toAgentDto } from "./service";
+import { botModels, notifyCell, publishAgent, toAgentDto } from "./service";
 
 /** D-01: personal bots per member when the organization has no `bot_policies` row. */
 export const DEFAULT_MAX_PERSONAL_BOTS = 3;
@@ -26,7 +26,7 @@ type PolicyRow = typeof botPolicies.$inferSelect;
 export async function personalModels(core: Core, tx: Tx, policy?: PolicyRow | null): Promise<AllowedModel[]> {
   const row = policy === undefined ? ((await tx.select().from(botPolicies).limit(1))[0] ?? null) : policy;
   const personalAllowed = row?.personalAllowedModels ?? [];
-  return (await allowedModels(core, tx)).filter(
+  return (await botModels(core, tx)).filter(
     (m) => personalAllowed.length === 0 || personalAllowed.includes(`${m.provider}/${m.modelId}`),
   );
 }

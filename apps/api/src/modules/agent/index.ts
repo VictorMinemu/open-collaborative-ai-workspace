@@ -47,7 +47,7 @@ import {
   type AgentUnit,
   agentAudience,
   agentFacts,
-  allowedModels,
+  botModels,
   findAgent,
   isModelAllowed,
   listAgentsWithUnits,
@@ -67,7 +67,9 @@ export {
   agentFacts,
   allowedModels,
   applyCellStatus,
+  botModels,
   cellAgents,
+  cellPoolClaudeProvider,
   cellProviders,
   cellSubscriptions,
   findAgent,
@@ -356,7 +358,7 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
         "/models",
         { ...allow["bot.read"], schema: { tags: ["agent"], response: { 200: AllowedModelList } } },
         async (req) => ({
-          models: await core.db.withTenant(tenant(req), (tx) => allowedModels(core, tx)),
+          models: await core.db.withTenant(tenant(req), (tx) => botModels(core, tx)),
         }),
       );
 

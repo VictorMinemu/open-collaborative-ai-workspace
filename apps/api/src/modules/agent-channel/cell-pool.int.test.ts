@@ -760,3 +760,118 @@ describe("a disconnect on Settings › Models removes the provider's ChatGPT bot
     expect(row.removed_at).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------- 07.18-19 R2.1: Claude bots without an API key
+
+describe("Claude bots run on the pool's tokens with no Anthropic API key (07.18-19 R2.1, D-15)", () => {
+  beforeEach(async () => {
+    await resetPool();
+    await su.query("delete from app.model_providers where organization_id = $1 and provider = 'anthropic'", [
+      orgA,
+    ]);
+  });
+
+  const anthropicOf = (snap: Json): Json[] => snap.providers.filter((p: Json) => p.kind === "anthropic");
+  const claudeModels = async (): Promise<Json[]> =>
+    (await ok(admin.request("GET", "/api/v1/models"))).models.filter((m: Json) => m.provider === "anthropic");
+  const createClaudeBot = (modelId: string) =>
+    admin.request("POST", "/api/v1/agents", {
+      name: `Claude ${modelId}`,
+      instructions: "Helpful.",
+      modelProvider: "anthropic",
+      modelId,
+    });
+
+  it("a token for bots renders a keyless anthropic provider, lists Claude models and lets a bot use one", async () => {
+    // Nothing for Claude yet: no provider, no model.
+    expect(anthropicOf(await snapshot())).toEqual([]);
+    expect(await claudeModels()).toEqual([]);
+    expect((await createClaudeBot("claude-sonnet-5-5")).status).toBe(400);
+
+    const a = await addToken("ana@acme", TA);
+    const snap = await snapshot();
+    expect(anthropicOf(snap)).toEqual([
+      expect.objectContaining({
+        id: "anthropic",
+        kind: "anthropic",
+        api: "anthropic-messages",
+        baseUrl: "https://api.anthropic.com",
+        apiKey: null,
+        models: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5"],
+      }),
+    ]);
+    // No key: nothing to put last, and the audit lists the provider id only.
+    expect(snap.accountPool.claude).toMatchObject({ order: [claudeTokenProfileId(a)], apiKeyLast: false });
+    expect((await configReads()).at(-1)?.providers).toContain("anthropic");
+
+    const models = await claudeModels();
+    expect(models.map((m) => m.modelId)).toEqual([
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "claude-haiku-4-5",
+    ]);
+    // Subscriptions first: the recommended default is Claude, and it is the only default.
+    expect(models.find((m) => m.modelId === "claude-sonnet-5-5")?.isDefault).toBe(true);
+    const all = (await ok(admin.request("GET", "/api/v1/models"))).models as Json[];
+    expect(all.filter((m) => m.isDefault)).toHaveLength(1);
+
+    const bot = await ok(createClaudeBot("claude-sonnet-5-5"));
+    const cellBot = (await snapshot()).agents.find((x: Json) => x.id === bot.id);
+    expect(cellBot?.modelRef).toBe("anthropic/claude-sonnet-5-5");
+    await ok(admin.request("DELETE", `/api/v1/agents/${bot.id}`));
+
+    // AI chats never draw from the pool (ADR-0017): no organization Claude model appears there.
+    const aiModels = (await ok(admin.request("GET", "/api/v1/ai-chat/models"))).models as Json[];
+    expect(aiModels.some((m) => m.ref?.backend === "org_key" && m.ref?.provider === "anthropic")).toBe(false);
+  });
+
+  it("no Claude for bots when no token serves them: scope work_zone, needs a new sign-in, or disabled", async () => {
+    const a = await addToken("ana@acme", TA);
+    await setPolicy("claude", { scope: "work_zone" });
+    expect(anthropicOf(await snapshot())).toEqual([]);
+    expect(await claudeModels()).toEqual([]);
+
+    await setPolicy("claude", { scope: "all" });
+    await su.query("update app.account_pool_accounts set credential_state = 'needs_sign_in' where id = $1", [
+      a,
+    ]);
+    expect(anthropicOf(await snapshot())).toEqual([]);
+    expect(await claudeModels()).toEqual([]);
+
+    await su.query("update app.account_pool_accounts set credential_state = 'ok' where id = $1", [a]);
+    await patchAccount(a, { enabled: false });
+    expect(anthropicOf(await snapshot())).toEqual([]);
+    expect(await claudeModels()).toEqual([]);
+  });
+
+  it("an organization key keeps its own provider entry (one only) and stays last; the admin's models win", async () => {
+    await ok(
+      admin.request("POST", "/api/v1/model-providers", {
+        provider: "anthropic",
+        apiKey: ORG_KEY,
+        allowedModels: ["claude-haiku-4-5"],
+      }),
+    );
+    await addToken("ana@acme", TA);
+    const snap = await snapshot();
+    expect(anthropicOf(snap)).toHaveLength(1);
+    expect(anthropicOf(snap)[0]).toMatchObject({ apiKey: ORG_KEY, models: ["claude-haiku-4-5"] });
+    expect(snap.accountPool.claude.apiKeyLast).toBe(true);
+    expect((await claudeModels()).map((m) => m.modelId)).toEqual(["claude-haiku-4-5"]);
+
+    // The key switched off on Settings › Models: the tokens still serve bots, with the admin's model list.
+    await ok(
+      admin.request("POST", "/api/v1/model-providers", {
+        provider: "anthropic",
+        enabled: false,
+        allowedModels: ["claude-haiku-4-5"],
+      }),
+    );
+    const off = await snapshot();
+    expect(anthropicOf(off)).toEqual([
+      expect.objectContaining({ apiKey: null, models: ["claude-haiku-4-5"] }),
+    ]);
+    expect(off.accountPool.claude.apiKeyLast).toBe(false);
+    expect((await claudeModels()).map((m) => m.modelId)).toEqual(["claude-haiku-4-5"]);
+  });
+});

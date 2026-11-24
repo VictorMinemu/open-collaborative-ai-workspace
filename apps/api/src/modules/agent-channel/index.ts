@@ -25,7 +25,14 @@ import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
-import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import {
+  applyCellStatus,
+  cellAgents,
+  cellPoolClaudeProvider,
+  cellProviders,
+  cellSubscriptions,
+  findAgent,
+} from "../agent";
 import { linkTurnAttachments, type ObjectStorage } from "../artifact";
 import type { AutomationFanOut, AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
@@ -408,6 +415,14 @@ export function createAgentChannelModule(
                   const pool = await cellAccountPool(tx, core, {
                     anthropicKey: providers.some((p) => p.kind === "anthropic"),
                   });
+                  // 07.18-19 R2.1 (D-15): Claude bots run on the pool's tokens alone when there is no usable key.
+                  if (
+                    pool.accountPool?.claude.tokens.length &&
+                    !providers.some((p) => p.kind === "anthropic")
+                  ) {
+                    const claude = await cellPoolClaudeProvider(core, tx);
+                    if (claude) providers.push(claude);
+                  }
                   const connected = await cellSubscriptions(tx);
                   const subscriptions = connected.filter((s) => !pool.withheldSubscriptions.includes(s.id));
                   // 07.18 gap: a connected subscription the pool withholds is named, so the cell keeps its sign-ins
