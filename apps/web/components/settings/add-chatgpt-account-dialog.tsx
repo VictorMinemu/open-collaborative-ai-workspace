@@ -22,7 +22,7 @@ import {
   Server,
   Terminal,
 } from "lucide-react";
-import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import { type FormEvent, Fragment, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { describedBy, FormField } from "@/components/ui/form-field";
@@ -53,7 +53,6 @@ import {
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useDevices } from "@/lib/workzone-queries";
-import { CopyLine } from "./copy-line";
 
 /** 44 px touch targets below `md` (UI-SPEC: every control at 390). */
 const TOUCH = "max-md:h-11";
@@ -500,9 +499,12 @@ export function ChatgptAccountForm({
  * as; the account then appears in the pool turned off, for an admin to turn on.
  */
 function DeviceCommand({ deviceName, command }: { deviceName: string; command: string | null }) {
+  const { copy, copied } = useCopy();
+  // Lines break only between words, never after a hyphen of `ocw-runtime` or `--label` (copied text is unchanged).
+  const words = command?.split(/ (?=--label )/u) ?? [];
   return (
     <div
-      className="grid gap-2.5 rounded-xl border bg-muted/30 p-3.5 text-sm"
+      className="grid min-w-0 gap-2.5 rounded-xl border bg-muted/30 p-3.5 text-sm"
       data-testid="chatgpt-device-command"
     >
       <p className="flex items-start gap-2.5 leading-relaxed">
@@ -515,7 +517,29 @@ function DeviceCommand({ deviceName, command }: { deviceName: string; command: s
         </span>
       </p>
       {command ? (
-        <CopyLine text={command} wrap buttonClassName="max-md:size-11" testId="chatgpt-command-line" />
+        <div
+          className="flex items-center gap-2 rounded-lg border bg-background py-1.5 pr-1.5 pl-3"
+          data-testid="chatgpt-command-line"
+        >
+          <code className="scrollbar-thin min-w-0 flex-1 overflow-x-auto py-1 font-mono text-[12.5px] leading-relaxed">
+            {words.map((w, i) => (
+              <Fragment key={w}>
+                {i > 0 ? " " : null}
+                <span className="whitespace-nowrap">{w}</span>
+              </Fragment>
+            ))}
+          </code>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            aria-label="Copy command"
+            className="max-md:size-11"
+            onClick={() => void copy(command).catch(() => toast.error("Could not copy the command"))}
+          >
+            {copied === command ? <Check className="text-success" /> : <Copy />}
+          </Button>
+        </div>
       ) : (
         <p className="rounded-lg border border-dashed px-3 py-2 text-muted-foreground text-xs">
           Type a label first.
