@@ -193,6 +193,13 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
           // 07.18 (D-07, PD-05): the work-session module decides whether the frame may act (its own session's account).
           case "session.account_limited":
             return hub.sessionHandler?.onAccountLimited?.(device, frame);
+          // 07.18 (D-09, PD-09, PD-10): the account-pool module's handler; a method it lacks ignores the frame.
+          case "account.usage":
+            return hub.accountHandler?.onAccountUsage?.(device, frame);
+          case "accounts.sync":
+            return hub.accountHandler?.onAccountsSync?.(device, frame);
+          case "account.login":
+            return hub.accountHandler?.onAccountLogin?.(device, frame);
         }
       };
 

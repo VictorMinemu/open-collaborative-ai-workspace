@@ -1,6 +1,6 @@
-import type { PoolLimitReason, PoolProvider } from "@ocw/contracts";
-import { accountPoolAccounts, type Tx } from "@ocw/db";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import type { AccountUsageSnapshot, PoolLimitReason, PoolProvider } from "@ocw/contracts";
+import { accountPoolAccounts, type Tx, workSessions } from "@ocw/db";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { AuditService } from "../audit";
 import { cooldownUntil, earliestReset, isCooling } from "./select";
 import { type PoolConsumer, servesConsumer } from "./selection";
@@ -140,4 +140,66 @@ export async function earliestPoolReset(
 export function everyAccountLimitedSentence(resetsAt: Date | null): string {
   const first = "Every pool account reached its limit for this turn.";
   return resetsAt ? `${first} The earliest resets at ${resetsAt.toISOString()}.` : first;
+}
+
+/**
+ * The session states in which a device is running (or attaching) a session: the work-session module's `ACTIVE_STATES`,
+ * repeated here because this module never imports the work-session module (which imports it).
+ */
+const LIVE_SESSION_STATES = ["provisioning", "idle", "running", "waiting_approval", "host_offline"] as const;
+
+export interface RecordUsageInput {
+  /** The device that sent the reading (from its link, never from the frame). */
+  deviceId: string;
+  /** A pool account (a token): only one a live session of this device uses. */
+  accountId?: string | undefined;
+  /** A Codex slot: only a live slot row of this very device. */
+  slotId?: string | undefined;
+  usage: AccountUsageSnapshot;
+  now: Date;
+}
+
+/**
+ * A usage reading the runtime reported (D-09, PD-09): stored as the account's last snapshot with the server's time.
+ * A device may report only for an account one of its own live sessions uses, or for a slot of its own (E11); anything
+ * else (another device's session or slot, an account no session uses, another organization's: RLS) stores nothing.
+ * Returns whether it was stored. Never polled, never audited (usage numbers only).
+ */
+export async function recordUsage(tx: Tx, input: RecordUsageInput): Promise<boolean> {
+  let accountId: string | null = null;
+  if (input.accountId !== undefined) {
+    const [used] = await tx
+      .select({ id: workSessions.poolAccountId })
+      .from(workSessions)
+      .where(
+        and(
+          eq(workSessions.deviceId, input.deviceId),
+          eq(workSessions.poolAccountId, input.accountId),
+          inArray(workSessions.status, [...LIVE_SESSION_STATES]),
+        ),
+      )
+      .limit(1);
+    accountId = used?.id ?? null;
+  } else if (input.slotId !== undefined) {
+    const [slot] = await tx
+      .select({ id: accountPoolAccounts.id })
+      .from(accountPoolAccounts)
+      .where(
+        and(
+          eq(accountPoolAccounts.kind, "device_slot"),
+          eq(accountPoolAccounts.deviceId, input.deviceId),
+          eq(accountPoolAccounts.slotId, input.slotId),
+          isNull(accountPoolAccounts.removedAt),
+        ),
+      )
+      .limit(1);
+    accountId = slot?.id ?? null;
+  }
+  if (accountId === null) return false;
+  const [row] = await tx
+    .update(accountPoolAccounts)
+    .set({ usage: input.usage, usageAt: input.now.toISOString() })
+    .where(and(eq(accountPoolAccounts.id, accountId), isNull(accountPoolAccounts.removedAt)))
+    .returning({ id: accountPoolAccounts.id });
+  return row !== undefined;
 }

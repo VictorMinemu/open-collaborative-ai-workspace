@@ -66,14 +66,15 @@ async function liveSession(dev: Dev): Promise<string> {
   dev.device.event(session.id, { type: "session.state", status: "idle" });
   await eventually(
     async () =>
-      (await su.query("select status from app.work_sessions where id = $1", [session.id])).rows[0]
-        ?.status === "idle",
+      (await su.query("select status from app.work_sessions where id = $1", [session.id])).rows[0]?.status ===
+      "idle",
   );
   return session.id as string;
 }
 
 const usageOf = async (id: string) =>
-  (await su.query("select usage, usage_at from app.account_pool_accounts where id = $1", [id])).rows[0] as Json;
+  (await su.query("select usage, usage_at from app.account_pool_accounts where id = $1", [id]))
+    .rows[0] as Json;
 
 const insertSlot = async (deviceId: string, label: string) => {
   const slotId = randomUUID();
@@ -158,10 +159,11 @@ describe("account.usage reaches the pool only for what the device's own sessions
     const id = await liveSession(mine);
     const own = await insertSlot(mine.deviceId, "Own slot");
     const foreign = await insertSlot(theirs.deviceId, "Their slot");
-    mine.device.send({ type: "account.usage", slotId: own.slotId, usage: snapshot(30) });
+    const usage = snapshot(30);
+    mine.device.send({ type: "account.usage", slotId: own.slotId, usage });
     mine.device.send({ type: "account.usage", slotId: foreign.slotId, usage: snapshot(99) });
     await settle(mine, id);
-    expect((await usageOf(own.id)).usage).toEqual(expect.objectContaining({ windows: snapshot(30).windows }));
+    expect((await usageOf(own.id)).usage).toEqual(usage);
     expect(await usageOf(foreign.id)).toEqual({ usage: null, usage_at: null });
   });
 
@@ -271,7 +273,9 @@ describe("the device's account frames have one handler (PD-09)", () => {
         { kind: "account.logout", ok: false, error: "not signed in" },
       ]);
       expect(
-        onCommandResult.mock.calls.filter(([, cmd]) => cmd.kind === "account.login" || cmd.kind === "account.logout"),
+        onCommandResult.mock.calls.filter(
+          ([, cmd]) => cmd.kind === "account.login" || cmd.kind === "account.logout",
+        ),
       ).toHaveLength(0);
     } finally {
       onCommandResult.mockRestore();

@@ -1,6 +1,7 @@
 import type { ApiModule, Core } from "../../core";
 import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
+export { createDeviceAccountHandler, type DeviceAccountParts } from "./device-frames";
 export {
   earliestPoolReset,
   everyAccountLimitedSentence,
@@ -8,6 +9,8 @@ export {
   type LimitResult,
   markLimited,
   markNeedsSignIn,
+  type RecordUsageInput,
+  recordUsage,
 } from "./limits";
 export { previewAccountSources } from "./preview";
 export type { AccountPoolDeps } from "./routes";
