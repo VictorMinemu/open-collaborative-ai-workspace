@@ -1,8 +1,7 @@
 # AGENTS.md — Open Collaborative AI Workspace
 
-This file is the single source of truth for every AI coding agent working in this repository
-(Claude Code, Codex, OpenCode, Cursor, Copilot, …). `CLAUDE.md` only imports it. Keep it short,
-specific and current; move long procedures to `docs/` or skills. See ADR-0004.
+This file is the single source of truth for every AI coding agent working in this repository (Claude Code, Codex, OpenCode, Cursor,
+Copilot, …). `CLAUDE.md` only imports it. Keep it short, specific and current; move long procedures to `docs/` or skills. See ADR-0004.
 
 ## Project
 
@@ -70,6 +69,7 @@ Taken from the PRD. Any design that violates one of these must be raised, not si
 | Clients | Web: Next.js 16 + React; Tailwind + shadcn/ui (Base UI); TanStack Query + Zustand. Desktop / mobile: Electron + bundled Vite renderer; Local Runtime daemon is a standalone process supervised by the app. Mobile (MVP7): Expo / React Native; headless servers install the daemon from the API (`/api/v1/runtime/*`, SDK installed beside it from npm), pair by device code and run it as a systemd/launchd service | PRD, research, 0005, 0033 |
 | Runtime adapters | Claude Code via Claude Agent SDK (streaming input, `canUseTool`); Codex via `codex app-server` JSON-RPC. Never scrape CLI stdout. Settings apply between turns; options come from the runtime-reported catalog, gated by `docs/workzone/runtime-controls-inventory.md`; the daemon alone updates the CLIs it drives (`apps/local-runtime/src/maintenance/`: fixed on-device command table, idle gate that never cuts a turn, org policy ∩ device level, `device.maintain`) | research, 0013, 0032 |
 | Runtime self-update | a service device's daemon updates itself to the build its workspace serves (`/api/v1/runtime/*` from its own server URL only, sha256-verified bundle and lockfile, fixed `npm ci`, staging → `versions/<sha12>`, atomic `current`, exit 75 under systemd/launchd); one click (`device.maintain`, any level) or automatic at the 07.11 level; switches only when no turn runs on any runtime; the build (sha256) is the identity, the version follows the release | 0040 |
+| Subscription account pool | per organization and provider (`claude`, `chatgpt`); admins only (`provider.manage`), audited `account_pool.*`; Claude setup-tokens sealed (`pool_token`) and added only to the frame sent to the session's device, passed as `CLAUDE_CODE_OAUTH_TOKEN` with competing auth stripped, never stored on the device; Codex accounts signed in on the device, one `CODEX_HOME` per slot with a shared `sessions/`; bots through OpenClaw profiles and the order the strategy sets; failover (= fill-first), round-robin, weighted (smooth WRR); sticky per session, never per request; a limit cools the account (reset, else 5 min, at most 7 days) and the turn re-runs on the next one, at most 3 switches; never a proxy, never polled; AI chats unchanged (ADR-0017) | 0044 |
 | Database / search | PostgreSQL only (MVP1). Chat search: STORED tsvector over three unaccented configs (simple, spanish, english) + GIN, `pg_trgm` for people/channels, always restricted to the resolver's readable set | 0003, 0016 |
 | Cache / pub-sub / presence | Redis. Event streaming / workflows: NATS JetStream and Temporal are **deferred**; do not add them yet | 0003 |
 | Object storage | Garage (single node) in compose, used only through the S3 API; browsers upload/download via presigned URLs, the API is the only ACL; bots read attachments only through `ocw_attachment_read` and `ocw_sandbox_import`, decided in `agent-channel/attachments.ts` / `attachment-access.ts` (live, asker-readable, same-thread files; extraction bounded, never executed; reads taint) | 0015 (supersedes MinIO in 0003), 0037 |
