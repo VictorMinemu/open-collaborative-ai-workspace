@@ -238,6 +238,17 @@ const tokenAccount = (ref: string, oauthToken: string, label = `Account ${ref}`)
   oauthToken,
 });
 
+/** 07.18-19 R1.5: variables CLI 2.1.331 reads that would take the session off the pool token. */
+const R15_VARS = [
+  "CLAUDE_CODE_USE_GATEWAY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "ANTHROPIC_UNIX_SOCKET",
+];
+
 describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () => {
   const saved = { ...process.env };
   beforeEach(() => {
@@ -248,9 +259,19 @@ describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () =>
     process.env.CLAUDE_CODE_USE_BEDROCK = "1";
     process.env.CLAUDE_CODE_USE_VERTEX = "1";
     process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+    // 07.18-19 R1.5: the other providers, gateways, credential descriptors and the socket of CLI 2.1.331.
+    for (const k of R15_VARS) process.env[k] = k.endsWith("_SOCKET") ? "/tmp/not-anthropic.sock" : "1";
   });
   afterEach(() => {
     process.env = { ...saved };
+  });
+
+  it("strips the other providers, credential descriptors and the API socket (07.18-19 R1.5)", async () => {
+    const { start } = setup();
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    const env = q.params.options.env ?? {};
+    for (const k of R15_VARS) expect(env[k], k).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
   });
 
   it("runs on the pool token with every competing credential stripped, even with useApiKey", async () => {
@@ -312,6 +333,7 @@ describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13,
       NO_PROXY: "",
       NODE_EXTRA_CA_CERTS: "/etc/corp-ca.pem",
     });
+    for (const k of R15_VARS) expect(settings.env?.[k], k).toBe("");
     // The secret deny rules and the bypass lock are exactly those of a session without a token.
     expect(settings.permissions).toEqual(plain.permissions);
     expect(plain).toEqual({ permissions: plain.permissions });

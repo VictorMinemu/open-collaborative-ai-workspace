@@ -16,6 +16,16 @@
 // requests (control run without the flag value: A received them). So `poolFlagEnv` pins the base URL, the proxy and the
 // CA variables in the flag settings, and a repository cannot send the pool token elsewhere (E16). Without the pin the
 // fallback would have been to refuse pool tokens for such projects.
+//
+// 07.18-19 R1.5 (read from the CLI 2.1.331 binary): more variables take a session off its `CLAUDE_CODE_OAUTH_TOKEN`.
+// - Providers and gateways: `CLAUDE_CODE_USE_GATEWAY|MANTLE|ANTHROPIC_AWS|ANTHROPIC_GOOGLE_CLOUD` (read as truthy, so
+//   the flag pin `""` turns them off; a project's settings can set them).
+// - Credential descriptors and the API socket: the CLI counts `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`,
+//   `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH` and `ANTHROPIC_UNIX_SOCKET` as a credential
+//   present, and with `ANTHROPIC_UNIX_SOCKET` every Anthropic call goes through that socket. They (and the other
+//   `*_FILE_DESCRIPTOR` variables of its list) are stripped from the child env. The CLI already drops them from every
+//   settings file except managed policy, so their flag pins are a no-op today and a guard if that ever changes (an
+//   empty value reads as unset: descriptors are trimmed and compared with "", the socket is tested for truthiness).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +38,33 @@ export const CLAUDE_POOL_STRIPPED_VARS: readonly string[] = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_GATEWAY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
+  "CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+  "ANTHROPIC_UNIX_SOCKET",
+];
+
+/** Pinned to `""` in the flag settings of a pool-token session (R1.5): each one, set, would bill or route elsewhere. */
+export const CLAUDE_POOL_PINNED_EMPTY_VARS: readonly string[] = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_GATEWAY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "ANTHROPIC_UNIX_SOCKET",
 ];
 
 /** `base` (the daemon's usual child env) without the competing credentials, plus the pool token. */
@@ -60,18 +97,12 @@ export const CLAUDE_POOL_PINNED_NETWORK_VARS: readonly string[] = [
 
 /**
  * The `env` of the flag settings layer for a pool-token session (A-06: it beats project settings): the base URL is
- * Anthropic's, the API-key and cloud-provider variables are empty, and the proxy and CA variables are the daemon's own
+ * Anthropic's, the API-key, provider, gateway, credential-descriptor and socket variables are empty, and the proxy and CA variables are the daemon's own
  * ("" when unset), so a project `.claude/settings.json` cannot redirect the token or bill something else.
  */
 export function poolFlagEnv(daemonEnv: Record<string, string | undefined>): Record<string, string> {
-  const env: Record<string, string> = {
-    ANTHROPIC_BASE_URL: ANTHROPIC_API_BASE_URL,
-    ANTHROPIC_API_KEY: "",
-    ANTHROPIC_AUTH_TOKEN: "",
-    CLAUDE_CODE_USE_BEDROCK: "",
-    CLAUDE_CODE_USE_VERTEX: "",
-    CLAUDE_CODE_USE_FOUNDRY: "",
-  };
+  const env: Record<string, string> = { ANTHROPIC_BASE_URL: ANTHROPIC_API_BASE_URL };
+  for (const k of CLAUDE_POOL_PINNED_EMPTY_VARS) env[k] = "";
   for (const k of CLAUDE_POOL_PINNED_NETWORK_VARS) env[k] = daemonEnv[k] ?? "";
   return env;
 }
