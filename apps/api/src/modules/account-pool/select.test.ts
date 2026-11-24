@@ -1,6 +1,6 @@
 import type { PoolStrategy } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { type PoolCandidate, pickAccount } from "./select";
+import { cooldownUntil, earliestReset, isCooling, type PoolCandidate, pickAccount } from "./select";
 
 /** Account selection as exact sequences (PURE, 07.18 Plan 04, D-04, PD-07). */
 
@@ -189,5 +189,78 @@ describe("pickAccount: weighted (smooth weighted round-robin)", () => {
     // Unclamped, A (1000) would win far more often than every other pick against B (100).
     const { ids } = weightedRun([cand("A", { weight: 1000 }), cand("B", { weight: 100, priority: 1 })], 4);
     expect(ids).toEqual(["A", "B", "A", "B"]);
+  });
+});
+
+const NOW = new Date(Date.UTC(2026, 10, 24, 12, 0, 0));
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const at = (ms: number) => new Date(NOW.getTime() + ms);
+
+describe("cooldownUntil (D-08, PD-08)", () => {
+  it("a missing reset cools 5 minutes", () => {
+    expect(cooldownUntil(null, NOW)).toEqual(at(5 * MINUTE));
+  });
+
+  it("a reset equal to now cools 5 minutes", () => {
+    expect(cooldownUntil(new Date(NOW), NOW)).toEqual(at(5 * MINUTE));
+  });
+
+  it("a past reset cools 5 minutes", () => {
+    expect(cooldownUntil(at(-1000), NOW)).toEqual(at(5 * MINUTE));
+  });
+
+  it("a reset 2 hours out cools until that reset", () => {
+    expect(cooldownUntil(at(2 * HOUR), NOW)).toEqual(at(2 * HOUR));
+  });
+
+  it("a reset 30 days out cools at most 7 days", () => {
+    expect(cooldownUntil(at(30 * DAY), NOW)).toEqual(at(7 * DAY));
+  });
+
+  it("returns a new Date, never the caller's", () => {
+    const reset = at(HOUR);
+    const until = cooldownUntil(reset, NOW);
+    expect(until).toEqual(reset);
+    expect(until).not.toBe(reset);
+  });
+});
+
+describe("isCooling (D-06)", () => {
+  it("is false without a cooldown", () => {
+    expect(isCooling(null, NOW)).toBe(false);
+  });
+
+  it("is false at the cooldown's end", () => {
+    expect(isCooling(new Date(NOW), NOW)).toBe(false);
+  });
+
+  it("is true for a future instant", () => {
+    expect(isCooling(at(1), NOW)).toBe(true);
+  });
+
+  it("is false for a past instant", () => {
+    expect(isCooling(at(-1), NOW)).toBe(false);
+  });
+});
+
+describe("earliestReset (D-06, PD-16)", () => {
+  it("returns the soonest future cooldown", () => {
+    const rows = [
+      { cooldownUntil: at(-HOUR) },
+      { cooldownUntil: at(3 * HOUR) },
+      { cooldownUntil: at(HOUR) },
+      { cooldownUntil: null },
+    ];
+    expect(earliestReset(rows, NOW)).toEqual(at(HOUR));
+  });
+
+  it("is null when nothing cools in the future", () => {
+    expect(earliestReset([{ cooldownUntil: at(-HOUR) }, { cooldownUntil: null }], NOW)).toBeNull();
+  });
+
+  it("is null for no rows", () => {
+    expect(earliestReset([], NOW)).toBeNull();
   });
 });
