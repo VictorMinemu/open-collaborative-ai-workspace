@@ -54,6 +54,7 @@ import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
+  ACCOUNT_SWITCH_FAILED_MESSAGE,
   type AccountSignal,
   type AgentRuntime,
   type EventSink,
@@ -81,9 +82,8 @@ import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } f
 export const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 5_000;
 
-/** 07.18 (A-01 fallback): a resume under the next account failed; never a silent fresh start. */
-export const ACCOUNT_SWITCH_FAILED_MESSAGE =
-  "This conversation could not continue on the next account. Start a new session.";
+/** 07.18 (A-01 fallback): a resume under the next account failed; never a silent fresh start (shared with Codex). */
+export { ACCOUNT_SWITCH_FAILED_MESSAGE };
 /** 07.18 (T-07.18-06-03): the init says a project credential won over the pool token. */
 export const PROJECT_CREDENTIALS_WON_MESSAGE =
   "This project's Claude settings choose their own credentials; the pool account is not used here";

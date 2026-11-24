@@ -49,6 +49,7 @@ import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
+  ACCOUNT_SWITCH_FAILED_MESSAGE,
   type AccountSignal,
   type AgentRuntime,
   type EventSink,
@@ -146,6 +147,18 @@ type Outcome = ApprovalDecision | "expired";
 /** 07.18 (PD-10): the only pool account kind Codex runs: a ChatGPT account slot on this device. */
 type SlotAccount = Extract<RuntimeAccount, { kind: "device_slot" }>;
 
+/** Same platform account (by ref), null = the device's own login. */
+function sameAccount(a: SlotAccount | null, b: SlotAccount | null): boolean {
+  return (a?.ref ?? null) === (b?.ref ?? null);
+}
+
+/** 07.18 (A-02 fallback): the session's thread could not resume under the next account. */
+class AccountSwitchError extends RuntimeError {
+  constructor() {
+    super(ACCOUNT_SWITCH_FAILED_MESSAGE, "runtime_unavailable");
+  }
+}
+
 /** A start's or a switch's account for this adapter: a slot, or null (the device's own login). */
 function slotAccountOf(account: RuntimeAccount | null | undefined): SlotAccount | null {
   if (!account) return null;
@@ -201,6 +214,12 @@ interface Session {
   dormant: boolean;
   /** 07.18 (D-02): the slot the app-server runs under (its `CODEX_HOME`), or null for the device's own login. */
   account: SlotAccount | null;
+  /**
+   * 07.18 (D-08): an account asked for while a turn was in flight, applied before the next turn (undefined = none).
+   */
+  pendingAccount: SlotAccount | null | undefined;
+  /** 07.18 (A-02): the app-server was stopped to change account; the next wake-up is the switch's resume. */
+  switching: boolean;
   /** 07.18 (PD-05, PD-09): where limits and usage of the session's account go. */
   onAccountSignal: ((signal: AccountSignal) => void) | null;
 }
@@ -398,6 +417,8 @@ export class CodexRuntime implements AgentRuntime {
       retired: new WeakSet(),
       dormant: false,
       account,
+      pendingAccount: undefined,
+      switching: false,
       onAccountSignal: options.onAccountSignal ?? null,
     } as Omit<Session, "peer" | "exited"> as Session;
     this.attach(session, proc);
@@ -530,6 +551,27 @@ export class CodexRuntime implements AgentRuntime {
     });
     s.steered.push(prompt.promptId);
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
+  }
+
+  /**
+   * 07.18 (D-08, PD-03): run the session's next turns on `account` (a slot, or null = the device's own login). The
+   * same account (by the platform's ref) changes nothing. Otherwise the app-server is stopped as `retireIdle()` does
+   * (its end is not the session's end) and the session goes dormant under the new account, so the next turn wakes it
+   * there and `thread/resume`s the same thread (one spawn). Asked while a turn is in flight, the switch waits for it:
+   * it is applied right before the next turn. A resume that fails there fails that turn (A-02).
+   */
+  async useAccount(sessionId: string, account: RuntimeAccount | null): Promise<void> {
+    const s = this.get(sessionId);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    const next = slotAccountOf(account);
+    const target = s.pendingAccount !== undefined ? s.pendingAccount : s.account;
+    if (sameAccount(target, next)) return;
+    if (isBusy(s)) {
+      s.pendingAccount = next;
+      return;
+    }
+    s.pendingAccount = undefined;
+    await this.switchAccount(s, next);
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -748,14 +790,36 @@ export class CodexRuntime implements AgentRuntime {
         sandboxPolicy: resp.sandbox ?? null,
         approvalsReviewer: resp.approvalsReviewer ?? null,
       };
+      s.switching = false;
       this.log.info("codex app-server woke a retired session", { sessionId: s.id });
     } catch (err) {
       s.dormant = true;
       await this.closeProcess(s, proc, peer, exited);
+      // A-02: the thread did not resume under the new account. Never a fresh thread instead.
+      if (s.switching) throw new AccountSwitchError();
       throw err instanceof RuntimeError
         ? err
         : new RuntimeError(`codex app-server failed to resume: ${errorMessage(err)}`, "runtime_unavailable");
     }
+  }
+
+  /** Stops the current app-server (unless already dormant) and records the new account; the next turn wakes it. */
+  private async switchAccount(s: Session, next: SlotAccount | null): Promise<void> {
+    if (sameAccount(s.account, next)) return;
+    s.account = next;
+    s.switching = true;
+    if (s.dormant) return;
+    s.dormant = true; // first, as in retireIdle(): a prompt arriving meanwhile wakes a new process
+    await this.closeProcess(s, s.proc, s.peer, s.exited);
+    this.log.info("codex app-server stopped to change account", { sessionId: s.id });
+  }
+
+  /** An account asked for during the last turn is applied before this one (07.18 D-08). */
+  private async applyPendingAccount(s: Session): Promise<void> {
+    if (s.pendingAccount === undefined) return;
+    const next = s.pendingAccount;
+    s.pendingAccount = undefined;
+    await this.switchAccount(s, next);
   }
 
   private get(sessionId: string): Session {
@@ -839,13 +903,17 @@ export class CodexRuntime implements AgentRuntime {
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     try {
+      await this.applyPendingAccount(s);
       if (s.dormant) await this.wake(s);
       await s.peer.request("thread/compact/start", {
         threadId: s.threadId,
       } satisfies ThreadCompactStartParams);
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
-      this.emit(s, { type: "session.error", message: `compaction failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "session.error",
+        message: err instanceof AccountSwitchError ? err.message : `compaction failed: ${errorMessage(err)}`,
+      });
       this.emit(s, {
         type: "prompt.completed",
         promptId: prompt.promptId,
@@ -866,6 +934,8 @@ export class CodexRuntime implements AgentRuntime {
     this.emit(s, { type: "session.state", status: "running" });
     try {
       const { mode, params } = this.turnOverrides(s, prompt);
+      // 07.18 D-08: an account asked for during the last turn moves the session before this one.
+      await this.applyPendingAccount(s);
       // 07.11 D-03a: a retired session resumes its thread on a new app-server before the turn.
       if (s.dormant) await this.wake(s);
       s.turnMode = mode;
@@ -890,7 +960,10 @@ export class CodexRuntime implements AgentRuntime {
       this.emitSettings(s, codexSettingsEvent(s.applied));
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
-      this.emit(s, { type: "session.error", message: `turn/start failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "session.error",
+        message: err instanceof AccountSwitchError ? err.message : `turn/start failed: ${errorMessage(err)}`,
+      });
       this.emit(s, {
         type: "prompt.completed",
         promptId: prompt.promptId,
