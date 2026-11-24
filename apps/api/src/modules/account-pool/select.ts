@@ -1,0 +1,60 @@
+import type { PoolStrategy } from "@ocw/contracts";
+
+/**
+ * Which pool account a Work Zone session gets (PURE, Phase 07.18, D-04, D-05, PD-07).
+ *
+ * An account is chosen only when a session starts or when its account must change (D-05); never per request. The
+ * caller filters usability (enabled, not cooling, a slot of the same device) before `pickAccount`, locks the
+ * provider's policy row `FOR UPDATE`, and persists `last_used_at` (every strategy) and the returned `wrr` state
+ * (weighted) in the same transaction (PD-07). This file never reads the database.
+ *
+ * Ties are deterministic everywhere: priority asc, then `createdAt` asc, then id asc.
+ */
+
+/** One usable account as the selector sees it; times are epoch milliseconds so the functions stay pure. */
+export interface PoolCandidate {
+  id: string;
+  priority: number;
+  weight: number;
+  lastUsedAt: number | null;
+  wrrCurrent: number;
+  createdAt: number;
+}
+
+export interface PoolPick {
+  id: string;
+  /** The weighted round-robin state of every candidate after this pick (unchanged by the other strategies). */
+  wrr: ReadonlyMap<string, number>;
+}
+
+/** The admin's order: priority asc, then the older account, then the smaller id. */
+function byOrder(a: PoolCandidate, b: PoolCandidate): number {
+  if (a.priority !== b.priority) return a.priority - b.priority;
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function currentState(candidates: readonly PoolCandidate[]): Map<string, number> {
+  return new Map(candidates.map((c) => [c.id, c.wrrCurrent]));
+}
+
+/** The first candidate under `better` (a strict "a wins over b"), scanning in the admin's order. */
+function best(
+  candidates: readonly PoolCandidate[],
+  better: (a: PoolCandidate, b: PoolCandidate) => boolean,
+): PoolCandidate {
+  const ordered = [...candidates].sort(byOrder);
+  let winner = ordered[0] as PoolCandidate;
+  for (const c of ordered.slice(1)) if (better(c, winner)) winner = c;
+  return winner;
+}
+
+export function pickAccount(strategy: PoolStrategy, candidates: readonly PoolCandidate[]): PoolPick | null {
+  if (candidates.length === 0) return null;
+  switch (strategy) {
+    case "failover":
+      return { id: best(candidates, () => false).id, wrr: currentState(candidates) };
+    default:
+      return null;
+  }
+}
