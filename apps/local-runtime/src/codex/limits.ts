@@ -2,7 +2,9 @@
 // Detection only: the server decides what a limit does (cooldown, switch). Nothing here reads or carries a credential.
 //
 // - A turn that ends with `turn.error.codexErrorInfo === "usageLimitExceeded"` (`turn/completed`), or an `error`
-//   notification with it and `willRetry: false`, is a `usage_limit`; `unauthorized` is `auth_failed`. Everything else
+//   notification with it and `willRetry: false`, is a `usage_limit`; `unauthorized` is `auth_failed`; a spend limit of
+//   the API key, project or organization (`apiKeySpendLimitExceeded`, `projectSpendLimitExceeded`,
+//   `organizationSpendLimitExceeded`, codex-cli 0.172.0; 07.18-19 R1.6) is `billing`. Everything else
 //   (`rateLimitExceeded`, which Codex retries, connection failures, …) is not an account limit.
 // - The reset is the latest `resetsAt` among the last reported windows at 100 % or more (epoch seconds, a value above
 //   1e12 read as milliseconds), else unknown. Codex's own protocol comment says clients "must not infer recovery from
@@ -65,6 +67,13 @@ function exhaustedResetsAt(windows: WindowsInput): string | null {
   return latest === null ? null : new Date(latest).toISOString();
 }
 
+/** Codex's spend-limit errors (codex-rs `APISpendLimitExceeded(SpendLimitScope)`): the account's billing refuses. */
+const SPEND_LIMIT_ERRORS: ReadonlySet<string> = new Set([
+  "apiKeySpendLimitExceeded",
+  "projectSpendLimitExceeded",
+  "organizationSpendLimitExceeded",
+]);
+
 /** The account limit a notification reports (PD-23), or null. */
 export function codexLimitSignal(
   n: { method: string; params?: unknown },
@@ -74,6 +83,7 @@ export function codexLimitSignal(
   if (info === "usageLimitExceeded")
     return { reason: "usage_limit", resetsAt: exhaustedResetsAt(lastWindows) };
   if (info === "unauthorized") return { reason: "auth_failed", resetsAt: null };
+  if (typeof info === "string" && SPEND_LIMIT_ERRORS.has(info)) return { reason: "billing", resetsAt: null };
   return null;
 }
 
