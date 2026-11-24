@@ -45,6 +45,7 @@ import {
   slashDisposition,
   type WorkSessionStatus,
 } from "@ocw/contracts";
+import { CodexRateLimits } from "../accounts/codex-protocol.js";
 import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
@@ -79,6 +80,7 @@ import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.js";
 import type { UserInput } from "./generated/v2/UserInput.js";
 import { JsonRpcError, type JsonRpcNotification, JsonRpcPeer, type JsonRpcRequest } from "./jsonrpc.js";
+import { type CodexWindows, codexLimitSignal, codexUsage, mergeCodexWindows } from "./limits.js";
 import {
   type CodexEffectiveSettings,
   CodexEventMapper,
@@ -126,7 +128,15 @@ export interface CodexRuntimeOptions extends FullAccessGateOptions {
   detect?: () => Promise<RuntimeInfo>;
   /** Observe every JSON-RPC message (fixture recording). */
   onRpcMessage?: (direction: "in" | "out", message: unknown) => void;
+  /**
+   * 07.18 (D-02): asked only when the device's own Codex login is signed out: a signed-in slot's `CODEX_HOME` to
+   * collect the model catalog under (no turn, no token copied), or null for no catalog.
+   */
+  catalogHome?: () => string | null | Promise<string | null>;
 }
+
+/** How long the one `account/rateLimits/read` after a slot app-server starts may take (PD-09). */
+const RATE_LIMITS_READ_TIMEOUT_MS = 15_000;
 
 const CODEX_API_KEY_VARS: readonly string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
 const PARENT_CODEX_VARS = /^CODEX_(SANDBOX.*|THREAD_ID|SESSION_ID|MANAGED_BY_.*)$/;
@@ -220,6 +230,10 @@ interface Session {
   pendingAccount: SlotAccount | null | undefined;
   /** 07.18 (A-02): the app-server was stopped to change account; the next wake-up is the switch's resume. */
   switching: boolean;
+  /** 07.18 (PD-23): the last rate-limit windows Codex reported for the session's account (null = none yet). */
+  windows: CodexWindows | null;
+  /** 07.18 (PD-05): this turn already reported a limit (once per turn). */
+  limitReported: boolean;
   /** 07.18 (PD-05, PD-09): where limits and usage of the session's account go. */
   onAccountSignal: ((signal: AccountSignal) => void) | null;
 }
@@ -322,11 +336,16 @@ export class CodexRuntime implements AgentRuntime {
   private async collectCatalog(): Promise<RuntimeCatalog | null> {
     try {
       const info = await this.detect();
-      if (!info.installed || !info.loggedIn) return null;
+      if (!info.installed) return null;
+      // 07.18 (D-02): a device that only has pool accounts collects under a signed-in slot's home.
+      const slotHome = info.loggedIn ? null : ((await this.opts.catalogHome?.()) ?? null);
+      if (!info.loggedIn && !slotHome) return null;
       const spawnFn: SpawnAppServer =
         this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
       const value = await collectCodexCatalog(spawnFn, {
-        env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
+        env: slotHome
+          ? { ...codexChildEnv(process.env, false), CODEX_HOME: slotHome }
+          : codexChildEnv(process.env, this.opts.useApiKey ?? false),
         runtimeVersion: info.version,
         permissionModes: [...this.capabilities.supportsPermissionModes],
       });
@@ -419,6 +438,8 @@ export class CodexRuntime implements AgentRuntime {
       account,
       pendingAccount: undefined,
       switching: false,
+      windows: null,
+      limitReported: false,
       onAccountSignal: options.onAccountSignal ?? null,
     } as Omit<Session, "peer" | "exited"> as Session;
     this.attach(session, proc);
@@ -461,6 +482,7 @@ export class CodexRuntime implements AgentRuntime {
       };
       this.emitSettings(session, codexSettingsEvent(session.applied));
       this.emit(session, { type: "session.state", status: "idle" });
+      this.readRateLimits(session);
     } catch (err) {
       session.stopping = true;
       session.peer.close();
@@ -792,6 +814,7 @@ export class CodexRuntime implements AgentRuntime {
       };
       s.switching = false;
       this.log.info("codex app-server woke a retired session", { sessionId: s.id });
+      this.readRateLimits(s);
     } catch (err) {
       s.dormant = true;
       await this.closeProcess(s, proc, peer, exited);
@@ -808,6 +831,7 @@ export class CodexRuntime implements AgentRuntime {
     if (sameAccount(s.account, next)) return;
     s.account = next;
     s.switching = true;
+    s.windows = null; // the readings were the previous account's
     if (s.dormant) return;
     s.dormant = true; // first, as in retireIdle(): a prompt arriving meanwhile wakes a new process
     await this.closeProcess(s, s.proc, s.peer, s.exited);
@@ -898,6 +922,7 @@ export class CodexRuntime implements AgentRuntime {
   private async compact(s: Session, prompt: PromptPayload): Promise<void> {
     s.running = prompt;
     s.interruptRequested = false;
+    s.limitReported = false;
     s.compacting = true;
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
@@ -929,6 +954,7 @@ export class CodexRuntime implements AgentRuntime {
     if (this.slashCommand(prompt) === "compact") return this.compact(s, prompt);
     s.running = prompt;
     s.interruptRequested = false;
+    s.limitReported = false;
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
@@ -976,6 +1002,8 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   private onNotification(s: Session, n: JsonRpcNotification): void {
+    // 07.18 (PD-05): limits and usage first, so a limit reaches the server before this turn's prompt.completed.
+    this.noteAccount(s, n);
     for (const ev of s.mapper.map(n)) {
       if (ev.type === "session.error" && s.interruptRequested) continue;
       if (ev.type === "session.settings") {
@@ -993,6 +1021,60 @@ export class CodexRuntime implements AgentRuntime {
         continue;
       }
       this.emit(s, ev);
+    }
+  }
+
+  /**
+   * 07.18 (D-07, D-09, PD-09, PD-23): a rate-limit update becomes a usage reading (merged with the windows it leaves
+   * out); a turn that ends on the account's limit or an unauthorized account is reported once per turn. The signal
+   * carries reasons, times and percentages only.
+   */
+  private noteAccount(s: Session, n: JsonRpcNotification): void {
+    if (n.method === "account/rateLimits/updated") {
+      this.noteRateLimits(s, n.params);
+      return;
+    }
+    const limit = codexLimitSignal(n, s.windows);
+    if (!limit || s.limitReported) return;
+    s.limitReported = true;
+    this.signal(s, { kind: "limited", promptId: s.running?.promptId ?? null, ...limit });
+  }
+
+  /** A rate-limit snapshot (an update or the read's answer) → remembered windows and one usage reading. */
+  private noteRateLimits(s: Session, raw: unknown): void {
+    const parsed = CodexRateLimits.safeParse(raw);
+    if (!parsed.success) return;
+    s.windows = mergeCodexWindows(s.windows, parsed.data.rateLimits);
+    const usage = codexUsage(s.windows);
+    if (usage) this.signal(s, { kind: "usage", usage });
+  }
+
+  /**
+   * PD-09: one `account/rateLimits/read` after a slot app-server starts (start and every wake-up), never polled.
+   * A session on the device's own login has no pool account to report on. A failure only costs this reading.
+   */
+  private readRateLimits(s: Session): void {
+    if (!s.account) return;
+    const peer = s.peer;
+    peer
+      .request("account/rateLimits/read", undefined, RATE_LIMITS_READ_TIMEOUT_MS)
+      .then((answer) => {
+        if (!s.retired.has(peer) && !s.finished) this.noteRateLimits(s, answer);
+      })
+      .catch((err: unknown) =>
+        this.log.debug("codex rate limits unavailable", {
+          sessionId: s.id,
+          error: redact(errorMessage(err)),
+        }),
+      );
+  }
+
+  private signal(s: Session, signal: AccountSignal): void {
+    if (!s.onAccountSignal) return;
+    try {
+      s.onAccountSignal(signal);
+    } catch (err) {
+      this.log.error("account signal sink failed", { sessionId: s.id, error: errorMessage(err) });
     }
   }
 
