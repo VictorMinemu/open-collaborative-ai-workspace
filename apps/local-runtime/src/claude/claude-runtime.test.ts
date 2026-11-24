@@ -427,7 +427,7 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
       {
         kind: "limited",
         promptId: "p1",
-        reason: "rate_limit",
+        reason: "usage_limit",
         resetsAt: new Date(reset * 1000).toISOString(),
       },
     ]);
@@ -450,6 +450,45 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
     });
     expect(signals.filter((s) => s.kind === "limited")).toHaveLength(2);
     expect(log.slice(-2)).toEqual(["signal:limited", "completed:p2"]);
+  });
+});
+
+describe("ClaudeCodeRuntime — what is not an account limit (07.18-19 R1.1-R1.3)", () => {
+  it("a rejected window served from overage, a per-minute 429 and reply text send only usage", async () => {
+    const signals: AccountSignal[] = [];
+    const { runtime, events, start } = setup();
+    const q = await start("default", {
+      account: tokenAccount("a", POOL_TOKEN_A),
+      onAccountSignal: (sig) => signals.push(sig),
+    });
+    q.emit(init("default"));
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        utilization: 1,
+        overageStatus: "allowed",
+        isUsingOverage: true,
+      },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: { content: [{ type: "text", text: "You've hit your limit of patience, I see." }] },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      error: "rate_limit",
+      message: { content: [{ type: "text", text: "API Error: Rate limit reached" }] },
+    });
+    q.emit(result());
+    await settle();
+    expect(signals.map((sig) => sig.kind)).toEqual(["usage"]);
+    expect(events.some((e) => e.type === "prompt.completed")).toBe(true);
   });
 });
 
