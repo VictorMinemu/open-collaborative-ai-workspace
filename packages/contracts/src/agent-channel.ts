@@ -809,6 +809,12 @@ export const CellAccountPool = z.object({
       .array(z.object({ accountId: Id, profileId: z.string().max(120), enabled: z.boolean() }))
       .max(POOL_LIMITS.accountsPerProvider),
   }),
+  /**
+   * Additive (07.18 gap): connected subscriptions the pool keeps bots off (it manages them and no account is enabled),
+   * so they are left out of `subscriptions`. The cell keeps their stored sign-ins; a subscription that is neither listed
+   * nor here was disconnected, and the cell signs it out. Absent = none (an API before the gap fix).
+   */
+  withheldByPool: z.array(SubscriptionProviderKind).max(SubscriptionProviderKind.options.length).optional(),
 });
 export type CellAccountPool = z.infer<typeof CellAccountPool>;
 

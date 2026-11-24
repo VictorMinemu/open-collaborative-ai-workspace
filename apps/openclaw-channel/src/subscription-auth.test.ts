@@ -395,6 +395,42 @@ describe("subscription sign-in in the cell", () => {
     expect(driver.logouts).toBe(1);
   });
 
+  it("every ChatGPT bot account off keeps the stored profiles; one back on serves again with no new sign-in (07.18 gap)", async () => {
+    const { auth, driver } = setup(fakeDriver({ profiles: true }));
+    driver.profileStore.set(PROFILE_B, { ...BOTS_ACCOUNT, usable: true });
+    driver.profileStore.set("openai:owner@example.test", { ...ACCOUNT, usable: true });
+    const pool = {
+      claude: { order: null, tokens: [], apiKeyLast: false },
+      chatgpt: {
+        order: null,
+        profiles: [
+          { accountId: "0199a000-0000-7000-8000-0000000000b2", profileId: PROFILE_B, enabled: false },
+        ],
+      },
+    };
+    // Every bot account off: the API withholds the provider and says so. Bots get nothing; nothing is signed out.
+    const off = await auth.sync({
+      subscriptions: [],
+      accountPool: { ...pool, withheldByPool: ["openai-codex"] },
+    });
+    expect(off.has("openai-codex")).toBe(false);
+    await auth.sync({ subscriptions: [], accountPool: { ...pool, withheldByPool: ["openai-codex"] } });
+    expect(driver.logouts).toBe(0);
+    expect([...driver.profileStore.keys()]).toEqual([PROFILE_B, "openai:owner@example.test"]);
+
+    // One back on: listed again, ready at once from the kept sign-in.
+    const on = { ...pool, chatgpt: { ...pool.chatgpt, order: [PROFILE_B] } };
+    const ready = await auth.sync({ subscriptions: [CODEX], accountPool: on });
+    expect([...ready]).toEqual(["openai-codex"]);
+    expect(driver.logins).toBe(0);
+    expect(driver.logouts).toBe(0);
+
+    // A real disconnect (provider gone, nothing withheld) still signs every profile out, also with a pool.
+    await auth.sync({ subscriptions: [], accountPool: on });
+    expect(driver.logoutCalls).toEqual([undefined]);
+    expect(driver.profileStore.size).toBe(0);
+  });
+
   it("bridge: auth commands from the stream, bots on a subscription are ready only once signed in", async () => {
     const driver = fakeDriver();
     const { client, auth } = setup(driver);

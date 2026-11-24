@@ -4,6 +4,7 @@ import {
   cellTopic,
   EventTypes,
   type ModelProvider,
+  type PoolProvider,
   type SubscriptionProviderKind,
 } from "@ocw/contracts";
 import { modelProviders, type Tx, tenantOf } from "@ocw/db";
@@ -17,6 +18,11 @@ import { notifyCell, toProviderDto } from "./service";
  * (OpenClaw owns the device authorization, the tokens and their refresh). This module only keeps the
  * provider row (allowed models + who is signed in) in sync with what the cell reports. ADR-0006.
  */
+
+/** The pool that holds a subscription's accounts for bots (07.18). */
+export const POOL_OF_SUBSCRIPTION: Record<SubscriptionProviderKind, PoolProvider> = {
+  "openai-codex": "chatgpt",
+};
 
 export interface SubscriptionAccountReport {
   email: string | null;

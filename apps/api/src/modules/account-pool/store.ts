@@ -459,3 +459,45 @@ export async function removePoolAccount(
   });
   await ports.onChange?.(tx, { provider: updated.provider, reason: "removed", account: updated });
 }
+
+/**
+ * 07.18 gap: the provider's sign-in in the cell was disconnected (Settings › Models), so the cell holds none of its
+ * profiles any more. Every live `cell_profile` row of the pool is marked removed in the caller's transaction (the one
+ * that deletes the provider row) and audited `account_pool.account_removed` with reason `provider_disconnected`; device
+ * slots and Claude tokens are not the cell's sign-in and stay. The disconnect itself signs the cell out and tells it to
+ * re-read its config, so no per-account `onChange` runs. Returns the removed ids.
+ */
+export async function removeCellProfiles(
+  tx: Tx,
+  audit: AuditService,
+  provider: PoolProvider,
+  now = new Date(),
+): Promise<string[]> {
+  const at = now.toISOString();
+  const removed = await tx
+    .update(accountPoolAccounts)
+    .set({ removedAt: at, updatedAt: at })
+    .where(
+      and(
+        eq(accountPoolAccounts.provider, provider),
+        eq(accountPoolAccounts.kind, "cell_profile"),
+        isNull(accountPoolAccounts.removedAt),
+      ),
+    )
+    .returning();
+  for (const row of removed) {
+    await audit.record(tx, {
+      action: "account_pool.account_removed",
+      resourceType: "account_pool_account",
+      resourceId: row.id,
+      metadata: {
+        provider: row.provider,
+        kind: row.kind,
+        origin: row.origin,
+        label: row.label,
+        reason: "provider_disconnected",
+      },
+    });
+  }
+  return removed.map((r) => r.id);
+}

@@ -12,6 +12,8 @@ Found while executing 07.18-16 (browser journey). Out of that plan's scope; not 
   So turning all ChatGPT bot accounts off destroys their sign-ins, and turning one back on later needs a new sign-in.
 - **Suggested fix:** when the snapshot carries `accountPool`, the plugin keeps the stored profiles of a withheld
   provider (bots just do not use it) instead of logging them out; a test in `subscription-auth.test.ts`.
+- **Status:** FIXED in `38de9162` (07.18-18). `GET /cell` names a connected subscription the pool withholds in
+  `accountPool.withheldByPool`; the plugin keeps that provider's profiles. A real disconnect still signs out.
 
 ## 2. Disconnect on Settings › Models leaves the pool's ChatGPT bot rows "Ready"
 
@@ -21,3 +23,5 @@ Found while executing 07.18-16 (browser journey). Out of that plan's scope; not 
   reconciles them: Settings › Account pool keeps showing them as Ready although the cell holds nothing.
 - **Suggested fix:** the same transaction marks the provider's `cell_profile` rows removed (audited
   `account_pool.account_removed`, reason `provider_disconnected`).
+- **Status:** FIXED in `30b6db1f` (07.18-18). The route calls `removeCellProfiles` in its transaction; integration test
+  includes tenant isolation.

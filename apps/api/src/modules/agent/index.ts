@@ -31,6 +31,7 @@ import { and, asc, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type ApiModule, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, forbidden, notFound } from "../../lib/errors";
+import { removeCellProfiles } from "../account-pool";
 import { ensureDm, setAgentDmsArchived } from "../chat";
 import {
   AuthzDeniedError,
@@ -57,7 +58,7 @@ import {
   toAgentDto,
   toProviderDto,
 } from "./service";
-import { revokeSubscriptionInCell } from "./subscription";
+import { POOL_OF_SUBSCRIPTION, revokeSubscriptionInCell } from "./subscription";
 import { registerTemplateRoutes } from "./templates-routes";
 
 export { createPersonalBot, DEFAULT_MAX_PERSONAL_BOTS, type PersonalBotInput } from "./personal";
@@ -79,6 +80,7 @@ export {
   applySubscriptionConnected,
   markSubscriptionNeedsReconnect,
   notifyCellOfPoolChange,
+  POOL_OF_SUBSCRIPTION,
   revokeSubscriptionInCell,
   subscriptionAccount,
 } from "./subscription";
@@ -334,7 +336,11 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
                 : { provider: row.provider },
             });
             // The cell deletes its stored sign-in for this subscription (same transaction as the row).
-            if (isSubscriptionProvider(row.provider)) await revokeSubscriptionInCell(core, tx, row.provider);
+            if (isSubscriptionProvider(row.provider)) {
+              await revokeSubscriptionInCell(core, tx, row.provider);
+              // 07.18 gap: the pool's bot accounts were those sign-ins; they leave the pool with them.
+              await removeCellProfiles(tx, core.audit, POOL_OF_SUBSCRIPTION[row.provider]);
+            }
             await core.realtime.appendEvent(
               tx,
               `org:${auth.organizationId}`,
