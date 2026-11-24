@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -399,6 +400,88 @@ describe("a session moves before its turn when its account can no longer serve (
     expect((await accountRow(a)).credential_state).toBe("needs_sign_in");
     expect(await promptStatus(p)).not.toBe("failed");
     await finishTurn(pool, id, frame);
+  });
+});
+
+describe("GET /account-pool/preview: what a new session would use (D-11, PD-16, PD-19)", () => {
+  /** The raw answer (headers and text): the cache header and the no-label scan. */
+  async function preview(client: TestClient, deviceId: string) {
+    const res = await fetch(`${stack.baseUrl}/api/v1/account-pool/preview?deviceId=${deviceId}`, {
+      headers: { origin: "http://localhost:3999", cookie: client.cookieHeader },
+    });
+    const text = await res.text();
+    return {
+      status: res.status,
+      cache: res.headers.get("cache-control"),
+      text,
+      body: JSON.parse(text) as Json,
+    };
+  }
+
+  it("two ready tokens: the pool with its strategy; Codex with no slot: the device's login", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const r = await preview(sam, pool.deviceId);
+    expect(r.status).toBe(200);
+    expect(r.cache).toBe("no-store");
+    expect(r.body).toEqual({
+      "claude-code": { source: "pool", strategy: "failover", ready: 2 },
+      codex: { source: "device_login" },
+    });
+    for (const secret of [a, b, TA, TB, '"A"', '"B"']) expect(r.text).not.toContain(secret);
+  });
+
+  it("every account cooling and fallback off: none, with the earliest reset", async () => {
+    const a = await addToken("A", TA);
+    const soon = new Date(Date.now() + 3_600_000);
+    await cool(a, soon);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    expect((await preview(sam, pool.deviceId)).body["claude-code"]).toEqual({
+      source: "none",
+      resetsAt: soon.toISOString(),
+    });
+  });
+
+  it("a device without accountPool: the device's login for both runtimes", async () => {
+    await addToken("A", TA);
+    expect((await preview(sam, old.deviceId)).body).toEqual({
+      "claude-code": { source: "device_login" },
+      codex: { source: "device_login" },
+    });
+  });
+
+  it("a member who may not use the device, another organization's member and an unknown device: 404", async () => {
+    await addToken("A", TA);
+    const { client: lee } = await invite(stack, victor, "lee@example.test", "Lee", "developer");
+    expect((await preview(lee, pool.deviceId)).status).toBe(404);
+    expect((await preview(sam, "01a20e49-0000-7000-8000-000000000000")).status).toBe(404);
+    // Eve moves into her own organization: Sam's device is not there for her.
+    const { client: eve, userId: eveId } = await invite(
+      stack,
+      victor,
+      "eve@example.test",
+      "Eve",
+      "developer",
+    );
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    const other = await preview(eve, pool.deviceId);
+    expect(other.status).toBe(404);
+    expect(other.text).not.toContain(TA);
   });
 });
 
