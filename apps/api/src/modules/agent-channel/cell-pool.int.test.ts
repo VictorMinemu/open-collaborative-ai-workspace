@@ -504,3 +504,129 @@ describe("the cell's profile list keeps the pool in step (07.18-14 T2)", () => {
     expect(await poolRows()).toEqual(before);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: pool changes reach the cell
+
+/** The cell stream's events of these types, oldest first. */
+const cellEvents = async (type: string): Promise<Json[]> =>
+  (
+    await su.query("select payload from app.stream_events where stream_id = $1 and type = $2 order by seq", [
+      `cell:${orgA}`,
+      type,
+    ])
+  ).rows.map((r: { payload: Json }) => r.payload);
+
+/** How many `cell.config.changed` events `fn` appends to org A's cell stream. */
+async function configChanges(fn: () => Promise<unknown>): Promise<number> {
+  const before = (await cellEvents("cell.config.changed")).length;
+  await fn();
+  return (await cellEvents("cell.config.changed")).length - before;
+}
+
+describe("pool changes reach the cell (07.18-14 T3)", () => {
+  beforeEach(resetPool);
+
+  it("every Claude token change and either policy tells the cell once; with scope work_zone a token change does not", async () => {
+    let a = "";
+    let b = "";
+    expect(
+      await configChanges(async () => {
+        a = await addToken("ana@acme", TA);
+      }),
+    ).toBe(1);
+    expect(
+      await configChanges(async () => {
+        b = await addToken("bo@acme", TB);
+      }),
+    ).toBe(1);
+    expect(await configChanges(() => patchAccount(b, { enabled: false }))).toBe(1);
+    expect(await configChanges(() => patchAccount(b, { enabled: true }))).toBe(1);
+    expect(
+      await configChanges(() =>
+        ok(admin.request("PUT", "/api/v1/account-pool/claude/order", { accountIds: [b, a] })),
+      ),
+    ).toBe(1);
+    expect((await snapshot()).accountPool.claude.order).toEqual([
+      claudeTokenProfileId(b),
+      claudeTokenProfileId(a),
+    ]);
+    expect(await configChanges(() => setPolicy("claude", { strategy: "round_robin" }))).toBe(1);
+    expect(await configChanges(() => setPolicy("chatgpt", { strategy: "round_robin" }))).toBe(1);
+    expect(await configChanges(() => ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${a}`)))).toBe(
+      1,
+    );
+
+    // Work Zone only: the cell never had these tokens, so their changes do not concern it.
+    expect(await configChanges(() => setPolicy("claude", { scope: "work_zone" }))).toBe(1);
+    let c = "";
+    expect(
+      await configChanges(async () => {
+        c = await addToken("cy@acme", TC);
+      }),
+    ).toBe(0);
+    expect(await configChanges(() => patchAccount(c, { label: "cy@acme.test" }))).toBe(0);
+    expect(
+      await configChanges(() =>
+        ok(admin.request("PUT", "/api/v1/account-pool/claude/order", { accountIds: [c, b] })),
+      ),
+    ).toBe(0);
+    expect(await configChanges(() => ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${c}`)))).toBe(
+      0,
+    );
+  });
+
+  it("a ChatGPT device slot change does not concern the cell", async () => {
+    const owner = (
+      await su.query("select user_id from app.org_members where organization_id = $1 limit 1", [orgA])
+    ).rows[0].user_id as string;
+    const deviceId = randomUUID();
+    await su.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'mac', 'darwin', $4)",
+      [deviceId, orgA, owner, `hash-${deviceId}`],
+    );
+    const slot = (
+      await su.query(
+        "insert into app.account_pool_accounts (organization_id, provider, kind, label, device_id, slot_id) values ($1, 'chatgpt', 'device_slot', 'ops@acme', $2, $3) returning id",
+        [orgA, deviceId, randomUUID()],
+      )
+    ).rows[0].id as string;
+    expect(await configChanges(() => patchAccount(slot, { enabled: false }))).toBe(0);
+    expect(await configChanges(() => patchAccount(slot, { label: "ops@acme.test" }))).toBe(0);
+    expect(
+      await configChanges(() =>
+        ok(admin.request("PUT", "/api/v1/account-pool/chatgpt/order", { accountIds: [slot] })),
+      ),
+    ).toBe(0);
+    expect(
+      await configChanges(() => ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${slot}`))),
+    ).toBe(0);
+  });
+
+  it("disabling a bot account leaves it out of the order; removing one signs only that profile out", async () => {
+    const p = await insertProfile("bots@acme", { priority: 0 });
+    const q = await insertProfile("ops@acme", { priority: 1 });
+    expect((await snapshot()).accountPool.chatgpt.order).toEqual([poolProfileId(p), poolProfileId(q)]);
+
+    expect(await configChanges(() => patchAccount(p, { enabled: false }))).toBe(1);
+    expect((await snapshot()).accountPool.chatgpt.order).toEqual([poolProfileId(q)]);
+    expect(await configChanges(() => patchAccount(p, { enabled: true }))).toBe(1);
+    expect(
+      await configChanges(() =>
+        ok(admin.request("PUT", "/api/v1/account-pool/chatgpt/order", { accountIds: [q, p] })),
+      ),
+    ).toBe(1);
+
+    const revokes = (await cellEvents("provider.auth.revoke")).length;
+    expect(await configChanges(() => ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${q}`)))).toBe(
+      1,
+    );
+    const revoked = (await cellEvents("provider.auth.revoke")).slice(revokes);
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]).toMatchObject({ provider: "openai-codex", profileIds: [poolProfileId(q)] });
+    // The other profile stays in the pool and in the cell's order.
+    const snap = await snapshot();
+    expect(snap.accountPool.chatgpt.profiles.map((x: Json) => x.accountId)).toEqual([p]);
+    expect(snap.accountPool.chatgpt.order).toEqual([poolProfileId(p)]);
+    expect(snap.subscriptions.map((s: Json) => s.id)).toEqual(["openai-codex"]);
+  });
+});

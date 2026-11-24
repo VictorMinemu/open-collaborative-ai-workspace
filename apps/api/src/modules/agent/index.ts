@@ -78,6 +78,8 @@ export {
 export {
   applySubscriptionConnected,
   markSubscriptionNeedsReconnect,
+  notifyCellOfPoolChange,
+  revokeSubscriptionInCell,
   subscriptionAccount,
 } from "./subscription";
 
