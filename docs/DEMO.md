@@ -1247,6 +1247,35 @@ Manual-Only Verifications). After the upgrade, with Gertru's sandbox on the new 
 7. **Audit.** The rows carry ids and counts only, never the goal or a note:
    `select action, result, metadata from app.audit_events where action like 'bot.task_%' order by occurred_at desc limit 20;`
 
+## Account pool (Phase 07.18)
+
+Phase 07.18 (ADR-0044, admin guide: [docs/self-hosting/account-pool.md](self-hosting/account-pool.md)). The
+organization keeps several Claude and ChatGPT subscription accounts; when one reaches its limit, the same turn goes on
+with the next one. Members do nothing: once an admin adds accounts, every Work Zone session and every bot uses them.
+
+- **Claude accounts.** As `victor@`, open **Settings › Account pool › Claude › Add Claude account**. On a computer
+  signed in to the first Claude account, run `claude setup-token`, paste the token, label it (for example `claude-a`).
+  Repeat with a second account (`claude-b`). Both rows read **Ready** and **Sealed on the server**; the token is never
+  shown again.
+- **ChatGPT accounts.** **Add ChatGPT account › For bots** signs one in inside the bots runtime with a device code.
+  **On a device** does the same on a server device, for its Work Zone sessions (or run
+  `ocw-runtime account add codex --label chatgpt-b` on it, then turn the row on). The ChatGPT account already signed in
+  on Settings › Models is already the first one.
+- **Strategy.** **Distribution** per section: **Use one until its limit, then the next** (default), **Round-robin** or
+  **Weighted**. A session keeps its account until that account hits its limit.
+- **As a member.** Sign in as `sam@`, open **New session** on a device he may use: the dialog reads **Account: pool
+  (failover)**. Start it; the header shows **Account: claude-a**.
+- **At a limit.** When `claude-a` reaches its limit, the timeline says "Switched to account claude-b: claude-a reached
+  its limit until 15:40", the header reads **Account: claude-b**, and the turn finishes there. Settings shows
+  `claude-a` **Cooling until 15:40**.
+- **Bots.** A bot on a Claude or ChatGPT model uses the pool's accounts in the bots runtime without any change to the
+  bot.
+
+A real limit cannot be reached on demand. The browser journey (`e2e/tests/account-pool.spec.ts`, CI only) uses the fake
+runtime with `OCW_RUNTIME_FAKE_LIMIT_PREFIX=limited-`: an account whose label starts with `limited-` hits a limit on
+every turn. The owner's checks with real accounts (A-01 Claude, A-02 Codex, bots, security) are in
+`.planning/phases/07.18-subscription-account-pool-work-zone-local-claude-code-and-co/07.18-UAT.md`.
+
 ## Troubleshooting
 
 | Symptom | Fix |
