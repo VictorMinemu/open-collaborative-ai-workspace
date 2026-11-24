@@ -55,6 +55,7 @@ export {
   type PoolPorts,
   poolAccountStatus,
   poolDevices,
+  removeCellProfiles,
   removePoolAccount,
   reorderPool,
   toPoolAccount,

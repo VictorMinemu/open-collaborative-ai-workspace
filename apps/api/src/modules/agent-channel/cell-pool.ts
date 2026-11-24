@@ -22,7 +22,7 @@ import {
   type PoolAccountRow,
   servesConsumer,
 } from "../account-pool";
-import { notifyCell, subscriptionAccount } from "../agent";
+import { notifyCell, POOL_OF_SUBSCRIPTION, subscriptionAccount } from "../agent";
 
 /**
  * The account pool as the organization's bots use it (Phase 07.18, D-02, D-04, D-12, D-15, PD-12, PD-13, PD-18;
@@ -127,9 +127,6 @@ export async function cellAccountPool(
 }
 
 // ---------------------------------------------------------------- what the cell reports (PD-11, PD-12, E14)
-
-/** The pool that holds a subscription's accounts for bots. */
-const POOL_OF_SUBSCRIPTION: Record<SubscriptionProviderKind, PoolProvider> = { "openai-codex": "chatgpt" };
 
 /** "ChatGPT for bots" (D-10): the account id and profile id are fixed when the admin starts the sign-in. */
 export interface PoolSignInFlow {

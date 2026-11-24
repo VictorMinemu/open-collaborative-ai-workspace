@@ -643,3 +643,120 @@ describe("pool changes reach the cell (07.18-14 T3)", () => {
     expect(snap.subscriptions.map((s: Json) => s.id)).toEqual(["openai-codex"]);
   });
 });
+
+// ---------------------------------------------------------------- 07.18 gap: a disconnect clears the bot accounts
+
+describe("a disconnect on Settings › Models removes the provider's ChatGPT bot accounts (07.18 gap)", () => {
+  beforeEach(resetPool);
+
+  const connectCodex = (org: string) =>
+    stack.built.core.db.withTenant({ organizationId: org, userId: null }, (tx) =>
+      applySubscriptionConnected(
+        stack.built.core,
+        tx,
+        "openai-codex",
+        { email: "bots@acme", planType: "plus" },
+        { flowId: null },
+      ),
+    );
+
+  it("live cell_profile rows get removed_at and one audited account_removed each; nothing else moves; org B untouched", async () => {
+    await connectCodex(orgA);
+    const p = await insertProfile("bots@acme", { priority: 0 });
+    const q = await insertProfile("ops@acme", { enabled: false, priority: 1 });
+    // Already removed earlier: keeps its removal, no second audit.
+    const gone = await insertProfile("old@acme", { priority: 2 });
+    const goneAt = "2026-01-02T03:04:05.000Z";
+    await su.query("update app.account_pool_accounts set removed_at = $2 where id = $1", [gone, goneAt]);
+    // Neither the Claude pool nor a Work Zone device's ChatGPT slot belongs to the cell's sign-in.
+    const token = await addToken("ana@acme", TA);
+    const owner = (
+      await su.query("select user_id from app.org_members where organization_id = $1 limit 1", [orgA])
+    ).rows[0].user_id as string;
+    const deviceId = randomUUID();
+    await su.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'mac', 'darwin', $4)",
+      [deviceId, orgA, owner, `hash-${deviceId}`],
+    );
+    const slot = (
+      await su.query(
+        "insert into app.account_pool_accounts (organization_id, provider, kind, label, device_id, slot_id) values ($1, 'chatgpt', 'device_slot', 'dev@acme', $2, $3) returning id",
+        [orgA, deviceId, randomUUID()],
+      )
+    ).rows[0].id as string;
+
+    // Another organization with its own ChatGPT bot account.
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Org B', $2)", [
+      orgB,
+      `b-${orgB}`,
+    ]);
+    await connectCodex(orgB);
+    const otherId = randomUUID();
+    await su.query(
+      `insert into app.account_pool_accounts (id, organization_id, provider, kind, label, cell_profile_id)
+       values ($1, $2, 'chatgpt', 'cell_profile', 'b@b.test', $3)`,
+      [otherId, orgB, poolProfileId(otherId)],
+    );
+
+    const auditsBefore = (await poolAudits()).length;
+    await ok(admin.request("DELETE", "/api/v1/model-providers/openai-codex"));
+
+    const orgRows = await su.query(
+      "select id, removed_at from app.account_pool_accounts where organization_id = $1",
+      [orgA],
+    );
+    const removedAt = new Map(orgRows.rows.map((r: Json) => [r.id as string, r.removed_at]));
+    expect(removedAt.get(p)).not.toBeNull();
+    expect(removedAt.get(q)).not.toBeNull();
+    expect(new Date(removedAt.get(gone)).toISOString()).toBe(goneAt);
+    expect(removedAt.get(token)).toBeNull();
+    expect(removedAt.get(slot)).toBeNull();
+
+    const removed = (await poolAudits()).slice(auditsBefore);
+    expect(removed.map((r) => `${r.action} ${r.resource_id}`).sort()).toEqual(
+      [`account_pool.account_removed ${p}`, `account_pool.account_removed ${q}`].sort(),
+    );
+    for (const r of removed) {
+      expect(r.metadata).toEqual({
+        provider: "chatgpt",
+        kind: "cell_profile",
+        origin: "admin",
+        label: r.resource_id === p ? "bots@acme" : "ops@acme",
+        reason: "provider_disconnected",
+      });
+      expect(JSON.stringify(r.metadata)).not.toMatch(/sk-|token/u);
+    }
+
+    // Settings › Account pool no longer lists them; the cell gets an empty ChatGPT pool and nothing withheld.
+    const view = await ok(admin.request("GET", "/api/v1/account-pool"));
+    expect(view.chatgpt.accounts.map((a: Json) => a.id)).toEqual([slot]);
+    const snap = await snapshot();
+    expect(snap.accountPool.chatgpt).toEqual({ order: null, profiles: [] });
+    expect(snap.accountPool.withheldByPool).toBeUndefined();
+
+    // Tenant isolation: org B's bot account stays live and unaudited.
+    const other = (
+      await su.query("select removed_at from app.account_pool_accounts where id = $1", [otherId])
+    ).rows[0];
+    expect(other.removed_at).toBeNull();
+    const otherAudits = await su.query(
+      "select 1 from app.audit_events where organization_id = $1 and action = 'account_pool.account_removed'",
+      [orgB],
+    );
+    expect(otherAudits.rowCount).toBe(0);
+  });
+
+  it("a provider that is not connected is a 404 and removes nothing", async () => {
+    await su.query(
+      "delete from app.model_providers where organization_id = $1 and provider = 'openai-codex'",
+      [orgA],
+    );
+    const p = await insertProfile("bots@acme");
+    const res = await admin.request("DELETE", "/api/v1/model-providers/openai-codex");
+    expect(res.status).toBe(404);
+    const row = (await su.query("select removed_at from app.account_pool_accounts where id = $1", [p]))
+      .rows[0];
+    expect(row.removed_at).toBeNull();
+  });
+});
