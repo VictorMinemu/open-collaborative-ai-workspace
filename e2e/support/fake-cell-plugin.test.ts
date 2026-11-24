@@ -3,7 +3,6 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AgentChannelConversationOpen } from "../../packages/contracts/src/automation-fan-out";
 import { readPack, taskDirectives } from "./bot-tasks";
-import { type FakeDeviceAuthServer, startFakeDeviceAuthServer } from "./fake-device-auth-server";
 import {
   FakeCellPlugin,
   type MentionPayload,
@@ -12,6 +11,7 @@ import {
   type TaskEventPayload,
   turnAttachmentsSuffix,
 } from "./fake-cell-plugin";
+import { type FakeDeviceAuthServer, startFakeDeviceAuthServer } from "./fake-device-auth-server";
 
 /**
  * 07.8-08: the fake cell's confined tool calls, against a stub Agent Channel. A success renders the result; a refusal
@@ -1886,7 +1886,12 @@ describe("FakeCellPlugin account pool profiles (07.18-16, PD-12, E14, E15)", () 
     // Without `profiles` the fake keeps its pre-07.18 behaviour: one sign-in per provider, no profile id, no list.
     const old = cellOf(false);
     const connected = await signIn(old, FLOW_2);
-    expect(connected).toEqual({ provider: "openai-codex", flowId: FLOW_2, state: "connected", account: OWNER });
+    expect(connected).toEqual({
+      provider: "openai-codex",
+      flowId: FLOW_2,
+      state: "connected",
+      account: OWNER,
+    });
     expect(old.credentials.get("openai-codex")).toEqual(OWNER);
     expect(old.profiles("openai-codex")).toEqual([]);
   });
@@ -1936,7 +1941,9 @@ describe("FakeCellPlugin account pool profiles (07.18-16, PD-12, E14, E15)", () 
         flowId: null,
         state: "connected",
         account: OWNER,
-        profiles: [{ profileId: DEFAULT_PROFILE, email: OWNER.email, planType: OWNER.planType, usable: true }],
+        profiles: [
+          { profileId: DEFAULT_PROFILE, email: OWNER.email, planType: OWNER.planType, usable: true },
+        ],
       },
     ]);
 

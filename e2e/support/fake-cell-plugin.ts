@@ -284,6 +284,27 @@ export interface FakeDeviceAuthOptions {
   reporterId?: string;
   /** Poll interval of the token endpoint (default 200 ms). */
   pollMs?: number;
+  /**
+   * 07.18 (PD-12, E14, E15): behave like a 07.18 plugin. Each sign-in is held as its own profile (the start's
+   * `profileId`, else OpenClaw's own `openai:<email>`) and reported `connected` with it; every profile of a provider the
+   * snapshot lists is reported in a credential state report (`flowId: null`, `profiles`) at start and on every config
+   * sync whenever the list changed, and again after a per-profile revoke (`profileIds`) drops some of them. Unset = a
+   * pre-07.18 plugin: one sign-in per provider and no profile id (a start that names one still reports it, as the 07.18
+   * plugin does; an older API never sends one).
+   */
+  profiles?: boolean;
+}
+
+/** An account as a fake profile holds it (identity only, like OpenClaw's auth store; never a token). */
+export interface FakeAuthAccount {
+  email: string | null;
+  planType: string | null;
+}
+
+/** One profile in a credential state report (`CellAuthProfileReport`, packages/contracts/src/agent-channel.ts). */
+export interface FakeAuthProfileReport extends FakeAuthAccount {
+  profileId: string;
+  usable: boolean;
 }
 
 export interface FakeCellOptions {
@@ -746,10 +767,17 @@ export class FakeCellPlugin {
   snapshot: FakeCellSnapshot | null = null;
   lastSeq = 0;
   /** Subscription credentials this fake cell "holds" (provider → account), like OpenClaw's auth store. */
-  readonly credentials = new Map<string, { email: string | null; planType: string | null }>();
+  readonly credentials = new Map<string, FakeAuthAccount>();
   /** Every `POST /provider-auth` report sent, with the HTTP status it got. */
   readonly authReports: Array<{ status: number; body: Record<string, unknown> }> = [];
+  /** The providers revoked as a whole (`provider.auth.revoke` without `profileIds`). */
   readonly revoked: string[] = [];
+  /** 07.18: every `provider.auth.revoke` handled, with the profile ids it named (null = every profile). */
+  readonly revokes: Array<{ provider: string; profileIds: string[] | null }> = [];
+  /** 07.18 (`deviceAuth.profiles`): the profiles held per provider (profile id → account), in sign-in order. */
+  private readonly heldProfiles = new Map<string, Map<string, FakeAuthAccount>>();
+  /** 07.18: the profile list last reported per provider (JSON), so a credential state report goes out on change only. */
+  private readonly reportedProfiles = new Map<string, string>();
   /** Every `POST /plugins/report` and `POST /mcp/probe-results` sent, with the HTTP status it got. */
   readonly pluginReports: Array<{ status: number; body: Record<string, unknown> }> = [];
   readonly probeReports: Array<{ status: number; body: Record<string, unknown> }> = [];
@@ -863,6 +891,8 @@ export class FakeCellPlugin {
   async start(): Promise<void> {
     if (this.opts.autoAck) await this.ackAll();
     else await this.fetchCell();
+    // 07.18: the first sync after a start reports the profiles this cell already holds (E14).
+    if (this.snapshot) await this.syncProfiles(this.snapshot);
     await this.connect(this.opts.afterSeq);
   }
 
@@ -1084,6 +1114,9 @@ export class FakeCellPlugin {
   async onEvent(type: string, data: FakeCellEvent["data"]) {
     try {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
+      if (type === "cell.config.changed" && this.opts.deviceAuth?.profiles) {
+        await this.syncProfiles(this.opts.autoAck && this.snapshot ? this.snapshot : await this.fetchCell());
+      }
       if (type === "agent.mention.v1" && this.opts.autoReply) {
         await this.answerTurn(data as unknown as MentionPayload, type, true);
       }
@@ -1150,10 +1183,7 @@ export class FakeCellPlugin {
       if (this.opts.deviceAuth) {
         if (type === "provider.auth.start") void this.runDeviceFlow(data);
         if (type === "provider.auth.cancel") this.flows.get(String(data.flowId))?.abort();
-        if (type === "provider.auth.revoke") {
-          this.credentials.delete(String(data.provider));
-          this.revoked.push(String(data.provider));
-        }
+        if (type === "provider.auth.revoke") await this.revoke(data);
       }
     } catch (err) {
       console.error("fake cell plugin handler failed", err);
@@ -2037,6 +2067,78 @@ export class FakeCellPlugin {
   }
 
   /**
+   * 07.18: this cell holds a sign-in of `provider` under `profileId` (a restarted cell's auth store, or a finished
+   * sign-in). `credentials` keeps naming the provider's first profile, as OpenClaw's status does.
+   */
+  holdProfile(provider: string, profileId: string, account: FakeAuthAccount): void {
+    const held = this.heldProfiles.get(provider) ?? new Map<string, FakeAuthAccount>();
+    held.set(profileId, { email: account.email, planType: account.planType });
+    this.heldProfiles.set(provider, held);
+    this.syncCredential(provider);
+  }
+
+  /** 07.18: every profile of `provider` this cell holds, as a credential state report lists it (never a token). */
+  profiles(provider: string): FakeAuthProfileReport[] {
+    return [...(this.heldProfiles.get(provider) ?? new Map<string, FakeAuthAccount>())].map(
+      ([profileId, a]) => ({ profileId, email: a.email, planType: a.planType, usable: true }),
+    );
+  }
+
+  /**
+   * 07.18: a credential state report (`flowId: null`) with every profile of `provider`: `connected` with the first
+   * profile's account, or `disconnected` once none is left. Remembered once the API took it.
+   */
+  async reportProfiles(provider: string): Promise<void> {
+    const profiles = this.profiles(provider);
+    const first = profiles[0];
+    const res = await this.reportAuth({
+      provider,
+      flowId: null,
+      ...(first
+        ? { state: "connected", account: { email: first.email, planType: first.planType } }
+        : { state: "disconnected" }),
+      profiles,
+    });
+    if (res.status === 200) this.reportedProfiles.set(provider, JSON.stringify(profiles));
+  }
+
+  /**
+   * 07.18 (`deviceAuth.profiles`): what the plugin's sync does with the profile list. For each subscription the snapshot
+   * lists, a changed list is reported; a provider the snapshot leaves out (not connected, or every bot account of the
+   * pool off) is never reported. A no-op for a pre-07.18 fake.
+   */
+  async syncProfiles(cell: Pick<FakeCellSnapshot, "subscriptions">): Promise<void> {
+    if (!this.opts.deviceAuth?.profiles) return;
+    for (const sub of cell.subscriptions ?? []) {
+      const now = JSON.stringify(this.profiles(sub.id));
+      if ((this.reportedProfiles.get(sub.id) ?? "[]") !== now) await this.reportProfiles(sub.id);
+    }
+  }
+
+  /** `provider.auth.revoke`: only the named profiles (then what is left is reported), else every one (E15). */
+  private async revoke(data: FakeCellEvent["data"]): Promise<void> {
+    const provider = String(data.provider);
+    const only = Array.isArray(data.profileIds) ? data.profileIds.map(String) : null;
+    this.revokes.push({ provider, profileIds: only });
+    if (!only) {
+      this.heldProfiles.delete(provider);
+      this.credentials.delete(provider);
+      this.revoked.push(provider);
+      return;
+    }
+    const held = this.heldProfiles.get(provider);
+    for (const id of only) held?.delete(id);
+    this.syncCredential(provider);
+    if (this.opts.deviceAuth?.profiles) await this.reportProfiles(provider);
+  }
+
+  private syncCredential(provider: string): void {
+    const first = [...(this.heldProfiles.get(provider)?.values() ?? [])][0];
+    if (first) this.credentials.set(provider, first);
+    else this.credentials.delete(provider);
+  }
+
+  /**
    * Mirrors apps/openclaw-channel/src/provider-auth.ts: request a code, report it, poll until the owner
    * approves (or denies / it expires / the admin cancels), exchange, report the account. Never logs codes.
    */
@@ -2107,8 +2209,18 @@ export class FakeCellPlugin {
           email: claims.email ?? null,
           planType: claims["https://api.openai.com/auth"]?.chatgpt_plan_type ?? null,
         };
-        this.credentials.set(provider, account);
-        await this.reportAuth({ provider, flowId, state: "connected", account });
+        // 07.18 (PD-12): the profile the sign-in is stored under, as apps/openclaw-channel reports it.
+        const asked = typeof data.profileId === "string" && data.profileId ? data.profileId : null;
+        const profileId = da.profiles ? (asked ?? `openai:${account.email ?? "default"}`) : asked;
+        if (da.profiles && profileId) this.holdProfile(provider, profileId, account);
+        else this.credentials.set(provider, account);
+        await this.reportAuth({
+          provider,
+          flowId,
+          state: "connected",
+          account,
+          ...(profileId ? { profileId } : {}),
+        });
         return;
       }
     } catch (err) {

@@ -62,7 +62,9 @@ test("ChatGPT subscription: device-code sign-in in the cell → bots on ChatGPT 
     token,
     autoAck: true,
     autoReply: true,
-    deviceAuth: { serverUrl: device.url, pollMs: 150 },
+    // A 07.18 cell (07.18-16): the sign-in reports its profile id, so it joins the account pool at once. Without it,
+    // a stack where an earlier spec removed every ChatGPT bot account keeps the subscription out of the snapshot.
+    deviceAuth: { serverUrl: device.url, pollMs: 150, profiles: true },
   });
   const verify = await context.newPage();
   await page.emulateMedia({ colorScheme: "dark" });
