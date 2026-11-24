@@ -20,7 +20,7 @@ import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resource
 import { isSecretBasename, type PermissionMode, type RuntimeInfo, type SessionEvent } from "@ocw/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
-import { RuntimeError, type StartSessionOptions } from "../runtime.js";
+import { type AccountSignal, RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
 import { commandTouchesSecrets, isSecretPath, secretDenyReason, secretDenyRules } from "./tool-policy.js";
 
@@ -374,6 +374,76 @@ describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13,
     );
     expect(contents.join("\n")).not.toContain(POOL_TOKEN_A);
     expect(JSON.stringify(events)).not.toContain(POOL_TOKEN_A);
+  });
+});
+
+describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18 D-07, D-09, PD-05, PD-24)", () => {
+  it("reports one limit per turn, with the last known reset, before that turn's prompt.completed", async () => {
+    const log: string[] = [];
+    const signals: AccountSignal[] = [];
+    const { runtime, events, start } = setup();
+    const q = await start("default", {
+      account: tokenAccount("a", POOL_TOKEN_A),
+      onAccountSignal: (sig) => {
+        signals.push(sig);
+        log.push(`signal:${sig.kind}`);
+      },
+    });
+    const watch = () => {
+      for (const e of events.splice(0)) if (e.type === "prompt.completed") log.push(`completed:${e.promptId}`);
+    };
+    q.emit(init("default"));
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    const reset = 1_795_000_000;
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.9, resetsAt: reset },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      error: "rate_limit",
+      message: { content: [{ type: "text", text: "You've hit your session limit · resets 3:45pm" }] },
+    });
+    q.emit({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "seven_day" } });
+    q.emit({ ...result(), subtype: "error_during_execution", is_error: true, errors: ["rate limited"] });
+    await settle();
+    watch();
+    expect(signals).toEqual([
+      {
+        kind: "usage",
+        usage: {
+          windows: [{ kind: "five_hour", usedPercent: 90, resetsAt: new Date(reset * 1000).toISOString() }],
+          at: expect.any(String),
+        },
+      },
+      {
+        kind: "limited",
+        promptId: "p1",
+        reason: "rate_limit",
+        resetsAt: new Date(reset * 1000).toISOString(),
+      },
+    ]);
+    expect(log).toEqual(["signal:usage", "signal:limited", "completed:p1"]);
+
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: reset + 60 },
+    });
+    q.emit({ ...result(), is_error: true, result: "You've hit your session limit · resets 4:45pm" });
+    await settle();
+    watch();
+    expect(signals.at(-1)).toEqual({
+      kind: "limited",
+      promptId: "p2",
+      reason: "five_hour",
+      resetsAt: new Date((reset + 60) * 1000).toISOString(),
+    });
+    expect(signals.filter((s) => s.kind === "limited")).toHaveLength(2);
+    expect(log.slice(-2)).toEqual(["signal:limited", "completed:p2"]);
   });
 });
 
