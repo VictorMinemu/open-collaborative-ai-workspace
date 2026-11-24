@@ -1220,6 +1220,16 @@ export class Daemon {
     };
   }
 
+  /**
+   * 07.18 (D-02, PD-11): `ocw-runtime account add|remove` changed slots.json: the slots are re-read from it and sent to
+   * the server now (`accounts.sync`, while connected; offline, the next handshake reports them). Answers the count.
+   */
+  async reloadAccounts(): Promise<{ codexSlots: number }> {
+    const slots = await this.codexSlots.list();
+    await this.sendAccountsSync();
+    return { codexSlots: slots.length };
+  }
+
   /** Lowers one session out of fullAccess after the opt-out (in session order, before any later prompt). */
   private leaveFullAccess(s: ActiveSession): Promise<void> {
     return this.inSessionOrder(s.sessionId, async () => {
@@ -1878,6 +1888,9 @@ export class Daemon {
       }
       case "reloadConfig":
         return this.reloadConfig();
+      // 07.18 (PD-11): `ocw-runtime account add|remove` changed the slots; local only, no value.
+      case "reloadAccounts":
+        return this.reloadAccounts();
       // 07.11 (D-09, PD-08): local only; the command still comes from the on-device table.
       case "runtimeCheck": {
         if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
