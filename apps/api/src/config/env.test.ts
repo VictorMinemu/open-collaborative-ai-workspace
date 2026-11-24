@@ -573,6 +573,15 @@ describe("egress variables (D-07)", () => {
     expect(loadEnv({ ...base, NODE_ENV: "production" }).OCW_EGRESS_TEST_HOSTS).toEqual(new Map());
   });
 
+  it("OCW_CLAUDE_OAUTH_TOKEN_URL is test-only: unset means Anthropic's own endpoint, refused in production", () => {
+    expect(loadEnv(base).OCW_CLAUDE_OAUTH_TOKEN_URL).toBeNull();
+    const fake = "http://fake-anthropic:4100/v1/oauth/token";
+    expect(loadEnv({ ...base, OCW_CLAUDE_OAUTH_TOKEN_URL: fake }).OCW_CLAUDE_OAUTH_TOKEN_URL).toBe(fake);
+    expect(() => loadEnv({ ...base, NODE_ENV: "production", OCW_CLAUDE_OAUTH_TOKEN_URL: fake })).toThrow(
+      /OCW_CLAUDE_OAUTH_TOKEN_URL: is test-only/,
+    );
+  });
+
   it("OCW_OPENBAO_ADDR is part of the configuration (the egress platform list), empty means unset", () => {
     expect(loadEnv(base).OCW_OPENBAO_ADDR).toBeNull();
     expect(loadEnv({ ...base, OCW_OPENBAO_ADDR: "" }).OCW_OPENBAO_ADDR).toBeNull();

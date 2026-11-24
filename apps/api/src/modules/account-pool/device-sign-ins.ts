@@ -13,12 +13,19 @@ import { accountPoolAccounts, devices, type TenantCtx, type Tx, tenantOf } from 
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
-import type { DeviceCommandRow, DeviceHub, DeviceRef } from "../device";
+import {
+  type DeviceCommandRow,
+  type DeviceHub,
+  type DeviceRef,
+  deviceFacts,
+  loadDeviceAccess,
+} from "../device";
+import { createPermissionService } from "../organization";
 import { insertPoolAccount, type PoolAccountRow } from "./store";
 
 /**
- * ChatGPT sign-ins on a service device (Phase 07.18, D-02, D-10, D-13, PD-11, PD-20, A-08). An admin starts one from
- * Settings: the API sends the device an `account.login` command for a new Codex slot, and the daemon runs Codex's own
+ * ChatGPT sign-ins on a device (Phase 07.18, D-02, D-10, D-13, PD-11, PD-20, A-08; 07.18-19 R3.2: a desktop device too
+ * when the admin may use it, see `refuseDevice`). An admin starts one from Settings: the API sends the device an `account.login` command for a new Codex slot, and the daemon runs Codex's own
  * device-code login under that slot's `CODEX_HOME`. The API only:
  *   1. sends the command and audits the start (same transaction),
  *   2. keeps the short-lived flow the admin UI shows (Redis, one per organization and device, auto-expiring, the
@@ -77,8 +84,13 @@ const isActive = (r: SignInRecord | null): r is SignInRecord =>
 /** Thrown inside a finishing transaction when another path ended the flow first (rolls the writes back). */
 class AlreadyEnded extends Error {}
 
+/** R3.2: what a desktop device the admin may not use answers (the dialog shows the full command with the label). */
+export const DEVICE_NOT_ALLOWED_SENTENCE =
+  'This device is not shared with you. Run "ocw-runtime account add codex" on it instead.';
+
 export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
   const redis = core.bus.pub;
+  const perms = createPermissionService(core);
 
   const parse = (raw: string | null): SignInRecord | null => {
     if (!raw) return null;
@@ -281,21 +293,30 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
   }
 
   /**
-   * D-10: sign-ins run only on a service device (a headless server; never a member's laptop) that is online, not
-   * revoked, and runs a daemon with pool support (an older one could not keep slots apart).
+   * D-10: sign-ins run on a device that is online, not revoked, and runs a daemon with pool support (an older one could
+   * not keep slots apart). A service device (a headless server) takes any admin's sign-in. A desktop device (a member's
+   * laptop) only when the admin may use it (07.18-19 R3.2): `device.use` decided by the resolver as a session start
+   * decides it, so the admin owns the device, its owner shared it, or granted it to the admin. Otherwise 409
+   * `device_not_allowed`: the account is added with `ocw-runtime account add codex` on that device (it arrives off).
    */
-  function refuseDevice(d: typeof devices.$inferSelect): void {
+  async function refuseDevice(tx: Tx, d: typeof devices.$inferSelect): Promise<void> {
     if (d.revokedAt !== null) {
       throw conflict("This device was removed. Pair it again to sign an account in there.", "device_offline");
     }
-    if (d.hostKind !== "service") {
-      throw conflict(
-        "ChatGPT accounts are signed in only on a server device (the OCW runtime running as a service).",
-        "not_a_service_device",
-      );
-    }
     if (d.accountPoolVersion === null) {
       throw conflict("Update the OCW runtime on this device first.", "not_a_service_device");
+    }
+    if (d.hostKind !== "service") {
+      const userId = tenantOf(tx).userId;
+      const use = userId
+        ? await perms.decide(
+            tx,
+            { kind: "user", userId },
+            "device.use",
+            deviceFacts(d, userId, await loadDeviceAccess(tx, userId)),
+          )
+        : { allowed: false };
+      if (!use.allowed) throw conflict(DEVICE_NOT_ALLOWED_SENTENCE, "device_not_allowed");
     }
     if (d.status !== "online") {
       throw conflict("This device is offline. Start its OCW runtime and try again.", "device_offline");
@@ -340,7 +361,7 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
     const rec = await core.db.withTenant(ctx, async (tx) => {
       const [d] = await tx.select().from(devices).where(eq(devices.id, body.deviceId));
       if (!d) throw notFound("Device not found");
-      refuseDevice(d);
+      await refuseDevice(tx, d);
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`account_pool_sign_in:${org}:${d.id}`}, 0))`,
       );

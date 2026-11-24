@@ -246,6 +246,34 @@ export const UpdatePoolPolicyRequest = z
   .refine(atLeastOneKey, { message: "change at least one field" });
 export type UpdatePoolPolicyRequest = z.infer<typeof UpdatePoolPolicyRequest>;
 
+// ---- Connect a Claude account from Settings (07.18-19 R3.1: the `claude setup-token` flow, run by the API) ----
+
+/** How long a started Claude sign-in waits for its code (the PKCE verifier's lifetime in Redis). */
+export const CLAUDE_SIGN_IN_TTL_S = 600;
+
+/** Start: a new account, or (`accountId`) a new token for an existing token account. */
+export const StartClaudeSignInRequest = z.strictObject({ accountId: Id.optional() });
+export type StartClaudeSignInRequest = z.infer<typeof StartClaudeSignInRequest>;
+
+/** What the admin opens: Anthropic's own sign-in page; the verifier and state never leave the server. */
+export const ClaudeSignInStart = z.object({
+  flowId: Id,
+  authorizeUrl: z.url().max(2000),
+  expiresAt: IsoDateTime,
+});
+export type ClaudeSignInStart = z.infer<typeof ClaudeSignInStart>;
+
+/**
+ * Complete: what Anthropic's page shows (`code#state`) or the address it ended on. `label` names a new account (not
+ * used when the sign-in replaces a token). Answered with the `PoolAccount`; never the token.
+ */
+export const CompleteClaudeSignInRequest = z.strictObject({
+  flowId: Id,
+  code: z.string().trim().min(1).max(4096),
+  label: PoolLabel.optional(),
+});
+export type CompleteClaudeSignInRequest = z.infer<typeof CompleteClaudeSignInRequest>;
+
 /** Sign a ChatGPT account in on a service device (a new Codex slot there). */
 export const StartDeviceSignInRequest = z.strictObject({ deviceId: Id, label: PoolLabel });
 export type StartDeviceSignInRequest = z.infer<typeof StartDeviceSignInRequest>;
@@ -278,11 +306,20 @@ export const AccountPoolErrorCode = z.enum([
   "api_key_not_allowed",
   "too_many_accounts",
   "not_a_service_device",
+  /** 07.18-19 R3.2: a desktop device the admin may not use (`ocw-runtime account add codex` on it instead). */
+  "device_not_allowed",
   "device_offline",
   "account_not_found",
   "sign_in_in_progress",
   "wrong_kind",
   "no_account",
+  // 07.18-19 R3.1: Connect a Claude account.
+  "sign_in_expired",
+  "invalid_code",
+  "state_mismatch",
+  "label_required",
+  "code_refused",
+  "claude_unavailable",
 ]);
 export type AccountPoolErrorCode = z.infer<typeof AccountPoolErrorCode>;
 

@@ -2,6 +2,15 @@ import type { ApiModule, Core } from "../../core";
 import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
 export {
+  CLAUDE_OAUTH,
+  type ClaudeSignIns,
+  claudeAuthorizeUrl,
+  claudeSignInKey,
+  createClaudeSignIns,
+  exchangeClaudeCode,
+  parsePastedCode,
+} from "./claude-sign-in";
+export {
   createDeviceAccountHandler,
   type DeviceAccountParts,
   defaultDeviceAccountParts,
@@ -82,6 +91,11 @@ export { openPoolToken, poolTokenAad, replacePoolToken, sealPoolToken } from "./
  * `/account-pool/chatgpt/device-sign-ins/current?deviceId=` sign a ChatGPT account in on a service device
  * (`device-sign-ins.ts`); the device's `accounts.sync` keeps its slot rows in step (`slots.ts`), a slot no admin started
  * arriving disabled; removing a slot account sends `account.logout` to its device.
+ *
+ * 07.18-19 R3.1: POST `/account-pool/claude/sign-ins` and `/account-pool/claude/sign-ins/complete` ("Connect a Claude
+ * account", `claude-sign-in.ts`) run the `claude setup-token` flow: the PKCE verifier in Redis (10 min, GETDEL, bound
+ * to the admin and the organization), the exchange through the egress guard, the token sealed by `addClaudeToken` or
+ * `updatePoolAccount`. R3.2: a device sign-in also runs on a laptop the admin may use (`device.use`).
  */
 export function createAccountPoolModule(core: Core, deps: AccountPoolDeps = {}): ApiModule {
   return {

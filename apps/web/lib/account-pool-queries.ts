@@ -4,6 +4,8 @@ import {
   AccountPoolPreview,
   AccountPoolView,
   type AddClaudeTokenRequest,
+  ClaudeSignInStart,
+  type CompleteClaudeSignInRequest,
   DeviceSignIn,
   type DeviceSignInState,
   Ok,
@@ -12,6 +14,7 @@ import {
   type PoolProvider,
   type ProviderAuthState,
   ProviderAuthStatus,
+  type StartClaudeSignInRequest,
   type UpdatePoolAccountRequest,
   type UpdatePoolPolicyRequest,
 } from "@ocw/contracts";
@@ -85,6 +88,35 @@ export function addClaudeAccountMutation(qc: QueryClient) {
 export function useAddClaudeAccount() {
   const qc = useQueryClient();
   return useMutation(addClaudeAccountMutation(qc));
+}
+
+/**
+ * 07.18-19 R3.1 "Connect a Claude account": `POST /account-pool/claude/sign-ins` answers Anthropic's sign-in page
+ * (the API keeps the PKCE verifier); `accountId` replaces that account's token instead of adding one.
+ */
+export function startClaudeSignInMutation() {
+  return {
+    mutationFn: (body: StartClaudeSignInRequest) =>
+      api.post("/api/v1/account-pool/claude/sign-ins", { body, schema: ClaudeSignInStart }),
+  };
+}
+
+export function useStartClaudeSignIn() {
+  return useMutation(startClaudeSignInMutation());
+}
+
+/** `POST /account-pool/claude/sign-ins/complete`: the pasted code goes once; the account comes back, never a token. */
+export function completeClaudeSignInMutation(qc: QueryClient) {
+  return {
+    mutationFn: (body: CompleteClaudeSignInRequest) =>
+      api.post("/api/v1/account-pool/claude/sign-ins/complete", { body, schema: PoolAccount }),
+    onSuccess: () => refreshPool(qc),
+  };
+}
+
+export function useCompleteClaudeSignIn() {
+  const qc = useQueryClient();
+  return useMutation(completeClaudeSignInMutation(qc));
 }
 
 /** Replace one account in the cached view (both providers; ids are unique). */

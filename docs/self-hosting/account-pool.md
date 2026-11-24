@@ -32,24 +32,33 @@ each member still signs in with their own ChatGPT plan there (ADR-0017).
 ## Add a Claude account
 
 Claude accounts on a Pro, Max or Team plan work through a long-lived **setup-token**, made by Anthropic's own sign-in.
+You can make it from Settings, with no terminal:
 
-1. On any computer where you can sign in to that Claude account, run:
+1. In **Settings › Account pool › Claude**, press **Add Claude account** and type a **Label**.
+2. Press **Connect a Claude account**. Anthropic's sign-in page opens in a new tab. Sign in with the Claude account you
+   want to add and approve.
+3. Anthropic's page then shows a code. Copy all of it (it has a `#` in the middle) and paste it in **Paste the code**.
+   Press **Add account**.
 
-   ```bash
-   claude setup-token
-   ```
+The server does what `claude setup-token` does: it trades the code for the same one-year token, with the same
+inference-only access. The code works once, for 10 minutes. If Anthropic does not accept it, the dialog says "Anthropic
+didn't accept this code. It may have expired or been used already. Start again."
 
-   Sign in in the browser it opens. The command prints a token that starts with `sk-ant-oat01-`. It is not saved
-   anywhere on that computer.
-2. In **Settings › Account pool › Claude**, press **Add Claude account**, type a **Label** and paste the token in
-   **Setup-token**. Save.
+**Paste a setup-token instead** is the other way, from any computer where you can sign in to that Claude account:
 
-The token lasts one year. It is sealed in the secret store at once and **never shown again**, to anyone. Sessions and
-bots use it right away. An API key (`sk-ant-api…`) is refused here with "This is an API key. Add it in Settings ›
-Models.": API keys stay on the Models page.
+```bash
+claude setup-token
+```
 
-When a token expires or is revoked, its row reads **Paste a new token**: run `claude setup-token` again and use
-**Replace the token** on that row. Nothing else changes (label, order, history).
+Sign in in the browser it opens. The command prints a token that starts with `sk-ant-oat01-`; it is not saved anywhere
+on that computer. Paste it in **Setup-token** and Save.
+
+Either way, the token lasts one year. It is sealed in the secret store at once and **never shown again**, to anyone.
+Sessions and bots use it right away. An API key (`sk-ant-api…`) is refused here with "This is an API key. Add it in
+Settings › Models.": API keys stay on the Models page.
+
+When a token expires or is revoked, its row reads **Paste a new token**: use **Replace the token** on that row and
+either connect the account again or paste a new setup-token. Nothing else changes (label, order, history).
 
 **Used by** (Claude section only): **Work Zone and bots** (the default), **Work Zone only** or **Bots only**.
 
@@ -69,13 +78,16 @@ be online (Settings › Bots runtime).
 The ChatGPT account your organization already signed in for bots on **Settings › Models** (before this release) is
 already in the pool as its first account. You do not have to sign it in again.
 
-### On a server device (Work Zone)
+### On a device (Work Zone)
 
-A ChatGPT account for Codex sessions lives on one **server device** (a headless runtime, [SERVER.md](../SERVER.md)) and
-serves Work Zone sessions on that device only. Two ways:
+A ChatGPT account for Codex sessions lives on one **device** and serves Work Zone sessions on that device only. It can
+be a **server device** (a headless runtime, [SERVER.md](../SERVER.md)) or a computer running the desktop app. Two ways:
 
-- **From Settings:** choose **On a device**, pick an online server device, type a label, **Start sign-in**. The device
-  asks Codex for a code; sign in as above. The account is on, and its row reads **On *device name***.
+- **From Settings:** choose **On a device**, pick an online device, type a label, **Start sign-in**. The device asks
+  Codex for a code; sign in as above. The account is on, and its row reads **On *device name***. This works on any
+  server device, and on a computer that is yours or whose owner shared it with you (Settings › Devices). A computer
+  that is not shared with you reads **Not shared with you**: picking it shows the exact command to run there (below),
+  with a Copy button, instead of **Start sign-in**.
 - **On the device itself**, as the user the runtime runs as:
 
   ```bash
