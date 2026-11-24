@@ -44,7 +44,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { type WebSocket, WebSocketServer } from "ws";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
-import { controlRequest } from "./control-socket.js";
+import { type ControlRequest, controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
@@ -3837,5 +3837,24 @@ describe("07.18-08 account.login / account.logout (D-02, D-10, PD-10)", () => {
     const again = randomUUID();
     server.send({ id: again, kind: "account.logout", sessionId: again, payload: { slotId } });
     expect(await server.frame("ack", (f) => f.commandId === again)).toMatchObject({ ok: true });
+  });
+});
+
+describe("07.18-08 reloadAccounts (PD-11): a slot the CLI added reaches the server at once", () => {
+  it("the control command re-reads the slots and sends accounts.sync; it refuses any value", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const slot = await store.create({ label: "Codex account 1", origin: "cli" });
+    const res = await controlRequest(socketPath(), { cmd: "reloadAccounts" });
+    expect(res).toEqual({ id: undefined, ok: true, result: { codexSlots: 1 } });
+    expect(
+      await server.frame("accounts.sync", (f) => f.codexSlots.some((s) => s.slotId === slot.slotId)),
+    ).toMatchObject({ codexSlots: [{ slotId: slot.slotId, origin: "cli", signedIn: false }] });
+    const forged = await controlRequest(socketPath(), {
+      cmd: "reloadAccounts",
+      slotId: slot.slotId,
+    } as unknown as ControlRequest);
+    expect(forged).toMatchObject({ ok: false, error: "invalid request" });
   });
 });
