@@ -70,6 +70,10 @@ export async function addClaudeAccountInUi(
   await page.getByTestId("pool-add-claude").click();
   const dialog = page.getByTestId("add-claude-account-dialog");
   await expect(dialog).toBeVisible();
+  // 07.18-19 R3: the dialog opens on "Connect a Claude account" (Anthropic's own sign-in); pasting a setup-token is the
+  // secondary path, which this fake-runtime journey uses because it cannot reach Anthropic.
+  await expect(dialog.getByTestId("claude-connect-start")).toBeVisible();
+  await dialog.getByTestId("claude-use-token").click();
   // Write-only (D-13): a new dialog never shows a token, not even the one pasted last time.
   await expect(dialog.getByTestId("claude-account-token")).toHaveValue("");
   await dialog.getByTestId("claude-account-label").fill(label);
