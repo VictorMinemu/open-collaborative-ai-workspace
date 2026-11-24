@@ -58,9 +58,15 @@ export async function resetPool(api: APIRequestContext): Promise<void> {
 /**
  * Settings › Account pool › Add Claude account, as an admin does it: opens the dialog (its token field starts empty),
  * types the label and pastes the token, saves, and waits for the dialog to close and the account's row to show. The page
- * must already be on `/settings/account-pool`.
+ * must already be on `/settings/account-pool`. `beforeSave` runs on the filled dialog (the spec's layout checks and
+ * review captures).
  */
-export async function addClaudeAccountInUi(page: Page, label: string, token: string): Promise<void> {
+export async function addClaudeAccountInUi(
+  page: Page,
+  label: string,
+  token: string,
+  beforeSave?: () => Promise<void>,
+): Promise<void> {
   await page.getByTestId("pool-add-claude").click();
   const dialog = page.getByTestId("add-claude-account-dialog");
   await expect(dialog).toBeVisible();
@@ -70,6 +76,7 @@ export async function addClaudeAccountInUi(page: Page, label: string, token: str
   await dialog.getByTestId("claude-account-token").fill(token);
   await expect(dialog.getByTestId("claude-account-token")).toHaveAttribute("type", "password");
   await expect(dialog.getByTestId("claude-account-save")).toBeEnabled();
+  await beforeSave?.();
   await dialog.getByTestId("claude-account-save").click();
   await expect(dialog).toBeHidden({ timeout: 15_000 });
   await expect(poolRow(page, "claude", label)).toBeVisible();

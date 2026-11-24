@@ -1,5 +1,6 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import { poolProfileId } from "../../packages/contracts/src/agent-channel.ts";
+import { expectNoSeriousA11y } from "../support/a11y";
 import {
   addClaudeAccountInUi,
   fakeSetupToken,
@@ -12,6 +13,7 @@ import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { startFakeDeviceAuthServer } from "../support/fake-device-auth-server";
+import { captureReview, expectNoSidewaysScroll, expectTouchTargets } from "../support/layout";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { shareDevice } from "../support/work-zone-projects";
 import { ADMIN, API_URL } from "./env";
@@ -29,6 +31,9 @@ import { ADMIN, API_URL } from "./env";
  * - ChatGPT for bots: the organization's existing ChatGPT sign-in (Settings › Models) is the pool's first account
  *   (adopted, E14), also after the cell restarts and lists the profiles it holds; the admin adds "bots-2" for bots with
  *   the device code; removing it signs out only its profile in the cell, and the adopted one stays (E15).
+ * Every screen (Settings with accounts, both add dialogs, the new-session dialog, the session after the switch) passes
+ * axe in light and dark, never scrolls sideways and has 44 px targets on a phone, with review captures `0718-*` in both
+ * themes at 1440 and 390 (owner rule: visual quality is part of done).
  * Every account is removed again in `finally`, so later specs on the stack run on the device's own login.
  */
 
@@ -48,6 +53,19 @@ async function signInAdmin(page: Page): Promise<void> {
     .getByRole("button", { name: /sign in|log in/i })
     .click();
   await expect(page).toHaveURL(/\/chat/, { timeout: 15_000 });
+}
+
+/** axe on `selector` in light and dark (serious and critical findings fail). */
+async function axeBothThemes(page: Page, selector: string): Promise<void> {
+  await expectNoSeriousA11y(page, selector);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectNoSeriousA11y(page, selector);
+  await page.emulateMedia({ colorScheme: "light" });
+}
+
+/** No focus ring or hover left from the last click in a review capture. */
+async function blur(page: Page): Promise<void> {
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
 async function openPoolSettings(page: Page): Promise<void> {
@@ -82,12 +100,25 @@ test("Claude pool: a member's session moves to the next account when the first o
     await signInAdmin(page);
     await openPoolSettings(page);
     await expect(page.getByTestId("pool-empty-claude")).toBeVisible();
-    await addClaudeAccountInUi(page, LIMITED, tokens[0] as string);
+    await addClaudeAccountInUi(page, LIMITED, tokens[0] as string, async () => {
+      // The Add Claude dialog, filled in: the token is masked (password field) in every capture.
+      await axeBothThemes(page, '[data-testid="add-claude-account-dialog"]');
+      await expectNoSidewaysScroll(page, "Add Claude account");
+      if (mobile) await expectTouchTargets(page, '[data-testid="add-claude-account-dialog"]');
+      await blur(page);
+      await captureReview(page, `0718-add-claude-${tag}`);
+    });
     await addClaudeAccountInUi(page, NEXT, tokens[1] as string);
     for (const label of [LIMITED, NEXT]) {
       await expect(poolRow(page, "claude", label).getByTestId("pool-account-status")).toHaveText("Ready");
       await expect(poolRow(page, "claude", label)).toContainText("Sealed on the server");
     }
+    // Settings › Account pool with two ready accounts: row actions, switches and selects are 44 px on a phone.
+    await axeBothThemes(page, '[data-testid="account-pool-settings"]');
+    await expectNoSidewaysScroll(page, "Settings › Account pool");
+    if (mobile) await expectTouchTargets(page, '[data-testid="pool-section-claude"]');
+    await blur(page);
+    await captureReview(page, `0718-pool-${tag}`);
     const view = await poolAs(adminApi);
     // The order is the order they were added in: failover takes limited-a first (D-04).
     expect(view.claude.accounts.map((a) => a.label)).toEqual([LIMITED, NEXT]);
@@ -111,6 +142,12 @@ test("Claude pool: a member's session moves to the next account when the first o
     await expect(dialog.getByTestId("new-session-account")).toHaveText("Account: pool (failover)", {
       timeout: 15_000,
     });
+    await axeBothThemes(s, '[data-testid="new-session-dialog"]');
+    await expectNoSidewaysScroll(s, "new-session dialog");
+    if (mobile) await expectTouchTargets(s, '[data-testid="new-session-dialog"]');
+    await dialog.getByTestId("new-session-account").scrollIntoViewIfNeeded();
+    await blur(s);
+    await captureReview(s, `0718-new-session-${tag}`);
     // Plan mode: the fake answers without asking to write a file, so the turn runs straight through.
     await dialog.getByTestId("new-session-settings-toggle").click();
     await dialog.getByTestId("mode-plan").click();
@@ -133,6 +170,13 @@ test("Claude pool: a member's session moves to the next account when the first o
       0,
     );
     await expect(s.getByTestId("session-account")).toContainText(`Account: ${NEXT}`);
+    // The session after the switch: the header chip and the switch line, readable in both themes.
+    await axeBothThemes(s, '[data-testid="session-header"]');
+    await axeBothThemes(s, '[data-testid="event-stream"]');
+    await expectNoSidewaysScroll(s, "session after the switch");
+    await switchLine.scrollIntoViewIfNeeded();
+    await blur(s);
+    await captureReview(s, `0718-session-switch-${tag}`);
 
     // ---- back in Settings, limited-a cools down until its reset (D-08, D-10)
     await openPoolSettings(page);
@@ -141,6 +185,11 @@ test("Claude pool: a member's session moves to the next account when the first o
       { timeout: 15_000 },
     );
     await expect(poolRow(page, "claude", NEXT).getByTestId("pool-account-status")).toHaveText("Ready");
+    await axeBothThemes(page, '[data-testid="account-pool-settings"]');
+    await expectNoSidewaysScroll(page, "Settings › Account pool, an account cooling");
+    if (mobile) await expectTouchTargets(page, '[data-testid="pool-section-claude"]');
+    await blur(page);
+    await captureReview(page, `0718-pool-cooling-${tag}`);
     const limited = await poolAccount(adminApi, "claude", LIMITED);
     expect(limited.status).toBe("cooling");
     expect(limited.limitReason).toBe("five_hour");
@@ -162,8 +211,10 @@ const BOTS_2 = "bots-2";
 
 test("ChatGPT for bots: the existing sign-in is the pool's first account; one added and removed in the cell", async ({
   page,
-}) => {
+}, info) => {
   test.setTimeout(180_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
   const token = cellToken();
   test.skip(!token, "OCW_CELL_TOKEN is not configured");
   const adminApi = await apiAs(ADMIN);
@@ -237,6 +288,11 @@ test("ChatGPT for bots: the existing sign-in is the pool's first account; one ad
     await expect(dialog).toBeVisible();
     await dialog.getByTestId("chatgpt-where-bots").click();
     await dialog.getByTestId("chatgpt-account-label").fill(BOTS_2);
+    await axeBothThemes(page, '[data-testid="add-chatgpt-account-dialog"]');
+    await expectNoSidewaysScroll(page, "Add ChatGPT account");
+    if (mobile) await expectTouchTargets(page, '[data-testid="add-chatgpt-account-dialog"]');
+    await blur(page);
+    await captureReview(page, `0718-add-chatgpt-form-${tag}`);
     await dialog.getByTestId("chatgpt-account-start").click();
     await expect(dialog.getByTestId("chatgpt-sign-in-pending")).toBeVisible({ timeout: 15_000 });
     const shownCode = (await dialog.getByTestId("chatgpt-user-code").textContent())?.trim() ?? "";
@@ -245,6 +301,12 @@ test("ChatGPT for bots: the existing sign-in is the pool's first account; one ad
       "href",
       `${deviceAuth.url}/codex/device`,
     );
+    // The code view: the link, the code and its Copy buttons, Cancel.
+    await axeBothThemes(page, '[data-testid="add-chatgpt-account-dialog"]');
+    await expectNoSidewaysScroll(page, "Add ChatGPT account, the code");
+    if (mobile) await expectTouchTargets(page, '[data-testid="add-chatgpt-account-dialog"]');
+    await blur(page);
+    await captureReview(page, `0718-add-chatgpt-${tag}`);
     expect(deviceAuth.approve(shownCode)).toBe(true);
     await expect(dialog.getByTestId("chatgpt-sign-in-connected")).toBeVisible({ timeout: 15_000 });
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -260,6 +322,12 @@ test("ChatGPT for bots: the existing sign-in is the pool's first account; one ad
     await expect(chatgptRows).toHaveCount(2);
     await expect(chatgptRows.filter({ hasText: "Bots runtime" })).toHaveCount(2);
     await expect(poolRow(page, "chatgpt", BOTS_2).getByTestId("pool-account-status")).toHaveText("Ready");
+    await axeBothThemes(page, '[data-testid="account-pool-settings"]');
+    await expectNoSidewaysScroll(page, "Settings › Account pool, ChatGPT for bots");
+    if (mobile) await expectTouchTargets(page, '[data-testid="pool-section-chatgpt"]');
+    await page.getByTestId("pool-section-chatgpt").scrollIntoViewIfNeeded();
+    await blur(page);
+    await captureReview(page, `0718-pool-chatgpt-${tag}`);
 
     // ---- removing bots-2 signs out only its profile in the cell; the adopted account stays (PD-25, E15)
     const revokesBefore = plugin.revokes.length;
