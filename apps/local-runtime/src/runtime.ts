@@ -2,8 +2,10 @@
 // Nothing outside an adapter may depend on Codex / Claude Code / OpenCode internals.
 
 import type {
+  AccountUsageSnapshot,
   ApprovalDecision,
   PermissionMode,
+  PoolLimitReason,
   PromptPayload,
   RuntimeCatalog,
   RuntimeId,
@@ -37,7 +39,31 @@ export interface RuntimeCapabilities {
    */
   supportsPermissionModes: readonly PermissionMode[];
   supportsImages: boolean;
+  /**
+   * 07.18 (PD-04): the pool account kinds this adapter can run a session on. Absent or empty = none: the daemon refuses
+   * a start or prompt naming an account of another kind before the adapter sees it.
+   */
+  supportsAccounts?: readonly ("token" | "device_slot")[];
 }
+
+/**
+ * 07.18 (D-02, PD-03): the pool account a session runs on, as the daemon hands it to an adapter. `ref` is the
+ * platform's account id (opaque here). A token lives only in the adapter's memory for that session: never logged,
+ * never written to a file, never put in an event, an error or a frame.
+ */
+export type RuntimeAccount = { ref: string; label: string } & (
+  | { kind: "token"; oauthToken: string }
+  | { kind: "device_slot"; slotId: string; codexHome: string }
+);
+
+/**
+ * 07.18 (D-07, D-09, PD-05, PD-09): what an adapter reports about the account of a session. `limited` is sent before
+ * the turn's `prompt.completed`, at most once per turn; `usage` whenever the runtime reports usage. Signals carry no
+ * credential and no account e-mail; the daemon adds the account ref it stored.
+ */
+export type AccountSignal =
+  | { kind: "limited"; promptId: string | null; reason: PoolLimitReason; resetsAt: string | null }
+  | { kind: "usage"; usage: AccountUsageSnapshot };
 
 export interface StartSessionOptions {
   /** Platform work session id (opaque, from the Control Plane). */
@@ -51,6 +77,10 @@ export interface StartSessionOptions {
   contextWindow?: number;
   /** Runtime-native session id from a previous `session.started` event. */
   resumeRuntimeSessionId?: string;
+  /** 07.18 (PD-03): the pool account to run on. Absent or null = the device's own login (as before 07.18). */
+  account?: RuntimeAccount | null;
+  /** 07.18 (PD-05): where the adapter reports limits and usage of the session's account. */
+  onAccountSignal?: (signal: AccountSignal) => void;
 }
 
 /**
@@ -115,6 +145,12 @@ export interface AgentRuntime {
    * many it retired (07.11 D-03a).
    */
   retireIdle(): Promise<number>;
+  /**
+   * 07.18 (D-08, PD-03): run the session's next turns on `account` (null = the device's own login). The same account
+   * ref changes nothing; otherwise the adapter switches between turns (never inside one), resuming the same runtime
+   * session. Absent = the adapter cannot change accounts in a live session.
+   */
+  useAccount?(sessionId: string, account: RuntimeAccount | null): Promise<void>;
   /** Re-resolve the CLI path and drop cached catalogs after an update (07.11). Absent = nothing cached. */
   refreshInstall?(): void;
   /** Stop the session and release the runtime process. */

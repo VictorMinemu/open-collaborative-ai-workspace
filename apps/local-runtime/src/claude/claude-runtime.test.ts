@@ -220,6 +220,62 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
   });
 });
 
+// 07.18: token-shaped values joined at runtime, so no credential literal lives in the repo.
+const POOL_TOKEN_A = ["sk", "ant", "oat01", "poolAAAAAAAAAAAAAAAAAAAAAAAAAAAA"].join("-");
+const POOL_TOKEN_B = ["sk", "ant", "oat01", "poolBBBBBBBBBBBBBBBBBBBBBBBBBBBB"].join("-");
+const tokenAccount = (ref: string, oauthToken: string, label = `Account ${ref}`) => ({
+  kind: "token" as const,
+  ref,
+  label,
+  oauthToken,
+});
+
+describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    process.env.OCW_DEVICE_TOKEN = "device-secret";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    process.env.ANTHROPIC_AUTH_TOKEN = "also-not";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-parent-one";
+    process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("runs on the pool token with every competing credential stripped, even with useApiKey", async () => {
+    const { start } = setup({ useApiKey: true });
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    const env = q.params.options.env ?? {};
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    for (const k of [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY",
+    ]) {
+      expect(env[k], k).toBeUndefined();
+    }
+    expect(env.DISABLE_AUTOUPDATER).toBe("1");
+    expect(Object.keys(env).filter((k) => k.startsWith("OCW_"))).toEqual([]);
+  });
+
+  it("without an account the env is exactly today's childEnv", async () => {
+    const { start } = setup({ useApiKey: true });
+    const q = await start();
+    expect(q.params.options.env).toEqual(childEnv(process.env, true));
+    const plain = await setup().start("default", { account: null });
+    expect(plain.params.options.env).toEqual(childEnv(process.env, false));
+  });
+
+  it("reports token accounts as supported", () => {
+    expect(setup().runtime.capabilities.supportsAccounts).toEqual(["token"]);
+  });
+});
+
 describe("ClaudeCodeRuntime — approvals via canUseTool", () => {
   it("emits approval.requested and allows once", async () => {
     const { start, runtime, events, cwd } = setup();
