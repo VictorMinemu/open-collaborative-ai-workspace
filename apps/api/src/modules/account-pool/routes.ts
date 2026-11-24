@@ -1,4 +1,5 @@
 import {
+  type AccountLogoutPayload,
   AccountPoolPreview,
   AccountPoolView,
   AddClaudeTokenRequest,
@@ -80,7 +81,26 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
   const admin = { config: { authz: "user" as const }, preValidation: auth };
   /** The routes whose body may carry a setup-token. */
   const adminWithToken = { ...admin, preValidation: [...auth, refuseApiKey] };
-  const ports: PoolPorts = { audit: core.audit, secrets: core.secrets, onChange: deps.onChange };
+  const ports: PoolPorts = {
+    audit: core.audit,
+    secrets: core.secrets,
+    // PD-25: a removed slot is signed out on its device. The command waits in the queue while the device is offline;
+    // the row is removed now either way. Then the module's own listener (the cell, plan 14).
+    async onChange(tx, change) {
+      const row = change.account;
+      if (change.reason === "removed" && row?.kind === "device_slot" && row.deviceId && row.slotId) {
+        if (!deps.hub) throw new Error("removing a device slot needs the device hub");
+        const payload: AccountLogoutPayload = { slotId: row.slotId };
+        await deps.hub.enqueue(tx, {
+          deviceId: row.deviceId,
+          workSessionId: null,
+          kind: "account.logout",
+          payload,
+        });
+      }
+      await deps.onChange?.(tx, change);
+    },
+  };
   const signIns = createDeviceSignIns(core, deps.hub);
 
   /** A device of the caller's organization (RLS: another organization's is not found). */
@@ -208,6 +228,16 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
       reply.header("cache-control", "no-store");
       await requireDevice(req, req.query.deviceId);
       return signIns.status(authOf(req).organizationId, req.query.deviceId);
+    },
+  );
+
+  app.delete(
+    "/account-pool/chatgpt/device-sign-ins/current",
+    { ...admin, schema: { tags, querystring: DeviceQuery, response: { 200: DeviceSignIn.nullable() } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      await requireDevice(req, req.query.deviceId);
+      return signIns.cancel(tenant(req), req.query.deviceId);
     },
   );
 }

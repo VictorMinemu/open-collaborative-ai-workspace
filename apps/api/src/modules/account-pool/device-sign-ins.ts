@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type AccountLoginFrame,
   type AccountLoginPayload,
+  type AccountLogoutPayload,
   type DeviceSignIn,
   type DeviceSignInState,
   POOL_LIMITS,
@@ -11,7 +12,7 @@ import {
 import { accountPoolAccounts, devices, type TenantCtx, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import { HttpError, notFound } from "../../lib/errors";
+import { conflict, HttpError, notFound } from "../../lib/errors";
 import type { DeviceCommandRow, DeviceHub, DeviceRef } from "../device";
 import { insertPoolAccount, type PoolAccountRow } from "./store";
 
@@ -66,6 +67,9 @@ const MESSAGES: Record<PoolSignInErrorCode, string> = {
 export const deviceSignInKey = (org: string, deviceId: string) =>
   `ocw:account-pool:sign-in:${org}:${deviceId}`;
 const endKey = (org: string, flowId: string) => `ocw:account-pool:sign-in-end:${org}:${flowId}`;
+
+/** How a daemon older than 07.18 acks a command kind it does not know. */
+const OLD_DAEMON_ACK = "invalid command frame";
 
 const isActive = (r: SignInRecord | null): r is SignInRecord =>
   r?.state === "starting" || r?.state === "pending";
@@ -126,9 +130,10 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
     org: string,
     rec: SignInRecord,
     build: (tx: Tx) => Promise<SignInRecord>,
+    actor: TenantCtx = { organizationId: org, userId: rec.startedBy },
   ): Promise<boolean> {
     try {
-      await core.db.withTenant({ organizationId: org, userId: rec.startedBy }, async (tx) => {
+      await core.db.withTenant(actor, async (tx) => {
         const final = await build(tx);
         if (!(await claimEnd(org, final))) throw new AlreadyEnded();
       });
@@ -275,6 +280,49 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
     };
   }
 
+  /**
+   * D-10: sign-ins run only on a service device (a headless server; never a member's laptop) that is online, not
+   * revoked, and runs a daemon with pool support (an older one could not keep slots apart).
+   */
+  function refuseDevice(d: typeof devices.$inferSelect): void {
+    if (d.revokedAt !== null) {
+      throw conflict("This device was removed. Pair it again to sign an account in there.", "device_offline");
+    }
+    if (d.hostKind !== "service") {
+      throw conflict(
+        "ChatGPT accounts are signed in only on a server device (the OCW runtime running as a service).",
+        "not_a_service_device",
+      );
+    }
+    if (d.accountPoolVersion === null) {
+      throw conflict("Update the OCW runtime on this device first.", "not_a_service_device");
+    }
+    if (d.status !== "online") {
+      throw conflict("This device is offline. Start its OCW runtime and try again.", "device_offline");
+    }
+  }
+
+  /** The pool's and the device's caps, checked before the code is shown (the insert checks the pool's again). */
+  async function refuseFullPool(tx: Tx, deviceId: string): Promise<void> {
+    const live = await tx
+      .select({ deviceId: accountPoolAccounts.deviceId, kind: accountPoolAccounts.kind })
+      .from(accountPoolAccounts)
+      .where(and(eq(accountPoolAccounts.provider, "chatgpt"), isNull(accountPoolAccounts.removedAt)));
+    if (live.length >= POOL_LIMITS.accountsPerProvider) {
+      throw conflict(
+        `This pool already has ${POOL_LIMITS.accountsPerProvider} accounts. Remove one before adding another.`,
+        "too_many_accounts",
+      );
+    }
+    const onDevice = live.filter((r) => r.kind === "device_slot" && r.deviceId === deviceId).length;
+    if (onDevice >= POOL_LIMITS.slotsPerDevice) {
+      throw conflict(
+        `This device already has ${POOL_LIMITS.slotsPerDevice} ChatGPT accounts. Remove one before adding another.`,
+        "too_many_accounts",
+      );
+    }
+  }
+
   const requireHub = (): DeviceHub => {
     if (!hub) throw new Error("device sign-ins need the device hub");
     return hub;
@@ -287,14 +335,18 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
   async function start(ctx: TenantCtx, body: StartDeviceSignInRequest): Promise<DeviceSignIn> {
     const org = ctx.organizationId;
     const h = requireHub();
+    // An aged flow ends (audited) before a new one may start.
+    await load(org, body.deviceId);
     const rec = await core.db.withTenant(ctx, async (tx) => {
       const [d] = await tx.select().from(devices).where(eq(devices.id, body.deviceId));
       if (!d) throw notFound("Device not found");
+      refuseDevice(d);
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`account_pool_sign_in:${org}:${d.id}`}, 0))`,
       );
       const cur = await read(org, d.id);
       if (isActive(cur) && aged(cur) === null) return cur;
+      await refuseFullPool(tx, d.id);
 
       const id = randomUUID();
       const slotId = randomUUID();
@@ -357,7 +409,9 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
       case "completed":
         return complete(org, rec, frame.planType?.trim().toLowerCase() || null);
       case "failed": {
-        await fail(org, rec, frame.error?.code ?? "failed");
+        const code = frame.error?.code ?? "failed";
+        // The device's own message is never shown: the sentence comes from the code (A-08: `unsupported`).
+        await fail(org, rec, code === "cell_offline" ? "failed" : code);
         return;
       }
     }
@@ -368,14 +422,57 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
     device: DeviceRef,
     command: DeviceCommandRow,
     ok: boolean,
-    _error: string | null,
+    error: string | null,
   ): Promise<void> {
     if (command.kind !== "account.login") return;
     const org = device.organizationId;
     const rec = await load(org, device.deviceId);
     if (!isActive(rec) || rec.id !== command.id) return;
     if (ok) return complete(org, rec, null);
-    await fail(org, rec, "failed");
+    // A daemon without the account commands acks them `invalid command frame` (device-link.ts CommandKind).
+    await fail(org, rec, error === OLD_DAEMON_ACK ? "runtime_too_old" : "failed");
+  }
+
+  /**
+   * Admin "Cancel" (PD-25): the device signs the slot out and removes it (`account.logout`); the flow reads
+   * `cancelled`. Nothing running: the last flow, unchanged.
+   */
+  async function cancel(ctx: TenantCtx, deviceId: string): Promise<DeviceSignIn | null> {
+    const org = ctx.organizationId;
+    const h = requireHub();
+    const rec = await load(org, deviceId);
+    if (!isActive(rec)) return toDto(org, rec);
+    await finish(
+      org,
+      rec,
+      async (tx) => {
+        const payload: AccountLogoutPayload = { slotId: rec.slotId };
+        await h.enqueue(tx, { deviceId, workSessionId: null, kind: "account.logout", payload });
+        await core.audit.record(tx, {
+          action: "account_pool.sign_in_failed",
+          resourceType: "account_pool",
+          result: "error",
+          deviceId,
+          metadata: {
+            provider: "chatgpt",
+            deviceId,
+            slotId: rec.slotId,
+            label: rec.label,
+            code: "cancelled",
+          },
+        });
+        return {
+          ...rec,
+          state: "error",
+          verificationUrl: null,
+          userCode: null,
+          expiresAt: null,
+          error: { code: "cancelled", message: MESSAGES.cancelled },
+        };
+      },
+      ctx,
+    );
+    return status(org, deviceId);
   }
 
   /** The slot of the device's running sign-in (the slots sync leaves it to the sign-in). */
@@ -384,7 +481,7 @@ export function createDeviceSignIns(core: Core, hub?: DeviceHub) {
     return isActive(rec) ? new Set([rec.slotId]) : new Set();
   }
 
-  return { start, status, onAccountLogin, onCommandResult, inFlightSlots };
+  return { start, status, cancel, onAccountLogin, onCommandResult, inFlightSlots };
 }
 
 export type DeviceSignIns = ReturnType<typeof createDeviceSignIns>;
