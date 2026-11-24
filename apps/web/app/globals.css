@@ -32,8 +32,9 @@
   --brand-soft-foreground: oklch(0.45 0.2 277);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
-  /* `text-destructive` (errors, destructive menu items): the destructive itself in light mode. */
-  --destructive-text: oklch(0.577 0.245 27.325);
+  /* `text-destructive` (errors, destructive menu items): a darker red than the fill in light mode, so error text keeps
+   * 4.5:1 on its own tinted card (`bg-destructive/8`, where the fill measured 4.1:1) as well as on the background. */
+  --destructive-text: oklch(0.505 0.213 27.518);
   --success: oklch(0.65 0.17 155);
   /* `text-success-text` (small green text: counts, A/U letters): about 5.1:1 on white; the fill above stays as is. */
   --success-text: oklch(0.52 0.14 155);
