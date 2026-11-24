@@ -21,6 +21,7 @@ import {
   type AgentChannelConsultRequest,
   AgentChannelConsultResponse,
   AgentChannelEventTypes,
+  type AgentChannelProviderAuthReport,
   AgentChannelRecordUpdateResponse,
   AgentChannelToolCallDecision,
   type AgentChannelTurnDone,
@@ -4856,5 +4857,200 @@ describe("07.17.1.1.2 tasks", () => {
     const kept = m.TurnContext.parse(bad);
     expect(kept.task).toBeUndefined();
     expect(kept.tools).toEqual(turn.tools);
+  });
+});
+
+describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts agent-channel.ts; PD-12, PD-13)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  type Channel = {
+    CellSnapshot: Schema;
+    CellAccountPool: Schema;
+    ProviderAuthStartEvent: Schema;
+    ProviderAuthRevokeEvent: Schema;
+    AgentChannelProviderAuthReport: Schema;
+    CellAuthProfileReport: Schema;
+    poolProfileId: (id: string) => string;
+    claudeTokenProfileId: (id: string) => string;
+    POOL_TOKEN_ENV_RE: RegExp;
+  };
+  const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
+  // Token-shaped values are assembled at runtime so no credential-shaped literal sits whole in the repository.
+  const token = (n: number) => ["sk-", "ant-", "oat01-", `abcdefghijKLMNOPQRST0123456789_-${n}`].join("");
+  const load = async () => ({
+    channel: (await import(contracts("agent-channel.ts"))) as Channel,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  /** A `GET /cell` body as the 07.17 API sends it (every additive field present, so both copies agree). */
+  const snapshot0717 = {
+    protocolVersion: 1,
+    cellId: U(1),
+    organizationId: U(2),
+    topic: `cell:${U(1)}`,
+    lastSeq: 7,
+    agents: [],
+    providers: [],
+    subscriptions: [],
+    webSearch: { provider: "duckduckgo" },
+    mcpServers: [],
+    plugins: [],
+    conversations: {
+      strictSummaries: false,
+      keepIdentifiers: false,
+      keepRecentTokens: 20000,
+      freshSessionOnFailure: true,
+    },
+  };
+  const claudeToken = (n: number) => ({
+    accountId: U(10 + n),
+    profileId: `anthropic:pool-${U(10 + n)}`,
+    envName: `OCW_POOL_TOKEN_${n}`,
+    token: token(n),
+  });
+  const accountPool = {
+    claude: {
+      order: [`anthropic:pool-${U(12)}`, `anthropic:pool-${U(11)}`, "anthropic:default"],
+      tokens: [claudeToken(1), claudeToken(2)],
+      apiKeyLast: true,
+    },
+    chatgpt: {
+      order: null,
+      profiles: [
+        { accountId: U(21), profileId: `openai:pool-${U(21)}`, enabled: true },
+        { accountId: U(22), profileId: "openai-codex:default", enabled: true },
+      ],
+    },
+  };
+
+  it("a 07.17 snapshot and one with accountPool parse to equal values in both copies", async () => {
+    const { channel, m } = await load();
+    for (const v of [snapshot0717, { ...snapshot0717, accountPool }]) {
+      const contract = channel.CellSnapshot.safeParse(v);
+      expect(contract.success).toBe(true);
+      expect(m.CellSnapshot.parse(v)).toEqual(contract.data);
+    }
+    expect(m.CellSnapshot.parse(snapshot0717).accountPool).toBeUndefined();
+    expect(m.CellSnapshot.parse({ ...snapshot0717, accountPool }).accountPool).toEqual(accountPool);
+  });
+
+  it("the pool's bounds agree: env names, the token shape and at most 20 tokens", async () => {
+    const { channel, m } = await load();
+    const withClaude = (patch: Record<string, unknown>) => ({
+      ...accountPool,
+      claude: { ...accountPool.claude, ...patch },
+    });
+    const apiKey = ["sk-", "ant-", "api03-", "abcdefghijKLMNOPQRST0123456789"].join("");
+    const cases: [unknown, boolean][] = [
+      [accountPool, true],
+      [withClaude({ tokens: [{ ...claudeToken(1), envName: "OCW_PROVIDER_KEY_X" }] }), false],
+      [withClaude({ tokens: [{ ...claudeToken(1), envName: "OCW_POOL_TOKEN_123" }] }), false],
+      [withClaude({ tokens: [{ ...claudeToken(1), token: apiKey }] }), false],
+      [withClaude({ tokens: [{ ...claudeToken(1), token: "sk-ant-short" }] }), false],
+      [withClaude({ tokens: Array.from({ length: 20 }, (_, i) => claudeToken(i + 1)) }), true],
+      [withClaude({ tokens: Array.from({ length: 21 }, (_, i) => claudeToken(i + 1)) }), false],
+      [withClaude({ order: Array(22).fill("anthropic:default") }), false],
+      [{ ...accountPool, chatgpt: { ...accountPool.chatgpt, order: Array(21).fill("openai:x") } }, false],
+    ];
+    for (const [v, ok] of cases) {
+      const a = m.CellAccountPool.safeParse(v);
+      const b = channel.CellAccountPool.safeParse(v);
+      expect(b.success, JSON.stringify(v).slice(0, 200)).toBe(ok);
+      expect(a.success, JSON.stringify(v).slice(0, 200)).toBe(ok);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+    expect(m.POOL_TOKEN_ENV_RE.source).toBe(channel.POOL_TOKEN_ENV_RE.source);
+    expect(m.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(true);
+    expect(m.POOL_TOKEN_ENV_RE.test("OCW_PROVIDER_KEY_X")).toBe(false);
+  });
+
+  it("sign-in events and reports carry profile ids in both copies; the profile id helpers agree", async () => {
+    const { channel, m } = await load();
+    const start = {
+      type: "provider.auth.start",
+      organizationId: U(2),
+      cellId: U(1),
+      seq: 3,
+      flowId: U(30),
+      provider: "openai-codex",
+      method: "device-code",
+      startBefore: "2026-11-24T10:15:00.000Z",
+    };
+    const revoke = {
+      type: "provider.auth.revoke",
+      organizationId: U(2),
+      cellId: U(1),
+      seq: 4,
+      provider: "openai-codex",
+    };
+    const pick = (data: unknown, key: string) => (data as Record<string, unknown>)[key];
+    for (const [schema, mirror, v, key] of [
+      [channel.ProviderAuthStartEvent, m.ProviderAuthStartEvent, start, "profileId"],
+      [
+        channel.ProviderAuthStartEvent,
+        m.ProviderAuthStartEvent,
+        { ...start, profileId: `openai:pool-${U(21)}` },
+        "profileId",
+      ],
+      [channel.ProviderAuthRevokeEvent, m.ProviderAuthRevokeEvent, revoke, "profileIds"],
+      [
+        channel.ProviderAuthRevokeEvent,
+        m.ProviderAuthRevokeEvent,
+        { ...revoke, profileIds: [`openai:pool-${U(21)}`] },
+        "profileIds",
+      ],
+    ] as const) {
+      const a = mirror.safeParse(v);
+      const b = schema.safeParse(v);
+      expect(a.success && b.success, JSON.stringify(v)).toBe(true);
+      expect(pick(a.data, key)).toEqual(pick(b.data, key));
+    }
+    expect(
+      m.ProviderAuthRevokeEvent.safeParse({ ...revoke, profileIds: Array(21).fill("openai:x") }).success,
+    ).toBe(
+      channel.ProviderAuthRevokeEvent.safeParse({ ...revoke, profileIds: Array(21).fill("openai:x") })
+        .success,
+    );
+
+    // The plugin builds these reports (a type there, checked by `satisfies`); the API parses them with the contract.
+    const connected = {
+      provider: "openai-codex",
+      flowId: U(30),
+      reporterId: "reporter-1234",
+      state: "connected",
+      account: { email: null, planType: "plus" },
+      profileId: `openai:pool-${U(21)}`,
+    } satisfies AgentChannelProviderAuthReport;
+    const stateReport = {
+      provider: "openai-codex",
+      flowId: null,
+      reporterId: "reporter-1234",
+      state: "connected",
+      profiles: [
+        { profileId: `openai:pool-${U(21)}`, email: null, planType: "plus", usable: true },
+        { profileId: "openai-codex:default", email: "ops@example.com", planType: "pro", usable: false },
+      ],
+    } satisfies AgentChannelProviderAuthReport;
+    for (const v of [connected, stateReport]) {
+      const b = channel.AgentChannelProviderAuthReport.safeParse(v);
+      expect(b.success, JSON.stringify(v)).toBe(true);
+      expect(b.data).toEqual(v);
+    }
+    for (const p of stateReport.profiles) {
+      expect(m.CellAuthProfileReport.parse(p)).toEqual(channel.CellAuthProfileReport.safeParse(p).data);
+    }
+    expect(m.CellAuthProfileReport.safeParse({ ...stateReport.profiles[0], profileId: "" }).success).toBe(
+      false,
+    );
+    expect(
+      channel.CellAuthProfileReport.safeParse({ ...stateReport.profiles[0], profileId: "" }).success,
+    ).toBe(false);
+
+    expect(m.poolProfileId(U(21))).toBe(`openai:pool-${U(21)}`);
+    expect(m.claudeTokenProfileId(U(11))).toBe(`anthropic:pool-${U(11)}`);
+    expect(m.poolProfileId(U(21))).toBe(channel.poolProfileId(U(21)));
+    expect(m.claudeTokenProfileId(U(11))).toBe(channel.claudeTokenProfileId(U(11)));
   });
 });

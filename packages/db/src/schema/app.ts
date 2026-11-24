@@ -2200,6 +2200,9 @@ export const deviceCommands = appSchema.table(
         // 07.17.1.1 (D-04): type-level only, like the kinds above (the column has no check constraint).
         "session.file.write",
         "session.file.read",
+        // 07.18 (D-02, PD-10): Codex slot sign-in and sign-out; type-level only, as above.
+        "account.login",
+        "account.logout",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
