@@ -410,6 +410,17 @@ Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits �
 OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.15 → 07.16 → 07.17 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 and 07.15 added 2026-11-07 and 07.16 and 07.17 added 2026-11-09 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
+### Phase 07.18: Subscription account pool: Work Zone (local Claude Code and Codex) and bots draw from an organization pool of Claude and ChatGPT accounts, with configurable distribution (failover on limit, round-robin, weighted, fill-first) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 07
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.18 to break down)
+
 ### Phase 07.1: Board channels and record templates (INSERTED)
 
 **Goal**: Any team runs a workflow (case files, orders, tickets, candidates) as a board channel whose cards are threads
