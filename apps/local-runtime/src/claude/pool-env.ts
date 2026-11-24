@@ -17,6 +17,9 @@
 // CA variables in the flag settings, and a repository cannot send the pool token elsewhere (E16). Without the pin the
 // fallback would have been to refuse pool tokens for such projects.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 /** Variables removed from the child env of a pool-token session (each one would win over, or replace, the token). */
 export const CLAUDE_POOL_STRIPPED_VARS: readonly string[] = [
   "ANTHROPIC_API_KEY",
@@ -71,4 +74,31 @@ export function poolFlagEnv(daemonEnv: Record<string, string | undefined>): Reco
   };
   for (const k of CLAUDE_POOL_PINNED_NETWORK_VARS) env[k] = daemonEnv[k] ?? "";
   return env;
+}
+
+export const POOL_REFUSED_PROJECT_CREDENTIALS =
+  "This project's Claude settings choose their own credentials; pool accounts are not used here";
+
+/**
+ * Whether the project's `.claude/settings.json` (the only settings source the adapter loads) runs its own
+ * `apiKeyHelper`. That helper outranks `CLAUDE_CODE_OAUTH_TOKEN` and cannot be pinned through the env, so such a
+ * project gets no pool token (the start is refused; the device's own login is unaffected). The env keys a project
+ * could use instead (base URL, API keys, proxy, CA) are pinned by `poolFlagEnv`. A file that cannot be parsed counts as
+ * overriding (fail closed); no file, nothing to override.
+ */
+export function projectOverridesAuth(cwd: string): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(join(cwd, ".claude", "settings.json"), "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return true;
+    const helper = (parsed as { apiKeyHelper?: unknown }).apiKeyHelper;
+    return helper !== undefined && helper !== null && helper !== "";
+  } catch {
+    return true;
+  }
 }

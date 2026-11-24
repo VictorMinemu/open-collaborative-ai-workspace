@@ -67,12 +67,24 @@ import { redact } from "../sanitize.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
-import { poolChildEnv } from "./pool-env.js";
+import {
+  POOL_REFUSED_PROJECT_CREDENTIALS,
+  poolChildEnv,
+  poolFlagEnv,
+  projectOverridesAuth,
+} from "./pool-env.js";
 import { generateClaudeTitle } from "./title.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
 
 export const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 5_000;
+
+/** 07.18 (A-01 fallback): a resume under the next account failed; never a silent fresh start. */
+export const ACCOUNT_SWITCH_FAILED_MESSAGE =
+  "This conversation could not continue on the next account. Start a new session.";
+/** 07.18 (T-07.18-06-03): the init says a project credential won over the pool token. */
+export const PROJECT_CREDENTIALS_WON_MESSAGE =
+  "This project's Claude settings choose their own credentials; the pool account is not used here";
 
 /** The subset of the SDK `Query` the adapter uses; lets tests inject a fake. */
 export interface QueryHandle extends AsyncIterable<SDKMessage> {
@@ -142,6 +154,10 @@ interface Session {
   cwd: string;
   /** 07.18 (D-02): the pool token this session runs on; null = the device's own login. Never logged or written. */
   account: SessionAccount | null;
+  /** The account ref the current CLI process was launched with; differs from `account.ref` until the next turn. */
+  launchedAccountRef: string | null;
+  /** The current process was launched for an account switch and has not reported its init yet (A-01). */
+  accountSwitching: boolean;
   /** Runtime session id given at start (resume), used when no init has reported one yet. */
   resumeId: string | null;
   /** The model id last handed to the CLI (catalog id, possibly with `[1m]`); relaunches keep it. */
@@ -379,13 +395,20 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     if (!existsSync(options.cwd) || !statSync(options.cwd).isDirectory()) {
       throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
+    const account = tokenAccountOf(options.account);
+    // 07.18 (E16, A-06): a project apiKeyHelper would win over the token and cannot be pinned: no pool token there.
+    if (account && projectOverridesAuth(options.cwd)) {
+      throw new RuntimeError(POOL_REFUSED_PROJECT_CREDENTIALS, "runtime_unavailable");
+    }
 
     const input = new AsyncQueue<SDKUserMessage>();
     const abort = new AbortController();
     const session: Session = {
       id: options.sessionId,
       cwd: options.cwd,
-      account: tokenAccountOf(options.account),
+      account,
+      launchedAccountRef: account?.ref ?? null,
+      accountSwitching: false,
       resumeId: options.resumeRuntimeSessionId ?? null,
       runtimeModel: options.model,
       bypass: mode.data === "fullAccess",
@@ -463,6 +486,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         permissions: bypass
           ? { deny: secretDenyRules() }
           : { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" },
+        // 07.18 (D-13, A-06): the flag layer beats project settings, so a repository cannot redirect the token.
+        ...(s.account ? { env: poolFlagEnv(process.env) } : {}),
       },
       env: s.account
         ? poolChildEnv(childEnv(process.env, false), s.account.oauthToken)
@@ -481,12 +506,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
    * between turns: the current query is closed (its end is not reported as the session's end), a new one resumes
    * the same runtime session with the launch options of `mode`, and the flag settings it ran with are re-applied.
    */
-  private async relaunch(s: Session, mode: PermissionMode): Promise<void> {
+  private async relaunch(
+    s: Session,
+    mode: PermissionMode,
+    reason = "a permission mode change",
+  ): Promise<void> {
     const options = this.launchOptions(s, mode, s.mapper.runtimeSessionId ?? s.resumeId);
     await this.closeQuery(s);
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
     await this.launch(s, mode, options);
-    this.log.info("claude-code relaunched for a permission mode change", {
+    this.log.info(`claude-code relaunched for ${reason}`, {
       sessionId: s.id,
       fullAccess: s.bypass,
     });
@@ -525,6 +554,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.input = new AsyncQueue<SDKUserMessage>();
     const q = this.queryFn({ prompt: s.input, options });
     s.q = q;
+    const accountRef = s.account?.ref ?? null;
+    s.accountSwitching = accountRef !== s.launchedAccountRef;
+    s.launchedAccountRef = accountRef;
     s.bypass = mode === "fullAccess";
     s.applied.permissionMode = mode;
     s.done = this.consume(s, q);
@@ -565,6 +597,24 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       // A retired CLI wakes directly in the mode being set, so the change costs one launch.
       if (s.dormant) await this.wake(s, s.pending?.permissionMode ?? s.configured.permissionMode);
       await this.applyPending(s, true);
+    });
+  }
+
+  /**
+   * 07.18 (D-08, PD-03): the session's next turns run on `account` (null = the device's own login). The same ref
+   * changes nothing now; another one is applied before the next turn (never inside one): the CLI is closed and
+   * relaunched with `resume` under the new env, and a retired session wakes directly under it (one launch). A failed
+   * resume fails that turn with `ACCOUNT_SWITCH_FAILED_MESSAGE` (A-01).
+   */
+  async useAccount(sessionId: string, account: RuntimeAccount | null): Promise<void> {
+    const s = this.get(sessionId);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    const next = tokenAccountOf(account);
+    if (next && projectOverridesAuth(s.cwd)) {
+      throw new RuntimeError(POOL_REFUSED_PROJECT_CREDENTIALS, "runtime_unavailable");
+    }
+    await this.serially(s, async () => {
+      s.account = next;
     });
   }
 
@@ -670,6 +720,22 @@ export class ClaudeCodeRuntime implements AgentRuntime {
               message: `Claude Code could not be restarted for this turn: ${redact(errorMessage(err)).slice(0, 300)}`,
             });
           }
+          return false;
+        }
+      } else if ((s.account?.ref ?? null) !== s.launchedAccountRef) {
+        // 07.18 (PD-03): another account for this turn: a new CLI resumes the session under it, in this turn's mode.
+        const configured = s.pending?.permissionMode ?? s.configured.permissionMode;
+        const mode = prompt.permissionMode ? minMode(configured, prompt.permissionMode) : configured;
+        try {
+          await this.relaunch(s, mode, "an account change");
+        } catch (err) {
+          this.log.warn("claude-code could not resume under the next account", {
+            sessionId: s.id,
+            error: redact(errorMessage(err)).slice(0, 300),
+          });
+          // No process runs now: the next turn tries to resume again (never a silent fresh start).
+          s.dormant = true;
+          if (!s.stopping) this.emit(s, { type: "session.error", message: ACCOUNT_SWITCH_FAILED_MESSAGE });
           return false;
         }
       }
@@ -846,6 +912,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     try {
       for await (const message of q) {
         if (s.retired.has(q)) break;
+        if (isInit(message)) {
+          s.accountSwitching = false;
+          if (s.account && projectCredentialWon(message)) {
+            this.emit(s, { type: "session.error", message: PROJECT_CREDENTIALS_WON_MESSAGE });
+          }
+        }
         if (reportsBypass(message) && !this.bypassAuthorized(s)) {
           // D-03 (replaced, not deleted): bypass that did not come through an authorized fullAccess launch
           // (repo settings, a runtime bug) fails closed.
@@ -876,11 +948,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         }
       }
       if (s.retired.has(q)) return; // replaced by a relaunch: not the session's end
-      this.finish(s, s.stopping ? null : "Claude Code process exited unexpectedly");
+      this.finish(s, s.stopping ? null : this.endMessage(s, "Claude Code process exited unexpectedly"));
     } catch (err) {
       if (s.retired.has(q)) return;
-      this.finish(s, s.stopping ? null : errorMessage(err));
+      this.finish(s, s.stopping ? null : this.endMessage(s, errorMessage(err)));
     }
+  }
+
+  /** A process launched for an account switch that ends before its init could not resume there (A-01). */
+  private endMessage(s: Session, fallback: string): string {
+    return s.accountSwitching ? ACCOUNT_SWITCH_FAILED_MESSAGE : fallback;
   }
 
   /** The running process is an authorized fullAccess launch and the device opt-in is still on. */
@@ -1030,6 +1107,16 @@ export function refuseSlashCommand(text: string): void {
       : `/${slash.name} is not available from the workspace`,
     "slash_command_refused",
   );
+}
+
+function isInit(message: SDKMessage): boolean {
+  return message.type === "system" && (message as { subtype?: unknown }).subtype === "init";
+}
+
+/** The init's credential is a project's API key or helper, not the pool token (`ApiKeySource`, sdk.d.ts:131). */
+function projectCredentialWon(message: SDKMessage): boolean {
+  const source = (message as { apiKeySource?: unknown }).apiKeySource;
+  return source === "ANTHROPIC_API_KEY" || source === "apiKeyHelper";
 }
 
 /** A system frame (init or status) saying the CLI runs `bypassPermissions`. */

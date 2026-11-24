@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -319,7 +327,9 @@ describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13,
         { sessionId: "s1", cwd, permissionMode: "default", account: tokenAccount("a", POOL_TOKEN_A) },
         () => undefined,
       ),
-    ).rejects.toThrow("This project's Claude settings choose their own credentials; pool accounts are not used here");
+    ).rejects.toThrow(
+      "This project's Claude settings choose their own credentials; pool accounts are not used here",
+    );
     expect(queries).toHaveLength(0);
     // The device's own login is not affected.
     await runtime.start({ sessionId: "s2", cwd, permissionMode: "default" }, () => undefined);
@@ -333,7 +343,8 @@ describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13,
     await settle();
     expect(events).toContainEqual({
       type: "session.error",
-      message: "This project's Claude settings choose their own credentials; the pool account is not used here",
+      message:
+        "This project's Claude settings choose their own credentials; the pool account is not used here",
     });
     const ok = setup();
     const q2 = await ok.start("default", { account: tokenAccount("a", POOL_TOKEN_A) });

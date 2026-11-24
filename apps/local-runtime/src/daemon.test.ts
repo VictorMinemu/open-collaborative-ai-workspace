@@ -3465,7 +3465,14 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     expect(runtime.accountSwitches).toEqual([]);
     expect(await prompt("p3", tokenAccount(ACCOUNT_B, "Team B"))).toMatchObject({ ok: true });
     expect(await prompt("p4", null)).toMatchObject({ ok: true });
-    expect(runtime.calls).toEqual(["prompt:p1", "prompt:p2", `useAccount:${ACCOUNT_B}`, "prompt:p3", "useAccount:device", "prompt:p4"]);
+    expect(runtime.calls).toEqual([
+      "prompt:p1",
+      "prompt:p2",
+      `useAccount:${ACCOUNT_B}`,
+      "prompt:p3",
+      "useAccount:device",
+      "prompt:p4",
+    ]);
     expect(runtime.accountSwitches[0]?.account).toEqual({
       kind: "token",
       ref: ACCOUNT_B,
@@ -3473,10 +3480,20 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
       oauthToken: POOL_TOKEN,
     });
     // The stored ref follows: a limit now names the device's own login.
-    runtime.started[0]?.onAccountSignal?.({ kind: "limited", promptId: "p4", reason: "rate_limit", resetsAt: null });
+    runtime.started[0]?.onAccountSignal?.({
+      kind: "limited",
+      promptId: "p4",
+      reason: "rate_limit",
+      resetsAt: null,
+    });
     expect(await server.frame("session.account_limited")).toMatchObject({ promptId: "p4", accountId: null });
     // A slot account in a prompt is refused before the turn, like at start.
-    const slot = await prompt("p5", { kind: "device_slot", accountId: ACCOUNT_B, label: "C", slotId: randomUUID() });
+    const slot = await prompt("p5", {
+      kind: "device_slot",
+      accountId: ACCOUNT_B,
+      label: "C",
+      slotId: randomUUID(),
+    });
     expect(slot).toMatchObject({ ok: false, error: "account slot not found on this device" });
     expect(runtime.calls.at(-1)).toBe("prompt:p4");
     expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);

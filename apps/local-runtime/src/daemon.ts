@@ -1309,6 +1309,19 @@ export class Daemon {
     if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
       throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
     }
+    // 07.18 (PD-03): absent = keep the current account; null or an object = this turn's account, switched only when
+    // the ref differs (the adapter applies it between turns). The daemon keeps the ref, never the token.
+    if (prompt.account !== undefined) {
+      const account = runtimeAccountOf(prompt.account);
+      const ref = account?.ref ?? null;
+      if (ref !== s.accountRef) {
+        if (account) refuseAccountKind(s.runtime, account);
+        if (!s.runtime.useAccount)
+          throw new Error(`${s.runtime.id} cannot change accounts in a live session`);
+        await s.runtime.useAccount(cmd.sessionId, account);
+        s.accountRef = ref;
+      }
+    }
     if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
     } else {
