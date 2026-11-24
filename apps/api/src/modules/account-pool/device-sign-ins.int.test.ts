@@ -156,7 +156,11 @@ describe("an admin signs a ChatGPT account in on a service device (07.18-13 T1)"
 
     const res = await fetch(`${stack.baseUrl}/api/v1/account-pool/chatgpt/device-sign-ins`, {
       method: "POST",
-      headers: { origin: "http://localhost:3999", cookie: victor.cookieHeader, "content-type": "application/json" },
+      headers: {
+        origin: "http://localhost:3999",
+        cookie: victor.cookieHeader,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ deviceId: server.deviceId, label: "ops@acme" }),
     });
     const startedText = await res.text();
@@ -243,7 +247,13 @@ describe("an admin signs a ChatGPT account in on a service device (07.18-13 T1)"
     expect(audit[2]).toMatchObject({
       resource_id: connected.accountId,
       device_id: server.deviceId,
-      metadata: { provider: "chatgpt", deviceId: server.deviceId, slotId, label: "ops@acme", planType: "plus" },
+      metadata: {
+        provider: "chatgpt",
+        deviceId: server.deviceId,
+        slotId,
+        label: "ops@acme",
+        planType: "plus",
+      },
     });
     const all = JSON.stringify(
       (await su.query("select metadata from app.audit_events where organization_id = $1", [orgA])).rows,

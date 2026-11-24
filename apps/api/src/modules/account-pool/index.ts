@@ -1,7 +1,18 @@
 import type { ApiModule, Core } from "../../core";
 import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
-export { createDeviceAccountHandler, type DeviceAccountParts } from "./device-frames";
+export {
+  createDeviceAccountHandler,
+  type DeviceAccountParts,
+  defaultDeviceAccountParts,
+} from "./device-frames";
+export {
+  createDeviceSignIns,
+  DEVICE_SIGN_IN_SIGNAL,
+  DEVICE_SIGN_IN_START_TIMEOUT_MS,
+  type DeviceSignIns,
+  deviceSignInKey,
+} from "./device-sign-ins";
 export {
   earliestPoolReset,
   everyAccountLimitedSentence,
@@ -29,6 +40,7 @@ export {
   storedSessionAccount,
   usableFor,
 } from "./selection";
+export { applySlotsSync, type SlotsSyncOptions, type SlotsSyncResult } from "./slots";
 export {
   addClaudeToken,
   insertPoolAccount,
@@ -64,6 +76,11 @@ export { openPoolToken, poolTokenAad, replacePoolToken, sealPoolToken } from "./
  * its transaction and reported to `deps.onChange` there. GET `/account-pool/preview?deviceId=` (07.18-09, PD-19) is the
  * one member route: any member who may use the device sees what a new session there would run on, without labels.
  * Selection for Work Zone sessions is `selection.ts` (`createAccountPoolPort`).
+ *
+ * 07.18-13 (D-02, D-10, PD-11, PD-25): POST `/account-pool/chatgpt/device-sign-ins`, GET and DELETE
+ * `/account-pool/chatgpt/device-sign-ins/current?deviceId=` sign a ChatGPT account in on a service device
+ * (`device-sign-ins.ts`); the device's `accounts.sync` keeps its slot rows in step (`slots.ts`), a slot no admin started
+ * arriving disabled; removing a slot account sends `account.logout` to its device.
  */
 export function createAccountPoolModule(core: Core, deps: AccountPoolDeps = {}): ApiModule {
   return {
