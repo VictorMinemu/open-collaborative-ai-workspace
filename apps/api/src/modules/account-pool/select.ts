@@ -89,3 +89,35 @@ export function pickAccount(strategy: PoolStrategy, candidates: readonly PoolCan
       return pickWeighted(candidates);
   }
 }
+
+// ---- cooldowns (D-06, D-08, PD-08, PD-16) ----
+
+/**
+ * How long a limited account cools. The reset comes from a device frame, so it is bounded: a missing, past or present
+ * reset cools `POOL_LIMITS.defaultCooldownMs` (a device cannot skip the cooldown), and one further out than
+ * `POOL_LIMITS.maxCooldownMs` is cut there (a device cannot disable an account for years). Keeping the later of two
+ * limits on an already cooling account is the caller's job.
+ */
+export function cooldownUntil(resetsAt: Date | null, now: Date): Date {
+  const nowMs = now.getTime();
+  if (resetsAt === null || resetsAt.getTime() <= nowMs) {
+    return new Date(nowMs + POOL_LIMITS.defaultCooldownMs);
+  }
+  return new Date(Math.min(resetsAt.getTime(), nowMs + POOL_LIMITS.maxCooldownMs));
+}
+
+/** An account cools only while its cooldown lies in the future; the end instant itself is ready again. */
+export function isCooling(cooldownUntil: Date | null, now: Date): boolean {
+  return cooldownUntil !== null && cooldownUntil.getTime() > now.getTime();
+}
+
+/** The soonest future cooldown end among the rows ("The earliest resets at …"), or null when none cools. */
+export function earliestReset(rows: readonly { cooldownUntil: Date | null }[], now: Date): Date | null {
+  let soonest: number | null = null;
+  for (const row of rows) {
+    const until = row.cooldownUntil;
+    if (until === null || !isCooling(until, now)) continue;
+    if (soonest === null || until.getTime() < soonest) soonest = until.getTime();
+  }
+  return soonest === null ? null : new Date(soonest);
+}
