@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { IsoDateTime, RelativePath } from "./common";
+import {
+  AccountUsageSnapshot,
+  ClaudeSetupToken,
+  POOL_LIMITS,
+  PoolLabel,
+  PoolLimitReason,
+  PoolSignInErrorCode,
+} from "./account-pool";
+import { Id, IsoDateTime, RelativePath } from "./common";
 import { DeviceHostKind, RuntimeInfo } from "./device";
 import {
   InstallMethod,
@@ -32,6 +40,30 @@ import { TITLE_PROMPT_MAX_CHARS } from "./session-title";
  */
 
 export const DEVICE_LINK_PROTOCOL_VERSION = 1;
+
+/**
+ * Phase 07.18 (PD-04): the account pool version a daemon announces in `hello.accountPool`. The API selects a pool
+ * account only for a device that sent it; an older daemon keeps running on its own login.
+ */
+export const DEVICE_ACCOUNT_POOL_VERSION = 1;
+
+/** 07.18 (PD-10): a Codex account slot on a device (`<ocw home>/accounts/codex/<slotId>/`). */
+export const SlotId = z.uuid();
+export type SlotId = z.infer<typeof SlotId>;
+
+/**
+ * 07.18 (D-02, PD-02, PD-03): the pool account one session runs on, server → device only.
+ *
+ * - `token`: a Claude setup-token. `device_commands.payload` stores it WITHOUT `oauthToken`; the API adds the token only
+ *   to the frame it actually sends (opened from the secret store at send time, never written back), and the daemon
+ *   passes it to that session only, in memory, as `CLAUDE_CODE_OAUTH_TOKEN`. Never logged, never sent back.
+ * - `device_slot`: a Codex account signed in on this device (`CODEX_HOME` per slot); carries no credential.
+ */
+export const SessionAccount = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("token"), accountId: Id, label: PoolLabel, oauthToken: ClaudeSetupToken }),
+  z.object({ kind: z.literal("device_slot"), accountId: Id, label: PoolLabel, slotId: SlotId }),
+]);
+export type SessionAccount = z.infer<typeof SessionAccount>;
 
 export const DeviceProjectAnnouncement = z.object({
   /** Opaque id chosen by the daemon; the absolute path stays in ~/.ocw/projects.json. */
@@ -71,6 +103,14 @@ export const CommandKind = z.enum([
    * `SessionFileReadPayload`.
    */
   "session.file.read",
+  /**
+   * 07.18 (D-02, PD-10): sign a ChatGPT account in on this device into a new Codex slot through Codex's own device-code
+   * login; payload `AccountLoginPayload`. Progress arrives as `account.login` frames. An older daemon acks `invalid
+   * command frame`, read as `runtime_too_old`.
+   */
+  "account.login",
+  /** 07.18 (PD-25): sign a Codex slot out and remove it; payload `AccountLogoutPayload`. Older daemons: as above. */
+  "account.logout",
 ]);
 export type CommandKind = z.infer<typeof CommandKind>;
 
@@ -124,6 +164,11 @@ export const HelloFrame = z.object({
    * so older daemons stay on protocol v1 (absent = false). Never settable from the server or the web.
    */
   isolatedServer: z.boolean().optional(),
+  /**
+   * 07.18 (PD-04): `DEVICE_ACCOUNT_POOL_VERSION` when the daemon can run a session on a pool account. Optional so every
+   * pre-07.18 hello still parses (absent = no pool support: the API never sends that device an account).
+   */
+  accountPool: z.literal(DEVICE_ACCOUNT_POOL_VERSION).optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 
@@ -250,6 +295,79 @@ export const RuntimeUpdateRunFrame = z
   });
 export type RuntimeUpdateRunFrame = z.infer<typeof RuntimeUpdateRunFrame>;
 
+/**
+ * 07.18 (D-07, PD-05): the session's account hit a usage limit (or failed authentication, `auth_failed`). Sent before
+ * the turn's `prompt.completed`. `accountId` null = the device's own login. Carries no credential and no account e-mail
+ * (P1, P2); the organization is bound by the API from the device token, never named here.
+ */
+export const SessionAccountLimitedFrame = z.object({
+  type: z.literal("session.account_limited"),
+  sessionId: z.uuid(),
+  promptId: z.string().min(1).max(128).nullable(),
+  accountId: Id.nullable(),
+  reason: PoolLimitReason,
+  resetsAt: IsoDateTime.nullable(),
+  at: IsoDateTime,
+});
+export type SessionAccountLimitedFrame = z.infer<typeof SessionAccountLimitedFrame>;
+
+/**
+ * 07.18 (D-09, PD-09): a usage snapshot the runtime reported for one account: a pool token (`accountId`) or a Codex
+ * slot (`slotId`), exactly one. Usage numbers only; never a token or an e-mail (P1, P2).
+ */
+export const AccountUsageFrame = z
+  .object({
+    type: z.literal("account.usage"),
+    accountId: Id.optional(),
+    slotId: SlotId.optional(),
+    usage: AccountUsageSnapshot,
+  })
+  .refine((f) => (f.accountId === undefined) !== (f.slotId === undefined), {
+    message: "an account.usage frame names exactly one of accountId and slotId",
+    path: ["accountId"],
+  });
+export type AccountUsageFrame = z.infer<typeof AccountUsageFrame>;
+
+/**
+ * 07.18 (D-02, PD-10, PD-11): one Codex slot as the device reports it. `label` is the one an admin typed (`server`) or
+ * the device owner typed in `ocw-runtime account add` (`cli`); never the account's e-mail (P2). No token: `auth.json`
+ * stays in the slot's `CODEX_HOME`.
+ */
+export const CodexSlotReport = z.object({
+  slotId: SlotId,
+  label: PoolLabel,
+  origin: z.enum(["server", "cli"]),
+  signedIn: z.boolean(),
+  planType: z.string().max(64).nullable(),
+  usage: AccountUsageSnapshot.nullable(),
+});
+export type CodexSlotReport = z.infer<typeof CodexSlotReport>;
+
+/** 07.18 (PD-10): every Codex slot on the device, sent after connect and on change (latest wins). No credential. */
+export const AccountsSyncFrame = z.object({
+  type: z.literal("accounts.sync"),
+  codexSlots: z.array(CodexSlotReport).max(POOL_LIMITS.slotsPerDevice),
+});
+export type AccountsSyncFrame = z.infer<typeof AccountsSyncFrame>;
+
+/**
+ * 07.18 (D-10): progress of one `account.login` command (`requestId` = the command id): the device code to show
+ * (`code`), then `completed` (with the plan type) or `failed`. The user code and verification URL go only to the admin
+ * who started the sign-in and are never audited (PD-20); no token, no e-mail (P1, P2).
+ */
+export const AccountLoginFrame = z.object({
+  type: z.literal("account.login"),
+  requestId: z.uuid(),
+  slotId: SlotId,
+  phase: z.enum(["code", "completed", "failed"]),
+  verificationUrl: z.url().max(500).optional(),
+  userCode: z.string().min(4).max(32).optional(),
+  expiresAt: IsoDateTime.optional(),
+  planType: z.string().max(64).optional(),
+  error: z.object({ code: PoolSignInErrorCode, message: z.string().max(300) }).optional(),
+});
+export type AccountLoginFrame = z.infer<typeof AccountLoginFrame>;
+
 export const DeviceToServerFrame = z.discriminatedUnion("type", [
   HelloFrame,
   ProjectsSyncFrame,
@@ -261,6 +379,10 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   TitleResultFrame,
   RuntimeMaintenanceFrame,
   RuntimeUpdateRunFrame,
+  SessionAccountLimitedFrame,
+  AccountUsageFrame,
+  AccountsSyncFrame,
+  AccountLoginFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -315,6 +437,11 @@ export const SessionStartPayload = z.object({
   /** Run in a dedicated git worktree (`<repo>/.ocw-worktrees/<session>`). */
   worktree: z.boolean().optional(),
   resumeRuntimeSessionId: z.string().max(256).optional(),
+  /**
+   * 07.18 (PD-03): the pool account the session runs on. Absent or null = the device's own login. Sent only to a device
+   * whose hello carried `accountPool`. A token account's `oauthToken` is added by the API at send time only (PD-02).
+   */
+  account: SessionAccount.nullable().optional(),
 });
 export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
 
@@ -367,6 +494,12 @@ export const PromptPayload = z.object({
    * adapter lowers to it before the turn and refuses the turn if it cannot.
    */
   permissionMode: PermissionMode.optional(),
+  /**
+   * 07.18 (PD-03): the account this turn runs on. Absent = keep the session's current account; null = the device's own
+   * login; an object = this pool account (the adapter switches between turns only when the account differs). A token
+   * account's `oauthToken` is added by the API at send time only (PD-02).
+   */
+  account: SessionAccount.nullable().optional(),
 });
 export type PromptPayload = z.infer<typeof PromptPayload>;
 
@@ -397,6 +530,18 @@ export const SessionTitlePayload = z.object({
   prompt: z.string().min(1).max(TITLE_PROMPT_MAX_CHARS),
 });
 export type SessionTitlePayload = z.infer<typeof SessionTitlePayload>;
+
+/** 07.18 (D-02): `account.login`, ChatGPT only (Claude accounts are setup-tokens an admin pastes). */
+export const AccountLoginPayload = z.strictObject({
+  provider: z.literal("chatgpt"),
+  slotId: SlotId,
+  label: PoolLabel,
+});
+export type AccountLoginPayload = z.infer<typeof AccountLoginPayload>;
+
+/** 07.18 (PD-25): `account.logout`, one slot. */
+export const AccountLogoutPayload = z.strictObject({ slotId: SlotId });
+export type AccountLogoutPayload = z.infer<typeof AccountLogoutPayload>;
 
 /** Keep only repo-relative paths (server-side defence in depth for AGENTS principle 7). */
 export function onlyRelativePaths(paths: readonly string[]): string[] {
