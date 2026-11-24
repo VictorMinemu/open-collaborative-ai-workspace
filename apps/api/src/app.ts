@@ -31,6 +31,7 @@ import { createJobs } from "./lib/jobs";
 import { redisRateLimitStore } from "./lib/rate-limit-store";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
+import { createAccountPoolModule } from "./modules/account-pool";
 import { createAgentModule } from "./modules/agent";
 import {
   type BrowserBudgets,
@@ -418,6 +419,8 @@ export async function buildApp(
       ...(opts.sandboxBudgetsMs ? { sandboxBudgets: opts.sandboxBudgetsMs } : {}),
     }),
     deviceModule, // B3
+    // Phase 07.18: the subscription account pool (ADR-0044); the hub serves the ChatGPT slot commands (07.18-13)
+    createAccountPoolModule(core, { hub: deviceModule.hub }),
     workSession, // B3 (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
