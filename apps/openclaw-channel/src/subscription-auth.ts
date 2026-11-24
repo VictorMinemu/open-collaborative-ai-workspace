@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentChannelProviderAuthReport,
+  CellAuthProfileReport,
   CellSnapshot,
   ProviderAuthCancelEvent,
   ProviderAuthErrorCode,
@@ -21,19 +22,30 @@ import type { EventStreamLogger } from "./event-stream.js";
 
 export type DeviceCodePrompt = { verificationUrl: string; userCode: string; expiresInMs: number };
 export type SubscriptionAccount = { email: string | null; planType: string | null };
+/** A finished sign-in: the account, and (07.18, PD-12) the profile id OpenClaw stored it under. */
+export type SubscriptionSignIn = SubscriptionAccount & { profileId?: string };
 
 /** What the module needs from OpenClaw. Real: openclaw-auth.ts. Tests: in-memory fakes. */
 export interface SubscriptionAuthDriver {
-  /** Runs the device-code sign-in; resolves once the credential is stored in OpenClaw. */
+  /**
+   * Runs the device-code sign-in; resolves once the credential is stored in OpenClaw. 07.18 (PD-12): `profileId` =
+   * store it under this profile id (a pool account for bots), next to the provider's other profiles.
+   */
   login(params: {
     provider: SubscriptionProviderId;
+    profileId?: string;
     signal: AbortSignal;
     onDeviceCode(prompt: DeviceCodePrompt): Promise<void>;
-  }): Promise<SubscriptionAccount>;
-  /** The usable stored credential for the provider, or null when there is none. */
+  }): Promise<SubscriptionSignIn>;
+  /** The first usable stored credential for the provider, or null when there is none. */
   status(provider: SubscriptionProviderId): Promise<SubscriptionAccount | null>;
-  /** Deletes the stored credentials for the provider. */
-  logout(provider: SubscriptionProviderId): Promise<void>;
+  /** 07.18 (PD-12): every stored profile of the provider (identity and usability, never a token). */
+  profiles?(provider: SubscriptionProviderId): Promise<CellAuthProfileReport[]>;
+  /**
+   * Deletes the stored credentials for the provider. 07.18 (E15): `profileIds` = only these profiles; absent = every
+   * profile of the provider, as before.
+   */
+  logout(provider: SubscriptionProviderId, profileIds?: readonly string[]): Promise<void>;
 }
 
 class FlowStopped extends Error {
@@ -76,10 +88,55 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
   const reporterId = opts.reporterId ?? `cell-${randomUUID()}`;
   const flows = new Map<
     string,
-    { provider: SubscriptionProviderId; abort: AbortController; done: Promise<void> }
+    {
+      provider: SubscriptionProviderId;
+      /** 07.18: the profile this sign-in stores (absent = the provider's default). */
+      profileId?: string;
+      abort: AbortController;
+      done: Promise<void>;
+    }
   >();
   /** Providers already reported as missing credentials (report once until it changes). */
   const reportedMissing = new Set<string>();
+  /**
+   * 07.18 (PD-12): the profile list this instance last reported per provider (JSON). A credential state report goes
+   * out when it changes (the first sync after start included), so the API adopts and updates its pool rows.
+   */
+  const reportedProfiles = new Map<string, string>();
+
+  /** Every stored profile (at most the contract's 20), or undefined when the driver cannot list them. */
+  async function storedProfiles(
+    provider: SubscriptionProviderId,
+  ): Promise<CellAuthProfileReport[] | undefined> {
+    if (!opts.driver.profiles) return undefined;
+    try {
+      return (await opts.driver.profiles(provider)).slice(0, 20);
+    } catch (error) {
+      log.warn?.(
+        `subscription ${provider}: profile list failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /** A credential state report (flowId null) with every profile; remembers the list once the API took it. */
+  async function reportCredentialState(
+    provider: SubscriptionProviderId,
+    account: SubscriptionAccount | null,
+    profiles: CellAuthProfileReport[] | undefined,
+  ): Promise<void> {
+    try {
+      await report({
+        provider,
+        flowId: null,
+        ...(account ? { state: "connected" as const, account } : { state: "disconnected" as const }),
+        ...(profiles ? { profiles } : {}),
+      });
+      if (profiles) reportedProfiles.set(provider, JSON.stringify(profiles));
+    } catch {
+      // Retried on the next sync (the remembered list is unchanged).
+    }
+  }
 
   const report = (body: Omit<AgentChannelProviderAuthReport, "reporterId">) =>
     opts.client.reportProviderAuth({ ...body, reporterId }, opts.signal);
@@ -93,8 +150,9 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
     const { flowId, provider } = ev;
     let userCode: string | undefined;
     try {
-      const account = await opts.driver.login({
+      const signedIn = await opts.driver.login({
         provider,
+        ...(ev.profileId ? { profileId: ev.profileId } : {}),
         signal: abort.signal,
         onDeviceCode: async (prompt) => {
           userCode = prompt.userCode;
@@ -118,7 +176,15 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
         },
       });
       reportedMissing.delete(provider);
-      await report({ provider, flowId, state: "connected", account });
+      const account: SubscriptionAccount = { email: signedIn.email, planType: signedIn.planType };
+      await report({
+        provider,
+        flowId,
+        state: "connected",
+        account,
+        // 07.18 (PD-12): the profile id OpenClaw stored (the requested one when the flow honoured it).
+        ...(ev.profileId ? { profileId: signedIn.profileId ?? ev.profileId } : {}),
+      });
       log.info?.(`sign-in ${flowId} (${provider}): connected`);
     } catch (error) {
       const reason = abort.signal.reason;
@@ -152,7 +218,12 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
       opts.signal.removeEventListener("abort", onStop);
       flows.delete(ev.flowId);
     });
-    flows.set(ev.flowId, { provider: ev.provider, abort, done });
+    flows.set(ev.flowId, {
+      provider: ev.provider,
+      ...(ev.profileId ? { profileId: ev.profileId } : {}),
+      abort,
+      done,
+    });
     log.info?.(`sign-in ${ev.flowId} (${ev.provider}): starting device-code flow`);
   }
 
@@ -161,11 +232,29 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
   }
 
   async function handleRevoke(ev: ProviderAuthRevokeEvent): Promise<void> {
-    for (const f of flows.values())
-      if (f.provider === ev.provider) f.abort.abort(new FlowStopped("cancelled"));
-    await opts.driver.logout(ev.provider);
-    reportedMissing.delete(ev.provider);
-    log.info?.(`subscription ${ev.provider}: credentials removed (disconnected by an admin)`);
+    const only = ev.profileIds;
+    for (const f of flows.values()) {
+      if (f.provider !== ev.provider) continue;
+      // 07.18 (E15): a per-profile revoke stops only a sign-in of one of those profiles.
+      if (only && !(f.profileId && only.includes(f.profileId))) continue;
+      f.abort.abort(new FlowStopped("cancelled"));
+    }
+    if (!only) {
+      await opts.driver.logout(ev.provider);
+      reportedMissing.delete(ev.provider);
+      log.info?.(`subscription ${ev.provider}: credentials removed (disconnected by an admin)`);
+      return;
+    }
+    await opts.driver.logout(ev.provider, only);
+    log.info?.(`subscription ${ev.provider}: ${only.length} profile(s) removed (by an admin)`);
+    // The API learns what is left: the other profiles, or that the provider is signed out.
+    const [account, profiles] = await Promise.all([
+      opts.driver.status(ev.provider).catch(() => null),
+      storedProfiles(ev.provider),
+    ]);
+    if (account) reportedMissing.delete(ev.provider);
+    else reportedMissing.add(ev.provider);
+    await reportCredentialState(ev.provider, account, profiles);
   }
 
   /**
@@ -190,11 +279,14 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
         );
         continue;
       }
+      const profiles = await storedProfiles(provider);
+      const profilesChanged =
+        profiles !== undefined && reportedProfiles.get(provider) !== JSON.stringify(profiles);
       if (account) {
         ready.add(sub.id);
         reportedMissing.delete(provider);
-        if ((sub.account?.email ?? null) !== account.email) {
-          await report({ provider, flowId: null, state: "connected", account }).catch(() => undefined);
+        if ((sub.account?.email ?? null) !== account.email || profilesChanged) {
+          await reportCredentialState(provider, account, profiles);
         }
         continue;
       }
@@ -204,7 +296,7 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
         log.warn?.(
           `subscription ${provider}: no stored sign-in in this cell; reconnect in Settings › Models`,
         );
-        await report({ provider, flowId: null, state: "disconnected" }).catch(() => undefined);
+        await reportCredentialState(provider, null, profiles);
       }
     }
     if (listed) {
