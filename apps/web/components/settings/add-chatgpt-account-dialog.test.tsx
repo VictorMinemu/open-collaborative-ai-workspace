@@ -17,6 +17,7 @@ import { api } from "@/lib/api";
 import { wzKeys } from "@/lib/workzone-queries";
 import {
   ChatgptAccountForm,
+  codexAddCommand,
   deviceChoices,
   SignInCodeView,
   signInErrorText,
@@ -42,6 +43,7 @@ const SERVER = "01a11635-d6e7-7c87-9f17-0000000000d1";
 const LAPTOP = "01a11635-d6e7-7c87-9f17-0000000000d2";
 const ASLEEP = "01a11635-d6e7-7c87-9f17-0000000000d3";
 const GONE = "01a11635-d6e7-7c87-9f17-0000000000d4";
+const MINE = "01a11635-d6e7-7c87-9f17-0000000000d5";
 const FLOW = "01a11635-d6e7-7c87-9f17-0000000000f1";
 const OTHER_FLOW = "01a11635-d6e7-7c87-9f17-0000000000f2";
 const URL = "https://auth.openai.com/codex/device";
@@ -69,8 +71,11 @@ function device(over: Partial<Device> = {}): Device {
 }
 
 const DEVICES: Device[] = [
-  device({ id: LAPTOP, name: "Ana's MacBook", hostKind: "desktop", platform: "darwin" }),
+  // Another member's laptop, not shared with this admin (no device.use): the command, not a sign-in (R3.2).
+  device({ id: LAPTOP, name: "Ana's MacBook", hostKind: "desktop", platform: "darwin", viewerCan: [] }),
   device(),
+  // The admin's own laptop (device.use): signs in from the panel (R3.2).
+  device({ id: MINE, name: "Víctor's MacBook", hostKind: "desktop", viewerCan: ["device.use"] }),
   device({ id: ASLEEP, name: "Rack 2", status: "offline" }),
   device({ id: GONE, name: "Old box", revokedAt: T }),
 ];
@@ -160,43 +165,92 @@ describe("where the account is used (Task 3)", () => {
     expect(text(from(html, "chatgpt-where-bots"))).toContain("For bots");
     expect(text(from(html, "chatgpt-where-bots"))).toContain("Signs in inside the bots runtime");
     expect(text(from(html, "chatgpt-where-device"))).toContain("On a device");
-    expect(text(from(html, "chatgpt-where-device"))).toContain("Work Zone sessions on one server device");
+    expect(text(from(html, "chatgpt-where-device"))).toContain("Work Zone sessions on one device");
     expect(tagsOf(html, "chatgpt-account-label")).toHaveLength(1);
     // Nothing to start before a label.
     expect(tagsOf(html, "chatgpt-account-start")[0]).toContain(` disabled=""`);
   });
 
-  it("on a device lists online server devices; the others are disabled with the reason", () => {
+  it("on a device lists the devices this admin may sign in on first, then the others with the reason (R3.2)", () => {
     expect(deviceChoices(DEVICES)).toEqual([
-      { id: SERVER, name: "Build server", disabled: false, reason: null },
-      { id: LAPTOP, name: "Ana's MacBook", disabled: true, reason: "Not a server device" },
-      { id: ASLEEP, name: "Rack 2", disabled: true, reason: "Offline" },
+      { id: SERVER, name: "Build server", disabled: false, command: false, reason: null },
+      { id: MINE, name: "Víctor's MacBook", disabled: false, command: false, reason: null },
+      { id: LAPTOP, name: "Ana's MacBook", disabled: false, command: true, reason: "Not shared with you" },
+      { id: ASLEEP, name: "Rack 2", disabled: true, command: false, reason: "Offline" },
     ]);
+    // An older API without viewerCan: a laptop reads as not shared (the API decides again on Start).
+    expect(
+      deviceChoices([device({ id: LAPTOP, hostKind: "desktop", viewerCan: undefined })])[0],
+    ).toMatchObject({
+      command: true,
+    });
     const html = render(
       <ChatgptAccountForm onDone={() => undefined} initial={{ where: "device", label: "ops@acme" }} />,
       withDevices(),
     );
     const list = text(from(html, "chatgpt-devices"));
     expect(list).toContain("Build server");
-    expect(list).toContain("Not a server device");
+    expect(list).toContain("Víctor's MacBook");
+    expect(list).toContain("Not shared with you");
     expect(list).toContain("Offline");
     expect(list).not.toContain("Old box");
+    const asleep = html.match(new RegExp(`<input[^>]*value="${ASLEEP}"[^>]*>`))?.[0] ?? "";
+    expect(asleep).toContain(` disabled=""`);
     const laptop = html.match(new RegExp(`<input[^>]*value="${LAPTOP}"[^>]*>`))?.[0] ?? "";
-    expect(laptop).toContain(` disabled=""`);
-    // The one usable server is chosen, so Start is on.
+    expect(laptop).not.toContain(` disabled=""`);
+    // The first device this admin may sign in on is chosen, so Start is on.
     const server = html.match(new RegExp(`<input[^>]*value="${SERVER}"[^>]*>`))?.[0] ?? "";
     expect(server).toContain(` checked=""`);
     expect(tagsOf(html, "chatgpt-account-start")[0]).not.toContain(` disabled=""`);
+    expect(tagsOf(html, "chatgpt-device-command")).toHaveLength(0);
   });
 
-  it("says so when there is no server device", () => {
+  it("the admin's own laptop signs in from the panel, like a server (R3.2)", () => {
+    const html = render(
+      <ChatgptAccountForm
+        onDone={() => undefined}
+        initial={{ where: "device", label: "ops@acme", deviceId: MINE }}
+      />,
+      withDevices(),
+    );
+    const mine = html.match(new RegExp(`<input[^>]*value="${MINE}"[^>]*>`))?.[0] ?? "";
+    expect(mine).toContain(` checked=""`);
+    expect(tagsOf(html, "chatgpt-account-start")[0]).not.toContain(` disabled=""`);
+    expect(tagsOf(html, "chatgpt-device-command")).toHaveLength(0);
+  });
+
+  it("a laptop not shared with the admin shows the exact command with a copy button instead of Start (R3.2)", () => {
+    const html = render(
+      <ChatgptAccountForm
+        onDone={() => undefined}
+        initial={{ where: "device", label: "ops@acme", deviceId: LAPTOP }}
+      />,
+      withDevices(),
+    );
+    const panel = text(from(html, "chatgpt-device-command"));
+    expect(panel).toContain("Run this on Ana's MacBook");
+    expect(panel).toContain('ocw-runtime account add codex --label "ops@acme"');
+    expect(panel).toContain("It arrives off");
+    expect(html).toContain('aria-label="Copy command"');
+    expect(tagsOf(html, "chatgpt-account-start")).toHaveLength(0);
+    expect(tagsOf(html, "chatgpt-command-done")).toHaveLength(1);
+  });
+
+  it("the command quotes the label for a shell; without a label there is none to copy yet", () => {
+    expect(codexAddCommand("ops@acme")).toBe('ocw-runtime account add codex --label "ops@acme"');
+    expect(codexAddCommand("  Ana López  ")).toBe('ocw-runtime account add codex --label "Ana López"');
+    expect(codexAddCommand(`it's "$HOME"`)).toBe(`ocw-runtime account add codex --label 'it'\\''s "$HOME"'`);
+    expect(codexAddCommand("")).toBeNull();
+  });
+
+  it("says so when no device is online", () => {
     const qc = new QueryClient();
-    qc.setQueryData<DeviceList>(wzKeys.devices, { devices: [DEVICES[0] as Device] });
+    qc.setQueryData<DeviceList>(wzKeys.devices, { devices: [DEVICES[3] as Device] });
     const html = render(
       <ChatgptAccountForm onDone={() => undefined} initial={{ where: "device", label: "ops@acme" }} />,
       qc,
     );
-    expect(text(html)).toContain("No server device is online");
+    expect(text(html)).toContain("No device is online");
     expect(tagsOf(html, "chatgpt-account-start")[0]).toContain(` disabled=""`);
   });
 });

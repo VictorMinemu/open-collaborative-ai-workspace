@@ -210,8 +210,9 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
     },
   );
 
-  // D-10 (07.18-13): ChatGPT accounts signed in on a service device. The device runs Codex's own device-code login; the
-  // code is answered here only, to admins, and never put on a stream or in audit.
+  // D-10 (07.18-13, 07.18-19 R3.2): ChatGPT accounts signed in on a device (a server, or a laptop the admin may use).
+  // The device runs Codex's own device-code login; the code is answered here only, to admins, and never put on a
+  // stream or in audit.
   app.post(
     "/account-pool/chatgpt/device-sign-ins",
     { ...admin, schema: { tags, body: StartDeviceSignInRequest, response: { 200: DeviceSignIn } } },

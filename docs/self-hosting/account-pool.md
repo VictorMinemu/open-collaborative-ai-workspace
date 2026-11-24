@@ -69,13 +69,16 @@ be online (Settings › Bots runtime).
 The ChatGPT account your organization already signed in for bots on **Settings › Models** (before this release) is
 already in the pool as its first account. You do not have to sign it in again.
 
-### On a server device (Work Zone)
+### On a device (Work Zone)
 
-A ChatGPT account for Codex sessions lives on one **server device** (a headless runtime, [SERVER.md](../SERVER.md)) and
-serves Work Zone sessions on that device only. Two ways:
+A ChatGPT account for Codex sessions lives on one **device** and serves Work Zone sessions on that device only. It can
+be a **server device** (a headless runtime, [SERVER.md](../SERVER.md)) or a computer running the desktop app. Two ways:
 
-- **From Settings:** choose **On a device**, pick an online server device, type a label, **Start sign-in**. The device
-  asks Codex for a code; sign in as above. The account is on, and its row reads **On *device name***.
+- **From Settings:** choose **On a device**, pick an online device, type a label, **Start sign-in**. The device asks
+  Codex for a code; sign in as above. The account is on, and its row reads **On *device name***. This works on any
+  server device, and on a computer that is yours or whose owner shared it with you (Settings › Devices). A computer
+  that is not shared with you reads **Not shared with you**: picking it shows the exact command to run there (below),
+  with a Copy button, instead of **Start sign-in**.
 - **On the device itself**, as the user the runtime runs as:
 
   ```bash

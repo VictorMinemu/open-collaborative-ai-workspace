@@ -20,6 +20,7 @@ import {
   type LucideIcon,
   RefreshCw,
   Server,
+  Terminal,
 } from "lucide-react";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -52,6 +53,7 @@ import {
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useDevices } from "@/lib/workzone-queries";
+import { CopyLine } from "./copy-line";
 
 /** 44 px touch targets below `md` (UI-SPEC: every control at 390). */
 const TOUCH = "max-md:h-11";
@@ -66,7 +68,7 @@ const WHERE_OPTIONS: Array<{ value: Where; label: string; description: string; i
   {
     value: "device",
     label: "On a device",
-    description: "Work Zone sessions on one server device.",
+    description: "Work Zone sessions on one device.",
     icon: Server,
   },
 ];
@@ -74,20 +76,52 @@ const WHERE_OPTIONS: Array<{ value: Where; label: string; description: string; i
 export interface DeviceChoice {
   id: string;
   name: string;
+  /** Offline: nothing to do there now. */
   disabled: boolean;
+  /** R3.2: a laptop this admin may not use: the dialog shows the command to run on it instead of Start. */
+  command: boolean;
   reason: string | null;
 }
 
-/** Live devices: online server devices first and selectable, the others listed disabled with the reason. */
+/**
+ * Live devices (07.18-19 R3.2): first those this admin may sign in on from here (an online server device, or a laptop
+ * the admin owns or that is shared with them: `device.use`), then laptops that are not shared (the command to run on
+ * them), then offline ones, disabled with the reason. The API decides again on Start.
+ */
 export function deviceChoices(devices: readonly Device[]): DeviceChoice[] {
   const choices = devices
     .filter((d) => d.revokedAt === null)
     .map((d): DeviceChoice => {
-      const reason =
-        d.hostKind !== "service" ? "Not a server device" : d.status !== "online" ? "Offline" : null;
-      return { id: d.id, name: d.name, disabled: reason !== null, reason };
+      if (d.status !== "online") {
+        return { id: d.id, name: d.name, disabled: true, command: false, reason: "Offline" };
+      }
+      const command = d.hostKind !== "service" && !(d.viewerCan?.includes("device.use") ?? false);
+      return {
+        id: d.id,
+        name: d.name,
+        disabled: false,
+        command,
+        reason: command ? "Not shared with you" : null,
+      };
     });
-  return [...choices.filter((c) => !c.disabled), ...choices.filter((c) => c.disabled)];
+  const rank = (c: DeviceChoice) => (c.disabled ? 2 : c.command ? 1 : 0);
+  return [...choices].sort((a, b) => rank(a) - rank(b));
+}
+
+/** A shell word: double quotes when nothing in it expands there, else single quotes. */
+function shellQuote(value: string): string {
+  if (!/["$`\\!]/.test(value)) return `"${value}"`;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * R3.2: the exact command that adds a ChatGPT account on the device itself (`ocw-runtime account add codex`, run as
+ * the user the runtime runs as); null until there is a label to put in it.
+ */
+export function codexAddCommand(label: string): string | null {
+  const parsed = PoolLabel.safeParse(label);
+  if (!parsed.success) return null;
+  return `ocw-runtime account add codex --label ${shellQuote(parsed.data)}`;
 }
 
 /** One sign-in as this dialog shows it, whichever route runs it. */
@@ -195,7 +229,7 @@ export function ChatgptAccountForm({
   initial,
 }: {
   onDone: () => void;
-  initial?: { where?: Where; label?: string };
+  initial?: { where?: Where; label?: string; deviceId?: string };
 }) {
   const qc = useQueryClient();
   const id = useId();
@@ -207,7 +241,7 @@ export function ChatgptAccountForm({
 
   const [where, setWhere] = useState<Where>(initial?.where ?? "bots");
   const [label, setLabel] = useState(initial?.label ?? "");
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initial?.deviceId ?? null);
   const [signing, setSigning] = useState(false);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -215,7 +249,11 @@ export function ChatgptAccountForm({
   const choices = deviceChoices(devices.data ?? []);
   const usable = choices.filter((c) => !c.disabled);
   const deviceId = picked && usable.some((c) => c.id === picked) ? picked : (usable[0]?.id ?? null);
-  const deviceName = choices.find((c) => c.id === deviceId)?.name ?? "the device";
+  const chosen = choices.find((c) => c.id === deviceId) ?? null;
+  const deviceName = chosen?.name ?? "the device";
+  // R3.2: a laptop not shared with this admin gets the command to run there, not a sign-in from here.
+  const byCommand = where === "device" && chosen?.command === true;
+  const command = byCommand ? codexAddCommand(label) : null;
 
   const botFlow = useBotPoolSignIn(signing && where === "bots");
   const deviceFlow = useDeviceSignIn(deviceId, signing && where === "device");
@@ -233,7 +271,7 @@ export function ChatgptAccountForm({
   const running = signing && (shown.state === "starting" || shown.state === "pending");
   const starting = startBot.isPending || startDevice.isPending;
   const labelOk = PoolLabel.safeParse(label).success;
-  const canStart = labelOk && (where === "bots" || deviceId !== null) && !starting;
+  const canStart = labelOk && (where === "bots" || (deviceId !== null && !byCommand)) && !starting;
 
   // Closing the dialog mid-flow (Escape, the X, the backdrop) cancels the sign-in and drops the code.
   const live = useRef({ running, where, deviceId, stopped: false });
@@ -378,13 +416,13 @@ export function ChatgptAccountForm({
 
         {where === "device" ? (
           <fieldset className="grid gap-2" data-testid="chatgpt-devices">
-            <legend className="mb-2 font-medium text-sm">Server device</legend>
+            <legend className="mb-2 font-medium text-sm">Device</legend>
             {devices.isPending ? (
               <p className="text-muted-foreground text-sm">Loading devices…</p>
             ) : usable.length === 0 ? (
               <p className="rounded-xl border border-dashed px-3 py-3 text-muted-foreground text-sm">
-                No server device is online. Install the runtime as a service on a server, then come back
-                (Settings › Devices).
+                No device is online. Start the OCW runtime on a server or a computer, then come back (Settings
+                › Devices).
               </p>
             ) : null}
             {choices.length > 0 ? (
@@ -434,17 +472,59 @@ export function ChatgptAccountForm({
             data-testid="chatgpt-account-label"
           />
         </FormField>
+        {byCommand ? <DeviceCommand deviceName={deviceName} command={command} /> : null}
       </DialogBody>
       <DialogFooter>
-        <Button type="button" variant="outline" onClick={onDone} className={TOUCH}>
-          Cancel
-        </Button>
-        <Button type="submit" disabled={!canStart} className={TOUCH} data-testid="chatgpt-account-start">
-          {starting ? <Spinner /> : <LogIn />}
-          Start sign-in
-        </Button>
+        {byCommand ? (
+          <Button type="button" onClick={onDone} className={TOUCH} data-testid="chatgpt-command-done">
+            Done
+          </Button>
+        ) : (
+          <>
+            <Button type="button" variant="outline" onClick={onDone} className={TOUCH}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canStart} className={TOUCH} data-testid="chatgpt-account-start">
+              {starting ? <Spinner /> : <LogIn />}
+              Start sign-in
+            </Button>
+          </>
+        )}
       </DialogFooter>
     </form>
+  );
+}
+
+/**
+ * R3.2: the command for a laptop this admin may not sign in on from here. It runs there as the user the runtime runs
+ * as; the account then appears in the pool turned off, for an admin to turn on.
+ */
+function DeviceCommand({ deviceName, command }: { deviceName: string; command: string | null }) {
+  return (
+    <div
+      className="grid gap-2.5 rounded-xl border bg-muted/30 p-3.5 text-sm"
+      data-testid="chatgpt-device-command"
+    >
+      <p className="flex items-start gap-2.5 leading-relaxed">
+        <Terminal aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0">
+          <span className="font-medium">Run this on {deviceName}.</span>{" "}
+          <span className="text-muted-foreground">
+            Its owner hasn't shared it with you, so the sign-in runs there.
+          </span>
+        </span>
+      </p>
+      {command ? (
+        <CopyLine text={command} wrap buttonClassName="max-md:size-11" testId="chatgpt-command-line" />
+      ) : (
+        <p className="rounded-lg border border-dashed px-3 py-2 text-muted-foreground text-xs">
+          Type a label first.
+        </p>
+      )}
+      <p className="text-muted-foreground text-xs leading-snug">
+        It arrives off. Turn it on here once it's listed.
+      </p>
+    </div>
   );
 }
 

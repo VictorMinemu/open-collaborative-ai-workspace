@@ -24,6 +24,7 @@ let stack: TestStack;
 let su: pg.Client;
 let victor: TestClient; // admin of org A
 let sam: TestClient; // member of org A
+let dana: TestClient; // developer of org A (pairs her own laptops, R3.2)
 let eve: TestClient; // admin of org B
 let orgA = "";
 
@@ -46,8 +47,8 @@ async function fails(res: Promise<Res>, status: number, code?: string): Promise<
   return r.body as Json;
 }
 
-async function joinAs(email: string, name: string) {
-  const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role: "standard" }));
+async function joinAs(email: string, name: string, role = "standard") {
+  const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role }));
   const c = new TestClient(stack.baseUrl);
   const acc = await ok(
     c.request("POST", `/api/v1/invitations/${inv.id}/accept`, { name, password: "another-long-password" }),
@@ -55,8 +56,12 @@ async function joinAs(email: string, name: string) {
   return [c, acc.user.id as string] as const;
 }
 
-async function connect(name: string, opts: Parameters<typeof FakeDevice.connect>[3] = {}): Promise<Dev> {
-  const paired = await pairDevice(stack, victor, name);
+async function connect(
+  name: string,
+  opts: Parameters<typeof FakeDevice.connect>[3] = {},
+  owner: TestClient = victor,
+): Promise<Dev> {
+  const paired = await pairDevice(stack, owner, name);
   const device = await FakeDevice.connect(stack.baseUrl, paired.token, undefined, opts);
   // The device is online once its hello was stored.
   await eventually(
@@ -119,6 +124,7 @@ beforeAll(async () => {
   );
   orgA = setup.organization.id;
   [sam] = await joinAs("sam@example.test", "Sam Lee");
+  [dana] = await joinAs("dana@example.test", "Dana Kim", "developer");
   let eveId: string;
   [eve, eveId] = await joinAs("eve@example.test", "Eve Black");
   const orgB = randomUUID();
@@ -304,7 +310,8 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
   let other: Dev;
 
   beforeAll(async () => {
-    desktop = await connect("Laptop", { host: "desktop", accountPool: 1 });
+    // R3.2: a member's laptop that is not shared with the admin (another member's private device).
+    desktop = await connect("Dana's laptop", { host: "desktop", accountPool: 1 }, dana);
     old = await connect("Old server", { host: "service" });
     other = await connect("Other server", { host: "service", accountPool: 1 });
   }, 120_000);
@@ -313,8 +320,10 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
     for (const dev of [desktop, old, other]) await dev?.device.close().catch(() => {});
   });
 
-  it("a desktop device, an older daemon, an offline or a revoked device are refused, with plain sentences", async () => {
-    await fails(start(victor, desktop.deviceId), 409, "not_a_service_device");
+  it("another member's private laptop, an older daemon, an offline or a revoked device are refused, with plain sentences", async () => {
+    // R3.2: the command to run on the device instead, never a sign-in on someone else's private laptop.
+    const notYours = await fails(start(victor, desktop.deviceId), 409, "device_not_allowed");
+    expect(notYours.error.message).toContain("ocw-runtime account add codex");
     const tooOld = await fails(start(victor, old.deviceId), 409, "not_a_service_device");
     expect(tooOld.error.message).toContain("Update the OCW runtime on this device first");
 
@@ -540,5 +549,67 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
     await fails(cancel(eve, server.deviceId), 404);
     await fails(start(victor, randomUUID()), 404);
     expect(server.device.pending("account.login")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- 07.18-19 R3.2: desktop devices
+
+describe("R3.2: a desktop device the admin may use signs a ChatGPT account in from the panel", () => {
+  let mine: Dev;
+  let danasDesk: Dev;
+  let danasDeskId = "";
+
+  beforeAll(async () => {
+    mine = await connect("Víctor's MacBook", { host: "desktop", accountPool: 1 });
+    danasDesk = await connect("Dana's desk", { host: "desktop", accountPool: 1 }, dana);
+    danasDeskId = danasDesk.deviceId;
+  }, 120_000);
+
+  afterAll(async () => {
+    for (const dev of [mine, danasDesk]) await dev?.device.close().catch(() => {});
+  });
+
+  it("the admin's own laptop: the device runs the login and the slot joins the pool enabled", async () => {
+    const { signIn, cmd, slotId } = await begin(mine, "mine@acme");
+    expect(signIn).toMatchObject({ deviceId: mine.deviceId, state: "starting", label: "mine@acme" });
+    expect(cmd.payload).toEqual({ provider: "chatgpt", slotId, label: "mine@acme" });
+    mine.device.send({
+      type: "account.login",
+      requestId: cmd.id,
+      slotId,
+      phase: "completed",
+      planType: "pro",
+    });
+    mine.device.ack(cmd.id);
+    const done = await settle(mine, (s) => s.state === "connected");
+    const pool = await ok(victor.request("GET", "/api/v1/account-pool"));
+    expect((pool.chatgpt.accounts as Json[]).find((a) => a.id === done.accountId)).toMatchObject({
+      kind: "device_slot",
+      enabled: true,
+      origin: "admin",
+      device: { id: mine.deviceId },
+    });
+  });
+
+  it("another member's laptop: refused until its owner shares it, then the admin signs in from the panel", async () => {
+    const refused = await fails(start(victor, danasDeskId, "desk@acme"), 409, "device_not_allowed");
+    expect(refused.error.message).toBe(
+      'This device is not shared with you. Run "ocw-runtime account add codex" on it instead.',
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    expect(danasDesk.device.pending("account.login")).toEqual([]);
+
+    // The owner shares the device (Settings › Devices): the admin may use it, so the sign-in runs there.
+    await ok(dana.request("PATCH", `/api/v1/devices/${danasDeskId}`, { shared: true }));
+    const { signIn, cmd, slotId } = await begin(danasDesk, "desk@acme");
+    expect(signIn).toMatchObject({ deviceId: danasDeskId, state: "starting" });
+    expect(cmd.payload).toEqual({ provider: "chatgpt", slotId, label: "desk@acme" });
+    await ok(cancel(victor, danasDeskId));
+    const logout = await danasDesk.device.command("account.logout");
+    danasDesk.device.ack(logout.id);
+
+    // Shared no more: refused again (decided on every start, never remembered).
+    await ok(dana.request("PATCH", `/api/v1/devices/${danasDeskId}`, { shared: false }));
+    await fails(start(victor, danasDeskId, "desk@acme"), 409, "device_not_allowed");
   });
 });

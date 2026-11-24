@@ -278,6 +278,8 @@ export const AccountPoolErrorCode = z.enum([
   "api_key_not_allowed",
   "too_many_accounts",
   "not_a_service_device",
+  /** 07.18-19 R3.2: a desktop device the admin may not use (`ocw-runtime account add codex` on it instead). */
+  "device_not_allowed",
   "device_offline",
   "account_not_found",
   "sign_in_in_progress",
