@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { RuntimeError } from "../runtime.js";
+import { type AccountSignal, type RuntimeAccount, RuntimeError } from "../runtime.js";
 import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
@@ -1555,5 +1555,118 @@ describe("CodexRuntime — retire idle and resume (07.11 D-03a)", () => {
     runtime.refreshInstall();
     await runtime.catalog();
     expect(servers).toHaveLength(2);
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// 07.18 (D-02, D-08, PD-03, PD-10): a session runs under the CODEX_HOME of the slot the server chose.
+
+const SLOT_A = "11111111-1111-4111-8111-111111111111";
+
+function slotAccount(slotId: string, ref = `acct-${slotId.slice(0, 4)}`) {
+  return {
+    kind: "device_slot" as const,
+    ref,
+    label: `ChatGPT ${slotId.slice(0, 1)}`,
+    slotId,
+    codexHome: join(tmpdir(), "ocw-slots", slotId),
+  };
+}
+
+function poolSetup(opts: { useApiKey?: boolean } = {}) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
+  const servers: FakeAppServer[] = [];
+  const next: Array<(env: Record<string, string | undefined>) => FakeAppServer> = [];
+  const events: SessionEvent[] = [];
+  const signals: AccountSignal[] = [];
+  const runtime = new CodexRuntime({
+    codexPath: "/usr/local/bin/codex",
+    ...(opts.useApiKey ? { useApiKey: true } : {}),
+    spawnAppServer: ({ env }) => {
+      const s = (next.shift() ?? ((e) => new FakeAppServer(e)))(env);
+      servers.push(s);
+      return s;
+    },
+  });
+  const start = async (account: RuntimeAccount | null | undefined) => {
+    await runtime.start(
+      {
+        sessionId: "s1",
+        cwd,
+        permissionMode: "default",
+        ...(account !== undefined ? { account } : {}),
+        onAccountSignal: (sig) => signals.push(sig),
+      },
+      (e) => events.push(e),
+    );
+    return servers[0] as FakeAppServer;
+  };
+  return { cwd, runtime, servers, next, events, signals, start };
+}
+
+describe("CodexRuntime — a session on a ChatGPT account slot (07.18 D-02, PD-03)", () => {
+  it("says it runs device_slot accounts only", () => {
+    expect(new CodexRuntime().capabilities.supportsAccounts).toEqual(["device_slot"]);
+  });
+
+  it("spawns the app-server with CODEX_HOME = the slot's home, no API key and no OCW_*, then thread/start", async () => {
+    process.env.OPENAI_API_KEY = "sk-should-not-leak";
+    process.env.CODEX_API_KEY = "ck-should-not-leak";
+    process.env.OCW_DEVICE_TOKEN = "device-secret";
+    process.env.CODEX_HOME = "/parent/codex-home";
+    // Even with the metered opt-in on, a slot session runs on the slot's subscription (D-15: subscriptions first).
+    const { start } = poolSetup({ useApiKey: true });
+    const account = slotAccount(SLOT_A);
+    const server = await start(account);
+    expect(server.env.CODEX_HOME).toBe(account.codexHome);
+    expect(server.env.OPENAI_API_KEY).toBeUndefined();
+    expect(server.env.CODEX_API_KEY).toBeUndefined();
+    expect(Object.keys(server.env).filter((k) => k.startsWith("OCW_"))).toEqual([]);
+    expect(server.received.map((m) => m.method).slice(0, 3)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+    ]);
+  });
+
+  it("without an account the env is today's codexChildEnv (a parent CODEX_HOME passes through)", async () => {
+    process.env.CODEX_HOME = "/parent/codex-home";
+    process.env.OCW_DEVICE_TOKEN = "device-secret";
+    const { start } = poolSetup();
+    const server = await start(undefined);
+    expect(server.env).toEqual(codexChildEnv(process.env, false));
+    expect(server.env.CODEX_HOME).toBe("/parent/codex-home");
+    const nullAccount = poolSetup();
+    const other = await nullAccount.start(null);
+    expect(other.env).toEqual(codexChildEnv(process.env, false));
+  });
+
+  it("a retired slot session wakes under the same slot home", async () => {
+    const { start, runtime, servers } = poolSetup();
+    const account = slotAccount(SLOT_A);
+    await start(account);
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    await runtime.prompt("s1", { promptId: "p1", text: "after the update" });
+    await wait();
+    expect(servers).toHaveLength(2);
+    expect(servers[1]?.env.CODEX_HOME).toBe(account.codexHome);
+    expect(servers[1]?.received.map((m) => m.method)).toContain("thread/resume");
+    await runtime.stopAll();
+  });
+
+  it("refuses a token account before spawning anything", async () => {
+    const { runtime, cwd, servers } = poolSetup();
+    await expect(
+      runtime.start(
+        {
+          sessionId: "s1",
+          cwd,
+          permissionMode: "default",
+          account: { kind: "token", ref: "r", label: "T", oauthToken: "x" },
+        },
+        () => undefined,
+      ),
+    ).rejects.toBeInstanceOf(RuntimeError);
+    expect(servers).toHaveLength(0);
   });
 });
