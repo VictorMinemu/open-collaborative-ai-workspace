@@ -1585,6 +1585,8 @@ function poolSetup(opts: { useApiKey?: boolean } = {}) {
   const next: Array<(env: Record<string, string | undefined>) => FakeAppServer> = [];
   const events: SessionEvent[] = [];
   const signals: AccountSignal[] = [];
+  /** Signals and events in the order the adapter produced them. */
+  const order: string[] = [];
   const runtime = new CodexRuntime({
     codexPath: "/usr/local/bin/codex",
     ...(opts.useApiKey ? { useApiKey: true } : {}),
@@ -1601,13 +1603,19 @@ function poolSetup(opts: { useApiKey?: boolean } = {}) {
         cwd,
         permissionMode: "default",
         ...(account !== undefined ? { account } : {}),
-        onAccountSignal: (sig) => signals.push(sig),
+        onAccountSignal: (sig) => {
+          signals.push(sig);
+          order.push(`signal:${sig.kind}`);
+        },
       },
-      (e) => events.push(e),
+      (e) => {
+        events.push(e);
+        order.push(`event:${e.type}`);
+      },
     );
     return servers[0] as FakeAppServer;
   };
-  return { cwd, runtime, servers, next, events, signals, start };
+  return { cwd, runtime, servers, next, events, signals, order, start };
 }
 
 describe("CodexRuntime — a session on a ChatGPT account slot (07.18 D-02, PD-03)", () => {
@@ -1804,5 +1812,188 @@ describe("CodexRuntime — useAccount moves the thread to another slot between t
     ).rejects.toBeInstanceOf(RuntimeError);
     await runtime.stop("s1");
     await expect(runtime.useAccount("s1", null)).rejects.toBeInstanceOf(RuntimeError);
+  });
+});
+
+describe("CodexRuntime — account limits and usage (07.18 D-07, D-09, PD-09, PD-23)", () => {
+  const RESET = 1_795_000_000;
+  const RATE_LIMITS = {
+    rateLimits: {
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: RESET },
+      secondary: { usedPercent: 60, windowDurationMins: 10_080, resetsAt: RESET + 86_400 },
+      planType: "plus",
+    },
+  };
+  /** Answers `account/rateLimits/read` as Codex does for a ChatGPT account. */
+  class RateLimitServer extends FakeAppServer {
+    protected override handleExtra(m: Msg): boolean {
+      if (m.method !== "account/rateLimits/read") return false;
+      this.send({ id: m.id, result: RATE_LIMITS });
+      return true;
+    }
+  }
+  const usageSignals = (signals: AccountSignal[]) =>
+    signals.filter((x): x is Extract<AccountSignal, { kind: "usage" }> => x.kind === "usage");
+  const limited = (signals: AccountSignal[]) => signals.filter((x) => x.kind === "limited");
+  const failTurn = (server: FakeAppServer, codexErrorInfo: string) => {
+    const error = { message: "You've hit your usage limit.", codexErrorInfo, additionalDetails: null };
+    server.notify("error", { threadId: "thread-1", turnId: "turn-1", willRetry: false, error });
+    server.notify("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "failed", items: [], error },
+    });
+  };
+
+  it("after a slot app-server starts it reads the rate limits once and reports them as usage", async () => {
+    const { start, next, signals } = poolSetup();
+    next.push((env) => new RateLimitServer(env));
+    const server = await start(slotAccount(SLOT_A));
+    await wait();
+    expect(server.received.filter((m) => m.method === "account/rateLimits/read")).toHaveLength(1);
+    expect(usageSignals(signals)).toEqual([
+      {
+        kind: "usage",
+        usage: {
+          windows: [
+            { kind: "primary", usedPercent: 25, resetsAt: new Date(RESET * 1000).toISOString() },
+            { kind: "secondary", usedPercent: 60, resetsAt: new Date((RESET + 86_400) * 1000).toISOString() },
+          ],
+          at: expect.any(String),
+        },
+      },
+    ]);
+  });
+
+  it("a session on the device's own login reads no rate limits", async () => {
+    const { start, next } = poolSetup();
+    next.push((env) => new RateLimitServer(env));
+    const server = await start(null);
+    await wait();
+    expect(server.received.map((m) => m.method)).not.toContain("account/rateLimits/read");
+  });
+
+  it("an app-server woken under the next slot reads its rate limits once", async () => {
+    const { start, runtime, servers, next } = poolSetup();
+    await start(slotAccount(SLOT_A));
+    next.push((env) => new RateLimitServer(env));
+    await runtime.useAccount("s1", slotAccount(SLOT_B));
+    await runtime.prompt("s1", { promptId: "p1", text: "go on" });
+    await wait();
+    expect(servers[1]?.received.filter((m) => m.method === "account/rateLimits/read")).toHaveLength(1);
+    await runtime.stopAll();
+  });
+
+  it("account/rateLimits/updated reports usage, merged with the windows it leaves out", async () => {
+    const { start, signals } = poolSetup();
+    const server = await start(slotAccount(SLOT_A));
+    server.notify("account/rateLimits/updated", RATE_LIMITS);
+    server.notify("account/rateLimits/updated", {
+      rateLimits: { primary: { usedPercent: 80, resetsAt: RESET } },
+    });
+    await wait();
+    const last = usageSignals(signals).at(-1);
+    expect(last?.usage.windows).toEqual([
+      { kind: "primary", usedPercent: 80, resetsAt: new Date(RESET * 1000).toISOString() },
+      { kind: "secondary", usedPercent: 60, resetsAt: new Date((RESET + 86_400) * 1000).toISOString() },
+    ]);
+  });
+
+  it("a usage-limit turn signals limited once, before its prompt.completed, with the exhausted window's reset", async () => {
+    const { start, runtime, signals, order } = poolSetup();
+    const server = await start(slotAccount(SLOT_A));
+    server.notify("account/rateLimits/updated", {
+      rateLimits: {
+        primary: { usedPercent: 100, resetsAt: RESET },
+        secondary: { usedPercent: 30, resetsAt: null },
+      },
+    });
+    await runtime.prompt("s1", { promptId: "p1", text: "work" });
+    await wait();
+    failTurn(server, "usageLimitExceeded");
+    await wait();
+    expect(limited(signals)).toEqual([
+      {
+        kind: "limited",
+        promptId: "p1",
+        reason: "usage_limit",
+        resetsAt: new Date(RESET * 1000).toISOString(),
+      },
+    ]);
+    expect(order.indexOf("signal:limited")).toBeLessThan(order.indexOf("event:prompt.completed"));
+    expect(order.indexOf("signal:limited")).toBeGreaterThan(order.indexOf("event:prompt.started"));
+
+    // The next turn may be limited again (once per turn).
+    await runtime.prompt("s1", { promptId: "p2", text: "again" });
+    await wait();
+    failTurn(server, "usageLimitExceeded");
+    await wait();
+    expect(limited(signals).map((x) => (x.kind === "limited" ? x.promptId : null))).toEqual(["p1", "p2"]);
+    await runtime.stopAll();
+  });
+
+  it("unauthorized signals auth_failed; a rate limit Codex retries signals nothing", async () => {
+    const { start, runtime, signals } = poolSetup();
+    const server = await start(slotAccount(SLOT_A));
+    await runtime.prompt("s1", { promptId: "p1", text: "work" });
+    await wait();
+    server.notify("error", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      willRetry: true,
+      error: { message: "retrying", codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+    });
+    await wait();
+    expect(limited(signals)).toEqual([]);
+    failTurn(server, "unauthorized");
+    await wait();
+    expect(limited(signals)).toEqual([
+      { kind: "limited", promptId: "p1", reason: "auth_failed", resetsAt: null },
+    ]);
+    await runtime.stopAll();
+  });
+});
+
+describe("CodexRuntime.catalog() — under a slot when the default home is signed out (07.18 D-02)", () => {
+  const make = (o: { loggedIn: boolean; home: string | null }) => {
+    const servers: CatalogAppServer[] = [];
+    const asked: number[] = [];
+    const runtime = new CodexRuntime({
+      detect: async () => ({ id: "codex", installed: true, version: "0.160.0", loggedIn: o.loggedIn }),
+      catalogHome: async () => {
+        asked.push(1);
+        return o.home;
+      },
+      spawnAppServer: ({ env }) => {
+        const s = new CatalogAppServer(env);
+        servers.push(s);
+        return s;
+      },
+    });
+    return { runtime, servers, asked };
+  };
+
+  it("collects model/list with CODEX_HOME = the slot's home, never a thread or a turn", async () => {
+    const { runtime, servers } = make({ loggedIn: false, home: "/tmp/ocw-slots/a" });
+    const catalog = await runtime.catalog();
+    expect(catalog?.models).toHaveLength(MODEL_LIST.data.length);
+    expect(servers).toHaveLength(1);
+    expect(servers[0]?.env.CODEX_HOME).toBe("/tmp/ocw-slots/a");
+    expect(servers[0]?.env.OPENAI_API_KEY).toBeUndefined();
+    const methods = servers[0]?.received.map((m) => m.method) ?? [];
+    expect(methods.filter((m) => m?.startsWith("thread/") || m?.startsWith("turn/"))).toEqual([]);
+  });
+
+  it("no signed-in slot: null without spawning", async () => {
+    const { runtime, servers } = make({ loggedIn: false, home: null });
+    expect(await runtime.catalog()).toBeNull();
+    expect(servers).toHaveLength(0);
+  });
+
+  it("a signed-in default home never asks for a slot", async () => {
+    process.env.CODEX_HOME = "/parent/codex-home";
+    const { runtime, servers, asked } = make({ loggedIn: true, home: "/tmp/ocw-slots/a" });
+    await runtime.catalog();
+    expect(asked).toEqual([]);
+    expect(servers[0]?.env.CODEX_HOME).toBe("/parent/codex-home");
   });
 });
