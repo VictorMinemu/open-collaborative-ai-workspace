@@ -1,5 +1,5 @@
-import { USAGE_LIMIT_ERROR_PREFIXES } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { USAGE_LIMIT_ERROR_PREFIXES } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 import { claudeLimitSignal, claudeResetsAt, claudeUsage } from "./limits.js";
 
@@ -17,11 +17,12 @@ const RESET_ISO = new Date(RESET_S * 1000).toISOString();
 
 describe("claudeLimitSignal (07.18 PD-24, A-07)", () => {
   it("a rejected rate_limit_event is a limit by window, with its reset", () => {
-    expect(claudeLimitSignal(rateLimit({ status: "rejected", rateLimitType: "five_hour", resetsAt: RESET_S }))).toEqual(
-      { reason: "five_hour", resetsAt: RESET_ISO },
-    );
+    expect(
+      claudeLimitSignal(rateLimit({ status: "rejected", rateLimitType: "five_hour", resetsAt: RESET_S })),
+    ).toEqual({ reason: "five_hour", resetsAt: RESET_ISO });
     const reason = (rateLimitType?: string) =>
-      claudeLimitSignal(rateLimit({ status: "rejected", ...(rateLimitType ? { rateLimitType } : {}) }))?.reason;
+      claudeLimitSignal(rateLimit({ status: "rejected", ...(rateLimitType ? { rateLimitType } : {}) }))
+        ?.reason;
     expect(reason("seven_day")).toBe("seven_day");
     expect(reason("seven_day_overage_included")).toBe("seven_day");
     expect(reason("seven_day_opus")).toBe("weekly_model");
@@ -46,12 +47,16 @@ describe("claudeLimitSignal (07.18 PD-24, A-07)", () => {
 
   it("a result or assistant text starting with an SDK usage-limit prefix is a usage limit", () => {
     const text = "You've hit your session limit · resets 3:45pm";
-    expect(claudeLimitSignal(msg({ type: "result", subtype: "success", is_error: true, result: text }))).toEqual({
+    expect(
+      claudeLimitSignal(msg({ type: "result", subtype: "success", is_error: true, result: text })),
+    ).toEqual({
       reason: "usage_limit",
       resetsAt: null,
     });
     expect(
-      claudeLimitSignal(msg({ type: "result", subtype: "error_during_execution", is_error: true, errors: [text] })),
+      claudeLimitSignal(
+        msg({ type: "result", subtype: "error_during_execution", is_error: true, errors: [text] }),
+      ),
     ).toMatchObject({ reason: "usage_limit" });
     expect(claudeLimitSignal(assistant(undefined, text))).toMatchObject({ reason: "usage_limit" });
     expect(claudeLimitSignal(msg({ type: "result", subtype: "success", result: "All done." }))).toBeNull();
@@ -84,10 +89,16 @@ describe("claudeUsage (07.18 PD-09, A-07)", () => {
         rateLimit({ status: "allowed", rateLimitType: "five_hour", utilization: 0.42, resetsAt: RESET_S }),
         now,
       ),
-    ).toEqual({ windows: [{ kind: "five_hour", usedPercent: 42, resetsAt: RESET_ISO }], at: now.toISOString() });
-    expect(claudeUsage(rateLimit({ status: "allowed", rateLimitType: "seven_day_opus", utilization: 1.2 }), now)).toEqual(
-      { windows: [{ kind: "weekly_model", usedPercent: 100, resetsAt: null }], at: now.toISOString() },
-    );
+    ).toEqual({
+      windows: [{ kind: "five_hour", usedPercent: 42, resetsAt: RESET_ISO }],
+      at: now.toISOString(),
+    });
+    expect(
+      claudeUsage(rateLimit({ status: "allowed", rateLimitType: "seven_day_opus", utilization: 1.2 }), now),
+    ).toEqual({
+      windows: [{ kind: "weekly_model", usedPercent: 100, resetsAt: null }],
+      at: now.toISOString(),
+    });
     expect(claudeUsage(rateLimit({ status: "allowed", utilization: 0.291 }), now)?.windows[0]).toEqual({
       kind: "other",
       usedPercent: 29.1,

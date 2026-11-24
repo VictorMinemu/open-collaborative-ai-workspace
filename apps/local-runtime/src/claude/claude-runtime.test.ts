@@ -390,7 +390,8 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
       },
     });
     const watch = () => {
-      for (const e of events.splice(0)) if (e.type === "prompt.completed") log.push(`completed:${e.promptId}`);
+      for (const e of events.splice(0))
+        if (e.type === "prompt.completed") log.push(`completed:${e.promptId}`);
     };
     q.emit(init("default"));
     await runtime.prompt("s1", { promptId: "p1", text: "one" });
@@ -398,7 +399,12 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
     const reset = 1_795_000_000;
     q.emit({
       type: "rate_limit_event",
-      rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.9, resetsAt: reset },
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 0.9,
+        resetsAt: reset,
+      },
     });
     q.emit({
       type: "assistant",

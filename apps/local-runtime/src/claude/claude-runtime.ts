@@ -54,6 +54,7 @@ import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
+  type AccountSignal,
   type AgentRuntime,
   type EventSink,
   type FullAccessGateOptions,
@@ -66,6 +67,7 @@ import {
 import { redact } from "../sanitize.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
+import { claudeLimitSignal, claudeResetsAt, claudeUsage } from "./limits.js";
 import { ClaudeEventMapper } from "./mapper.js";
 import {
   POOL_REFUSED_PROJECT_CREDENTIALS,
@@ -158,6 +160,12 @@ interface Session {
   launchedAccountRef: string | null;
   /** The current process was launched for an account switch and has not reported its init yet (A-01). */
   accountSwitching: boolean;
+  /** 07.18 (PD-05): where limits and usage of the account go; a no-op when the daemon passed none. */
+  onAccountSignal: (signal: AccountSignal) => void;
+  /** A limit was already reported for the running turn (once per turn, PD-24). */
+  limitReported: boolean;
+  /** The last reset time a `rate_limit_event` named, for limits that carry none. */
+  lastResetsAt: string | null;
   /** Runtime session id given at start (resume), used when no init has reported one yet. */
   resumeId: string | null;
   /** The model id last handed to the CLI (catalog id, possibly with `[1m]`); relaunches keep it. */
@@ -409,6 +417,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       account,
       launchedAccountRef: account?.ref ?? null,
       accountSwitching: false,
+      onAccountSignal: options.onAccountSignal ?? (() => undefined),
+      limitReported: false,
+      lastResetsAt: null,
       resumeId: options.resumeRuntimeSessionId ?? null,
       runtimeModel: options.model,
       bypass: mode.data === "fullAccess",
@@ -701,6 +712,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private async dispatch(s: Session, prompt: PromptPayload): Promise<void> {
     s.running = prompt;
     s.interruptRequested = false;
+    s.limitReported = false;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     // Held settings first: a failure is reported and dropped, the turn still runs with the previous values.
@@ -930,6 +942,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           q.close();
           break;
         }
+        // 07.18 (PD-05): limits and usage go out before this message's events (so before the turn's prompt.completed).
+        this.noteAccount(s, message);
         for (const ev of s.mapper.map(message)) {
           // Session state is owned by the adapter (prompt lifecycle + approvals), not the SDK.
           if (ev.type === "session.state") continue;
@@ -952,6 +966,31 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     } catch (err) {
       if (s.retired.has(q)) return;
       this.finish(s, s.stopping ? null : this.endMessage(s, errorMessage(err)));
+    }
+  }
+
+  /** 07.18 (D-07, D-09, PD-24): one limit per turn (with the last known reset) and every usage reading. */
+  private noteAccount(s: Session, message: SDKMessage): void {
+    const resetsAt = claudeResetsAt(message);
+    if (resetsAt) s.lastResetsAt = resetsAt;
+    const usage = claudeUsage(message);
+    if (usage) this.signal(s, { kind: "usage", usage });
+    const limit = claudeLimitSignal(message);
+    if (!limit || s.limitReported) return;
+    s.limitReported = true;
+    this.signal(s, {
+      kind: "limited",
+      promptId: s.running?.promptId ?? null,
+      reason: limit.reason,
+      resetsAt: limit.resetsAt ?? s.lastResetsAt,
+    });
+  }
+
+  private signal(s: Session, signal: AccountSignal): void {
+    try {
+      s.onAccountSignal(signal);
+    } catch (err) {
+      this.log.error("account signal failed", { sessionId: s.id, error: errorMessage(err) });
     }
   }
 

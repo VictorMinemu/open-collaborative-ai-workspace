@@ -340,7 +340,9 @@ describe("FakeRuntime pool accounts (07.18 D-08 test seam)", () => {
     const events: SessionEvent[] = [];
     const rt = new FakeRuntime("claude-code", 1);
     expect(rt.capabilities.supportsAccounts).toEqual(["token", "device_slot"]);
-    await rt.start({ sessionId: "s1", cwd, permissionMode: "plan", account: account("B") }, (e) => events.push(e));
+    await rt.start({ sessionId: "s1", cwd, permissionMode: "plan", account: account("B") }, (e) =>
+      events.push(e),
+    );
     await rt.prompt("s1", { promptId: "p1", text: "plan it" });
     await until(events, (e) => e.type === "prompt.completed");
     expect(answers(events)).toContain("(account: B)");
