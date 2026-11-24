@@ -408,9 +408,13 @@ export function createAgentChannelModule(
                   const pool = await cellAccountPool(tx, core, {
                     anthropicKey: providers.some((p) => p.kind === "anthropic"),
                   });
-                  const subscriptions = (await cellSubscriptions(tx)).filter(
-                    (s) => !pool.withheldSubscriptions.includes(s.id),
-                  );
+                  const connected = await cellSubscriptions(tx);
+                  const subscriptions = connected.filter((s) => !pool.withheldSubscriptions.includes(s.id));
+                  // 07.18 gap: a connected subscription the pool withholds is named, so the cell keeps its sign-ins
+                  // (an unlisted one it would read as disconnected and sign out).
+                  const withheldByPool = connected
+                    .filter((s) => pool.withheldSubscriptions.includes(s.id))
+                    .map((s) => s.id);
                   // Per-agent tool sets (D-08 layer 2) and the org's search provider (D-09).
                   const capabilities = await cellAgentCapabilities(tx, core.env);
                   const policy = await loadPolicy(tx);
@@ -453,7 +457,14 @@ export function createAgentChannelModule(
                     conversations: policy.conversations,
                     mcpServers,
                     plugins,
-                    ...(pool.accountPool ? { accountPool: pool.accountPool } : {}),
+                    ...(pool.accountPool
+                      ? {
+                          accountPool: {
+                            ...pool.accountPool,
+                            ...(withheldByPool.length > 0 ? { withheldByPool } : {}),
+                          },
+                        }
+                      : {}),
                   } as const;
                 },
               );

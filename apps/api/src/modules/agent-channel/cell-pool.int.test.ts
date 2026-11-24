@@ -228,18 +228,31 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
     const p = await insertProfile("bots@acme");
     expect((await snapshot()).subscriptions.map((s: Json) => s.id)).toEqual(["openai-codex"]);
 
+    expect((await snapshot()).accountPool.withheldByPool).toBeUndefined();
+
     await patchAccount(p, { enabled: false });
     let snap = await snapshot();
     expect(snap.subscriptions).toEqual([]);
     expect(snap.accountPool.chatgpt.order).toBeNull();
+    // 07.18 gap: the cell is told the pool withholds it (keep the sign-ins), not that it was disconnected.
+    expect(snap.accountPool.withheldByPool).toEqual(["openai-codex"]);
 
     await patchAccount(p, { enabled: true });
-    expect((await snapshot()).subscriptions.map((s: Json) => s.id)).toEqual(["openai-codex"]);
+    snap = await snapshot();
+    expect(snap.subscriptions.map((s: Json) => s.id)).toEqual(["openai-codex"]);
+    expect(snap.accountPool.withheldByPool).toBeUndefined();
 
     await ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${p}`));
     snap = await snapshot();
     expect(snap.subscriptions).toEqual([]);
     expect(snap.accountPool.chatgpt).toEqual({ order: null, profiles: [] });
+    expect(snap.accountPool.withheldByPool).toEqual(["openai-codex"]);
+
+    // A real disconnect: the provider is gone, so nothing is withheld (the cell signs out what it holds).
+    await ok(admin.request("DELETE", "/api/v1/model-providers/openai-codex"));
+    snap = await snapshot();
+    expect(snap.subscriptions).toEqual([]);
+    expect(snap.accountPool.withheldByPool).toBeUndefined();
   });
 
   it("with CELL_CLAUDE_TOKENS false (A-05 failed) the cell gets no Claude tokens", async () => {

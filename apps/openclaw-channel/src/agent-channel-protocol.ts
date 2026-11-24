@@ -1913,6 +1913,11 @@ export const CellAccountPool = z.object({
       .array(z.object({ accountId: Id, profileId: z.string().max(120), enabled: z.boolean() }))
       .max(POOL_ACCOUNTS_PER_PROVIDER),
   }),
+  /**
+   * 07.18 gap: connected subscriptions the pool keeps bots off (left out of `subscriptions`). Their stored sign-ins
+   * stay; absent on older APIs = none (an unlisted subscription is then read as disconnected, as before).
+   */
+  withheldByPool: z.array(SubscriptionProviderId).max(SubscriptionProviderId.options.length).optional(),
 });
 export type CellAccountPool = z.infer<typeof CellAccountPool>;
 

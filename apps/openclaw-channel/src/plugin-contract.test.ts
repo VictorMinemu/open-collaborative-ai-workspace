@@ -4936,6 +4936,26 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     expect(m.CellSnapshot.parse({ ...snapshot0717, accountPool }).accountPool).toEqual(accountPool);
   });
 
+  it("withheldByPool (07.18 gap) parses to equal values in both copies; only known subscription providers", async () => {
+    const { channel, m } = await load();
+    const withheld = { ...accountPool, withheldByPool: ["openai-codex"] };
+    const contract = channel.CellSnapshot.safeParse({ ...snapshot0717, accountPool: withheld });
+    expect(contract.success).toBe(true);
+    expect(m.CellSnapshot.parse({ ...snapshot0717, accountPool: withheld })).toEqual(contract.data);
+    expect(m.CellAccountPool.parse(withheld).withheldByPool).toEqual(["openai-codex"]);
+    // Absent (an API before the gap fix) stays absent in both copies.
+    expect(m.CellAccountPool.parse(accountPool).withheldByPool).toBeUndefined();
+    const contractPool = channel.CellAccountPool.safeParse(accountPool);
+    expect((contractPool.data as { withheldByPool?: unknown } | undefined)?.withheldByPool).toBeUndefined();
+    for (const bad of [
+      ["anthropic"],
+      ["openai-codex", "openai-codex", "openai-codex", "openai-codex", "x"],
+    ]) {
+      expect(m.CellAccountPool.safeParse({ ...accountPool, withheldByPool: bad }).success).toBe(false);
+      expect(channel.CellAccountPool.safeParse({ ...accountPool, withheldByPool: bad }).success).toBe(false);
+    }
+  });
+
   it("the pool's bounds agree: env names, the token shape and at most 20 tokens", async () => {
     const { channel, m } = await load();
     const withClaude = (patch: Record<string, unknown>) => ({

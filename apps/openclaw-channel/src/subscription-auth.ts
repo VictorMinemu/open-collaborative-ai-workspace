@@ -268,10 +268,13 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
    * - listed + no credential (volume reset, revoked) → report `disconnected` once, unless a flow runs;
    * - not listed but a credential exists → an admin disconnected while the cell was offline: log out.
    *   Only when the API sent the field at all (older APIs omit it).
+   * - not listed because the account pool withholds it (`accountPool.withheldByPool`: every bot account off) → keep
+   *   the stored profiles; bots simply do not use the provider, and turning one account back on needs no new sign-in.
    */
-  async function sync(cell: Pick<CellSnapshot, "subscriptions">): Promise<Set<string>> {
+  async function sync(cell: Pick<CellSnapshot, "subscriptions" | "accountPool">): Promise<Set<string>> {
     const ready = new Set<string>();
     const listed = cell.subscriptions;
+    const withheld: readonly string[] = cell.accountPool?.withheldByPool ?? [];
     for (const sub of listed ?? []) {
       const provider = sub.id as SubscriptionProviderId;
       let account: SubscriptionAccount | null;
@@ -306,6 +309,7 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
     if (listed) {
       for (const provider of ["openai-codex"] as const) {
         if (listed.some((s) => s.id === provider)) continue;
+        if (withheld.includes(provider)) continue;
         if ([...flows.values()].some((f) => f.provider === provider)) continue;
         const stale = await opts.driver.status(provider).catch(() => null);
         if (stale) {
