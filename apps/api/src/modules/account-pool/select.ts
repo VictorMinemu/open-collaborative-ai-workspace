@@ -1,4 +1,4 @@
-import type { PoolStrategy } from "@ocw/contracts";
+import { POOL_LIMITS, type PoolStrategy } from "@ocw/contracts";
 
 /**
  * Which pool account a Work Zone session gets (PURE, Phase 07.18, D-04, D-05, PD-07).
@@ -49,12 +49,43 @@ function best(
   return winner;
 }
 
+/** Never used first, then the least recently used; the admin's order breaks ties. */
+function usedEarlier(a: PoolCandidate, b: PoolCandidate): boolean {
+  if (a.lastUsedAt === null) return b.lastUsedAt !== null;
+  return b.lastUsedAt !== null && a.lastUsedAt < b.lastUsedAt;
+}
+
+function clampWeight(weight: number): number {
+  return Math.min(POOL_LIMITS.weightMax, Math.max(POOL_LIMITS.weightMin, Math.trunc(weight)));
+}
+
+/**
+ * Smooth weighted round-robin (the nginx algorithm): every candidate's current value grows by its weight, the largest
+ * current wins (ties by the admin's order), and the winner gives back the total weight. A candidate the caller has no
+ * state for passes `wrrCurrent: 0` (a newly added account).
+ */
+function pickWeighted(candidates: readonly PoolCandidate[]): PoolPick {
+  const next = new Map<string, number>();
+  let total = 0;
+  for (const c of candidates) {
+    const weight = clampWeight(c.weight);
+    total += weight;
+    next.set(c.id, c.wrrCurrent + weight);
+  }
+  const current = (c: PoolCandidate) => next.get(c.id) ?? 0;
+  const winner = best(candidates, (a, b) => current(a) > current(b));
+  next.set(winner.id, current(winner) - total);
+  return { id: winner.id, wrr: next };
+}
+
 export function pickAccount(strategy: PoolStrategy, candidates: readonly PoolCandidate[]): PoolPick | null {
   if (candidates.length === 0) return null;
   switch (strategy) {
     case "failover":
       return { id: best(candidates, () => false).id, wrr: currentState(candidates) };
-    default:
-      return null;
+    case "round_robin":
+      return { id: best(candidates, usedEarlier).id, wrr: currentState(candidates) };
+    case "weighted":
+      return pickWeighted(candidates);
   }
 }

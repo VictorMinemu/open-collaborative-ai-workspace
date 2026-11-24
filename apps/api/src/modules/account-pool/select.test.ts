@@ -102,7 +102,10 @@ describe("pickAccount: round_robin (least recently used)", () => {
 });
 
 /** Runs `n` weighted picks, feeding each pick's `wrr` back as the next call's state (as the store persists it). */
-function weightedRun(start: readonly PoolCandidate[], n: number): { ids: string[]; state: Map<string, number> } {
+function weightedRun(
+  start: readonly PoolCandidate[],
+  n: number,
+): { ids: string[]; state: Map<string, number> } {
   let candidates = [...start];
   const ids: string[] = [];
   for (let i = 0; i < n; i++) {
@@ -172,7 +175,11 @@ describe("pickAccount: weighted (smooth weighted round-robin)", () => {
   it("clamps a weight below the minimum up to it", () => {
     // Unclamped, weights 0 and -3 never accumulate and C would win the first pick.
     const { ids } = weightedRun(
-      [cand("A", { weight: 0 }), cand("B", { weight: -3, priority: 1 }), cand("C", { weight: 1, priority: 2 })],
+      [
+        cand("A", { weight: 0 }),
+        cand("B", { weight: -3, priority: 1 }),
+        cand("C", { weight: 1, priority: 2 }),
+      ],
       3,
     );
     expect(ids).toEqual(["A", "B", "C"]);
