@@ -1,7 +1,15 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { accessLostCopy, leftProjectLine, SessionBackLink, sessionBackLink } from "./session-view";
+import {
+  accessLostCopy,
+  leftProjectLine,
+  SessionAccountChip,
+  SessionBackLink,
+  sessionAccountLabel,
+  sessionAccountTooltip,
+  sessionBackLink,
+} from "./session-view";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => undefined }) }));
 
@@ -99,5 +107,52 @@ describe("session back link", () => {
     expect(html).toContain(`href="/chat/${conv}?m=${card}"`);
     expect(html).toContain("max-md:h-11");
     expect(html).toContain('<span class="truncate">Back to #eng</span>');
+  });
+});
+
+/** 07.18-12 (D-11): the pool account a session runs on, label only, in the header. */
+describe("session account", () => {
+  const account = (label: string) => ({
+    id: "44444444-4444-4444-8444-444444444444",
+    label,
+    provider: "claude" as const,
+  });
+  const base = { deviceName: "build-01", runtime: "claude-code" as const };
+
+  it("names the pool account, the device's own login, or nothing for an older API", () => {
+    expect(sessionAccountLabel({ poolAccount: account("ana@acme.dev") })).toBe("Account: ana@acme.dev");
+    expect(sessionAccountLabel({ poolAccount: null })).toBe("This device's login");
+    expect(sessionAccountLabel({})).toBeNull();
+  });
+
+  it("cuts a long label to 32 characters with an ellipsis; the tooltip keeps it whole", () => {
+    const long = "a-very-long-pool-account-label-for-the-team@acme.dev";
+    const label = sessionAccountLabel({ poolAccount: account(long) });
+    expect(label).toBe(`Account: ${long.slice(0, 31)}…`);
+    expect(label?.length).toBe("Account: ".length + 32);
+    expect(sessionAccountTooltip({ ...base, poolAccount: account(long) })).toBe(
+      `Pool account ${long} · on build-01`,
+    );
+    expect(sessionAccountTooltip({ ...base, poolAccount: null })).toBe(
+      "Claude Code uses its own sign-in on build-01",
+    );
+  });
+
+  it("renders a quiet chip with the label, and nothing without the field", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionAccountChip, { session: { ...base, poolAccount: account("A") } }),
+    );
+    expect(html).toContain('data-testid="session-account"');
+    expect(html).toContain("Account: A");
+    expect(html).toContain("Pool account A · on build-01");
+    expect(renderToStaticMarkup(createElement(SessionAccountChip, { session: base }))).toBe("");
+  });
+
+  it("renders a label as text, never as markup (T-07.18-12-02)", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionAccountChip, { session: { ...base, poolAccount: account("<b>x</b>") } }),
+    );
+    expect(html).not.toContain("<b>");
+    expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
   });
 });
