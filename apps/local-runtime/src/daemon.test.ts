@@ -40,6 +40,7 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
+import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
@@ -442,7 +443,8 @@ beforeEach(async () => {
   runtime = new FakeRuntime();
   daemon = await Daemon.create({
     home,
-    env: {},
+    // 07.18: a scratch default Codex home, so no slot ever links the real ~/.codex.
+    env: { CODEX_HOME: join(home, "codex-default") },
     token: "device-token-123",
     config: { serverUrl: server.url },
     runtimes: [runtime],
@@ -3395,7 +3397,7 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     expect(runtime.started[0]?.account ?? null).toBeNull();
   });
 
-  it("refuses a device_slot account while no slot store exists", async () => {
+  it("refuses a device_slot account whose slot is not on this device", async () => {
     const { id } = await startWith({
       kind: "device_slot",
       accountId: ACCOUNT_A,
@@ -3514,5 +3516,49 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
       resetsAt: null,
     });
     expect(server.allFrames.some((f) => f.type === "account.usage")).toBe(false);
+  });
+
+  it("the handshake reports every Codex slot in accounts.sync, after capabilities, with no credential", async () => {
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const a = await store.create({ label: "ana@acme", origin: "server" });
+    const b = await store.create({ label: "Codex account 2", origin: "cli" });
+    writeFileSync(join(store.homeOf(a.slotId), "auth.json"), JSON.stringify({ tokens: { access_token: "AT" } }));
+    await store.setPlan(a.slotId, "plus");
+    await daemon.start();
+    const sync = await server.frame("accounts.sync");
+    expect(sync).toEqual({
+      type: "accounts.sync",
+      codexSlots: [
+        { slotId: a.slotId, label: "ana@acme", origin: "server", signedIn: true, planType: "plus", usage: null },
+        { slotId: b.slotId, label: "Codex account 2", origin: "cli", signedIn: false, planType: null, usage: null },
+      ],
+    });
+    const types = server.last.frames.map((f) => f.type);
+    expect(types.indexOf("accounts.sync")).toBeGreaterThan(types.indexOf("capabilities"));
+    // auth.json is never read: nothing of it, and no path, leaves the device.
+    expect(JSON.stringify(server.allFrames)).not.toContain("access_token");
+    expect(JSON.stringify(server.allFrames)).not.toContain(home);
+  });
+
+  it("a device_slot account of a known slot reaches the adapter with that slot's CODEX_HOME", async () => {
+    runtime.supportsAccounts = ["token", "device_slot"];
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const slot = await store.create({ label: "ChatGPT A", origin: "server" });
+    const { id } = await startWith({
+      kind: "device_slot",
+      accountId: ACCOUNT_A,
+      label: "ChatGPT A",
+      slotId: slot.slotId,
+    });
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    expect(runtime.started[0]?.account).toEqual({
+      kind: "device_slot",
+      ref: ACCOUNT_A,
+      label: "ChatGPT A",
+      slotId: slot.slotId,
+      codexHome: store.homeOf(slot.slotId),
+    });
+    // The slot's directory stays on the device.
+    expect(JSON.stringify(server.allFrames)).not.toContain(store.homeOf(slot.slotId));
   });
 });
