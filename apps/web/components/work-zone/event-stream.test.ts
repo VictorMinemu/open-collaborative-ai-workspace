@@ -87,3 +87,74 @@ describe("buildItems › runtime.update", () => {
     });
   });
 });
+
+/**
+ * The account switch line (07.18-12, D-08, PD-14): the API appends `account.switched` to the stored stream when a
+ * session moves to another pool account, so every viewer sees when and why, also after a reload. The time is the
+ * viewer's own (the formatter the timeline uses); the tests pass a fixed one.
+ */
+describe("buildItems › account.switched", () => {
+  const UNTIL = "2026-10-28T15:40:00.000Z";
+  const at1540 = (iso: string) => (iso === UNTIL ? "15:40" : `?${iso}`);
+  const switched = (
+    over: Partial<Extract<SessionEvent, { type: "account.switched" }>> = {},
+  ): SessionEvent => ({
+    type: "account.switched",
+    fromLabel: "A",
+    toLabel: "B",
+    reason: "limit",
+    until: UNTIL,
+    ...over,
+  });
+
+  it("says which account the session moved to, why and until when", () => {
+    expect(buildItems(live([switched()]), at1540)).toEqual([
+      {
+        kind: "system",
+        key: "e1",
+        at: AT,
+        text: "Switched to account B: A reached its limit until 15:40",
+        testId: "account-switch-line",
+      },
+    ]);
+  });
+
+  it("names the device's own login when no pool account was left", () => {
+    const [item] = buildItems(live([switched({ toLabel: null })]), at1540);
+    expect(item).toMatchObject({
+      text: "Switched to this device's login: A reached its limit until 15:40",
+    });
+  });
+
+  it("says an account that was removed or disabled is no longer available", () => {
+    const [item] = buildItems(live([switched({ reason: "unavailable", until: null })]), at1540);
+    expect(item).toMatchObject({ text: "Switched to account B: A is no longer available" });
+  });
+
+  it("drops the until part when the reset time is unknown", () => {
+    const [item] = buildItems(live([switched({ until: null })]), at1540);
+    expect(item).toMatchObject({ text: "Switched to account B: A reached its limit" });
+  });
+
+  it("gives one line per switch, in order, and leaves the other events alone", () => {
+    const items = buildItems(
+      live([update("done", "2.1.300"), switched(), switched({ fromLabel: "B", toLabel: "C" })]),
+      at1540,
+    );
+    expect(items.map((i) => (i.kind === "system" ? i.text : i.kind))).toEqual([
+      "Claude Code updated to 2.1.300",
+      "Switched to account B: A reached its limit until 15:40",
+      "Switched to account C: B reached its limit until 15:40",
+    ]);
+  });
+
+  it("uses the viewer's clock by default", () => {
+    const [item] = buildItems(live([switched()]));
+    const local = new Date(UNTIL).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    expect(item).toMatchObject({ text: `Switched to account B: A reached its limit until ${local}` });
+  });
+});
