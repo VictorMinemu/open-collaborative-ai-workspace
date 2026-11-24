@@ -238,6 +238,17 @@ const tokenAccount = (ref: string, oauthToken: string, label = `Account ${ref}`)
   oauthToken,
 });
 
+/** 07.18-19 R1.5: variables CLI 2.1.331 reads that would take the session off the pool token. */
+const R15_VARS = [
+  "CLAUDE_CODE_USE_GATEWAY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "ANTHROPIC_UNIX_SOCKET",
+];
+
 describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () => {
   const saved = { ...process.env };
   beforeEach(() => {
@@ -248,9 +259,19 @@ describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () =>
     process.env.CLAUDE_CODE_USE_BEDROCK = "1";
     process.env.CLAUDE_CODE_USE_VERTEX = "1";
     process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+    // 07.18-19 R1.5: the other providers, gateways, credential descriptors and the socket of CLI 2.1.331.
+    for (const k of R15_VARS) process.env[k] = k.endsWith("_SOCKET") ? "/tmp/not-anthropic.sock" : "1";
   });
   afterEach(() => {
     process.env = { ...saved };
+  });
+
+  it("strips the other providers, credential descriptors and the API socket (07.18-19 R1.5)", async () => {
+    const { start } = setup();
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    const env = q.params.options.env ?? {};
+    for (const k of R15_VARS) expect(env[k], k).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
   });
 
   it("runs on the pool token with every competing credential stripped, even with useApiKey", async () => {
@@ -312,6 +333,7 @@ describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13,
       NO_PROXY: "",
       NODE_EXTRA_CA_CERTS: "/etc/corp-ca.pem",
     });
+    for (const k of R15_VARS) expect(settings.env?.[k], k).toBe("");
     // The secret deny rules and the bypass lock are exactly those of a session without a token.
     expect(settings.permissions).toEqual(plain.permissions);
     expect(plain).toEqual({ permissions: plain.permissions });
@@ -427,7 +449,7 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
       {
         kind: "limited",
         promptId: "p1",
-        reason: "rate_limit",
+        reason: "usage_limit",
         resetsAt: new Date(reset * 1000).toISOString(),
       },
     ]);
@@ -450,6 +472,45 @@ describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18
     });
     expect(signals.filter((s) => s.kind === "limited")).toHaveLength(2);
     expect(log.slice(-2)).toEqual(["signal:limited", "completed:p2"]);
+  });
+});
+
+describe("ClaudeCodeRuntime — what is not an account limit (07.18-19 R1.1-R1.3)", () => {
+  it("a rejected window served from overage, a per-minute 429 and reply text send only usage", async () => {
+    const signals: AccountSignal[] = [];
+    const { runtime, events, start } = setup();
+    const q = await start("default", {
+      account: tokenAccount("a", POOL_TOKEN_A),
+      onAccountSignal: (sig) => signals.push(sig),
+    });
+    q.emit(init("default"));
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        utilization: 1,
+        overageStatus: "allowed",
+        isUsingOverage: true,
+      },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: { content: [{ type: "text", text: "You've hit your limit of patience, I see." }] },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      error: "rate_limit",
+      message: { content: [{ type: "text", text: "API Error: Rate limit reached" }] },
+    });
+    q.emit(result());
+    await settle();
+    expect(signals.map((sig) => sig.kind)).toEqual(["usage"]);
+    expect(events.some((e) => e.type === "prompt.completed")).toBe(true);
   });
 });
 
@@ -989,6 +1050,78 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
     });
     await expect(signedOut.runtime.catalog()).resolves.toBeNull();
     expect(signedOut.queries).toHaveLength(0);
+  });
+});
+
+// 07.18-19 R1.8: a device whose own Claude CLI is signed out still has a catalog and titles through a pool token.
+describe("ClaudeCodeRuntime — a device without its own Claude login (07.18-19 R1.8)", () => {
+  const signedOut = () =>
+    Promise.resolve({ id: "claude-code" as const, installed: true, version: "2.1.289", loggedIn: false });
+  const titleQuery = (queries: FakeQuery[]) => queries.find((q) => Array.isArray(q.params.options.tools));
+  const flagEnv = (q: FakeQuery | undefined) =>
+    (q?.params.options.settings as { env?: Record<string, string> } | undefined)?.env;
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("no pool session: no catalog and no query, as before", async () => {
+    const { runtime, queries } = setup({ detect: signedOut, prepare: prepareProbe });
+    expect(runtime.catalogReadyWithoutLogin()).toBe(false);
+    await expect(runtime.catalog()).resolves.toBeNull();
+    expect(queries).toHaveLength(0);
+  });
+
+  it("collects the catalog with a live pool session's token, stripped and pinned like that session", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    const { runtime, queries, start } = setup({ detect: signedOut, prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    expect(runtime.catalogReadyWithoutLogin()).toBe(true);
+    const catalog = await runtime.catalog();
+    expect(catalog?.models.length).toBeGreaterThan(0);
+    const probe = queries.at(-1);
+    expect(probe?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    expect(probe?.params.options.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(flagEnv(probe)).toMatchObject({
+      ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+      ANTHROPIC_API_KEY: "",
+    });
+    expect(probe?.prompts).toEqual([]);
+    await runtime.stop("s1");
+    expect(runtime.catalogReadyWithoutLogin()).toBe(false);
+  });
+
+  it("a signed-in device keeps its own login for the catalog, even with a pool session", async () => {
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    await runtime.catalog();
+    const probe = queries.at(-1);
+    expect(probe?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(flagEnv(probe)).toBeUndefined();
+  });
+
+  it("a pool session's title runs on that session's token, never the device's login", async () => {
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    await runtime
+      .generateTitle({ sessionId: "s1", prompt: "fix the bug", model: "haiku", signal: signal() })
+      .catch(() => undefined);
+    const title = titleQuery(queries);
+    expect(title?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    expect(flagEnv(title)).toMatchObject({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
+    expect(JSON.stringify(title?.params.options.settings)).not.toContain(POOL_TOKEN_A);
+  });
+
+  it("a session on the device's own login keeps that login for its title", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-parent-one";
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default");
+    await runtime
+      .generateTitle({ sessionId: "s1", prompt: "fix the bug", model: "haiku", signal: signal() })
+      .catch(() => undefined);
+    const title = titleQuery(queries);
+    expect(title?.params.options.env).toEqual(childEnv(process.env, false));
+    expect(flagEnv(title)).toBeUndefined();
   });
 });
 

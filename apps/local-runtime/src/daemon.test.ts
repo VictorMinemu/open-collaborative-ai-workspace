@@ -193,8 +193,14 @@ class FakeRuntime implements AgentRuntime {
     }
   }
 
+  /** 07.18-19 R1.8: whether the device's own Claude login is signed in, and whether a pool token is ready. */
+  loggedIn = true;
+  poolReady = false;
+  catalogReadyWithoutLogin(): boolean {
+    return this.poolReady;
+  }
   detect(): Promise<RuntimeInfo> {
-    return Promise.resolve({ id: "claude-code", installed: true, version: "9.9.9", loggedIn: true });
+    return Promise.resolve({ id: "claude-code", installed: true, version: "9.9.9", loggedIn: this.loggedIn });
   }
   async start(o: StartSessionOptions, sink: EventSink): Promise<void> {
     this.started.push(o);
@@ -1283,6 +1289,8 @@ describe("Automatic session titles (03.2-12, D-18, P-15, P-19)", () => {
     expect(runtime.titleRequests.map((r) => [r.model, r.prompt])).toEqual([
       ["haiku", "Please fix the login redirect bug"],
     ]);
+    // 07.18-19 R1.8: the adapter learns whose title it is (a pool session's title runs on its own token).
+    expect(runtime.titleRequests[0]?.sessionId).toBe(SID);
   });
 
   it("a failure is a failed ack whose error starts with the code; no frame, no session event", async () => {
@@ -3376,6 +3384,45 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     });
     return { id, sessionId };
   }
+
+  // 07.18-19 R1.8: a device that only has pool accounts still reports the Claude catalog.
+  it("a signed-out Claude reports no catalog until a pool token is ready, then one", async () => {
+    runtime.loggedIn = false;
+    await daemon.start();
+    expect((await server.frame("capabilities")).catalogs).toEqual([]);
+    await daemon.stop();
+    runtime.poolReady = true;
+    daemon = await Daemon.create({
+      home,
+      env: {},
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+    await daemon.start();
+    const caps = await server.frame("capabilities", (f) => f.catalogs.length > 0);
+    expect(caps.catalogs.map((c) => c.runtime)).toEqual(["claude-code"]);
+  });
+
+  it("a pool session starting on a signed-out Claude sends the catalog it makes possible", async () => {
+    runtime.loggedIn = false;
+    const { id } = await startWith(tokenAccount());
+    runtime.poolReady = true; // the adapter now holds the session's token
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    const caps = await server.frame("capabilities", (f) => f.catalogs.length > 0);
+    expect(caps.catalogs.map((c) => c.runtime)).toEqual(["claude-code"]);
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
+  it("a pool session on a signed-in Claude sends no extra capabilities", async () => {
+    const { id } = await startWith(tokenAccount());
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    await sleep(30);
+    expect(server.allFrames.filter((f) => f.type === "capabilities")).toHaveLength(1);
+  });
 
   it("announces accountPool in the hello", async () => {
     await daemon.start();

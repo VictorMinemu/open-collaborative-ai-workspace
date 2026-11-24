@@ -100,6 +100,8 @@ export function buildClaudeCatalog(input: {
 export interface CollectOptions {
   claudePath: string | null;
   env: Record<string, string | undefined>;
+  /** 07.18-19 R1.8: the flag-settings env of a pool token (`poolFlagEnv`), when the probe runs on one. */
+  flagEnv?: Record<string, string>;
   cwd: string;
   timeoutMs?: number;
 }
@@ -115,7 +117,10 @@ function probeOptions(opts: CollectOptions, abort: AbortController): Options {
     permissionMode: "default",
     allowDangerouslySkipPermissions: false,
     settingSources: ["project"],
-    settings: { permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" } },
+    settings: {
+      permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" },
+      ...(opts.flagEnv ? { env: opts.flagEnv } : {}),
+    },
     canUseTool: async () => ({ behavior: "deny", message: "Catalog probe: no tools." }),
     env: opts.env,
     abortController: abort,

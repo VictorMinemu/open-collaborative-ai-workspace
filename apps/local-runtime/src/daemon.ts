@@ -853,8 +853,9 @@ export class Daemon {
     for (const r of this.runtimes.values()) {
       const info = infos.find((i) => i.id === r.id);
       if (!info?.installed || !r.catalog) continue;
-      // 07.18 (D-02): a signed-out Codex still has a catalog when one of its account slots is signed in.
-      if (!info.loggedIn && !(r.id === "codex" && (await firstSignedInSlotHome(this.codexSlots)))) continue;
+      // 07.18 (D-02): a signed-out Codex still has a catalog when one of its account slots is signed in; 07.18-19 R1.8:
+      // a signed-out Claude when a pool token is in its adapter's memory.
+      if (!info.loggedIn && !(await this.catalogWithoutOwnLogin(r))) continue;
       // 07.11 (PD-07): never while this runtime's CLI updates; the capabilities sent after the run cover it.
       const gate = this.gates.get(r.id);
       if (gate && !gate.isOpen) continue;
@@ -878,6 +879,24 @@ export class Daemon {
       }
     }
     return out;
+  }
+
+  /** 07.18 (D-02), 07.18-19 R1.8: a runtime whose own login is signed out can still describe what a pool account offers. */
+  private async catalogWithoutOwnLogin(r: AgentRuntime): Promise<boolean> {
+    if (r.id === "codex") return (await firstSignedInSlotHome(this.codexSlots)) !== null;
+    return r.catalogReadyWithoutLogin?.() === true;
+  }
+
+  /**
+   * 07.18-19 R1.8: a pool session just made a catalog possible on a runtime signed out on this device (a pool-only
+   * device): the server hears it now, so the new-session dialog can offer models. Nothing when the device is signed in.
+   */
+  private async announcePoolCatalog(runtime: AgentRuntime): Promise<void> {
+    if (!this.isConnected || runtime.id === "codex" || !runtime.catalogReadyWithoutLogin?.()) return;
+    const info = (await this.detectRuntimes()).find((i) => i.id === runtime.id);
+    if (!info || info.loggedIn) return;
+    const frame = await this.capabilitiesFrame();
+    if (this.isConnected) this.send(frame);
   }
 
   private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
@@ -1656,6 +1675,13 @@ export class Daemon {
       this.endSession(cmd.sessionId);
       throw err;
     }
+    if (account?.kind === "token") {
+      void this.announcePoolCatalog(runtime).catch((err: unknown) =>
+        this.log.warn("pool catalog not announced", {
+          error: sanitizeString(errorMessage(err), [this.home]),
+        }),
+      );
+    }
   }
 
   /**
@@ -1700,6 +1726,7 @@ export class Daemon {
       payload,
       roots,
       timeoutMs: this.opts.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
+      sessionId: cmd.sessionId,
       ...(active ? { sessionRuntime: active.runtime.id } : {}),
     });
     this.send({

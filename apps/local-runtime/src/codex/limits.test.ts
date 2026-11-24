@@ -81,6 +81,22 @@ describe("codexLimitSignal (PD-23)", () => {
     expect(codexLimitSignal(turnCompleted(null), exhausted)).toBeNull();
   });
 
+  // 07.18-19 R1.6: codex-cli 0.172.0 `CodexErrorInfo` (`APISpendLimitExceeded(SpendLimitScope)` in codex-rs).
+  it("a spend limit of the key, project or organization is billing (no reset)", () => {
+    for (const info of [
+      "apiKeySpendLimitExceeded",
+      "projectSpendLimitExceeded",
+      "organizationSpendLimitExceeded",
+    ]) {
+      expect(codexLimitSignal(turnCompleted(info), exhausted), info).toEqual({
+        reason: "billing",
+        resetsAt: null,
+      });
+      expect(codexLimitSignal(errorNote(info, false), null)?.reason, info).toBe("billing");
+      expect(codexLimitSignal(errorNote(info, true), null), info).toBeNull();
+    }
+  });
+
   it("a completed turn and any other notification are not limits", () => {
     const ok = {
       method: "turn/completed",

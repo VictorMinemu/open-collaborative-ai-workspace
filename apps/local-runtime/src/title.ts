@@ -49,6 +49,8 @@ export interface RunTitleOptions {
   sessionRuntime?: RuntimeId;
   /** Home directory for contain() (tests). */
   home?: string;
+  /** 07.18-19 R1.8: the session the title is for (the adapter picks that session's account). */
+  sessionId?: string;
 }
 
 /** Run one title call and return a normalized, sanitized, valid title, or throw a `TitleError`. */
@@ -80,7 +82,12 @@ export async function runTitle(o: RunTitleOptions): Promise<string> {
   let raw: string;
   try {
     raw = await Promise.race([
-      runtime.generateTitle({ prompt: payload.prompt, model: payload.model, signal: abort.signal }),
+      runtime.generateTitle({
+        prompt: payload.prompt,
+        model: payload.model,
+        signal: abort.signal,
+        ...(o.sessionId ? { sessionId: o.sessionId } : {}),
+      }),
       deadline,
     ]);
   } catch (err) {
