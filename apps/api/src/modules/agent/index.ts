@@ -72,6 +72,7 @@ export {
   findAgent,
   listAgents,
   loadAgentUnit,
+  notifyCell,
   toAgentDto,
 } from "./service";
 export {

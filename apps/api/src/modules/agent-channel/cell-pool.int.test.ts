@@ -3,6 +3,7 @@ import { claudeTokenProfileId, poolProfileId } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
+import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { applySubscriptionConnected } from "../agent";
 import { type CellPoolView, cellAccountPool } from "./cell-pool";
@@ -248,5 +249,258 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
     );
     expect(pool.accountPool?.claude).toEqual({ order: null, tokens: [], apiKeyLast: true });
     expect(pool.accountIds).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: sign-in per pool account, adoption
+
+const CODEX = "/api/v1/model-providers/openai-codex/auth";
+
+/** The payload of the latest `provider.auth.start` on org A's cell stream. */
+const lastStart = async (): Promise<Json> =>
+  (
+    await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'provider.auth.start' order by seq desc limit 1",
+      [`cell:${orgA}`],
+    )
+  ).rows[0]?.payload as Json;
+
+const poolRows = async (org = orgA): Promise<Json[]> =>
+  (
+    await su.query(
+      "select * from app.account_pool_accounts where organization_id = $1 and kind = 'cell_profile' order by priority, created_at, id",
+      [org],
+    )
+  ).rows as Json[];
+
+const poolAudits = async () =>
+  (
+    await su.query(
+      "select action, resource_id, user_id, metadata from app.audit_events where organization_id = $1 and action like 'account_pool.%' order by occurred_at, id",
+      [orgA],
+    )
+  ).rows as Json[];
+
+const codexProvider = async (): Promise<Json | undefined> =>
+  (await ok(admin.request("GET", "/api/v1/model-providers"))).providers.find(
+    (p: Json) => p.provider === "openai-codex",
+  );
+
+/** A connected report from the cell for the flow the admin just started. */
+const connected = (flowId: string, body: Json) =>
+  cell.reportAuth({ provider: "openai-codex", flowId, state: "connected", ...body });
+
+describe("each ChatGPT account for bots signs in as its own profile; the old sign-in is adopted (07.18-14 T2)", () => {
+  let auditsBefore = 0;
+  beforeAll(async () => {
+    await resetPool();
+    auditsBefore = (await poolAudits()).length;
+    await cell.start();
+  });
+
+  it("“ChatGPT for bots” asks the cell for openai:pool-<id>; connected adds an enabled admin row, audited", async () => {
+    const started = await ok(admin.request("POST", CODEX, { poolAccount: { label: "bots@acme" } }));
+    const ev = await lastStart();
+    expect(ev.flowId).toBe(started.flowId);
+    const accountId = String(ev.profileId).replace(/^openai:pool-/, "");
+    expect(accountId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ev.profileId).toBe(poolProfileId(accountId));
+    // Nothing is in the pool until the cell holds the sign-in.
+    expect(await poolRows()).toEqual([]);
+
+    const body = { account: { email: "bots@acme.test", planType: "Plus" }, profileId: ev.profileId };
+    const res = await connected(started.flowId, body);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const rows = await poolRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: accountId,
+      provider: "chatgpt",
+      kind: "cell_profile",
+      label: "bots@acme",
+      origin: "admin",
+      enabled: true,
+      credential_state: "ok",
+      plan_type: "plus",
+      cell_profile_id: ev.profileId,
+      removed_at: null,
+    });
+    const audits = (await poolAudits()).slice(auditsBefore);
+    expect(audits.map((a) => a.action)).toEqual([
+      "account_pool.sign_in_started",
+      "account_pool.account_added",
+      "account_pool.signed_in",
+    ]);
+    expect(audits.every((a) => a.resource_id === accountId)).toBe(true);
+    expect(await codexProvider()).toMatchObject({
+      account: { email: "bots@acme.test", planType: "plus", needsReconnect: false },
+    });
+    expect((await snapshot()).accountPool.chatgpt).toEqual({
+      order: [ev.profileId],
+      profiles: [{ accountId, profileId: ev.profileId, enabled: true }],
+    });
+
+    // The same report again writes nothing more.
+    expect((await connected(started.flowId, body)).status).toBe(200);
+    expect(await poolRows()).toHaveLength(1);
+    expect(await poolAudits()).toHaveLength(auditsBefore + 3);
+  });
+
+  it("a second sign-in while one runs is refused unless restarted; the same request is idempotent", async () => {
+    const first = await ok(admin.request("POST", CODEX, { poolAccount: { label: "ops@acme" } }));
+    const again = await ok(admin.request("POST", CODEX, { poolAccount: { label: "ops@acme" } }));
+    expect(again.flowId).toBe(first.flowId);
+    const other = await admin.request("POST", CODEX, { poolAccount: { label: "sales@acme" } });
+    expect(other.status).toBe(409);
+    expect((other.body as Json).error.code).toBe("sign_in_in_progress");
+    expect((await admin.request("POST", CODEX, {})).status).toBe(409);
+    await ok(admin.request("DELETE", CODEX));
+  });
+
+  it("A-03 fallback: a connected report with another profile id stores the id the cell reports", async () => {
+    const started = await ok(admin.request("POST", CODEX, { poolAccount: { label: "ops@acme" } }));
+    const accountId = String((await lastStart()).profileId).replace(/^openai:pool-/, "");
+    const res = await connected(started.flowId, {
+      account: { email: "ops@acme.test", planType: "pro" },
+      profileId: "openai:ops-chosen",
+    });
+    expect(res.status).toBe(200);
+    expect((await poolRows()).find((r) => r.id === accountId)).toMatchObject({
+      label: "ops@acme",
+      origin: "admin",
+      cell_profile_id: "openai:ops-chosen",
+    });
+  });
+
+  it("the Models page card works as before; its connected report lands in the pool (adopted when new)", async () => {
+    let started = await ok(admin.request("POST", CODEX, {}));
+    expect((await lastStart()).profileId).toBeUndefined();
+    const res = await connected(started.flowId, {
+      account: { email: "legacy@acme.test", planType: "plus" },
+      profileId: "openai:default",
+    });
+    expect(res.status).toBe(200);
+    expect((await poolRows()).find((r) => r.cell_profile_id === "openai:default")).toMatchObject({
+      label: "legacy@acme.test",
+      origin: "adopted",
+      enabled: true,
+    });
+
+    // An older plugin's report without a profile id: today's behaviour, no row (the cell's profile list adopts it).
+    const before = (await poolRows()).length;
+    started = await ok(admin.request("POST", CODEX, {}));
+    const legacy = await connected(started.flowId, {
+      account: { email: "legacy@acme.test", planType: "plus" },
+    });
+    expect(legacy.status).toBe(200);
+    expect((await ok(admin.request("GET", CODEX))).state).toBe("connected");
+    expect(await poolRows()).toHaveLength(before);
+  });
+});
+
+describe("the cell's profile list keeps the pool in step (07.18-14 T2)", () => {
+  beforeAll(resetPool);
+
+  const stateReport = (state: "connected" | "disconnected", profiles: Json[]) =>
+    cell.reportAuth({
+      provider: "openai-codex",
+      flowId: null,
+      state,
+      ...(state === "connected" ? { account: { email: "ana@acme", planType: "plus" } } : {}),
+      profiles,
+    });
+  const P1 = { profileId: "openai:p1", email: "ana@acme", planType: "Plus", usable: true };
+  const P2 = { profileId: "openai:p2", email: null, planType: null, usable: true };
+  const P3 = { profileId: "openai:p3", email: "cy@acme", planType: "plus", usable: true };
+  const live = async () => (await poolRows()).filter((r) => r.removed_at === null);
+
+  it("the pre-07.18 sign-in becomes the first ChatGPT pool account; the same report twice writes nothing more", async () => {
+    expect((await stateReport("connected", [P1, P2])).status).toBe(200);
+    expect(
+      (await poolRows()).map((r) => [
+        r.cell_profile_id,
+        r.label,
+        r.origin,
+        r.enabled,
+        r.priority,
+        r.plan_type,
+      ]),
+    ).toEqual([
+      ["openai:p1", "ana@acme", "adopted", true, 0, "plus"],
+      ["openai:p2", "ChatGPT account", "adopted", true, 1, null],
+    ]);
+    const audits = (await poolAudits()).length;
+    expect((await stateReport("connected", [P1, P2])).status).toBe(200);
+    expect(await poolRows()).toHaveLength(2);
+    expect(await poolAudits()).toHaveLength(audits);
+    // The adopted accounts reach the cell (failover: both, in order).
+    expect((await snapshot()).accountPool.chatgpt.order).toEqual(["openai:p1", "openai:p2"]);
+  });
+
+  it("a profile the cell no longer holds leaves the pool; an unusable one needs a sign-in", async () => {
+    expect((await stateReport("connected", [P1])).status).toBe(200);
+    const p2 = (await poolRows()).find((r) => r.cell_profile_id === "openai:p2");
+    expect(p2?.removed_at).not.toBeNull();
+    expect((await poolAudits()).at(-1)).toMatchObject({
+      action: "account_pool.account_removed",
+      resource_id: p2?.id,
+    });
+
+    // One usable profile left keeps the provider connected.
+    expect((await stateReport("disconnected", [{ ...P1, usable: false }, P3])).status).toBe(200);
+    expect((await live()).map((r) => [r.cell_profile_id, r.credential_state])).toEqual([
+      ["openai:p1", "needs_sign_in"],
+      ["openai:p3", "ok"],
+    ]);
+    expect((await codexProvider())?.account.needsReconnect).toBe(false);
+
+    // None usable: the provider needs a reconnect (bots keep their model).
+    const none = [
+      { ...P1, usable: false },
+      { ...P3, usable: false },
+    ];
+    expect((await stateReport("disconnected", none)).status).toBe(200);
+    expect((await codexProvider())?.account.needsReconnect).toBe(true);
+    expect((await live()).map((r) => r.credential_state)).toEqual(["needs_sign_in", "needs_sign_in"]);
+
+    // Usable again: the credential is ok again.
+    expect((await stateReport("connected", [P1, P3])).status).toBe(200);
+    expect((await live()).map((r) => r.credential_state)).toEqual(["ok", "ok"]);
+  });
+
+  it("another organization's cell report creates rows only in that organization", async () => {
+    const orgB = randomUUID();
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Org B', $2)", [
+      orgB,
+      `b-${orgB}`,
+    ]);
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, sha256Hex(tokenB)],
+    );
+    await stack.built.core.db.withTenant({ organizationId: orgB, userId: null }, (tx) =>
+      applySubscriptionConnected(
+        stack.built.core,
+        tx,
+        "openai-codex",
+        { email: "b@b.test", planType: "plus" },
+        { flowId: null },
+      ),
+    );
+    const before = await poolRows();
+    const cellB = new FakeCellPlugin({ apiUrl: stack.baseUrl, token: tokenB });
+    const res = await cellB.reportAuth({
+      provider: "openai-codex",
+      flowId: null,
+      state: "connected",
+      account: { email: "b@b.test", planType: "plus" },
+      profiles: [{ profileId: "openai:p1", email: "b@b.test", planType: "plus", usable: true }],
+    });
+    expect(res.status).toBe(200);
+    expect((await poolRows(orgB)).map((r) => [r.organization_id, r.cell_profile_id])).toEqual([
+      [orgB, "openai:p1"],
+    ]);
+    expect(await poolRows()).toEqual(before);
   });
 });

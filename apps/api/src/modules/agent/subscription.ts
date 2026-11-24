@@ -108,13 +108,17 @@ export async function applySubscriptionConnected(
 /**
  * The cell reports it no longer holds usable credentials for a connected subscription (state volume reset,
  * token revoked at the provider). Keep the row (bots keep their model) and flag it for reconnection.
+ * Phase 07.18 (D-12, PD-12): with several pool profiles in the cell, the row stays connected while at least one of
+ * them is usable (`usableProfiles`, from the cell's profile list; absent = an older cell, today's behaviour).
  */
 export async function markSubscriptionNeedsReconnect(
   core: Core,
   tx: Tx,
   provider: SubscriptionProviderKind,
   reason: string,
+  opts: { usableProfiles?: number | null } = {},
 ): Promise<boolean> {
+  if ((opts.usableProfiles ?? 0) > 0) return false;
   const { organizationId } = tenantOf(tx);
   const row = await findRow(tx, provider);
   if (!row?.account || row.account.needsReconnect) return false;

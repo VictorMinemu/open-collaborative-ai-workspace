@@ -9,6 +9,7 @@ import {
   AgentChannelRuntimeReport,
   AgentChannelStatusReport,
   AgentChannelTyping,
+  BotPoolSignIn,
   CellSnapshot,
   cellTopic,
   IdParams,
@@ -339,7 +340,10 @@ export function createAgentChannelModule(
           schema: {
             tags,
             params: SubscriptionProviderParams,
-            body: z.object({ restart: z.boolean().optional() }).optional(),
+            // 07.18 (D-10): `poolAccount` signs in a ChatGPT account for bots as its own pool account.
+            body: z
+              .object({ restart: z.boolean().optional(), poolAccount: BotPoolSignIn.optional() })
+              .optional(),
             response: { 200: ProviderAuthStatus },
           },
         },
@@ -354,7 +358,7 @@ export function createAgentChannelModule(
               clientKind: a.clientKind,
             },
             req.params.provider,
-            { restart: req.body?.restart },
+            { restart: req.body?.restart, poolAccount: req.body?.poolAccount },
           );
         },
       );

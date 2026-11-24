@@ -3,16 +3,19 @@ import type { ClientKind } from "@ocw/contracts";
 import {
   AgentChannelEventTypes,
   type AgentChannelProviderAuthReport,
+  type BotPoolSignIn,
   cellTopic,
   EphemeralTypes,
   type ProviderAuthError,
   type ProviderAuthState,
   type ProviderAuthStatus,
+  poolProfileId,
   type SubscriptionProviderKind,
 } from "@ocw/contracts";
 import type { Core } from "../../core";
 import { conflict } from "../../lib/errors";
 import { applySubscriptionConnected, markSubscriptionNeedsReconnect, subscriptionAccount } from "../agent";
+import { applyCellProfileReport, type PoolSignInFlow } from "./cell-pool";
 import type { CellPresence } from "./presence";
 
 /**
@@ -46,6 +49,11 @@ interface FlowRecord {
   userCode: string | null;
   expiresAt: string | null;
   error: ProviderAuthError | null;
+  /**
+   * 07.18 (D-10, PD-12): "ChatGPT for bots": the pool account this sign-in creates, its label and the profile id asked
+   * of the cell. Absent or null = the Models page card (today's single sign-in).
+   */
+  poolAccount?: PoolSignInFlow | null;
 }
 
 /** The signed-in user starting or cancelling a sign-in; audits record their real client kind. */
@@ -151,11 +159,16 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
     };
   }
 
-  /** Admin "Connect": idempotent while a flow is active (unless `restart`). */
+  /**
+   * Admin "Connect": idempotent while a flow is active (unless `restart`). With `poolAccount` (07.18, D-10) the sign-in
+   * adds a ChatGPT account for bots to the pool: its id is chosen here and the cell is asked to store the sign-in as
+   * `openai:pool-<id>` (PD-12); the row is created only when the cell reports it connected. A different sign-in while
+   * one runs is 409 `sign_in_in_progress`.
+   */
   async function start(
     ctx: ProviderAuthCaller,
     provider: SubscriptionProviderKind,
-    opts: { restart?: boolean } = {},
+    opts: { restart?: boolean; poolAccount?: BotPoolSignIn } = {},
   ): Promise<ProviderAuthStatus> {
     const org = ctx.organizationId;
     const cell = await presence.status(org, null);
@@ -166,10 +179,22 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
       );
     }
     const current = effective(await read(org, provider));
-    if (isActive(current) && !opts.restart) return status(org, provider);
+    if (isActive(current) && !opts.restart) {
+      if ((current?.poolAccount?.label ?? null) === (opts.poolAccount?.label ?? null))
+        return status(org, provider);
+      throw conflict(
+        "Another sign-in is in progress. Finish or cancel it before starting this one.",
+        "sign_in_in_progress",
+      );
+    }
 
     const flowId = randomUUID();
     const now = new Date();
+    const accountId = opts.poolAccount ? randomUUID() : null;
+    const poolAccount: PoolSignInFlow | null =
+      opts.poolAccount && accountId
+        ? { accountId, label: opts.poolAccount.label, profileId: poolProfileId(accountId) }
+        : null;
     await core.db.withTenant({ organizationId: org, userId: ctx.userId }, async (tx) => {
       if (current && isActive(current)) {
         await core.realtime.appendEvent(tx, cellTopic(org), AgentChannelEventTypes.providerAuthCancel, {
@@ -186,8 +211,24 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         resourceId: null,
         sessionId: ctx.sessionId,
         clientKind: ctx.clientKind,
-        metadata: { provider, flowId, method: "device-code", restart: !!opts.restart },
+        metadata: {
+          provider,
+          flowId,
+          method: "device-code",
+          restart: !!opts.restart,
+          ...(poolAccount ? { poolAccountId: poolAccount.accountId } : {}),
+        },
       });
+      if (poolAccount) {
+        await core.audit.record(tx, {
+          action: "account_pool.sign_in_started",
+          resourceType: "account_pool_account",
+          resourceId: poolAccount.accountId,
+          sessionId: ctx.sessionId,
+          clientKind: ctx.clientKind,
+          metadata: { provider: "chatgpt", kind: "cell_profile", label: poolAccount.label, flowId },
+        });
+      }
       await core.realtime.appendEvent(tx, cellTopic(org), AgentChannelEventTypes.providerAuthStart, {
         type: AgentChannelEventTypes.providerAuthStart,
         organizationId: org,
@@ -196,6 +237,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         provider,
         method: "device-code",
         startBefore: new Date(now.getTime() + START_EVENT_TTL_MS).toISOString(),
+        ...(poolAccount ? { profileId: poolAccount.profileId } : {}),
       });
       // Written before commit so a fast cell report always finds its flow.
       await write(org, {
@@ -209,6 +251,7 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         userCode: null,
         expiresAt: null,
         error: null,
+        poolAccount,
       });
     });
     await notifyBrowsers(org, provider, "starting");
@@ -256,19 +299,31 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
     const { provider } = body;
 
     // Out-of-band credential state (no flow): refresh identity or flag a lost sign-in.
+    // 07.18 (PD-12, E14): the list of profiles the cell holds keeps the pool's bot accounts in step, in the same
+    // transaction as the provider row.
     if (body.flowId === null) {
       if (body.state === "connected") {
-        const account = await core.db.withTenant({ organizationId: org, userId: null }, (tx) =>
-          subscriptionAccount(tx, provider),
-        );
-        if (!account) throw conflict("This subscription is not connected", "not_connected");
-        await core.db.withTenant({ organizationId: org, userId: null }, (tx) =>
-          applySubscriptionConnected(core, tx, provider, normalizeAccount(body.account), { flowId: null }),
-        );
+        await core.db.withTenant({ organizationId: org, userId: null }, async (tx) => {
+          const account = await subscriptionAccount(tx, provider);
+          if (!account) throw conflict("This subscription is not connected", "not_connected");
+          await applySubscriptionConnected(core, tx, provider, normalizeAccount(body.account), {
+            flowId: null,
+          });
+          await applyCellProfileReport(core, tx, body, null);
+        });
       } else if (body.state === "disconnected") {
-        await core.db.withTenant({ organizationId: org, userId: null }, (tx) =>
-          markSubscriptionNeedsReconnect(core, tx, provider, body.error?.code ?? "missing_credentials"),
-        );
+        await core.db.withTenant({ organizationId: org, userId: null }, async (tx) => {
+          const pool = await applyCellProfileReport(core, tx, body, null);
+          await markSubscriptionNeedsReconnect(
+            core,
+            tx,
+            provider,
+            body.error?.code ?? "missing_credentials",
+            {
+              usableProfiles: pool.usableProfiles,
+            },
+          );
+        });
       } else {
         throw conflict("A flow id is required for this state", "flow_required");
       }
@@ -308,6 +363,11 @@ export function createProviderAuth(core: Core, presence: CellPresence) {
         await core.db.withTenant({ organizationId: org, userId: flow.startedBy }, async (tx) => {
           await applySubscriptionConnected(core, tx, provider, normalizeAccount(body.account), {
             flowId: flow.flowId,
+          });
+          // 07.18 (PD-12): the signed-in profile joins the pool (the requested account, or adopted when new).
+          await applyCellProfileReport(core, tx, body, {
+            flowId: flow.flowId,
+            poolAccount: flow.poolAccount ?? null,
           });
           await write(org, {
             ...flow,

@@ -1,14 +1,28 @@
 import {
+  type AgentChannelProviderAuthReport,
   CELL_CLAUDE_TOKENS,
   type CellAccountPool,
+  type CellAuthProfileReport,
   claudeTokenProfileId,
+  POOL_LIMITS,
   type PoolPolicy,
+  type PoolProvider,
   type SubscriptionProviderKind,
 } from "@ocw/contracts";
 import { accountPoolAccounts, type Tx } from "@ocw/db";
-import { asc, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Core } from "../../core";
-import { loadPoolPolicy, openPoolToken, type PoolAccountRow, servesConsumer } from "../account-pool";
+import { HttpError } from "../../lib/errors";
+import {
+  insertPoolAccount,
+  listPoolAccounts,
+  loadPoolPolicy,
+  lockPool,
+  openPoolToken,
+  type PoolAccountRow,
+  servesConsumer,
+} from "../account-pool";
+import { notifyCell, subscriptionAccount } from "../agent";
 
 /**
  * The account pool as the organization's bots use it (Phase 07.18, D-02, D-04, D-12, D-15, PD-12, PD-13, PD-18;
@@ -109,5 +123,260 @@ export async function cellAccountPool(
     },
     withheldSubscriptions: chatgptManaged && enabledProfiles.length === 0 ? ["openai-codex"] : [],
     accountIds: [...tokens.map((t) => t.accountId), ...profiles.map((p) => p.accountId)],
+  };
+}
+
+// ---------------------------------------------------------------- what the cell reports (PD-11, PD-12, E14)
+
+/** The pool that holds a subscription's accounts for bots. */
+const POOL_OF_SUBSCRIPTION: Record<SubscriptionProviderKind, PoolProvider> = { "openai-codex": "chatgpt" };
+
+/** "ChatGPT for bots" (D-10): the account id and profile id are fixed when the admin starts the sign-in. */
+export interface PoolSignInFlow {
+  accountId: string;
+  label: string;
+  /** The profile id asked of the cell (`poolProfileId(accountId)`). */
+  profileId: string;
+}
+
+/** The sign-in flow a `connected` report finishes. */
+export interface CellProfileFlow {
+  flowId: string;
+  /** Null for a sign-in started without a pool account (the Models page card). */
+  poolAccount: PoolSignInFlow | null;
+}
+
+export interface CellProfileResult {
+  /** Whether the pool changed (the cell was then told to re-read its config). */
+  changed: boolean;
+  /** Usable profiles in a credential state report's list; null when the report carries none (an older cell). */
+  usableProfiles: number | null;
+}
+
+const FALLBACK_LABEL = "ChatGPT account";
+const labelOf = (email: string | null | undefined) =>
+  email?.trim().slice(0, POOL_LIMITS.labelMax).trim() || FALLBACK_LABEL;
+const planOf = (plan: string | null | undefined) => plan?.trim().toLowerCase().slice(0, 64) || null;
+
+type AccountPatch = Partial<typeof accountPoolAccounts.$inferInsert>;
+
+async function liveProfiles(tx: Tx, provider: PoolProvider): Promise<PoolAccountRow[]> {
+  return (await listPoolAccounts(tx, provider)).filter((r) => r.kind === "cell_profile");
+}
+
+async function patchAccount(tx: Tx, id: string, patch: AccountPatch): Promise<void> {
+  await tx
+    .update(accountPoolAccounts)
+    .set({ ...patch, updatedAt: new Date().toISOString() })
+    .where(eq(accountPoolAccounts.id, id));
+}
+
+/** A cell profile row at the end of the order; a full pool leaves the profile out (logged by provider only). */
+async function addProfile(
+  core: Core,
+  tx: Tx,
+  input: {
+    id?: string;
+    provider: PoolProvider;
+    label: string;
+    origin: "admin" | "adopted";
+    cellProfileId: string;
+    planType: string | null;
+  },
+): Promise<PoolAccountRow | null> {
+  try {
+    return await insertPoolAccount(tx, core.audit, { ...input, kind: "cell_profile" });
+  } catch (err) {
+    if (err instanceof HttpError && err.code === "too_many_accounts") {
+      core.log.warn({ provider: input.provider }, "account pool full; a cell profile was not added");
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function auditSignedIn(
+  core: Core,
+  tx: Tx,
+  row: Pick<PoolAccountRow, "id" | "provider" | "label" | "origin" | "planType">,
+  flowId: string,
+): Promise<void> {
+  await core.audit.record(tx, {
+    action: "account_pool.signed_in",
+    resourceType: "account_pool_account",
+    resourceId: row.id,
+    // The cell completed the flow; the tenant user of tx is the admin who started it.
+    clientKind: "agent",
+    metadata: {
+      provider: row.provider,
+      kind: "cell_profile",
+      label: row.label,
+      origin: row.origin,
+      planType: row.planType,
+      flowId,
+      source: "openclaw_cell",
+    },
+  });
+}
+
+/** A finished sign-in: its profile joins the pool (or, signed in again, is ok again). A replay changes nothing. */
+async function applySignedIn(
+  core: Core,
+  tx: Tx,
+  provider: PoolProvider,
+  profileId: string,
+  report: AgentChannelProviderAuthReport,
+  flow: CellProfileFlow,
+): Promise<boolean> {
+  const plan = planOf(report.account?.planType);
+  const pool = flow.poolAccount;
+  const existing = (await liveProfiles(tx, provider)).find((r) => r.cellProfileId === profileId);
+  if (existing) {
+    const patch: AccountPatch = {};
+    if (existing.credentialState !== "ok") patch.credentialState = "ok";
+    if (plan !== null && plan !== existing.planType) patch.planType = plan;
+    // The cell listed the profile before this report arrived: the admin's label wins.
+    if (pool && existing.origin === "adopted") Object.assign(patch, { origin: "admin", label: pool.label });
+    if (Object.keys(patch).length === 0) return false;
+    await patchAccount(tx, existing.id, patch);
+    await auditSignedIn(core, tx, { ...existing, ...patch }, flow.flowId);
+    return true;
+  }
+  if (pool) {
+    // A replayed report for an account removed since is not revived.
+    const [taken] = await tx
+      .select({ id: accountPoolAccounts.id })
+      .from(accountPoolAccounts)
+      .where(eq(accountPoolAccounts.id, pool.accountId));
+    if (taken) return false;
+  }
+  const row = await addProfile(core, tx, {
+    ...(pool ? { id: pool.accountId } : {}),
+    provider,
+    label: pool?.label ?? labelOf(report.account?.email),
+    origin: pool ? "admin" : "adopted",
+    cellProfileId: profileId,
+    planType: plan,
+  });
+  if (!row) return false;
+  await auditSignedIn(core, tx, row, flow.flowId);
+  return true;
+}
+
+/**
+ * A credential state report's profile list (PD-12, E14): a profile the pool lacks is adopted (only while the
+ * subscription is connected), a pool profile the cell no longer holds leaves the pool, and each one's credential
+ * follows `usable`. The report binds to the cell's own organization (the transaction's tenant), so it never writes
+ * another organization's rows.
+ */
+async function reconcileProfiles(
+  core: Core,
+  tx: Tx,
+  provider: PoolProvider,
+  report: AgentChannelProviderAuthReport,
+  profiles: readonly CellAuthProfileReport[],
+): Promise<boolean> {
+  const reported = new Map<string, CellAuthProfileReport>();
+  for (const p of profiles) if (!reported.has(p.profileId)) reported.set(p.profileId, p);
+  const live = await liveProfiles(tx, provider);
+  const byProfile = new Map(live.map((r) => [r.cellProfileId, r]));
+  const connected = (await subscriptionAccount(tx, report.provider)) !== null;
+  let changed = false;
+
+  for (const p of reported.values()) {
+    const state = p.usable ? "ok" : "needs_sign_in";
+    const plan = planOf(p.planType);
+    const row = byProfile.get(p.profileId);
+    if (row) {
+      const patch: AccountPatch = {};
+      if (row.credentialState !== state) patch.credentialState = state;
+      if (plan !== null && plan !== row.planType) patch.planType = plan;
+      const keys = Object.keys(patch);
+      if (keys.length === 0) continue;
+      await patchAccount(tx, row.id, patch);
+      await core.audit.record(tx, {
+        action: "account_pool.account_updated",
+        resourceType: "account_pool_account",
+        resourceId: row.id,
+        actorKind: "system",
+        clientKind: "agent",
+        metadata: {
+          provider,
+          kind: row.kind,
+          label: row.label,
+          changed: keys,
+          credentialState: state,
+          source: "openclaw_cell",
+        },
+      });
+      changed = true;
+      continue;
+    }
+    if (!connected) continue;
+    const added = await addProfile(core, tx, {
+      provider,
+      label: labelOf(p.email),
+      origin: "adopted",
+      cellProfileId: p.profileId,
+      planType: plan,
+    });
+    if (!added) continue;
+    if (!p.usable) await patchAccount(tx, added.id, { credentialState: "needs_sign_in" });
+    changed = true;
+  }
+
+  for (const row of live) {
+    if (row.cellProfileId !== null && reported.has(row.cellProfileId)) continue;
+    const at = new Date().toISOString();
+    await tx
+      .update(accountPoolAccounts)
+      .set({ removedAt: at, updatedAt: at })
+      .where(and(eq(accountPoolAccounts.id, row.id), isNull(accountPoolAccounts.removedAt)));
+    await core.audit.record(tx, {
+      action: "account_pool.account_removed",
+      resourceType: "account_pool_account",
+      resourceId: row.id,
+      actorKind: "system",
+      clientKind: "agent",
+      metadata: {
+        provider,
+        kind: row.kind,
+        origin: row.origin,
+        label: row.label,
+        reason: "not_in_cell",
+        source: "openclaw_cell",
+      },
+    });
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * What a cell's `POST /provider-auth` means for the pool, in the caller's transaction (the one that updates the
+ * provider row): a `connected` report of a flow adds or refreshes its profile (the profile id the cell reports, else the
+ * one asked for; A-03), and a credential state report with `profiles` reconciles the pool's bot accounts. Any change
+ * tells the cell to re-read its config. A report with neither changes nothing (an older cell).
+ */
+export async function applyCellProfileReport(
+  core: Core,
+  tx: Tx,
+  report: AgentChannelProviderAuthReport,
+  flow: CellProfileFlow | null,
+): Promise<CellProfileResult> {
+  const provider = POOL_OF_SUBSCRIPTION[report.provider];
+  const profileId =
+    flow && report.state === "connected" ? (report.profileId ?? flow.poolAccount?.profileId ?? null) : null;
+  const profiles = report.flowId === null ? (report.profiles ?? null) : null;
+  if (!profileId && !profiles) return { changed: false, usableProfiles: null };
+
+  await lockPool(tx, provider);
+  let changed = false;
+  if (flow && profileId) changed = await applySignedIn(core, tx, provider, profileId, report, flow);
+  if (profiles) changed = (await reconcileProfiles(core, tx, provider, report, profiles)) || changed;
+  if (changed) await notifyCell(core, tx, "providers.updated", null);
+  return {
+    changed,
+    usableProfiles: profiles ? new Set(profiles.filter((p) => p.usable).map((p) => p.profileId)).size : null,
   };
 }
