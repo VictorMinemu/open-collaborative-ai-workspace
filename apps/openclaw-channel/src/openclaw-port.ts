@@ -1,13 +1,20 @@
 import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import type { CellSnapshot } from "./agent-channel-protocol.js";
+import { type CellSnapshot, POOL_TOKEN_ENV_RE } from "./agent-channel-protocol.js";
 import { type OpenClawPort, TurnRanError, type TurnRun } from "./bridge.js";
+import {
+  applyCellAccountPool,
+  type CellPoolDriver,
+  createOpenClawPoolDriver,
+  planCellAccountPool,
+} from "./cell-account-pool.js";
 import { CHANNEL_ID, type MappedMention } from "./mention-mapper.js";
 import {
   agentStateDirFor,
   applyPlanToDraft,
   type MutableConfig,
   planReconcile,
+  providerKeyEnvName,
   type ReconcilePlan,
 } from "./reconciler.js";
 import { type TaskTurnOutcome, type ToolGuard, toolGuard } from "./tool-guard.js";
@@ -46,7 +53,7 @@ export type PluginRuntimeLike = {
     ensureAuthProfileStore(
       agentDir?: string,
       opts?: { readOnly?: boolean; allowKeychainPrompt?: boolean },
-    ): { profiles?: Record<string, Record<string, unknown>> } | undefined;
+    ): { profiles?: Record<string, Record<string, unknown>>; order?: Record<string, unknown> } | undefined;
   };
   channel: {
     routing: {
@@ -89,6 +96,8 @@ export type RealPortOptions = {
   stateDir?: string;
   /** Test seam: the `openclaw/plugin-sdk/session-store-runtime` module (quick 261113-id6). */
   sessionStore?: () => Promise<SessionStoreModule>;
+  /** Test seam (07.18): the auth store driver the account pool is applied through. */
+  poolDriver?: CellPoolDriver;
 };
 
 /** The part of OpenClaw's public session store runtime the port uses (see openclaw-sdk.d.ts). */
@@ -117,6 +126,7 @@ export function sessionKeyFor(base: string, m: Pick<MappedMention, "sessionThrea
 export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
   const { runtime, accountId } = opts;
   const guard = opts.guard ?? toolGuard;
+  const poolDriver = opts.poolDriver ?? createOpenClawPoolDriver({ runtime });
   /**
    * One run at a time per OpenClaw session: the tool gate keys the active turn by session key, so two turns of
    * one session must never overlap (the event stream processes events concurrently).
@@ -182,9 +192,30 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
           env: { ...process.env },
         },
       );
+      // 07.18 (D-02, PD-13): the pool for bots. Its tokens, like every secret, reach OpenClaw only through the gateway env.
+      const anthropicKey = cell.providers.some((p) => p.id === "anthropic" && p.apiKey);
+      const pool = planCellAccountPool(cell.accountPool, {
+        anthropicKeyEnv: anthropicKey ? providerKeyEnvName("anthropic") : null,
+      });
+      const referenced = pool.profiles.map((p) => p.envName);
+      const referencedBefore = referenced.map((name) => process.env[name]);
       // Secrets reach OpenClaw only through the gateway process env; the config holds ${ENV} refs.
       for (const [name, value] of Object.entries(plan.env)) process.env[name] = value;
-      if (!plan.changed) return { changed: false, results: plan.results };
+      for (const [name, value] of Object.entries(pool.env)) process.env[name] = value;
+      let poolEnvChanged = referenced.some((name, i) => process.env[name] !== referencedBefore[i]);
+      for (const name of Object.keys(process.env)) {
+        if (POOL_TOKEN_ENV_RE.test(name) && !(name in pool.env)) {
+          delete process.env[name];
+          poolEnvChanged = true;
+        }
+      }
+      // After the config write (or none): never fails the reconcile; a failed step is retried on the next one.
+      const applyPool = () =>
+        applyCellAccountPool(pool, poolDriver, { envChanged: poolEnvChanged, log: opts.log });
+      if (!plan.changed) {
+        await applyPool();
+        return { changed: false, results: plan.results };
+      }
       const write = (p: ReconcilePlan) =>
         runtime.config.mutateConfigFile({
           afterWrite: { mode: "auto" },
@@ -216,6 +247,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         const prefix = `OCW_MCP_${name.toUpperCase()}_`;
         for (const key of Object.keys(process.env)) if (key.startsWith(prefix)) delete process.env[key];
       }
+      await applyPool();
       opts.log?.info?.(
         `reconciled OpenClaw: agents upsert=${Object.keys(plan.upsertAgents).length} remove=${removed}, providers upsert=${Object.keys(plan.upsertProviders).length} remove=${plan.removeProviders.length}, mcp servers upsert=${Object.keys(plan.upsertMcpServers).length} remove=${plan.removeMcpServers.length}${plan.webSearchProvider ? `, web search=${plan.webSearchProvider}` : ""}${plan.compaction ? ", compaction" : ""}`,
       );

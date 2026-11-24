@@ -7,6 +7,7 @@ import type {
   CellSnapshot,
   CellSubscription,
 } from "./agent-channel-protocol.js";
+import { planCellAccountPool } from "./cell-account-pool.js";
 import { openClawAgentIdFor, sanitizeName } from "./mention-mapper.js";
 import { withTurnScopedTools } from "./turn-scoped-tools.js";
 
@@ -229,15 +230,24 @@ export function desiredAgentEntry(
 /** What a model that accepts images declares (07.8 D-14, spike ii); every other model stays text only (no `input`). */
 export const IMAGE_MODEL_INPUT = ["text", "image"] as const;
 
-export function desiredProviderEntry(provider: CellProvider, extraModels: string[] = []): ProviderEntry {
+/**
+ * @param opts.keyInProfiles 07.18 (D-02, A-05): the `anthropic` entry carries no `apiKey` while Claude pool tokens serve
+ *   bots; the org key is then the last auth profile (cell-account-pool.ts). `undefined` here = remove it on write.
+ */
+export function desiredProviderEntry(
+  provider: CellProvider,
+  extraModels: string[] = [],
+  opts: { keyInProfiles?: boolean } = {},
+): ProviderEntry {
   const ids = [...new Set([...provider.models, ...extraModels])];
   // 07.8 (D-14): OpenClaw passes a tool's image to the model only when the model declares image input; our custom
   // providers have no catalog discovery, so the API's per-model flag is the only source.
   const images = new Set(provider.imageModels ?? []);
+  const keyInProfiles = opts.keyInProfiles === true && provider.id === "anthropic";
   return {
     baseUrl: provider.baseUrl,
     api: provider.api,
-    apiKey: provider.apiKey ? envRef(providerKeyEnvName(provider.id)) : "none",
+    apiKey: keyInProfiles ? undefined : provider.apiKey ? envRef(providerKeyEnvName(provider.id)) : "none",
     models: ids.map((id) =>
       images.has(id) ? { id, name: id, input: [...IMAGE_MODEL_INPUT] } : { id, name: id },
     ),
@@ -390,7 +400,7 @@ export function planReconcile(
   },
   cell: Pick<
     CellSnapshot,
-    "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers" | "conversations"
+    "agents" | "providers" | "subscriptions" | "webSearch" | "mcpServers" | "conversations" | "accountPool"
   >,
   opts: {
     readySubscriptions?: ReadonlySet<string>;
@@ -461,9 +471,11 @@ export function planReconcile(
 
   const upsertProviders: Record<string, ProviderEntry> = {};
   const env: Record<string, string> = {};
+  // 07.18 (A-05): Claude pool tokens serve bots as auth profiles; the anthropic key then is the last profile.
+  const { keyInProfiles } = planCellAccountPool(cell.accountPool, { anthropicKeyEnv: null });
   for (const provider of cell.providers) {
     const id = openClawProviderId(provider.id);
-    const entry = desiredProviderEntry({ ...provider, id }, extraModels.get(provider.id));
+    const entry = desiredProviderEntry({ ...provider, id }, extraModels.get(provider.id), { keyInProfiles });
     if (!sameProvider(existingProviders[id], entry, provider.apiKey)) upsertProviders[id] = entry;
     if (provider.apiKey) env[providerKeyEnvName(id)] = provider.apiKey;
   }
@@ -567,7 +579,10 @@ export function applyPlanToDraft(draft: MutableConfig, plan: ReconcilePlan): voi
     draft.models ??= {};
     draft.models.providers ??= {};
     for (const [id, entry] of Object.entries(plan.upsertProviders)) {
-      draft.models.providers[id] = { ...(draft.models.providers[id] ?? {}), ...entry };
+      const next: ProviderEntry = { ...(draft.models.providers[id] ?? {}), ...entry };
+      // An owned key set to undefined is removed (07.18: the anthropic key moved to an auth profile).
+      for (const [k, v] of Object.entries(entry)) if (v === undefined) delete next[k];
+      draft.models.providers[id] = next;
     }
   }
   for (const id of plan.removeProviders ?? []) delete draft.models?.providers?.[id];

@@ -309,13 +309,63 @@ declare module "openclaw/plugin-sdk/gateway-runtime" {
   ): Promise<unknown>;
 }
 
-/** Public, typed `openclaw/plugin-sdk/provider-auth` (subset). */
+/**
+ * Public, typed `openclaw/plugin-sdk/provider-auth` (subset). Every writer resolves null when the store lock is busy
+ * (`dist/provider-auth-write-compat-*.mjs` in 2026.9.7); omitted `agentDir` = the shared `main` store.
+ *
+ * 07.18 probes, read from the pinned 2026.9.7 dist (`dist/plugin-sdk/provider-auth.js`, `dist/profiles-*.mjs`,
+ * `dist/order-*.mjs`, `dist/model-auth-provider-*.mjs`, `dist/oauth-*.mjs`, `dist/gateway/server-methods` handler
+ * `dist/models-auth-order-*.mjs`, docs `gateway/authentication.md`, `auth-credential-semantics.md`):
+ *
+ * - **A-04 (order).** The gateway method is `models.authOrderSet` `{ provider, profileIds: string[] | null, agentId? }`
+ *   (null clears). It refuses a list that leaves out any stored profile of the provider ("profileIds must include every
+ *   available profile") and refuses when `auth.order` in config owns the order, so it cannot keep a disabled profile
+ *   out. What it calls, `setAuthProfileOrder`, only writes `store.order[provider]` under the store lock; the cell does
+ *   the same through `updateAuthProfileStoreWithLock`. At selection (`resolveAuthProfileOrderWithMetadata`) an explicit
+ *   order is the only candidate list: unlisted profiles are excluded (`models status --probe` shows
+ *   `excluded_by_auth_order`), listed ones keep their order and cooling ones go last. Exception: when every listed
+ *   profile is missing from the store, OpenClaw falls back to all stored profiles. No order = OAuth before token
+ *   before api_key, then least recently used. A stored order beats `auth.order` in config.
+ * - **A-05 (token profiles before the provider key) holds.** `resolveApiKeyForProviderCore` tries, in order: a session
+ *   pin, a provider entry whose `apiKey` names a stored profile, an entry with `auth: "api-key"` (the reconciler never
+ *   sets it), non-secret markers, then the auth profiles in order, and only then the entry's own key. A `token`
+ *   profile may carry `tokenRef` (an env SecretRef) instead of `token`; `resolveApiKeyForProfile` reads it from the
+ *   runtime snapshot that `refreshProviderLoginAuthState` re-publishes from the gateway env. Not exercised with a real
+ *   setup-token here (no real account in tests): owner UAT.
+ */
 declare module "openclaw/plugin-sdk/provider-auth" {
   export function removeProviderAuthProfilesWithLock(params: {
     cfg?: Record<string, unknown>;
     provider: string;
     agentDir?: string;
+    /** Exact ids (whatever their provider) instead of every profile of `provider`. */
     profileIds?: string[];
+  }): Promise<unknown | null>;
+
+  /** An env (or file/exec/store) SecretRef: exactly these three keys. */
+  export type SecretRef = { source: "env" | "file" | "exec" | "store"; provider: string; id: string };
+
+  export type AuthProfileCredential =
+    | { type: "token"; provider: string; token?: string; tokenRef?: SecretRef; expires?: number }
+    | { type: "api_key"; provider: string; key?: string; keyRef?: SecretRef }
+    | ({ type: "oauth"; provider: string } & Record<string, unknown>);
+
+  /** The function behind `openclaw models auth paste-token` (07.18, A-05): one profile, under the store lock. */
+  export function upsertAuthProfileWithLock(params: {
+    profileId: string;
+    credential: AuthProfileCredential;
+    agentDir?: string;
+    stateDir?: string;
+  }): Promise<unknown | null>;
+
+  /** A locked read-modify-write of the auth store; `updater` returns whether it changed anything (07.18, A-04). */
+  export function updateAuthProfileStoreWithLock(params: {
+    agentDir?: string;
+    saveOptions?: { preserveOrderProfileIds?: string[] };
+    updater: (store: {
+      profiles: Record<string, Record<string, unknown>>;
+      order?: Record<string, string[]>;
+    }) => boolean;
   }): Promise<unknown | null>;
 }
 
