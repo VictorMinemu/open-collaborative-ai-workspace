@@ -212,7 +212,7 @@ describe("Add Claude account (Task 1)", () => {
     expect(token).toContain('autoComplete="off"');
     expect(token).toContain('value=""');
     const save = tagsOf(html, "claude-account-save")[0] ?? "";
-    expect(save).toMatch(/disabled/);
+    expect(save).toContain(` disabled=""`);
   });
 
   it("refuses an API key inline with the contract's sentence; Save stays disabled", () => {
@@ -223,7 +223,18 @@ describe("Add Claude account (Task 1)", () => {
     );
     const alert = html.match(/<p[^>]*role="alert"[^>]*>([^<]*)<\/p>/)?.[1] ?? "";
     expect(alert).toBe("This is an API key. Add it in Settings › Models.");
-    expect(tagsOf(html, "claude-account-save")[0]).toMatch(/disabled/);
+    expect(tagsOf(html, "claude-account-save")[0]).toContain(` disabled=""`);
+  });
+
+  it("Save turns on with a label and a setup-token", () => {
+    const html = inDialog(
+      <ClaudeAccountForm
+        onDone={() => undefined}
+        initial={{ label: "ana@acme", token: `sk-ant-oat01-${"b".repeat(40)}` }}
+      />,
+    );
+    expect(tagsOf(html, "claude-account-save")[0]).not.toContain(` disabled=""`);
+    expect(html).not.toContain('role="alert"');
   });
 
   it("accepts a setup-token; empty reads as no error yet", () => {
@@ -272,10 +283,10 @@ describe("account rows (Task 2)", () => {
     expect(named(html, "Use ana@acme")).toMatch(/aria-checked="true"|data-checked/);
     expect(named(html, "Rename ana@acme")).not.toBe("");
     expect(named(html, "Remove ana@acme")).not.toBe("");
-    expect(named(html, "Move ana@acme up")).toMatch(/disabled/);
-    expect(named(html, "Move ana@acme down")).not.toMatch(/disabled/);
-    expect(named(html, "Move bea@acme up")).not.toMatch(/disabled/);
-    expect(named(html, "Move cai@acme down")).toMatch(/disabled/);
+    expect(named(html, "Move ana@acme up")).toContain(` disabled=""`);
+    expect(named(html, "Move ana@acme down")).not.toContain(` disabled=""`);
+    expect(named(html, "Move bea@acme up")).not.toContain(` disabled=""`);
+    expect(named(html, "Move cai@acme down")).toContain(` disabled=""`);
     // A token account can get a new token.
     expect(named(html, "Replace the token of cai@acme")).not.toBe("");
   });
@@ -334,7 +345,13 @@ describe("strategy, scope and fallback (Task 2)", () => {
         view={view({
           chatgpt: [
             account({ id: BEA, provider: "chatgpt", kind: "device_slot", label: "ops@acme", device: BUILD }),
-            account({ id: CAI, provider: "chatgpt", kind: "cell_profile", label: "bots@acme", planType: "pro" }),
+            account({
+              id: CAI,
+              provider: "chatgpt",
+              kind: "cell_profile",
+              label: "bots@acme",
+              planType: "pro",
+            }),
           ],
         })}
       />,
@@ -356,9 +373,10 @@ describe("the row and policy writes (Task 2)", () => {
       id: ANA,
       body: { enabled: false },
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(qc.getQueryData<AccountPoolView>(poolKeys.view)?.claude.accounts[0]?.enabled).toBe(false);
+    await vi.waitFor(() =>
+      expect(qc.getQueryData<AccountPoolView>(poolKeys.view)?.claude.accounts[0]?.enabled).toBe(false),
+    );
+    expect(api.patch).toHaveBeenCalledTimes(1);
     release(account({ enabled: false, status: "disabled" }));
     await pending;
     const [path, opts] = vi.mocked(api.patch).mock.calls[0] ?? [];
@@ -376,7 +394,9 @@ describe("the row and policy writes (Task 2)", () => {
   it("reorder waits for the server and takes its view", async () => {
     const qc = new QueryClient();
     qc.setQueryData(poolKeys.view, view({ claude: THREE }));
-    const answer = view({ claude: [THREE[1] as PoolAccount, THREE[0] as PoolAccount, THREE[2] as PoolAccount] });
+    const answer = view({
+      claude: [THREE[1] as PoolAccount, THREE[0] as PoolAccount, THREE[2] as PoolAccount],
+    });
     vi.mocked(api.put).mockResolvedValue(answer);
     await new MutationObserver(qc, reorderPoolMutation(qc)).mutate({
       provider: "claude",

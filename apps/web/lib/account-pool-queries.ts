@@ -1,6 +1,16 @@
 "use client";
 
-import { AccountPoolPreview, AccountPoolView, type AddClaudeTokenRequest, PoolAccount } from "@ocw/contracts";
+import {
+  AccountPoolPreview,
+  AccountPoolView,
+  type AddClaudeTokenRequest,
+  Ok,
+  PoolAccount,
+  PoolPolicy,
+  type PoolProvider,
+  type UpdatePoolAccountRequest,
+  type UpdatePoolPolicyRequest,
+} from "@ocw/contracts";
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, isApiError } from "./api";
 
@@ -13,6 +23,7 @@ import { api, isApiError } from "./api";
 export const poolKeys = {
   all: ["account-pool"] as const,
   view: ["account-pool", "view"] as const,
+  previews: ["account-pool", "preview"] as const,
   preview: (deviceId: string) => ["account-pool", "preview", deviceId] as const,
 };
 
@@ -66,4 +77,106 @@ export function addClaudeAccountMutation(qc: QueryClient) {
 export function useAddClaudeAccount() {
   const qc = useQueryClient();
   return useMutation(addClaudeAccountMutation(qc));
+}
+
+/** Replace one account in the cached view (both providers; ids are unique). */
+function patchAccount(
+  view: AccountPoolView | undefined,
+  id: string,
+  change: (a: PoolAccount) => PoolAccount,
+): AccountPoolView | undefined {
+  if (!view) return view;
+  const map = (p: AccountPoolView["claude"]) => ({
+    ...p,
+    accounts: p.accounts.map((a) => (a.id === id ? change(a) : a)),
+  });
+  return { claude: map(view.claude), chatgpt: map(view.chatgpt) };
+}
+
+/**
+ * `PATCH /account-pool/accounts/:id` (label, enabled, weight, a new token). Optimistic only for the on/off switch,
+ * rolled back when the API refuses; the answer replaces the row (the API decides its status).
+ */
+export function updatePoolAccountMutation(qc: QueryClient) {
+  return {
+    mutationFn: ({ id, body }: { id: string; body: UpdatePoolAccountRequest }) =>
+      api.patch(`/api/v1/account-pool/accounts/${id}`, { body, schema: PoolAccount }),
+    onMutate: async ({ id, body }: { id: string; body: UpdatePoolAccountRequest }) => {
+      if (body.enabled === undefined) return { previous: undefined };
+      await qc.cancelQueries({ queryKey: poolKeys.view });
+      const previous = qc.getQueryData<AccountPoolView>(poolKeys.view);
+      const enabled = body.enabled;
+      qc.setQueryData(
+        poolKeys.view,
+        patchAccount(previous, id, (a) => ({ ...a, enabled })),
+      );
+      return { previous };
+    },
+    onError: (
+      _err: unknown,
+      _vars: { id: string; body: UpdatePoolAccountRequest },
+      ctx: { previous: AccountPoolView | undefined } | undefined,
+    ) => {
+      if (ctx?.previous) qc.setQueryData(poolKeys.view, ctx.previous);
+    },
+    onSuccess: (account: PoolAccount) => {
+      qc.setQueryData(
+        poolKeys.view,
+        patchAccount(qc.getQueryData<AccountPoolView>(poolKeys.view), account.id, () => account),
+      );
+      void qc.invalidateQueries({ queryKey: poolKeys.previews });
+    },
+  };
+}
+
+export function useUpdatePoolAccount() {
+  const qc = useQueryClient();
+  return useMutation(updatePoolAccountMutation(qc));
+}
+
+/** `PUT /account-pool/:provider/order`: waits for the server, whose view replaces the cache. */
+export function reorderPoolMutation(qc: QueryClient) {
+  return {
+    mutationFn: ({ provider, accountIds }: { provider: PoolProvider; accountIds: string[] }) =>
+      api.put(`/api/v1/account-pool/${provider}/order`, { body: { accountIds }, schema: AccountPoolView }),
+    onSuccess: (view: AccountPoolView) => qc.setQueryData(poolKeys.view, view),
+  };
+}
+
+export function useReorderPool() {
+  const qc = useQueryClient();
+  return useMutation(reorderPoolMutation(qc));
+}
+
+/** `PUT /account-pool/:provider/policy` (strategy, scope, fallback to the device's login). */
+export function updatePoolPolicyMutation(qc: QueryClient) {
+  return {
+    mutationFn: ({ provider, body }: { provider: PoolProvider; body: UpdatePoolPolicyRequest }) =>
+      api.put(`/api/v1/account-pool/${provider}/policy`, { body, schema: PoolPolicy }),
+    onSuccess: (policy: PoolPolicy) => {
+      const view = qc.getQueryData<AccountPoolView>(poolKeys.view);
+      if (view)
+        qc.setQueryData(poolKeys.view, { ...view, [policy.provider]: { ...view[policy.provider], policy } });
+      // The members' previews name the strategy.
+      void qc.invalidateQueries({ queryKey: poolKeys.previews });
+    },
+  };
+}
+
+export function useUpdatePoolPolicy() {
+  const qc = useQueryClient();
+  return useMutation(updatePoolPolicyMutation(qc));
+}
+
+/** `DELETE /account-pool/accounts/:id`: sessions on it move to the next account at their next turn (PD-25). */
+export function removePoolAccountMutation(qc: QueryClient) {
+  return {
+    mutationFn: (id: string) => api.del(`/api/v1/account-pool/accounts/${id}`, { schema: Ok }),
+    onSuccess: () => refreshPool(qc),
+  };
+}
+
+export function useRemovePoolAccount() {
+  const qc = useQueryClient();
+  return useMutation(removePoolAccountMutation(qc));
 }

@@ -2,18 +2,28 @@
 
 import {
   type AccountPoolView,
-  POOL_STRATEGY_TEXT,
+  BOTS_WEIGHTED_NOTE,
+  CELL_CLAUDE_TOKENS,
   type PoolAccount,
+  type PoolPolicy,
   type PoolProvider,
+  type PoolScope,
+  type UpdatePoolPolicyRequest,
 } from "@ocw/contracts";
-import { Plus } from "lucide-react";
-import { useState } from "react";
+import { Info, Plus } from "lucide-react";
+import { useId, useState } from "react";
+import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAccountPool } from "@/lib/account-pool-queries";
+import { Switch } from "@/components/ui/switch";
+import { moveInOrder, strategyOptions } from "@/lib/account-pool-format";
+import { useAccountPool, useReorderPool, useUpdatePoolPolicy } from "@/lib/account-pool-queries";
+import { errorMessage } from "@/lib/api";
 import { useCan, usePermissions } from "@/lib/permissions";
+import { AccountPoolRow } from "./account-pool-row";
 import { AddClaudeAccountDialog } from "./add-claude-account-dialog";
 
 /** Per provider: the section's title, what kind of subscription it holds, and its empty state. */
@@ -36,6 +46,18 @@ const PROVIDER_COPY: Record<
     emptyHelp: "Sign one in for bots, or on a server device for its Work Zone sessions.",
   },
 };
+
+/** PD-18: who a Claude token account serves. */
+const SCOPE_OPTIONS: Array<{ value: PoolScope; label: string }> = [
+  { value: "all", label: "Work Zone and bots" },
+  { value: "work_zone", label: "Work Zone only" },
+  { value: "bots", label: "Bots only" },
+];
+
+/** D-05: the strategy only picks when a session starts or its account must change. */
+const STICKY_NOTE = "A session keeps its account until that account hits its limit.";
+/** A-05 fallback: Claude tokens do not reach the bots runtime. */
+const BOTS_API_KEY_NOTE = "Bots use the Anthropic API key";
 
 /**
  * Settings › Account pool (Phase 07.18, D-10, D-15): the organization's Claude and ChatGPT subscription accounts that
@@ -74,20 +96,46 @@ export function AccountPoolSettings() {
   return <PoolSections view={pool.data} />;
 }
 
-/** Both provider sections for a loaded view (the tests render this directly). */
-export function PoolSections({ view }: { view: AccountPoolView }) {
-  const [adding, setAdding] = useState<PoolProvider | null>(null);
+type Adding = { provider: "claude"; replacing: PoolAccount | null } | { provider: "chatgpt" } | null;
+
+/**
+ * Both provider sections for a loaded view (the tests render this directly). `cellClaudeTokens` is the contract's
+ * `CELL_CLAUDE_TOKENS`, a prop only so its fallback text can be tested.
+ */
+export function PoolSections({
+  view,
+  cellClaudeTokens = CELL_CLAUDE_TOKENS,
+}: {
+  view: AccountPoolView;
+  cellClaudeTokens?: boolean;
+}) {
+  const [adding, setAdding] = useState<Adding>(null);
   return (
     <div className="grid gap-8" data-testid="account-pool-settings">
       <p className="text-muted-foreground text-sm">
         Every member's Work Zone sessions and every bot use these accounts automatically. Nobody has to set
         anything up.
       </p>
-      <ProviderSection provider="claude" pool={view.claude} onAdd={() => setAdding("claude")} />
-      <ProviderSection provider="chatgpt" pool={view.chatgpt} onAdd={() => setAdding("chatgpt")} />
+      <ProviderSection
+        provider="claude"
+        pool={view.claude}
+        botsUseApiKey={!cellClaudeTokens}
+        onAdd={() => setAdding({ provider: "claude", replacing: null })}
+        onReplaceToken={(a) => setAdding({ provider: "claude", replacing: a })}
+      />
+      <ProviderSection
+        provider="chatgpt"
+        pool={view.chatgpt}
+        botsUseApiKey={false}
+        onAdd={() => setAdding({ provider: "chatgpt" })}
+        onReplaceToken={() => undefined}
+      />
       <AddClaudeAccountDialog
-        open={adding === "claude"}
-        onOpenChange={(o) => setAdding(o ? "claude" : null)}
+        open={adding?.provider === "claude"}
+        replacing={adding?.provider === "claude" ? adding.replacing : null}
+        onOpenChange={(o) => {
+          if (!o) setAdding(null);
+        }}
       />
     </div>
   );
@@ -96,15 +144,32 @@ export function PoolSections({ view }: { view: AccountPoolView }) {
 function ProviderSection({
   provider,
   pool,
+  botsUseApiKey,
   onAdd,
+  onReplaceToken,
 }: {
   provider: PoolProvider;
   pool: AccountPoolView[PoolProvider];
+  botsUseApiKey: boolean;
   onAdd: () => void;
+  onReplaceToken: (a: PoolAccount) => void;
 }) {
   const copy = PROVIDER_COPY[provider];
+  const reorder = useReorderPool();
   const ready = pool.accounts.filter((a) => a.status === "ready").length;
-  const strategy = POOL_STRATEGY_TEXT[pool.policy.strategy];
+  const ids = pool.accounts.map((a) => a.id);
+  const weighted = pool.policy.strategy === "weighted";
+
+  async function move(id: string, by: -1 | 1) {
+    const accountIds = moveInOrder(ids, id, by);
+    if (!accountIds) return;
+    try {
+      await reorder.mutateAsync({ provider, accountIds });
+    } catch (err) {
+      toast.error("Could not change the order", { description: errorMessage(err) });
+    }
+  }
+
   return (
     <section
       data-testid={`pool-section-${provider}`}
@@ -137,10 +202,7 @@ function ProviderSection({
         ) : null}
       </header>
 
-      <div className="border-t bg-muted/20 px-4 py-3 sm:px-5" data-testid={`pool-strategy-${provider}`}>
-        <p className="font-medium text-sm">{strategy.label}</p>
-        <p className="mt-0.5 text-muted-foreground text-xs">{strategy.description}</p>
-      </div>
+      <PolicyControls policy={pool.policy} botsUseApiKey={botsUseApiKey} />
 
       {pool.accounts.length === 0 ? (
         <div
@@ -156,9 +218,18 @@ function ProviderSection({
           </Button>
         </div>
       ) : (
-        <ul className="divide-y border-t">
-          {pool.accounts.map((a) => (
-            <AccountLine key={a.id} account={a} />
+        <ul className="divide-y border-t" aria-label={`${copy.title} accounts, in order`}>
+          {pool.accounts.map((a, i) => (
+            <AccountPoolRow
+              key={a.id}
+              account={a}
+              weighted={weighted}
+              first={i === 0}
+              last={i === pool.accounts.length - 1}
+              reordering={reorder.isPending}
+              onMove={(by) => void move(a.id, by)}
+              onReplaceToken={() => onReplaceToken(a)}
+            />
           ))}
         </ul>
       )}
@@ -166,10 +237,126 @@ function ProviderSection({
   );
 }
 
-function AccountLine({ account }: { account: PoolAccount }) {
+/** Strategy, scope (Claude) and the fallback switch; each change is saved at once (D-04, D-06, PD-18). */
+function PolicyControls({ policy, botsUseApiKey }: { policy: PoolPolicy; botsUseApiKey: boolean }) {
+  const id = useId();
+  const save = useUpdatePoolPolicy();
+  const provider = policy.provider;
+  const options = strategyOptions();
+  const chosen = options.find((o) => o.value === policy.strategy);
+  const weightedForBots = policy.strategy === "weighted" && !botsUseApiKey;
+
+  async function change(body: UpdatePoolPolicyRequest) {
+    try {
+      await save.mutateAsync({ provider, body });
+    } catch (err) {
+      toast.error("Could not save the setting", { description: errorMessage(err) });
+    }
+  }
+
   return (
-    <li data-testid="pool-account" className="px-4 py-3 sm:px-5">
-      <span className="font-medium text-sm">{account.label}</span>
-    </li>
+    <div
+      className="grid gap-4 border-t bg-muted/20 px-4 py-4 sm:px-5"
+      data-testid={`pool-strategy-${provider}`}
+    >
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid min-w-0 content-start gap-1.5">
+          <span id={`${id}-strategy`} className="font-medium text-sm">
+            Distribution
+          </span>
+          <Select
+            items={options.map((o) => ({ value: o.value, label: o.label }))}
+            value={policy.strategy}
+            onValueChange={(v) => {
+              const option = options.find((o) => o.value === v);
+              if (option && option.value !== policy.strategy) void change({ strategy: option.value });
+            }}
+            disabled={save.isPending}
+          >
+            <SelectTrigger
+              aria-labelledby={`${id}-strategy`}
+              data-testid={`pool-strategy-select-${provider}`}
+              className="h-11 w-full bg-background sm:h-9"
+            />
+            <SelectContent>
+              {options.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  <span className="grid gap-0.5 py-0.5">
+                    <span>{o.label}</span>
+                    <span className="max-w-72 whitespace-normal text-muted-foreground text-xs">
+                      {o.description}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-muted-foreground text-xs leading-relaxed">{chosen?.description}</span>
+        </div>
+        {provider === "claude" ? (
+          <div className="grid min-w-0 content-start gap-1.5">
+            <span id={`${id}-scope`} className="font-medium text-sm">
+              Used by
+            </span>
+            <Select
+              items={SCOPE_OPTIONS}
+              value={policy.scope}
+              onValueChange={(v) => {
+                const option = SCOPE_OPTIONS.find((o) => o.value === v);
+                if (option && option.value !== policy.scope) void change({ scope: option.value });
+              }}
+              disabled={save.isPending}
+            >
+              <SelectTrigger
+                aria-labelledby={`${id}-scope`}
+                data-testid="pool-scope-claude"
+                className="h-11 w-full bg-background sm:h-9"
+              />
+              <SelectContent>
+                {SCOPE_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-muted-foreground text-xs leading-relaxed">
+              Applies to every Claude account in the pool.
+            </span>
+          </div>
+        ) : null}
+      </div>
+
+      <p className="flex items-start gap-2 text-muted-foreground text-xs leading-relaxed">
+        <Info aria-hidden className="mt-px size-3.5 shrink-0" />
+        <span>
+          {STICKY_NOTE}
+          {weightedForBots ? ` ${BOTS_WEIGHTED_NOTE}` : null}
+          {botsUseApiKey ? ` ${BOTS_API_KEY_NOTE}.` : null}
+        </span>
+      </p>
+
+      {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
+      <label
+        className="flex cursor-pointer items-start gap-3 rounded-xl border bg-background p-3"
+        data-testid={`pool-fallback-${provider}`}
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block font-medium text-sm">
+            Use the device's own login when no account is ready
+          </span>
+          <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+            When it's off, new sessions can't start until an account is ready.
+          </span>
+        </span>
+        <Switch
+          checked={policy.fallbackToDeviceLogin}
+          onCheckedChange={(fallbackToDeviceLogin) => void change({ fallbackToDeviceLogin })}
+          disabled={save.isPending}
+          aria-label="Use the device's own login when no account is ready"
+          className="mt-0.5"
+        />
+      </label>
+    </div>
   );
 }

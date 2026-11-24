@@ -1,6 +1,6 @@
 "use client";
 
-import { ClaudeSetupToken, POOL_LIMITS, PoolLabel } from "@ocw/contracts";
+import { ClaudeSetupToken, POOL_LIMITS, type PoolAccount, PoolLabel } from "@ocw/contracts";
 import { KeyRound, Terminal } from "lucide-react";
 import { type FormEvent, useId, useState } from "react";
 import { toast } from "sonner";
@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/panel-dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { useAddClaudeAccount } from "@/lib/account-pool-queries";
+import { useAddClaudeAccount, useUpdatePoolAccount } from "@/lib/account-pool-queries";
 import { errorMessage } from "@/lib/api";
 
 /** 44 px touch targets below `md` (UI-SPEC: every control at 390). */
@@ -50,15 +50,24 @@ export function claudeTokenError(value: string): string | null {
  */
 export function AddClaudeAccountDialog({
   open,
+  replacing = null,
   onOpenChange,
 }: {
   open: boolean;
+  /** A token account whose token is replaced (a new `claude setup-token`); null adds an account. */
+  replacing?: Pick<PoolAccount, "id" | "label"> | null;
   onOpenChange: (open: boolean) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="add-claude-account-dialog" className="sm:max-w-lg">
-        {open ? <ClaudeAccountForm onDone={() => onOpenChange(false)} /> : null}
+        {open ? (
+          <ClaudeAccountForm
+            key={replacing?.id ?? "new"}
+            replacing={replacing}
+            onDone={() => onOpenChange(false)}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   );
@@ -67,20 +76,24 @@ export function AddClaudeAccountDialog({
 /** The form; `initial` is only for tests that render a typed state. */
 export function ClaudeAccountForm({
   onDone,
+  replacing = null,
   initial,
 }: {
   onDone: () => void;
+  replacing?: Pick<PoolAccount, "id" | "label"> | null;
   initial?: { label?: string; token?: string };
 }) {
   const add = useAddClaudeAccount();
+  const update = useUpdatePoolAccount();
+  const pending = add.isPending || update.isPending;
   const id = useId();
   const [label, setLabel] = useState(initial?.label ?? "");
   const [token, setToken] = useState(initial?.token ?? "");
   const [refused, setRefused] = useState<string | null>(null);
   const tokenError = claudeTokenError(token) ?? refused ?? undefined;
-  const labelOk = PoolLabel.safeParse(label).success;
+  const labelOk = replacing !== null || PoolLabel.safeParse(label).success;
   const tokenOk = token.trim() !== "" && claudeTokenError(token) === null;
-  const canSave = labelOk && tokenOk && !add.isPending;
+  const canSave = labelOk && tokenOk && !pending;
   const labelHint = "Usually the account's e-mail. Members see it.";
   const tokenHint = "Sealed on the server and never shown again.";
 
@@ -88,11 +101,17 @@ export function ClaudeAccountForm({
     e.preventDefault();
     if (!canSave) return;
     try {
-      await add.mutateAsync({ label: label.trim(), token: token.trim() });
-      setToken("");
-      toast.success("Claude account added", {
-        description: "New Work Zone sessions and bots can use it now.",
-      });
+      if (replacing) {
+        await update.mutateAsync({ id: replacing.id, body: { token: token.trim() } });
+        setToken("");
+        toast.success(`New token saved for ${replacing.label}`);
+      } else {
+        await add.mutateAsync({ label: label.trim(), token: token.trim() });
+        setToken("");
+        toast.success("Claude account added", {
+          description: "New Work Zone sessions and bots can use it now.",
+        });
+      }
       onDone();
     } catch (err) {
       setRefused(errorMessage(err));
@@ -102,9 +121,11 @@ export function ClaudeAccountForm({
   return (
     <form onSubmit={submit} noValidate className="flex min-h-0 flex-col">
       <DialogHeader>
-        <DialogTitle>Add Claude account</DialogTitle>
+        <DialogTitle>{replacing ? `New token for ${replacing.label}` : "Add Claude account"}</DialogTitle>
         <DialogDescription>
-          A Claude Pro, Max or Team subscription the whole organization can use.
+          {replacing
+            ? "The old token stops being used as soon as you save."
+            : "A Claude Pro, Max or Team subscription the whole organization can use."}
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="grid gap-4">
@@ -118,21 +139,23 @@ export function ClaudeAccountForm({
             {HELP_AFTER}
           </p>
         </div>
-        <FormField id={`${id}-label`} label="Label" hint={labelHint}>
-          <Input
-            id={`${id}-label`}
-            type="text"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            maxLength={POOL_LIMITS.labelMax}
-            placeholder="ana@acme.com"
-            autoComplete="off"
-            autoFocus
-            aria-describedby={describedBy(`${id}-label`, undefined, labelHint)}
-            className={TOUCH}
-            data-testid="claude-account-label"
-          />
-        </FormField>
+        {replacing ? null : (
+          <FormField id={`${id}-label`} label="Label" hint={labelHint}>
+            <Input
+              id={`${id}-label`}
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              maxLength={POOL_LIMITS.labelMax}
+              placeholder="ana@acme.com"
+              autoComplete="off"
+              autoFocus
+              aria-describedby={describedBy(`${id}-label`, undefined, labelHint)}
+              className={TOUCH}
+              data-testid="claude-account-label"
+            />
+          </FormField>
+        )}
         <FormField id={`${id}-token`} label="Setup-token" hint={tokenHint} error={tokenError}>
           <Input
             id={`${id}-token`}
@@ -153,11 +176,11 @@ export function ClaudeAccountForm({
         </FormField>
       </DialogBody>
       <DialogFooter>
-        <Button type="button" variant="outline" onClick={onDone} disabled={add.isPending} className={TOUCH}>
+        <Button type="button" variant="outline" onClick={onDone} disabled={pending} className={TOUCH}>
           Cancel
         </Button>
         <Button type="submit" disabled={!canSave} className={TOUCH} data-testid="claude-account-save">
-          {add.isPending ? <Spinner /> : <KeyRound />}
+          {pending ? <Spinner /> : <KeyRound />}
           Save
         </Button>
       </DialogFooter>
