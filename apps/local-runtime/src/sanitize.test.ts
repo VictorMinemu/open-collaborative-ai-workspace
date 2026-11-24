@@ -1,6 +1,26 @@
 import type { SessionEvent } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { contain, redact, sanitizeEvent, truncateBytes } from "./sanitize.js";
+import { contain, redact, sanitizeEvent, sanitizeValue, truncateBytes } from "./sanitize.js";
+
+describe("07.18 pool tokens never leave the device (D-13)", () => {
+  // Joined at runtime, so no credential literal lives in the repo.
+  const TOKEN = ["sk", "ant", "oat01", "Zx9_Kq-pool".repeat(6)].join("-");
+
+  it("redact() removes a setup-token wherever it sits in a text", () => {
+    const out = redact(`spawn failed: CLAUDE_CODE_OAUTH_TOKEN=${TOKEN} (exit 1)`);
+    expect(out).not.toContain(TOKEN);
+    expect(out).not.toContain("oat01");
+    expect(redact(`${TOKEN}`)).not.toContain(TOKEN);
+  });
+
+  it("sanitizeValue() removes it from every string of an object", () => {
+    const out = sanitizeValue(
+      { env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, list: [`token ${TOKEN}`], nested: { deep: { v: TOKEN } } },
+      ["/tmp/x"],
+    );
+    expect(JSON.stringify(out)).not.toContain(TOKEN);
+  });
+});
 
 const HOME = "/Users/alice";
 const ROOT = "/Users/alice/code/acme";

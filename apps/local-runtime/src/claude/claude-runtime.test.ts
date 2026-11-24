@@ -1,4 +1,12 @@
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -12,7 +20,7 @@ import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resource
 import { isSecretBasename, type PermissionMode, type RuntimeInfo, type SessionEvent } from "@ocw/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
-import { RuntimeError, type StartSessionOptions } from "../runtime.js";
+import { type AccountSignal, RuntimeError, type StartSessionOptions } from "../runtime.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
 import { commandTouchesSecrets, isSecretPath, secretDenyReason, secretDenyRules } from "./tool-policy.js";
 
@@ -217,6 +225,365 @@ describe("ClaudeCodeRuntime — SDK options (security + billing)", () => {
     await tick();
     expect(q.closed).toBe(true);
     expect(events.some((e) => e.type === "session.error")).toBe(true);
+  });
+});
+
+// 07.18: token-shaped values joined at runtime, so no credential literal lives in the repo.
+const POOL_TOKEN_A = ["sk", "ant", "oat01", "poolAAAAAAAAAAAAAAAAAAAAAAAAAAAA"].join("-");
+const POOL_TOKEN_B = ["sk", "ant", "oat01", "poolBBBBBBBBBBBBBBBBBBBBBBBBBBBB"].join("-");
+const tokenAccount = (ref: string, oauthToken: string, label = `Account ${ref}`) => ({
+  kind: "token" as const,
+  ref,
+  label,
+  oauthToken,
+});
+
+describe("ClaudeCodeRuntime — a pool token account (07.18 D-02, PD-03)", () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    process.env.OCW_DEVICE_TOKEN = "device-secret";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    process.env.ANTHROPIC_AUTH_TOKEN = "also-not";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-parent-one";
+    process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("runs on the pool token with every competing credential stripped, even with useApiKey", async () => {
+    const { start } = setup({ useApiKey: true });
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    const env = q.params.options.env ?? {};
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    for (const k of [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY",
+    ]) {
+      expect(env[k], k).toBeUndefined();
+    }
+    expect(env.DISABLE_AUTOUPDATER).toBe("1");
+    expect(Object.keys(env).filter((k) => k.startsWith("OCW_"))).toEqual([]);
+  });
+
+  it("without an account the env is exactly today's childEnv", async () => {
+    const { start } = setup({ useApiKey: true });
+    const q = await start();
+    expect(q.params.options.env).toEqual(childEnv(process.env, true));
+    const plain = await setup().start("default", { account: null });
+    expect(plain.params.options.env).toEqual(childEnv(process.env, false));
+  });
+
+  it("reports token accounts as supported", () => {
+    expect(setup().runtime.capabilities.supportsAccounts).toEqual(["token"]);
+  });
+});
+
+describe("ClaudeCodeRuntime — the pool token cannot be redirected (07.18 D-13, A-06, E16)", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+  const flagSettings = (q: FakeQuery) =>
+    q.params.options.settings as { env?: Record<string, string>; permissions: Perms };
+
+  it("pins the base URL, the API-key variables and the daemon's own proxy and CA in the flag settings", async () => {
+    process.env.HTTPS_PROXY = "http://proxy.corp.example:3128";
+    process.env.NODE_EXTRA_CA_CERTS = "/etc/corp-ca.pem";
+    delete process.env.HTTP_PROXY;
+    delete process.env.ALL_PROXY;
+    delete process.env.NO_PROXY;
+    const { start } = setup();
+    const plain = flagSettings(await setup().start());
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    const settings = flagSettings(q);
+    expect(settings.env).toMatchObject({
+      ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_AUTH_TOKEN: "",
+      HTTPS_PROXY: "http://proxy.corp.example:3128",
+      HTTP_PROXY: "",
+      ALL_PROXY: "",
+      NO_PROXY: "",
+      NODE_EXTRA_CA_CERTS: "/etc/corp-ca.pem",
+    });
+    // The secret deny rules and the bypass lock are exactly those of a session without a token.
+    expect(settings.permissions).toEqual(plain.permissions);
+    expect(plain).toEqual({ permissions: plain.permissions });
+    expect(JSON.stringify(settings)).not.toContain(POOL_TOKEN_A);
+  });
+
+  it("refuses a pool token for a project whose settings run their own apiKeyHelper", async () => {
+    const { runtime, cwd, queries } = setup();
+    mkdirSync(join(cwd, ".claude"));
+    writeFileSync(join(cwd, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "./get-key.sh" }));
+    await expect(
+      runtime.start(
+        { sessionId: "s1", cwd, permissionMode: "default", account: tokenAccount("a", POOL_TOKEN_A) },
+        () => undefined,
+      ),
+    ).rejects.toThrow(
+      "This project's Claude settings choose their own credentials; pool accounts are not used here",
+    );
+    expect(queries).toHaveLength(0);
+    // The device's own login is not affected.
+    await runtime.start({ sessionId: "s2", cwd, permissionMode: "default" }, () => undefined);
+    expect(queries).toHaveLength(1);
+  });
+
+  it("reports an init whose credential came from the project instead of the pool token", async () => {
+    const { start, events } = setup();
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    q.emit({ ...init("default"), apiKeySource: "apiKeyHelper" });
+    await settle();
+    expect(events).toContainEqual({
+      type: "session.error",
+      message:
+        "This project's Claude settings choose their own credentials; the pool account is not used here",
+    });
+    const ok = setup();
+    const q2 = await ok.start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    q2.emit({ ...init("default"), apiKeySource: "oauth" });
+    await settle();
+    expect(ok.events.some((e) => e.type === "session.error")).toBe(false);
+  });
+
+  it("leaves no trace of the token in the OCW home, the config dir or the project", async () => {
+    const ocw = mkdtempSync(join(tmpdir(), "ocw-pool-home-"));
+    const config = mkdtempSync(join(tmpdir(), "ocw-pool-cfg-"));
+    process.env.OCW_HOME = ocw;
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const { start, runtime, cwd, events } = setup();
+    const q = await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    q.emit(init("default"));
+    await runtime.prompt("s1", { promptId: "p1", text: "hi" });
+    await settle();
+    q.emit(result());
+    await settle();
+    await runtime.stop("s1");
+    const contents = [ocw, config, cwd].flatMap((dir) =>
+      (readdirSync(dir, { recursive: true }) as string[])
+        .map((f) => join(dir, f))
+        .filter((f) => statSync(f).isFile())
+        .map((f) => readFileSync(f, "utf8")),
+    );
+    expect(contents.join("\n")).not.toContain(POOL_TOKEN_A);
+    expect(JSON.stringify(events)).not.toContain(POOL_TOKEN_A);
+  });
+});
+
+describe("ClaudeCodeRuntime — limits and usage of the session's account (07.18 D-07, D-09, PD-05, PD-24)", () => {
+  it("reports one limit per turn, with the last known reset, before that turn's prompt.completed", async () => {
+    const log: string[] = [];
+    const signals: AccountSignal[] = [];
+    const { runtime, events, start } = setup();
+    const q = await start("default", {
+      account: tokenAccount("a", POOL_TOKEN_A),
+      onAccountSignal: (sig) => {
+        signals.push(sig);
+        log.push(`signal:${sig.kind}`);
+      },
+    });
+    const watch = () => {
+      for (const e of events.splice(0))
+        if (e.type === "prompt.completed") log.push(`completed:${e.promptId}`);
+    };
+    q.emit(init("default"));
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    const reset = 1_795_000_000;
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 0.9,
+        resetsAt: reset,
+      },
+    });
+    q.emit({
+      type: "assistant",
+      parent_tool_use_id: null,
+      error: "rate_limit",
+      message: { content: [{ type: "text", text: "You've hit your session limit · resets 3:45pm" }] },
+    });
+    q.emit({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "seven_day" } });
+    q.emit({ ...result(), subtype: "error_during_execution", is_error: true, errors: ["rate limited"] });
+    await settle();
+    watch();
+    expect(signals).toEqual([
+      {
+        kind: "usage",
+        usage: {
+          windows: [{ kind: "five_hour", usedPercent: 90, resetsAt: new Date(reset * 1000).toISOString() }],
+          at: expect.any(String),
+        },
+      },
+      {
+        kind: "limited",
+        promptId: "p1",
+        reason: "rate_limit",
+        resetsAt: new Date(reset * 1000).toISOString(),
+      },
+    ]);
+    expect(log).toEqual(["signal:usage", "signal:limited", "completed:p1"]);
+
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    q.emit({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: reset + 60 },
+    });
+    q.emit({ ...result(), is_error: true, result: "You've hit your session limit · resets 4:45pm" });
+    await settle();
+    watch();
+    expect(signals.at(-1)).toEqual({
+      kind: "limited",
+      promptId: "p2",
+      reason: "five_hour",
+      resetsAt: new Date((reset + 60) * 1000).toISOString(),
+    });
+    expect(signals.filter((s) => s.kind === "limited")).toHaveLength(2);
+    expect(log.slice(-2)).toEqual(["signal:limited", "completed:p2"]);
+  });
+});
+
+describe("ClaudeCodeRuntime — switching account between turns (07.18 D-08, PD-03, A-01)", () => {
+  const promptTexts = (q: FakeQuery) => q.prompts.map((p) => p.message.content);
+  const sessionEnds = (events: SessionEvent[]) =>
+    events.filter((e) => e.type === "session.state" && (e.status === "completed" || e.status === "failed"));
+  const saved = { ...process.env };
+  beforeEach(() => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  async function afterOneTurn(extra: Parameters<typeof setup>[0] = {}) {
+    const ctx = setup(extra);
+    const first = await ctx.start("acceptEdits", { account: tokenAccount("a", POOL_TOKEN_A) });
+    first.emit(init("acceptEdits"));
+    await ctx.runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    first.emit(result());
+    await settle();
+    return { ...ctx, first };
+  }
+
+  it("the next turn runs on a new CLI resuming the same session under the new token", async () => {
+    const { runtime, queries, events, first } = await afterOneTurn();
+    await runtime.useAccount("s1", tokenAccount("b", POOL_TOKEN_B));
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(queries).toHaveLength(2);
+    expect(first.closed).toBe(true);
+    const next = queries[1] as FakeQuery;
+    expect(next.params.options).toMatchObject({ resume: "rt-1", permissionMode: "acceptEdits" });
+    expect(next.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_B);
+    expect(promptTexts(next)).toEqual(["two"]);
+    next.emit(result());
+    await settle();
+    expect(sessionEnds(events)).toEqual([]);
+    expect(events.filter((e) => e.type === "session.error")).toEqual([]);
+    expect(events.filter((e) => e.type === "prompt.completed").map((e) => e.promptId)).toEqual(["p1", "p2"]);
+  });
+
+  it("the same account changes nothing", async () => {
+    const { runtime, queries, first } = await afterOneTurn();
+    await runtime.useAccount("s1", tokenAccount("a", POOL_TOKEN_A, "renamed"));
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(queries).toHaveLength(1);
+    expect(promptTexts(first)).toEqual(["one", "two"]);
+  });
+
+  it("null moves the session to the device's own login, without the pool pin", async () => {
+    const { runtime, queries } = await afterOneTurn();
+    await runtime.useAccount("s1", null);
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    const next = queries[1] as FakeQuery;
+    expect(next.params.options.resume).toBe("rt-1");
+    expect(next.params.options.env).toEqual(childEnv(process.env, false));
+    expect((next.params.options.settings as { env?: unknown }).env).toBeUndefined();
+  });
+
+  it("a switch asked during a turn applies before the next turn, never inside it", async () => {
+    const ctx = setup();
+    const first = await ctx.start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    first.emit(init("default"));
+    await ctx.runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    await ctx.runtime.useAccount("s1", tokenAccount("b", POOL_TOKEN_B));
+    await ctx.runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(ctx.queries).toHaveLength(1);
+    expect(first.closed).toBe(false);
+    first.emit(result());
+    await settle();
+    expect(ctx.queries).toHaveLength(2);
+    expect((ctx.queries[1] as FakeQuery).params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_B);
+    expect(promptTexts(ctx.queries[1] as FakeQuery)).toEqual(["two"]);
+  });
+
+  it("a retired session wakes directly under the new account (one launch)", async () => {
+    const { runtime, queries } = await afterOneTurn();
+    await runtime.retireIdle();
+    await runtime.useAccount("s1", tokenAccount("b", POOL_TOKEN_B));
+    expect(queries).toHaveLength(1);
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(queries).toHaveLength(2);
+    const woken = queries[1] as FakeQuery;
+    expect(woken.params.options).toMatchObject({ resume: "rt-1" });
+    expect(woken.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_B);
+    expect(promptTexts(woken)).toEqual(["two"]);
+  });
+
+  it("a resume that fails under the new account fails the turn and says so (no silent fresh start)", async () => {
+    let launches = 0;
+    const { runtime, queries, events } = await afterOneTurn({
+      prepare: () => {
+        launches++;
+        if (launches === 2) throw new Error(`resume refused for ${POOL_TOKEN_B}`);
+      },
+    });
+    await runtime.useAccount("s1", tokenAccount("b", POOL_TOKEN_B));
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(queries).toHaveLength(1);
+    expect(events).toContainEqual({
+      type: "session.error",
+      message: "This conversation could not continue on the next account. Start a new session.",
+    });
+    expect(events.filter((e) => e.type === "prompt.completed").at(-1)).toMatchObject({
+      promptId: "p2",
+      isError: true,
+    });
+    expect(JSON.stringify(events)).not.toContain(POOL_TOKEN_B);
+  });
+
+  it("a CLI that ends before its init after a switch reports the same failure", async () => {
+    const { runtime, queries, events } = await afterOneTurn();
+    await runtime.useAccount("s1", tokenAccount("b", POOL_TOKEN_B));
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    (queries[1] as FakeQuery).close();
+    await settle();
+    expect(events).toContainEqual({
+      type: "session.error",
+      message: "This conversation could not continue on the next account. Start a new session.",
+    });
+    expect(events.filter((e) => e.type === "prompt.completed").at(-1)).toMatchObject({
+      promptId: "p2",
+      isError: true,
+    });
   });
 });
 

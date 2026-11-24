@@ -66,6 +66,7 @@ import type { SelfUpdateOptions } from "./maintenance/self-update-job.js";
 import type {
   AgentRuntime,
   EventSink,
+  RuntimeAccount,
   RuntimeCapabilities,
   StartSessionOptions,
   TitleRequest,
@@ -89,10 +90,19 @@ class FakeRuntime implements AgentRuntime {
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
       supportsImages: this.supportsImages,
+      supportsAccounts: this.supportsAccounts,
     };
   }
   /** 06.1-03: whether this stub says it can take images (the daemon refuses image prompts otherwise). */
   supportsImages = false;
+  /** 07.18: the pool account kinds this stub accepts. */
+  supportsAccounts: ("token" | "device_slot")[] = ["token"];
+  /** 07.18: every `useAccount` call, in order (null = the device's own login). */
+  readonly accountSwitches: Array<{ sessionId: string; account: RuntimeAccount | null }> = [];
+  async useAccount(sessionId: string, account: RuntimeAccount | null): Promise<void> {
+    this.calls.push(`useAccount:${account?.ref ?? "device"}`);
+    this.accountSwitches.push({ sessionId, account });
+  }
   /** When set, `prompt()` rejects with this message (a runtime error echoing its input). */
   promptError: string | null = null;
   /** 07.17.1.1: when set, `prompt()` emits `prompt.started`, waits for it, then `prompt.completed` (a running turn). */
@@ -3328,5 +3338,181 @@ describe("07.17.1.1 diff.result never closes the link (D-14, PD-19)", () => {
     expect(diff.patch).toContain("b/big.txt");
     expect(diff.patch.endsWith("\n")).toBe(true);
     expect(await server.frame("ack", (f) => f.commandId === "dbig")).toMatchObject({ ok: true });
+  });
+});
+
+describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", () => {
+  // Token-shaped values joined at runtime, so no credential literal lives in the repo.
+  const POOL_TOKEN = ["sk", "ant", "oat01", "pooltokenAAAAAAAAAAAAAAAAAAAAAAAA"].join("-");
+  const ACCOUNT_A = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const tokenAccount = (accountId = ACCOUNT_A, label = "Team A") => ({
+    kind: "token",
+    accountId,
+    label,
+    oauthToken: POOL_TOKEN,
+  });
+
+  async function startWith(account: unknown): Promise<{ id: string; sessionId: string }> {
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    const id = randomUUID();
+    const sessionId = randomUUID();
+    server.send({
+      id,
+      kind: "session.start",
+      sessionId,
+      payload: {
+        projectLocalId: localId,
+        permissionMode: "default",
+        ...(account !== undefined ? { account } : {}),
+      },
+    });
+    return { id, sessionId };
+  }
+
+  it("announces accountPool in the hello", async () => {
+    await daemon.start();
+    expect(await server.frame("hello")).toMatchObject({ accountPool: 1 });
+  });
+
+  it("a token account reaches the adapter as a RuntimeAccount; the token never leaves the device", async () => {
+    const { id } = await startWith(tokenAccount());
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    expect(runtime.started[0]?.account).toEqual({
+      kind: "token",
+      ref: ACCOUNT_A,
+      label: "Team A",
+      oauthToken: POOL_TOKEN,
+    });
+    expect(typeof runtime.started[0]?.onAccountSignal).toBe("function");
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
+  it("a start without an account passes none (as before 07.18)", async () => {
+    const { id } = await startWith(undefined);
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    expect(runtime.started[0]?.account ?? null).toBeNull();
+  });
+
+  it("refuses a device_slot account while no slot store exists", async () => {
+    const { id } = await startWith({
+      kind: "device_slot",
+      accountId: ACCOUNT_A,
+      label: "ChatGPT A",
+      slotId: randomUUID(),
+    });
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({
+      ok: false,
+      error: "account slot not found on this device",
+    });
+    expect(runtime.started).toEqual([]);
+  });
+
+  it("refuses an account kind the adapter does not support, before start", async () => {
+    runtime.supportsAccounts = [];
+    const { id } = await startWith(tokenAccount());
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({
+      ok: false,
+      error: "claude-code cannot run a session on a token account",
+    });
+    expect(runtime.started).toEqual([]);
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
+  it("an adapter's limit and usage signals become session.account_limited and account.usage frames", async () => {
+    const { id, sessionId } = await startWith(tokenAccount());
+    await server.frame("ack", (f) => f.commandId === id);
+    const signal = runtime.started[0]?.onAccountSignal;
+    if (!signal) throw new Error("no onAccountSignal");
+    const resetsAt = "2026-11-24T18:00:00.000Z";
+    signal({ kind: "limited", promptId: "p1", reason: "five_hour", resetsAt });
+    expect(await server.frame("session.account_limited")).toEqual({
+      type: "session.account_limited",
+      sessionId,
+      promptId: "p1",
+      accountId: ACCOUNT_A,
+      reason: "five_hour",
+      resetsAt,
+      at: expect.any(String),
+    });
+    const usage = { windows: [{ kind: "five_hour" as const, usedPercent: 42, resetsAt }], at: resetsAt };
+    signal({ kind: "usage", usage });
+    expect(await server.frame("account.usage")).toEqual({
+      type: "account.usage",
+      accountId: ACCOUNT_A,
+      usage,
+    });
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
+  it("a prompt naming another account switches before the turn; absent or the same one changes nothing", async () => {
+    const ACCOUNT_B = "1f0e0d0c-0b0a-4908-8706-050403020101";
+    const { id, sessionId } = await startWith(tokenAccount());
+    await server.frame("ack", (f) => f.commandId === id);
+    const prompt = async (promptId: string, account?: unknown) => {
+      const cid = randomUUID();
+      server.send({
+        id: cid,
+        kind: "prompt",
+        sessionId,
+        payload: { promptId, text: "go", ...(account !== undefined ? { account } : {}) },
+      });
+      return server.frame("ack", (f) => f.commandId === cid);
+    };
+    expect(await prompt("p1")).toMatchObject({ ok: true });
+    expect(await prompt("p2", tokenAccount())).toMatchObject({ ok: true });
+    expect(runtime.accountSwitches).toEqual([]);
+    expect(await prompt("p3", tokenAccount(ACCOUNT_B, "Team B"))).toMatchObject({ ok: true });
+    expect(await prompt("p4", null)).toMatchObject({ ok: true });
+    expect(runtime.calls).toEqual([
+      "prompt:p1",
+      "prompt:p2",
+      `useAccount:${ACCOUNT_B}`,
+      "prompt:p3",
+      "useAccount:device",
+      "prompt:p4",
+    ]);
+    expect(runtime.accountSwitches[0]?.account).toEqual({
+      kind: "token",
+      ref: ACCOUNT_B,
+      label: "Team B",
+      oauthToken: POOL_TOKEN,
+    });
+    // The stored ref follows: a limit now names the device's own login.
+    runtime.started[0]?.onAccountSignal?.({
+      kind: "limited",
+      promptId: "p4",
+      reason: "rate_limit",
+      resetsAt: null,
+    });
+    expect(await server.frame("session.account_limited")).toMatchObject({ promptId: "p4", accountId: null });
+    // A slot account in a prompt is refused before the turn, like at start.
+    const slot = await prompt("p5", {
+      kind: "device_slot",
+      accountId: ACCOUNT_B,
+      label: "C",
+      slotId: randomUUID(),
+    });
+    expect(slot).toMatchObject({ ok: false, error: "account slot not found on this device" });
+    expect(runtime.calls.at(-1)).toBe("prompt:p4");
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
+  it("a limit on the device's own login names no account; its usage sends nothing", async () => {
+    const { id, sessionId } = await startWith(null);
+    await server.frame("ack", (f) => f.commandId === id);
+    const signal = runtime.started[0]?.onAccountSignal;
+    if (!signal) throw new Error("no onAccountSignal");
+    signal({ kind: "usage", usage: { windows: [], at: new Date().toISOString() } });
+    signal({ kind: "limited", promptId: null, reason: "usage_limit", resetsAt: null });
+    expect(await server.frame("session.account_limited")).toMatchObject({
+      sessionId,
+      promptId: null,
+      accountId: null,
+      reason: "usage_limit",
+      resetsAt: null,
+    });
+    expect(server.allFrames.some((f) => f.type === "account.usage")).toBe(false);
   });
 });

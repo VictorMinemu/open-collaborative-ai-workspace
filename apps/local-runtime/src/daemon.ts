@@ -28,6 +28,7 @@ import { arch, homedir, platform, userInfo } from "node:os";
 import {
   ApprovalResolvePayload,
   type CommandFrame,
+  DEVICE_ACCOUNT_POOL_VERSION,
   DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
@@ -50,6 +51,7 @@ import {
   type RuntimeUpdatesLevel,
   type RuntimeUpdatesLevelSource,
   type ServerToDeviceFrame,
+  type SessionAccount,
   SessionConfigurePayload,
   type SessionEvent,
   SessionFileReadPayload,
@@ -102,7 +104,7 @@ import {
 } from "./maintenance/self-update-boot.js";
 import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-job.js";
 import { isSupervised, runningBuild } from "./maintenance/supervision.js";
-import type { AgentRuntime } from "./runtime.js";
+import type { AccountSignal, AgentRuntime, RuntimeAccount } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { openSessionFileForRead, SessionFileError, writeSessionFile } from "./session-files.js";
 import { runTitle } from "./title.js";
@@ -266,6 +268,28 @@ interface ActiveSession {
   worktreeBranch: string | null;
   /** The session mode the server last authorized here (start / configure); per-turn caps only lower it. */
   mode: PermissionMode;
+  /** 07.18 (PD-03): the pool account ref the session runs on (null = the device's own login). Never the token. */
+  accountRef: string | null;
+}
+
+/** 07.18 (PD-03): no slot store on this device yet (08 adds Codex slots), so a slot account is refused. */
+export const ACCOUNT_SLOT_NOT_FOUND_MESSAGE = "account slot not found on this device";
+
+/**
+ * 07.18 (D-02, PD-03): the wire account of a start or prompt → what the adapter gets. Absent or null = the device's
+ * own login. A token is passed on in memory only; the daemon keeps just the ref.
+ */
+function runtimeAccountOf(wire: SessionAccount | null | undefined): RuntimeAccount | null {
+  if (!wire) return null;
+  if (wire.kind === "device_slot") throw new Error(ACCOUNT_SLOT_NOT_FOUND_MESSAGE);
+  return { kind: "token", ref: wire.accountId, label: wire.label, oauthToken: wire.oauthToken };
+}
+
+/** 07.18 (T-07.18-06-04): an account kind the adapter cannot run is refused before the adapter sees it. */
+function refuseAccountKind(runtime: AgentRuntime, account: RuntimeAccount): void {
+  if (!runtime.capabilities.supportsAccounts?.includes(account.kind)) {
+    throw new Error(`${runtime.id} cannot run a session on a ${account.kind} account`);
+  }
 }
 
 function realpathOr(p: string): string {
@@ -801,6 +825,8 @@ export class Daemon {
       fullAccessOptIn: this.gate.optIn,
       // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
       isolatedServer: this.reportedIsolated,
+      // 07.18 (PD-04): this daemon can run a session on a pool account.
+      accountPool: DEVICE_ACCOUNT_POOL_VERSION,
     };
     await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [
@@ -1283,6 +1309,19 @@ export class Daemon {
     if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
       throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
     }
+    // 07.18 (PD-03): absent = keep the current account; null or an object = this turn's account, switched only when
+    // the ref differs (the adapter applies it between turns). The daemon keeps the ref, never the token.
+    if (prompt.account !== undefined) {
+      const account = runtimeAccountOf(prompt.account);
+      const ref = account?.ref ?? null;
+      if (ref !== s.accountRef) {
+        if (account) refuseAccountKind(s.runtime, account);
+        if (!s.runtime.useAccount)
+          throw new Error(`${s.runtime.id} cannot change accounts in a live session`);
+        await s.runtime.useAccount(cmd.sessionId, account);
+        s.accountRef = ref;
+      }
+    }
     if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
     } else {
@@ -1338,6 +1377,10 @@ export class Daemon {
       throw new Error(`permission mode '${payload.permissionMode}' is not allowed on this device`);
     }
 
+    // 07.18 (PD-03, PD-04): the account is mapped and checked against the adapter before anything is created.
+    const account = runtimeAccountOf(payload.account);
+    if (account) refuseAccountKind(runtime, account);
+
     let cwd = project.path;
     let worktreeBranch: string | null = null;
     if (payload.worktree) {
@@ -1353,6 +1396,7 @@ export class Daemon {
       cwd,
       worktreeBranch,
       mode: payload.permissionMode,
+      accountRef: account?.ref ?? null,
     });
     try {
       await runtime.start(
@@ -1360,6 +1404,8 @@ export class Daemon {
           sessionId: cmd.sessionId,
           cwd,
           permissionMode: payload.permissionMode,
+          ...(account ? { account } : {}),
+          onAccountSignal: (signal) => this.sendAccountSignal(cmd.sessionId, signal),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.effort ? { effort: payload.effort } : {}),
           ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
@@ -1379,6 +1425,30 @@ export class Daemon {
       this.endSession(cmd.sessionId);
       throw err;
     }
+  }
+
+  /**
+   * 07.18 (D-07, D-09, PD-05): an adapter's limit or usage report, as a frame naming the account ref the session runs
+   * on now. It goes through `send()`, so offline it waits in the same log as the events, in order (the limit before
+   * the turn's `prompt.completed`). A usage report of the device's own login has no account to name: nothing is sent.
+   */
+  private sendAccountSignal(sessionId: string, signal: AccountSignal): void {
+    const active = this.sessions.get(sessionId);
+    if (!active) return; // the session already left this device
+    const accountId = active.accountRef;
+    if (signal.kind === "limited") {
+      this.send({
+        type: "session.account_limited",
+        sessionId,
+        promptId: signal.promptId,
+        accountId,
+        reason: signal.reason,
+        resetsAt: signal.resetsAt,
+        at: new Date().toISOString(),
+      });
+      return;
+    }
+    if (accountId) this.send({ type: "account.usage", accountId, usage: signal.usage });
   }
 
   /**

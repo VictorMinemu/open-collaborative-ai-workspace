@@ -16,6 +16,11 @@
 // Runtime updates (07.11): with OCW_RUNTIME_FAKE_CLI=1, `detect()` and `catalog()` report the version printed by the
 // `claude` / `codex` found on PATH (a fake CLI in end-to-end tests), so tests see versions move; any failure keeps
 // `fake`. `retireIdle()` marks idle sessions dormant and `wakeUps` counts how many woke again.
+// Pool accounts (07.18, D-08 test seam): it runs token and slot accounts (`supportsAccounts`), never reads a token, and
+// its footer gains `(account: <label>)` while the session runs on one; `useAccount()` switches the label between turns.
+// OCW_RUNTIME_FAKE_LIMIT_PREFIX=<prefix> (e2e only): every turn of an account whose label starts with <prefix> reports a
+// `five_hour` limit resetting 15 minutes ahead, then fails with "You've hit your session limit", as a Claude
+// subscription does, so the browser journey sees the platform switch accounts on the real daemon.
 
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -40,9 +45,11 @@ import {
 } from "@ocw/contracts";
 import { findExecutable } from "../exec-path.js";
 import {
+  type AccountSignal,
   type AgentRuntime,
   type EventSink,
   type FullAccessGateOptions,
+  type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -72,7 +79,13 @@ interface FakeSession {
   turns: number;
   /** Its "process" was retired while idle (07.11 D-03a); the next prompt or settings change wakes it. */
   dormant: boolean;
+  /** 07.18: the label of the pool account the session runs on (null = the device's own login). */
+  accountLabel: string | null;
+  onAccountSignal: (signal: AccountSignal) => void;
 }
+
+/** 07.18: how far ahead a fake limit resets. */
+const FAKE_LIMIT_RESET_MS = 15 * 60_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -184,6 +197,7 @@ export class FakeRuntime implements AgentRuntime {
   private readonly allowFullAccess: () => boolean;
   private readonly echoPrompt = process.env.OCW_RUNTIME_FAKE_ECHO === "1";
   private readonly holdFile = process.env.OCW_RUNTIME_FAKE_HOLD_FILE || null;
+  private readonly limitPrefix = process.env.OCW_RUNTIME_FAKE_LIMIT_PREFIX || null;
   /** How many retired sessions were woken by a prompt or settings change (07.11 D-03a; tests read it). */
   wakeUps = 0;
 
@@ -223,6 +237,7 @@ export class FakeRuntime implements AgentRuntime {
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
       supportsImages: true,
+      supportsAccounts: ["token", "device_slot"],
     };
   }
 
@@ -316,6 +331,8 @@ export class FakeRuntime implements AgentRuntime {
       allowAll: false,
       turns: 0,
       dormant: false,
+      accountLabel: o.account?.label ?? null,
+      onAccountSignal: o.onAccountSignal ?? (() => undefined),
     };
     this.sessions.set(s.id, s);
     sink({
@@ -338,6 +355,11 @@ export class FakeRuntime implements AgentRuntime {
     }
     this.wake(s);
     void this.run(s, prompt);
+  }
+
+  /** 07.18: the next turns run on `account` (the label in the footer changes); a running turn keeps its own. */
+  async useAccount(sessionId: string, account: RuntimeAccount | null): Promise<void> {
+    this.get(sessionId).accountLabel = account?.label ?? null;
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -488,11 +510,24 @@ export class FakeRuntime implements AgentRuntime {
     const images = prompt.images?.length
       ? `\nImages: ${prompt.images.length} (${prompt.images.map((i) => i.mediaType).join(", ")})`
       : "";
-    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}${images}`;
+    const label = s.accountLabel;
+    const accountLine = label !== null ? `\n(account: ${label})` : "";
+    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}${images}${accountLine}`;
     this.emit(s, { type: "prompt.started", promptId: pid });
     this.emit(s, { type: "session.state", status: "running" });
     let isError = false;
     try {
+      // 07.18: a limited fake account reports the limit before the turn ends, as the Claude adapter does (PD-05).
+      if (label !== null && this.limitPrefix && label.startsWith(this.limitPrefix)) {
+        await sleep(this.delayMs);
+        s.onAccountSignal({
+          kind: "limited",
+          promptId: pid,
+          reason: "five_hour",
+          resetsAt: new Date(Date.now() + FAKE_LIMIT_RESET_MS).toISOString(),
+        });
+        throw new Error("You've hit your session limit");
+      }
       // ADR-0012: a fullAccess turn needs the device gate open at the moment it starts (opt-out wins at once).
       if (mode === "fullAccess" && !this.allowFullAccess()) {
         throw new RuntimeError("Full access is not enabled on this device", "permission_mode_rejected");
