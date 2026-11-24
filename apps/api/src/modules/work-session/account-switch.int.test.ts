@@ -392,7 +392,13 @@ describe("every limit case ends in a defined outcome (D-06, D-08, PD-15, PD-16, 
     const again = await pool.device.command("prompt", id);
     expect(again.payload).toMatchObject({ promptId: p, account: { accountId: b, oauthToken: TB } });
     expect(await switchedEvents(id)).toEqual([
-      { type: "account.switched", fromLabel: null, toLabel: "B", reason: "limit", until: resetsAt.toISOString() },
+      {
+        type: "account.switched",
+        fromLabel: null,
+        toLabel: "B",
+        reason: "limit",
+        until: resetsAt.toISOString(),
+      },
     ]);
     expect(await auditOf("account_pool.limited", id)).toHaveLength(0);
     await finishTurn(pool, id, again);
