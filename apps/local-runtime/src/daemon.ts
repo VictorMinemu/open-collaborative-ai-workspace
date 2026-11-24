@@ -62,6 +62,7 @@ import {
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
 } from "@ocw/contracts";
+import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
 import {
@@ -272,16 +273,30 @@ interface ActiveSession {
   accountRef: string | null;
 }
 
-/** 07.18 (PD-03): no slot store on this device yet (08 adds Codex slots), so a slot account is refused. */
+/** 07.18 (D-02): a `device_slot` account whose slot is not in this device's slot store. */
 export const ACCOUNT_SLOT_NOT_FOUND_MESSAGE = "account slot not found on this device";
 
 /**
- * 07.18 (D-02, PD-03): the wire account of a start or prompt → what the adapter gets. Absent or null = the device's
- * own login. A token is passed on in memory only; the daemon keeps just the ref.
+ * 07.18 (D-02, PD-03, PD-10): the wire account of a start or prompt → what the adapter gets. Absent or null = the
+ * device's own login. A token is passed on in memory only; the daemon keeps just the ref. A slot account resolves to
+ * that slot's `CODEX_HOME` through the store (device-local, never sent back); an unknown slot is refused.
  */
-function runtimeAccountOf(wire: SessionAccount | null | undefined): RuntimeAccount | null {
+async function runtimeAccountOf(
+  wire: SessionAccount | null | undefined,
+  slots: CodexSlotStore,
+): Promise<RuntimeAccount | null> {
   if (!wire) return null;
-  if (wire.kind === "device_slot") throw new Error(ACCOUNT_SLOT_NOT_FOUND_MESSAGE);
+  if (wire.kind === "device_slot") {
+    const slot = await slots.get(wire.slotId).catch(() => undefined);
+    if (!slot) throw new Error(ACCOUNT_SLOT_NOT_FOUND_MESSAGE);
+    return {
+      kind: "device_slot",
+      ref: wire.accountId,
+      label: wire.label,
+      slotId: slot.slotId,
+      codexHome: slots.homeOf(slot.slotId),
+    };
+  }
   return { kind: "token", ref: wire.accountId, label: wire.label, oauthToken: wire.oauthToken };
 }
 
@@ -338,6 +353,8 @@ export type ReloadConfigResult = {
 
 export class Daemon {
   readonly registry: ProjectRegistry;
+  /** 07.18 (D-02, PD-10): the Codex account slots on this device (shared with `ocw-runtime account`). */
+  readonly codexSlots: CodexSlotStore;
   private link: DeviceLink | null = null;
   private control: ControlSocketServer | null = null;
   private readonly runtimes = new Map<RuntimeId, AgentRuntime>();
@@ -394,6 +411,7 @@ export class Daemon {
     private readonly gate: FullAccessGate,
   ) {
     this.registry = new ProjectRegistry(home);
+    this.codexSlots = new CodexSlotStore(home, env);
     for (const r of runtimes) {
       this.runtimes.set(r.id, r);
       this.gates.set(r.id, new RuntimeGate());
@@ -835,6 +853,8 @@ export class Daemon {
       ...(this.boot ? this.boot.report.frames : []),
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
+      // 07.18 (D-02, PD-10): every Codex slot, after capabilities; offline changes go with this frame on reconnect.
+      await this.accountsSyncFrame(),
       ...(this.maintenance ? [this.withSelf(await this.maintenance.snapshot())] : []),
     ];
     // The link writes these frames right after this resolves; once they went out on an open socket, the marker goes.
@@ -878,6 +898,25 @@ export class Daemon {
 
   private send(frame: DeviceToServerFrame): void {
     this.link?.send(frame);
+  }
+
+  /**
+   * 07.18 (D-02, P2): the slots as the server may see them: id, label, origin, signed in, plan, usage. Never a path, an
+   * e-mail or anything from `auth.json`. A slot file that cannot be read reports no slots (logged).
+   */
+  private async accountsSyncFrame(): Promise<DeviceToServerFrame> {
+    const codexSlots = await this.codexSlots.report().catch((err: unknown) => {
+      this.log.warn("account slots unreadable", { error: sanitizeString(errorMessage(err), [this.home]) });
+      return [];
+    });
+    return { type: "accounts.sync", codexSlots };
+  }
+
+  /** 07.18: a slot changed: the server hears it now while connected; offline, the next handshake carries it. */
+  private async sendAccountsSync(): Promise<void> {
+    if (!this.isConnected) return;
+    const frame = await this.accountsSyncFrame();
+    if (this.isConnected) this.send(frame);
   }
 
   private async syncProjects(): Promise<void> {
@@ -1312,7 +1351,7 @@ export class Daemon {
     // 07.18 (PD-03): absent = keep the current account; null or an object = this turn's account, switched only when
     // the ref differs (the adapter applies it between turns). The daemon keeps the ref, never the token.
     if (prompt.account !== undefined) {
-      const account = runtimeAccountOf(prompt.account);
+      const account = await runtimeAccountOf(prompt.account, this.codexSlots);
       const ref = account?.ref ?? null;
       if (ref !== s.accountRef) {
         if (account) refuseAccountKind(s.runtime, account);
@@ -1378,7 +1417,7 @@ export class Daemon {
     }
 
     // 07.18 (PD-03, PD-04): the account is mapped and checked against the adapter before anything is created.
-    const account = runtimeAccountOf(payload.account);
+    const account = await runtimeAccountOf(payload.account, this.codexSlots);
     if (account) refuseAccountKind(runtime, account);
 
     let cwd = project.path;

@@ -760,13 +760,14 @@ describe("Daemon <-> Device Link", () => {
     runtime.emit("ws5", { type: "tool.completed", toolUseId: "t1", ok: true, summary: "done" });
 
     await server.waitFor(() =>
-      server.connections.length === 2 && server.last.frames.length >= 5 ? true : undefined,
+      server.connections.length === 2 && server.last.frames.length >= 6 ? true : undefined,
     );
     const types = server.last.frames.map((f) => (f.type === "event" ? f.event.type : f.type));
-    expect(types.slice(0, 5)).toEqual([
+    expect(types.slice(0, 6)).toEqual([
       "hello",
       "projects.sync",
       "capabilities",
+      "accounts.sync",
       "tool.started",
       "tool.completed",
     ]);
@@ -3522,15 +3523,32 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
     const a = await store.create({ label: "ana@acme", origin: "server" });
     const b = await store.create({ label: "Codex account 2", origin: "cli" });
-    writeFileSync(join(store.homeOf(a.slotId), "auth.json"), JSON.stringify({ tokens: { access_token: "AT" } }));
+    writeFileSync(
+      join(store.homeOf(a.slotId), "auth.json"),
+      JSON.stringify({ tokens: { access_token: "AT" } }),
+    );
     await store.setPlan(a.slotId, "plus");
     await daemon.start();
     const sync = await server.frame("accounts.sync");
     expect(sync).toEqual({
       type: "accounts.sync",
       codexSlots: [
-        { slotId: a.slotId, label: "ana@acme", origin: "server", signedIn: true, planType: "plus", usage: null },
-        { slotId: b.slotId, label: "Codex account 2", origin: "cli", signedIn: false, planType: null, usage: null },
+        {
+          slotId: a.slotId,
+          label: "ana@acme",
+          origin: "server",
+          signedIn: true,
+          planType: "plus",
+          usage: null,
+        },
+        {
+          slotId: b.slotId,
+          label: "Codex account 2",
+          origin: "cli",
+          signedIn: false,
+          planType: null,
+          usage: null,
+        },
       ],
     });
     const types = server.last.frames.map((f) => f.type);

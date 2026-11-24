@@ -96,7 +96,8 @@ describe("CodexSlotStore (07.18 PD-10)", () => {
   });
 
   it(`refuses more than ${POOL_LIMITS.slotsPerDevice} slots`, async () => {
-    for (let i = 0; i < POOL_LIMITS.slotsPerDevice; i++) await store.create({ label: `S${i}`, origin: "cli" });
+    for (let i = 0; i < POOL_LIMITS.slotsPerDevice; i++)
+      await store.create({ label: `S${i}`, origin: "cli" });
     await expect(store.create({ label: "one too many", origin: "cli" })).rejects.toThrow(
       `at most ${POOL_LIMITS.slotsPerDevice} Codex accounts on one device`,
     );
