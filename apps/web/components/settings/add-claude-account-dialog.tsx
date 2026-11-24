@@ -176,7 +176,7 @@ function SwitchMode({
         type="button"
         variant="link"
         onClick={onClick}
-        className="text-[13px] max-md:py-3"
+        className="text-[13px] max-md:h-auto max-md:min-h-11 max-md:py-3"
         data-testid={testId}
       >
         {children}
