@@ -296,7 +296,7 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
     device as `CODEX_HOME` slots (`~/.ocw/accounts/codex/<slotId>`, shared `sessions/`, Codex's own device-code
     sign-in from Settings or `ocw-runtime account add codex`; CLI slots arrive off). ChatGPT accounts for bots are
     OpenClaw profiles `openai:pool-<id>` in the cell. Claude tokens reach the cell as `anthropic:pool-<id>` token
-    profiles over `OCW_POOL_TOKEN_<n>`, with the org key last. The pre-07.18 bot sign-in is adopted as the first
+    profiles over `OCW_POOL_TOKEN_<account id hex>`, with the org key last. The pre-07.18 bot sign-in is adopted as the first
     account.
   - **Selection:** `failover` (default, "Use one until its limit, then the next"), `round_robin` (least recently
     used) and `weighted` (smooth weighted round-robin), by a pure `pickAccount` under a policy row lock; sticky per

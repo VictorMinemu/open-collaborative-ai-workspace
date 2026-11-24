@@ -181,7 +181,7 @@ is on record; it does not claim the use is permitted. The admin documentation (p
   "adopted"`). The pre-07.18 `model_providers` sign-in thereby becomes the pool's first ChatGPT account with no SQL data
   migration, and keeps working.
 - Claude accounts reach the cell as the same setup-tokens, over the authenticated `GET /cell` like provider API keys,
-  as an `anthropic:pool-<accountId>` token profile per account, read from an `OCW_POOL_TOKEN_<n>` env SecretRef. If
+  as an `anthropic:pool-<accountId>` token profile per account, read from an `OCW_POOL_TOKEN_<account id hex>` env SecretRef. If
   token profiles do not take precedence over the Anthropic API key (A-05), `CELL_CLAUDE_TOKENS` is false: the cell gets
   no Claude tokens and Settings says "Bots use the Anthropic API key", stated, never silent.
 
