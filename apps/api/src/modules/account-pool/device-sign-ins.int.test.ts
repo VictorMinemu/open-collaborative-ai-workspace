@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import { pairDevice } from "../../testing-workzone";
+import { deviceSignInKey } from "./index";
 
 /**
  * Phase 07.18-13 (D-02, D-10, D-13, PD-11, PD-20, PD-25, A-08, E10, E11): an admin signs a ChatGPT account in on a
@@ -264,5 +265,280 @@ describe("an admin signs a ChatGPT account in on a service device (07.18-13 T1)"
       (await su.query("select payload from app.stream_events where organization_id = $1", [orgA])).rows,
     );
     expect(stream).not.toContain(CODE);
+  });
+});
+
+// ---------------------------------------------------------------- 07.18-13 T3: refusals, failures, cancel, sign-out
+
+/** Starts a sign-in on `dev` and returns it with the `account.login` command the device received. */
+async function begin(dev: Dev, label = "ops@acme") {
+  const signIn = await ok(start(victor, dev.deviceId, label));
+  const cmd = await dev.device.command("account.login");
+  return { signIn, cmd, slotId: cmd.payload.slotId as string };
+}
+
+/** The current sign-in once `pred` holds. */
+const settle = (dev: Dev, pred: (s: Json) => boolean) =>
+  eventually(async () => {
+    const r = await ok(current(victor, dev.deviceId));
+    return r && pred(r) ? r : undefined;
+  });
+
+const failedAudits = async (flowSlot: string) =>
+  (await auditRows(["account_pool.sign_in_failed"])).filter((a) => a.metadata.slotId === flowSlot);
+
+/** Rewrites the device's Redis flow record (to age it without waiting). */
+async function ageRecord(dev: Dev, patch: Json) {
+  const redis = stack.built.core.bus.pub;
+  const key = deviceSignInKey(orgA, dev.deviceId);
+  const raw = await redis.get(key);
+  if (!raw) throw new Error("no flow record");
+  await redis.set(key, JSON.stringify({ ...JSON.parse(raw), ...patch }), {
+    expiration: { type: "EX", value: 600 },
+  });
+}
+
+describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () => {
+  let desktop: Dev;
+  let old: Dev;
+  let other: Dev;
+
+  beforeAll(async () => {
+    desktop = await connect("Laptop", { host: "desktop", accountPool: 1 });
+    old = await connect("Old server", { host: "service" });
+    other = await connect("Other server", { host: "service", accountPool: 1 });
+  }, 120_000);
+
+  afterAll(async () => {
+    for (const dev of [desktop, old, other]) await dev?.device.close().catch(() => {});
+  });
+
+  it("a desktop device, an older daemon, an offline or a revoked device are refused, with plain sentences", async () => {
+    await fails(start(victor, desktop.deviceId), 409, "not_a_service_device");
+    const tooOld = await fails(start(victor, old.deviceId), 409, "not_a_service_device");
+    expect(tooOld.error.message).toContain("Update the OCW runtime on this device first");
+
+    const offline = await pairDevice(stack, victor, "Parked server");
+    await su.query(
+      "update app.devices set host_kind = 'service', account_pool_version = 1, status = 'offline' where id = $1",
+      [offline.deviceId],
+    );
+    await fails(start(victor, offline.deviceId), 409, "device_offline");
+
+    const revoked = await pairDevice(stack, victor, "Revoked server");
+    await su.query(
+      "update app.devices set host_kind = 'service', account_pool_version = 1, status = 'online', revoked_at = now() where id = $1",
+      [revoked.deviceId],
+    );
+    await fails(start(victor, revoked.deviceId), 409, "device_offline");
+
+    expect(desktop.device.pending("account.login")).toEqual([]);
+    expect(old.device.pending("account.login")).toEqual([]);
+    expect(await auditRows(["account_pool.sign_in_started"])).toHaveLength(1); // only T1's
+  });
+
+  it("one sign-in per device: a second start while one is pending answers it and sends no second command", async () => {
+    const { signIn, cmd, slotId } = await begin(other);
+    other.device.send(codeFrame(cmd.id, slotId));
+    await settle(other, (s) => s.state === "pending");
+    const again = await ok(start(victor, other.deviceId, "someone-else@acme"));
+    expect(again).toMatchObject({ id: signIn.id, label: "ops@acme", state: "pending" });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(other.device.pending("account.login")).toEqual([]);
+
+    // Cancel: the device signs the slot out; the flow reads cancelled, audited once with the code only.
+    const cancelled = await ok(cancel(victor, other.deviceId));
+    expect(cancelled).toMatchObject({ state: "error", error: { code: "cancelled" }, userCode: null });
+    const logout = await other.device.command("account.logout");
+    expect(logout.payload).toEqual({ slotId });
+    other.device.ack(logout.id);
+    // The daemon's own `failed` (cancelled) after the cancel changes nothing.
+    other.device.send({
+      type: "account.login",
+      requestId: cmd.id,
+      slotId,
+      phase: "failed",
+      error: { code: "cancelled", message: "cancelled" },
+    });
+    other.device.ack(cmd.id, false, "cancelled");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await ok(current(victor, other.deviceId))).toMatchObject({
+      state: "error",
+      error: { code: "cancelled" },
+    });
+    const audits = await failedAudits(slotId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.metadata).toEqual({
+      provider: "chatgpt",
+      deviceId: other.deviceId,
+      slotId,
+      label: "ops@acme",
+      code: "cancelled",
+    });
+    // A cancel with nothing running answers the last flow and sends nothing.
+    expect(await ok(cancel(victor, other.deviceId))).toMatchObject({ error: { code: "cancelled" } });
+  });
+
+  it("an older daemon's refusal ends runtime_too_old; a denied login ends denied; each audited once", async () => {
+    const a = await begin(server);
+    server.device.ack(a.cmd.id, false, "invalid command frame");
+    const tooOld = await settle(server, (s) => s.state === "error");
+    expect(tooOld.error).toEqual({
+      code: "runtime_too_old",
+      message: "Update the OCW runtime on this device first.",
+    });
+    expect((await failedAudits(a.slotId)).map((x) => x.metadata.code)).toEqual(["runtime_too_old"]);
+
+    const b = await begin(server);
+    server.device.send(codeFrame(b.cmd.id, b.slotId));
+    await settle(server, (s) => s.state === "pending");
+    server.device.send({
+      type: "account.login",
+      requestId: b.cmd.id,
+      slotId: b.slotId,
+      phase: "failed",
+      error: { code: "denied", message: `denied for ${CODE}` },
+    });
+    server.device.ack(b.cmd.id, false, "denied");
+    const denied = await settle(server, (s) => s.state === "error");
+    expect(denied).toMatchObject({
+      id: b.signIn.id,
+      error: { code: "denied", message: "The sign-in was denied in the browser." },
+      verificationUrl: null,
+      userCode: null,
+    });
+    expect((await failedAudits(b.slotId)).map((x) => x.metadata.code)).toEqual(["denied"]);
+
+    const c = await begin(server);
+    server.device.send({
+      type: "account.login",
+      requestId: c.cmd.id,
+      slotId: c.slotId,
+      phase: "failed",
+      error: { code: "unsupported", message: "no device code" },
+    });
+    expect((await settle(server, (s) => s.state === "error")).error).toEqual({
+      code: "unsupported",
+      message: "Update Codex on this device and try again.",
+    });
+  });
+
+  it("no code within 45 s reads device_offline; a code past its expiry reads expired; each audited once", async () => {
+    const a = await begin(server);
+    await ageRecord(server, { startedAt: new Date(Date.now() - 60_000).toISOString() });
+    const silent = await settle(server, (s) => s.state === "error");
+    expect(silent.error.code).toBe("device_offline");
+    await ok(current(victor, server.deviceId));
+    expect((await failedAudits(a.slotId)).map((x) => x.metadata.code)).toEqual(["device_offline"]);
+    // A late code changes nothing.
+    server.device.send(codeFrame(a.cmd.id, a.slotId));
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await ok(current(victor, server.deviceId))).state).toBe("error");
+
+    const b = await begin(server);
+    server.device.send(codeFrame(b.cmd.id, b.slotId));
+    await settle(server, (s) => s.state === "pending");
+    await ageRecord(server, { expiresAt: new Date(Date.now() - 1000).toISOString() });
+    const expired = await settle(server, (s) => s.state === "error");
+    expect(expired).toMatchObject({ error: { code: "expired" }, userCode: null, verificationUrl: null });
+    expect((await failedAudits(b.slotId)).map((x) => x.metadata.code)).toEqual(["expired"]);
+  });
+
+  it("a frame for another device's command, or for no account.login, changes nothing (E11)", async () => {
+    const { signIn, cmd, slotId } = await begin(server);
+    // Device `other` replays server's command id and slot.
+    other.device.send(codeFrame(cmd.id, slotId));
+    other.device.send({
+      type: "account.login",
+      requestId: cmd.id,
+      slotId,
+      phase: "completed",
+      planType: "pro",
+    });
+    other.device.ack(cmd.id);
+    // Server itself, with an unknown request id.
+    server.device.send(codeFrame(randomUUID(), slotId));
+    server.device.send({ type: "account.login", requestId: randomUUID(), slotId, phase: "completed" });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(await ok(current(victor, server.deviceId))).toMatchObject({ id: signIn.id, state: "starting" });
+    expect(
+      (
+        await su.query("select count(*)::int as n from app.account_pool_accounts where slot_id = $1", [
+          slotId,
+        ])
+      ).rows[0].n,
+    ).toBe(0);
+    await ok(cancel(victor, server.deviceId));
+    server.device.ack((await server.device.command("account.logout")).id);
+  });
+
+  it("removing a device_slot account signs it out on its device, even while the device is offline", async () => {
+    const { cmd, slotId } = await begin(other, "gone@acme");
+    other.device.send({
+      type: "account.login",
+      requestId: cmd.id,
+      slotId,
+      phase: "completed",
+      planType: "plus",
+    });
+    other.device.ack(cmd.id);
+    const done = await settle(other, (s) => s.state === "connected");
+
+    await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${done.accountId}`));
+    const logout = await other.device.command("account.logout");
+    expect(logout.payload).toEqual({ slotId });
+    other.device.ack(logout.id);
+
+    // Offline: the row is removed now, the command waits in the queue.
+    const second = await begin(other, "later@acme");
+    other.device.send({
+      type: "account.login",
+      requestId: second.cmd.id,
+      slotId: second.slotId,
+      phase: "completed",
+    });
+    other.device.ack(second.cmd.id);
+    const connected = await settle(other, (s) => s.state === "connected");
+    await other.device.close();
+    await su.query("update app.devices set status = 'offline' where id = $1", [other.deviceId]);
+    await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${connected.accountId}`));
+    const row = (
+      await su.query("select removed_at from app.account_pool_accounts where id = $1", [connected.accountId])
+    ).rows[0];
+    expect(row.removed_at).not.toBeNull();
+    const queued = (
+      await su.query(
+        "select status, payload from app.device_commands where device_id = $1 and kind = 'account.logout' order by created_at desc limit 1",
+        [other.deviceId],
+      )
+    ).rows[0];
+    expect(queued).toMatchObject({ status: "pending", payload: { slotId: second.slotId } });
+    // A removed sign-in's account reads as no sign-in.
+    expect(await ok(current(victor, other.deviceId))).toBeNull();
+
+    // A token account's removal sends nothing to any device.
+    const before = (
+      await su.query("select count(*)::int as n from app.device_commands where kind = 'account.logout'")
+    ).rows[0].n as number;
+    const token = ["sk", "ant", "oat01", "Q".repeat(48)].join("-");
+    const added = await ok(
+      victor.request("POST", "/api/v1/account-pool/claude/accounts", { label: "t", token }),
+    );
+    await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${added.id}`));
+    expect(
+      (await su.query("select count(*)::int as n from app.device_commands where kind = 'account.logout'"))
+        .rows[0].n,
+    ).toBe(before);
+  });
+
+  it("a member gets 403 on the three routes; another organization's admin gets 404 for A's device", async () => {
+    await fails(start(sam, server.deviceId), 403);
+    await fails(current(sam, server.deviceId), 403);
+    await fails(cancel(sam, server.deviceId), 403);
+    await fails(start(eve, server.deviceId), 404);
+    await fails(current(eve, server.deviceId), 404);
+    await fails(cancel(eve, server.deviceId), 404);
+    await fails(start(victor, randomUUID()), 404);
+    expect(server.device.pending("account.login")).toEqual([]);
   });
 });
