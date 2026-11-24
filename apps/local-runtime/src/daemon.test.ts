@@ -3438,7 +3438,11 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     });
     const usage = { windows: [{ kind: "five_hour" as const, usedPercent: 42, resetsAt }], at: resetsAt };
     signal({ kind: "usage", usage });
-    expect(await server.frame("account.usage")).toEqual({ type: "account.usage", accountId: ACCOUNT_A, usage });
+    expect(await server.frame("account.usage")).toEqual({
+      type: "account.usage",
+      accountId: ACCOUNT_A,
+      usage,
+    });
     expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
   });
 

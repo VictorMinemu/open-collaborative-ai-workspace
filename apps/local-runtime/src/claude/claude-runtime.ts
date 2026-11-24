@@ -15,8 +15,10 @@
 //   rules and the hook stay in Full access too (canUseTool is not consulted in bypass mode) (D-04);
 // - user/local Claude settings are not loaded, so personal allow-rules cannot skip cloud approvals;
 // - OCW_* variables (device token) are stripped from the Claude Code process environment;
-// - billing: runs on the user's local Claude Code login (subscription) through the installed CLI;
-//   ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are stripped unless `useApiKey` is set;
+// - billing: runs on the device's own Claude Code login (subscription) through the installed CLI, or on the pool token
+//   the platform gave this session (07.18 D-02, `claude/pool-env.ts`: in memory only, every competing credential
+//   stripped, the base URL / proxy / CA pinned in the flag settings); ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are
+//   stripped unless `useApiKey` is set, and always with a pool token;
 // - one update authority (07.11 D-12): every CLI process the daemon launches (sessions, catalog, titles) runs with
 //   DISABLE_AUTOUPDATER=1, so the CLI never updates itself behind the daemon's update gate;
 // - runtime updates never cut a turn (07.11 D-03a): `retireIdle()` closes only the CLI processes of sessions with
@@ -55,6 +57,7 @@ import {
   type AgentRuntime,
   type EventSink,
   type FullAccessGateOptions,
+  type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -64,6 +67,7 @@ import { redact } from "../sanitize.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { ClaudeEventMapper } from "./mapper.js";
+import { poolChildEnv } from "./pool-env.js";
 import { generateClaudeTitle } from "./title.js";
 import { extractPaths, secretDenyReason, secretDenyRules, summarizeToolInput } from "./tool-policy.js";
 
@@ -130,9 +134,14 @@ interface PendingApproval {
   settle(outcome: ApprovalOutcome, comment?: string): void;
 }
 
+/** 07.18: the pool token account a session runs on (null = the device's own login). Memory only. */
+type SessionAccount = { ref: string; label: string; oauthToken: string };
+
 interface Session {
   id: string;
   cwd: string;
+  /** 07.18 (D-02): the pool token this session runs on; null = the device's own login. Never logged or written. */
+  account: SessionAccount | null;
   /** Runtime session id given at start (resume), used when no init has reported one yet. */
   resumeId: string | null;
   /** The model id last handed to the CLI (catalog id, possibly with `[1m]`); relaunches keep it. */
@@ -233,6 +242,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
       supportsImages: true,
+      supportsAccounts: ["token"],
     };
   }
 
@@ -375,6 +385,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const session: Session = {
       id: options.sessionId,
       cwd: options.cwd,
+      account: tokenAccountOf(options.account),
       resumeId: options.resumeRuntimeSessionId ?? null,
       runtimeModel: options.model,
       bypass: mode.data === "fullAccess",
@@ -453,7 +464,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           ? { deny: secretDenyRules() }
           : { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" },
       },
-      env: childEnv(process.env, this.opts.useApiKey ?? false),
+      env: s.account
+        ? poolChildEnv(childEnv(process.env, false), s.account.oauthToken)
+        : childEnv(process.env, this.opts.useApiKey ?? false),
       abortController: s.abort,
       stderr: (data: string) => this.log.debug(`[claude-code ${s.id}] ${redact(data.trimEnd())}`),
     };
@@ -987,6 +1000,15 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       return { behavior: "deny", message };
     };
   }
+}
+
+/** The token account of a start (07.18); a slot account never reaches this adapter (`supportsAccounts`). */
+function tokenAccountOf(account: RuntimeAccount | null | undefined): SessionAccount | null {
+  if (!account) return null;
+  if (account.kind !== "token") {
+    throw new RuntimeError("claude-code runs only on token accounts", "runtime_unavailable");
+  }
+  return { ref: account.ref, label: account.label, oauthToken: account.oauthToken };
 }
 
 /** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
