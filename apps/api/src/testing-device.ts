@@ -74,6 +74,10 @@ export class FakeDevice {
       host?: "desktop" | "service";
       /** 07.16 (D-19): the owner's local isolated-server mark (`isolatedServer`); sent only when given. */
       isolatedServer?: boolean;
+      /** 07.18 (PD-04): the daemon runs sessions on pool accounts (`hello.accountPool`); sent only when given. */
+      accountPool?: 1;
+      /** 07.18 (PD-17): whether Claude Code reports a login of its own (default true). */
+      claudeLoggedIn?: boolean;
     } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
@@ -91,7 +95,7 @@ export class FakeDevice {
           id: "claude-code",
           installed: true,
           version: opts.claudeVersion === undefined ? "2.1.287" : opts.claudeVersion,
-          loggedIn: true,
+          loggedIn: opts.claudeLoggedIn ?? true,
         },
         opts.codexInstalled === false
           ? { id: "codex", installed: false, version: null, loggedIn: false }
@@ -104,6 +108,7 @@ export class FakeDevice {
       ],
       ...(sessions ? { sessions } : {}),
       ...(opts.isolatedServer !== undefined ? { isolatedServer: opts.isolatedServer } : {}),
+      ...(opts.accountPool !== undefined ? { accountPool: opts.accountPool } : {}),
     });
     await d.next((f) => f.type === "welcome");
     return d;

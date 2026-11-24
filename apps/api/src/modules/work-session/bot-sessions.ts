@@ -350,6 +350,8 @@ function refusalOf(f: WorkSessionStartFailure): BotWorkSessionRefused {
     case "device_offline":
       return refusedAnswer("device_offline");
     case "runtime_unavailable":
+    // 07.18 (PD-16): no pool account and no usable device login reads to the bot as an unavailable runtime.
+    case "no_account":
       return refusedAnswer("runtime_unavailable");
     case "prompt_not_allowed":
       return refusedAnswer("prompt_not_allowed");

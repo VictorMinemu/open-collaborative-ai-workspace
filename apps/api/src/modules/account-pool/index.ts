@@ -1,7 +1,22 @@
 import type { ApiModule, Core } from "../../core";
 import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
+export { previewAccountSources } from "./preview";
 export type { AccountPoolDeps } from "./routes";
+export {
+  type AccountPoolPort,
+  createAccountPoolPort,
+  getPoolAccount,
+  noAccountSentence,
+  type PoolConsumer,
+  type SelectAccountInput,
+  type SelectAccountResult,
+  type StoredSessionAccount,
+  selectAccount,
+  servesConsumer,
+  storedSessionAccount,
+  usableFor,
+} from "./selection";
 export {
   addClaudeToken,
   insertPoolAccount,
@@ -34,7 +49,9 @@ export { openPoolToken, poolTokenAad, replacePoolToken, sealPoolToken } from "./
  * Routes (all `authz: user`, `provider.manage`, `cache-control: no-store`): GET `/account-pool`, POST
  * `/account-pool/claude/accounts`, PATCH and DELETE `/account-pool/accounts/:id` (removal is soft, PD-25), PUT
  * `/account-pool/:provider/order` and PUT `/account-pool/:provider/policy`. Every write is audited `account_pool.*` in
- * its transaction and reported to `deps.onChange` there.
+ * its transaction and reported to `deps.onChange` there. GET `/account-pool/preview?deviceId=` (07.18-09, PD-19) is the
+ * one member route: any member who may use the device sees what a new session there would run on, without labels.
+ * Selection for Work Zone sessions is `selection.ts` (`createAccountPoolPort`).
  */
 export function createAccountPoolModule(core: Core, deps: AccountPoolDeps = {}): ApiModule {
   return {
