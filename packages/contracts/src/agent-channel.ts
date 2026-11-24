@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ClaudeSetupToken, POOL_LIMITS } from "./account-pool";
 import {
   AgentStatus,
   CellRuntimePause,
@@ -447,6 +448,11 @@ export const ProviderAuthStartEvent = z.object({
   method: z.literal("device-code"),
   /** A cell that sees this event after this instant (e.g. replay after downtime) must ignore it. */
   startBefore: IsoDateTime,
+  /**
+   * 07.18 (PD-12): the OpenClaw profile id to sign in (`poolProfileId(accountId)`). Absent = the provider's default
+   * profile (today's behaviour); older plugins ignore it.
+   */
+  profileId: z.string().max(120).optional(),
 });
 export type ProviderAuthStartEvent = z.infer<typeof ProviderAuthStartEvent>;
 
@@ -466,8 +472,22 @@ export const ProviderAuthRevokeEvent = z.object({
   cellId: Id,
   seq: z.number().int().positive(),
   provider: SubscriptionProviderKind,
+  /** 07.18 (PD-25, E15): sign out only these profiles. Absent = every profile of the provider (today's behaviour). */
+  profileIds: z.array(z.string().max(120)).max(POOL_LIMITS.accountsPerProvider).optional(),
 });
 export type ProviderAuthRevokeEvent = z.infer<typeof ProviderAuthRevokeEvent>;
+
+/**
+ * 07.18 (PD-12): one sign-in the cell holds, as it reports it. `email` comes from the provider's own identity (the cell
+ * already reports it today) and stays an admin-only field; never a token.
+ */
+export const CellAuthProfileReport = z.object({
+  profileId: z.string().min(1).max(120),
+  email: z.string().max(320).nullable(),
+  planType: z.string().max(64).nullable(),
+  usable: z.boolean(),
+});
+export type CellAuthProfileReport = z.infer<typeof CellAuthProfileReport>;
 
 /**
  * `POST /agent-channel/v1/provider-auth` — the cell reports progress of a sign-in flow, or (flowId null)
@@ -495,6 +515,10 @@ export const AgentChannelProviderAuthReport = z.object({
     .optional(),
   /** `error` only. */
   error: z.object({ code: ProviderAuthErrorCode, message: z.string().max(300) }).optional(),
+  /** 07.18 (PD-12), `connected` only: the profile id the flow stored (the one asked for, or the one OpenClaw chose). */
+  profileId: z.string().max(120).optional(),
+  /** 07.18 (PD-12), credential state reports (flowId null): every profile of the provider the cell holds. */
+  profiles: z.array(CellAuthProfileReport).max(POOL_LIMITS.accountsPerProvider).optional(),
 });
 export type AgentChannelProviderAuthReport = z.infer<typeof AgentChannelProviderAuthReport>;
 
@@ -741,6 +765,53 @@ export const CellMcpServer = z.object({
 });
 export type CellMcpServer = z.infer<typeof CellMcpServer>;
 
+/** 07.18 (PD-12): the OpenClaw profile id of a ChatGPT pool account signed in inside the cell. */
+export function poolProfileId(accountId: string): string {
+  return `openai:pool-${accountId}`;
+}
+
+/** 07.18 (D-02): the OpenClaw `anthropic` token profile id of a Claude pool account. */
+export function claudeTokenProfileId(accountId: string): string {
+  return `anthropic:pool-${accountId}`;
+}
+
+/** 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). */
+export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9]{1,2}$/;
+
+/**
+ * 07.18 (D-02, D-04, PD-13, PD-18): the organization's pool as the cell applies it. `order` null = no explicit order
+ * (OpenClaw's own least-recently-used rotation); an explicit order lists only enabled profiles. Claude `tokens` are
+ * SECRETS revealed only over this authenticated route, like `CellProvider.apiKey`: the cell exports each as `envName`
+ * and never logs it. `apiKeyLast` puts the org's Anthropic API key after the pool's tokens. ChatGPT credentials stay in
+ * the cell's own auth store (ADR-0006): only profile ids travel.
+ */
+export const CellAccountPool = z.object({
+  claude: z.object({
+    order: z
+      .array(z.string().max(120))
+      .max(POOL_LIMITS.accountsPerProvider + 1)
+      .nullable(),
+    tokens: z
+      .array(
+        z.object({
+          accountId: Id,
+          profileId: z.string().max(120),
+          envName: z.string().regex(POOL_TOKEN_ENV_RE),
+          token: ClaudeSetupToken,
+        }),
+      )
+      .max(POOL_LIMITS.accountsPerProvider),
+    apiKeyLast: z.boolean(),
+  }),
+  chatgpt: z.object({
+    order: z.array(z.string().max(120)).max(POOL_LIMITS.accountsPerProvider).nullable(),
+    profiles: z
+      .array(z.object({ accountId: Id, profileId: z.string().max(120), enabled: z.boolean() }))
+      .max(POOL_LIMITS.accountsPerProvider),
+  }),
+});
+export type CellAccountPool = z.infer<typeof CellAccountPool>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.literal(AGENT_CHANNEL_PROTOCOL_VERSION),
   cellId: Id,
@@ -763,6 +834,11 @@ export const CellSnapshot = z.object({
    * them to `agents.defaults.compaction` and applies `freshSessionOnFailure` itself.
    */
   conversations: BotConversationPolicy.default(() => ({ ...DEFAULT_BOT_CONVERSATIONS })),
+  /**
+   * Additive (07.18, D-02, PD-12, PD-13): the account pool for bots. Absent = today's cell behaviour (the provider's
+   * stored sign-ins, no explicit order). Carries Claude tokens only over this authenticated route.
+   */
+  accountPool: CellAccountPool.optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 
