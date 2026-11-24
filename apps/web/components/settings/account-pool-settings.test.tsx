@@ -3,8 +3,9 @@ import { MutationObserver, QueryClient, QueryClientProvider } from "@tanstack/re
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { Dialog } from "@/components/ui/panel-dialog";
 import { addClaudeAccountMutation, poolKeys } from "@/lib/account-pool-queries";
+import { api } from "@/lib/api";
 import { PoolSections } from "./account-pool-settings";
 import { ClaudeAccountForm, claudeTokenError, SETUP_TOKEN_HELP } from "./add-claude-account-dialog";
 import { SETTINGS_SECTIONS } from "./settings-nav";
@@ -66,6 +67,9 @@ function view(over: { claude?: PoolAccount[]; chatgpt?: PoolAccount[] } = {}): A
 function render(node: ReactElement, qc = new QueryClient()): string {
   return renderToStaticMarkup(<QueryClientProvider client={qc}>{node}</QueryClientProvider>);
 }
+
+/** Dialog parts need the dialog's root; the popup itself (a portal) is not rendered in node. */
+const inDialog = (node: ReactElement) => render(<Dialog open>{node}</Dialog>);
 
 const text = (markup: string) =>
   markup
@@ -145,7 +149,7 @@ describe("the two provider sections (Task 1)", () => {
 
 describe("Add Claude account (Task 1)", () => {
   it("explains claude setup-token and asks for a label and a password-type token", () => {
-    const html = render(<ClaudeAccountForm onDone={() => undefined} />);
+    const html = inDialog(<ClaudeAccountForm onDone={() => undefined} />);
     expect(SETUP_TOKEN_HELP).toBe(
       "Run `claude setup-token` in a terminal where you are signed in to the Claude account, then paste the token here.",
     );
@@ -164,10 +168,11 @@ describe("Add Claude account (Task 1)", () => {
   it("refuses an API key inline with the contract's sentence; Save stays disabled", () => {
     const key = `sk-ant-api03-${"a".repeat(40)}`;
     expect(claudeTokenError(key)).toBe("This is an API key. Add it in Settings › Models.");
-    const html = render(<ClaudeAccountForm onDone={() => undefined} initial={{ label: "ana@acme", token: key }} />);
-    expect(text(from(html, "claude-account-token-error"))).toContain(
-      "This is an API key. Add it in Settings › Models.",
+    const html = inDialog(
+      <ClaudeAccountForm onDone={() => undefined} initial={{ label: "ana@acme", token: key }} />,
     );
+    const alert = html.match(/<p[^>]*role="alert"[^>]*>([^<]*)<\/p>/)?.[1] ?? "";
+    expect(alert).toBe("This is an API key. Add it in Settings › Models.");
     expect(tagsOf(html, "claude-account-save")[0]).toMatch(/disabled/);
   });
 

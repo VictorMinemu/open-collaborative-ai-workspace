@@ -4,6 +4,7 @@ import {
   Container,
   Cpu,
   Hand,
+  KeySquare,
   Laptop,
   LockKeyhole,
   type LucideIcon,
@@ -48,6 +49,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     permission: "unit.modules.manage",
   },
   { id: "models", label: "Models", href: "/settings/models", icon: Cpu, permission: "provider.manage" },
+  // 07.18 (D-10, PD-19): the Claude and ChatGPT subscription accounts Work Zone sessions and bots share.
+  {
+    id: "account-pool",
+    label: "Account pool",
+    href: "/settings/account-pool",
+    icon: KeySquare,
+    permission: "provider.manage",
+  },
   {
     id: "bot-policy",
     label: "Bot policy",
