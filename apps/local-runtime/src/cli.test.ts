@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuntimeId } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ControlRequestSchema } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { DoctorReport } from "./doctor.js";
 import { silentLogger } from "./logger.js";
@@ -1087,4 +1088,128 @@ describe("ocw-runtime doctor and service (07.12-08, D-04, D-05)", () => {
     expect(usage.code).toBe(1);
     expect(usage.stdout).toContain("usage: ocw-runtime service");
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.18-08 `ocw-runtime account add|list|remove` (D-02, PD-11). A fake `codex` (account methods only) configured in
+// runtime.json, a scratch CODEX_HOME: no real Codex, no real ChatGPT account, never the real ~/.codex.
+
+const FAKE_CODEX = fileURLToPath(new URL("./accounts/fake-codex/fake-codex-accounts.mjs", import.meta.url));
+
+describe("ocw-runtime account (07.18-08, D-02, PD-11)", () => {
+  function accountsHome(): { home: string; env: Record<string, string>; codexHome: string } {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(root);
+    const home = join(root, "ocw");
+    mkdirSync(home, { mode: 0o700 });
+    const codexHome = join(root, "codex-default");
+    const codex = join(root, "bin", "codex");
+    mkdirSync(join(root, "bin"));
+    writeFileSync(codex, readFileSync(FAKE_CODEX));
+    chmodSync(codex, 0o755);
+    writeFileSync(join(home, "runtime.json"), JSON.stringify({ codex: { path: codex } }), { mode: 0o600 });
+    return { home, codexHome, env: { CODEX_HOME: codexHome } };
+  }
+  const slotsOf = (home: string) =>
+    (
+      JSON.parse(readFileSync(join(home, "accounts", "codex", "slots.json"), "utf8")) as {
+        slots: Array<{ slotId: string; label: string; origin: string; planType: string | null }>;
+      }
+    ).slots;
+
+  it("add prints the URL and code, waits, signs in and records origin cli; without --label it is numbered", async () => {
+    const { home, env, codexHome } = accountsHome();
+    const r = await cliAsync(home, ["account", "add", "codex", "--label", "ana@acme"], env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain("https://auth.example.test/codex/device");
+    expect(r.stdout).toContain("FAKE-0001");
+    expect(r.stdout).toContain(
+      "Signed in (plan: plus). The server lists it under Settings › Account pool; an admin turns it on.",
+    );
+    const [slot] = slotsOf(home);
+    expect(slot).toMatchObject({ label: "ana@acme", origin: "cli", planType: "plus" });
+    // Codex wrote the slot's auth.json; the slot shares the default Codex home's history.
+    const slotDir = join(home, "accounts", "codex", slot?.slotId ?? "");
+    expect(existsSync(join(slotDir, "auth.json"))).toBe(true);
+    expect(realpathSync(join(slotDir, "sessions"))).toBe(join(codexHome, "sessions"));
+
+    const second = await cliAsync(home, ["account", "add", "codex"], env);
+    expect(second.code, second.stderr).toBe(0);
+    expect(slotsOf(home).map((s) => s.label)).toEqual(["ana@acme", "Codex account 2"]);
+  }, 60_000);
+
+  it("list prints one line per slot; remove signs out and removes by label or id; an unknown slot exits 2", async () => {
+    const { home, env, codexHome } = accountsHome();
+    expect((await cliAsync(home, ["account", "add", "codex", "--label", "A"], env)).code).toBe(0);
+    expect((await cliAsync(home, ["account", "add", "codex", "--label", "B"], env)).code).toBe(0);
+    const [a, b] = slotsOf(home);
+    const list = await cliAsync(home, ["account", "list"], env);
+    expect(list.code, list.stderr).toBe(0);
+    expect(list.stdout.trim().split("\n")).toEqual([
+      `${a?.slotId}  A  signed in  plan: plus`,
+      `${b?.slotId}  B  signed in  plan: plus`,
+    ]);
+
+    const byLabel = await cliAsync(home, ["account", "remove", "codex", "A"], env);
+    expect(byLabel.code, byLabel.stderr).toBe(0);
+    expect(byLabel.stdout).toContain(`Removed "A" (${a?.slotId}).`);
+    const byId = await cliAsync(home, ["account", "remove", "codex", b?.slotId ?? ""], env);
+    expect(byId.code, byId.stderr).toBe(0);
+    expect(slotsOf(home)).toEqual([]);
+    expect(existsSync(join(codexHome, "sessions"))).toBe(true);
+
+    const unknown = await cliAsync(home, ["account", "remove", "codex", "nope"], env);
+    expect(unknown.code).toBe(2);
+    expect(unknown.stderr).toContain('no Codex account on this device matches "nope"');
+    expect(unknown.stderr).toContain("usage: ocw-runtime account");
+    const bad = await cliAsync(home, ["account", "add", "claude"], env);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("usage: ocw-runtime account");
+    expect((await cliAsync(home, ["account", "list"], env)).stdout).toContain(
+      "No Codex accounts on this device.",
+    );
+  }, 60_000);
+
+  it("a declined sign-in removes its slot and fails", async () => {
+    const { home, env } = accountsHome();
+    const r = await cliAsync(home, ["account", "add", "codex", "--label", "A"], {
+      ...env,
+      FAKE_CODEX_LOGIN: "denied",
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("The sign-in was declined");
+    expect(slotsOf(home)).toEqual([]);
+  }, 60_000);
+
+  it("a running daemon gets the strict reloadAccounts after add and remove", async () => {
+    const { home, env, codexHome } = accountsHome();
+    const daemon = await Daemon.create({
+      home,
+      env: { CODEX_HOME: codexHome },
+      token: null,
+      runtimes: [stubRuntime("codex")],
+      logger: silentLogger,
+    });
+    const reload = vi.spyOn(daemon, "reloadAccounts");
+    try {
+      await daemon.start();
+      const add = await cliAsync(home, ["account", "add", "codex", "--label", "A"], env);
+      expect(add.code, add.stderr).toBe(0);
+      expect(reload).toHaveBeenCalledTimes(1);
+      const [slot] = slotsOf(home);
+      expect((await daemon.codexSlots.list()).map((s) => s.slotId)).toEqual([slot?.slotId]);
+      const rm = await cliAsync(home, ["account", "remove", "codex", "A"], env);
+      expect(rm.code, rm.stderr).toBe(0);
+      expect(reload).toHaveBeenCalledTimes(2);
+    } finally {
+      await daemon.stop();
+    }
+  }, 60_000);
+
+  it("ControlRequestSchema takes reloadAccounts with no value and refuses any extra key", () => {
+    expect(ControlRequestSchema.safeParse({ cmd: "reloadAccounts" }).success).toBe(true);
+    expect(ControlRequestSchema.safeParse({ id: 1, cmd: "reloadAccounts" }).success).toBe(true);
+    expect(ControlRequestSchema.safeParse({ cmd: "reloadAccounts", slotId: "x" }).success).toBe(false);
+    expect(ControlRequestSchema.safeParse({ cmd: "reloadAccounts", label: "A" }).success).toBe(false);
+  });
 });

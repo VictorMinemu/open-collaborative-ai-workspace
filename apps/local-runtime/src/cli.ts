@@ -36,9 +36,25 @@
 //                                  with one fix line; reads ~/.ocw/service.env as the service does; exit 1 on any fail.
 //   ocw-runtime remove-project <dir|name|id>
 //                                  unregister a project (via the running daemon, or directly when stopped)
+//   ocw-runtime account add codex [--label <label>]
+//                                  07.18 (D-02, PD-11): sign a ChatGPT account in for Codex in a new account slot,
+//                                  through Codex's own device-code login (prints the link and the code, waits). The
+//                                  server lists it in Settings › Account pool, off until an admin turns it on.
+//   ocw-runtime account list       the Codex account slots on this device (id, label, signed in, plan)
+//   ocw-runtime account remove codex <slotId|label>
+//                                  sign the slot out and remove it (the shared Codex history stays). After add and
+//                                  remove a running daemon re-sends its slots (`reloadAccounts`). Runs as the user that
+//                                  owns the OCW home; under a system service, as that service's user.
 
 import { homedir } from "node:os";
-import { type DeviceHostKind, RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
+import { type DeviceHostKind, PoolLabel, RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
+import {
+  CodexLoginError,
+  codexAccountSpawner,
+  logoutCodex,
+  runCodexDeviceLogin,
+} from "./accounts/codex-login.js";
+import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { detectClaudeCode } from "./claude/detect.js";
 import {
   ensureOcwHome,
@@ -57,6 +73,7 @@ import { type ControlRequest, controlRequest, controlSocketPath } from "./contro
 import { Daemon } from "./daemon.js";
 import { createDoctorDeps, doctorExitCode, formatDoctorJson, formatDoctorText, runDoctor } from "./doctor.js";
 import { type EnrollResult, enroll } from "./enroll.js";
+import { findExecutable } from "./exec-path.js";
 import { readInstallInfo } from "./install-info.js";
 import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
@@ -326,6 +343,119 @@ async function removeProject(ref: string | undefined): Promise<void> {
   process.stdout.write(`Removed "${project.name}" (${project.localId}).\n`);
 }
 
+const ACCOUNT_USAGE =
+  "usage: ocw-runtime account add codex [--label <label>] | account list | account remove codex <slotId|label>";
+
+/** A usage error of `account`: stderr, exit 2. */
+function accountUsage(line?: string): void {
+  process.stderr.write(`${line ? `ocw-runtime account: ${line}\n` : ""}${ACCOUNT_USAGE}\n`);
+  process.exitCode = 2;
+}
+
+/** 07.18 (PD-11): a running daemon re-sends its slots; a stopped one reports them on its next handshake. */
+async function reloadDaemonAccounts(home: string): Promise<void> {
+  try {
+    const res = await controlRequest(controlSocketPath(home), { cmd: "reloadAccounts" });
+    if (!res.ok)
+      process.stderr.write(`Note: the running runtime did not reload its accounts (${res.error}).\n`);
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+  }
+}
+
+async function codexAccountCall(home: string) {
+  const config = await loadConfig(home);
+  return {
+    spawn: codexAccountSpawner(config.codex.path ?? findExecutable("codex"), silentLogger),
+    env: process.env,
+  };
+}
+
+/** `account add codex`: a new slot (`origin: "cli"`), Codex's device-code login on this terminal; Ctrl-C cancels (130). */
+async function accountAdd(home: string, args: string[]): Promise<void> {
+  await ensureOcwHome(home);
+  const store = new CodexSlotStore(home, process.env);
+  const typed = flag(args, "label");
+  const label = PoolLabel.safeParse(typed ?? `Codex account ${(await store.list()).length + 1}`);
+  if (!label.success) return accountUsage("the label must be 1 to 120 characters");
+  const call = await codexAccountCall(home);
+  const slot = await store.create({ label: label.data, origin: "cli" });
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  process.once("SIGINT", onSigint);
+  try {
+    const { planType } = await runCodexDeviceLogin({
+      ...call,
+      home: store.homeOf(slot.slotId),
+      signal: controller.signal,
+      onCode: (code) =>
+        process.stdout.write(
+          `Open ${code.verificationUrl} and enter the code ${code.userCode} (it expires in 15 minutes).\n` +
+            "Waiting for the sign-in…\n",
+        ),
+    });
+    await store.setPlan(slot.slotId, planType);
+    process.stdout.write(
+      `Signed in (plan: ${planType ?? "unknown"}). The server lists it under Settings › Account pool; an admin turns it on.\n`,
+    );
+  } catch (err) {
+    await store.remove(slot.slotId).catch(() => undefined);
+    process.stderr.write(`${errorMessage(err)}\n`);
+    process.exitCode = err instanceof CodexLoginError && err.code === "cancelled" ? 130 : 1;
+    return;
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+  await reloadDaemonAccounts(home);
+}
+
+/** `account list`: one line per slot (id, label, signed in, plan); never a path or anything from `auth.json`. */
+async function accountList(home: string): Promise<void> {
+  const slots = await new CodexSlotStore(home, process.env).report();
+  if (slots.length === 0) {
+    process.stdout.write("No Codex accounts on this device.\n");
+    return;
+  }
+  for (const s of slots) {
+    process.stdout.write(
+      `${s.slotId}  ${s.label}  ${s.signedIn ? "signed in" : "not signed in"}  plan: ${s.planType ?? "-"}\n`,
+    );
+  }
+}
+
+/** `account remove codex <slotId|label>`: Codex signs it out (best effort), then the slot goes. */
+async function accountRemove(home: string, ref: string | undefined): Promise<void> {
+  if (!ref) return accountUsage();
+  const store = new CodexSlotStore(home, process.env);
+  const slots = await store.list();
+  const byId = slots.find((s) => s.slotId === ref);
+  const byLabel = slots.filter((s) => s.label === ref);
+  if (!byId && byLabel.length > 1) {
+    return accountUsage(`ambiguous: ${byLabel.map((s) => s.slotId).join(", ")}; use the slot id`);
+  }
+  const slot = byId ?? byLabel[0];
+  if (!slot) return accountUsage(`no Codex account on this device matches "${ref}"`);
+  try {
+    await logoutCodex({ ...(await codexAccountCall(home)), home: store.homeOf(slot.slotId) });
+  } catch (err) {
+    process.stderr.write(`Note: Codex could not sign it out (${errorMessage(err)}); removing it anyway.\n`);
+  }
+  await store.remove(slot.slotId);
+  process.stdout.write(`Removed "${slot.label}" (${slot.slotId}).\n`);
+  await reloadDaemonAccounts(home);
+}
+
+/** 07.18 (D-02, PD-11) `account add|list|remove`: local only, over the same slot store the daemon reads. */
+async function accountCommand(args: string[]): Promise<void> {
+  const [sub, provider, ...rest] = args;
+  const home = ocwHome();
+  if (sub === "list" && provider === undefined) return accountList(home);
+  if (provider !== "codex") return accountUsage();
+  if (sub === "add") return accountAdd(home, rest);
+  if (sub === "remove") return accountRemove(home, rest[0]);
+  return accountUsage();
+}
+
 const ENROLL_USAGE = "usage: ocw-runtime enroll [--server <url>] [--code <XXXX-XXXX>] [--name <name>]";
 
 /**
@@ -540,6 +670,8 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "doctor":
       return doctorCommand(rest);
+    case "account":
+      return accountCommand(rest);
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

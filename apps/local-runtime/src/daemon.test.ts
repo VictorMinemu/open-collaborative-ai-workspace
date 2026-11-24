@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -23,6 +24,7 @@ import {
 import type { AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   type ApprovalDecision,
@@ -40,8 +42,9 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
+import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
-import { controlRequest } from "./control-socket.js";
+import { type ControlRequest, controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
@@ -442,7 +445,8 @@ beforeEach(async () => {
   runtime = new FakeRuntime();
   daemon = await Daemon.create({
     home,
-    env: {},
+    // 07.18: a scratch default Codex home, so no slot ever links the real ~/.codex.
+    env: { CODEX_HOME: join(home, "codex-default") },
     token: "device-token-123",
     config: { serverUrl: server.url },
     runtimes: [runtime],
@@ -758,13 +762,14 @@ describe("Daemon <-> Device Link", () => {
     runtime.emit("ws5", { type: "tool.completed", toolUseId: "t1", ok: true, summary: "done" });
 
     await server.waitFor(() =>
-      server.connections.length === 2 && server.last.frames.length >= 5 ? true : undefined,
+      server.connections.length === 2 && server.last.frames.length >= 6 ? true : undefined,
     );
     const types = server.last.frames.map((f) => (f.type === "event" ? f.event.type : f.type));
-    expect(types.slice(0, 5)).toEqual([
+    expect(types.slice(0, 6)).toEqual([
       "hello",
       "projects.sync",
       "capabilities",
+      "accounts.sync",
       "tool.started",
       "tool.completed",
     ]);
@@ -3395,7 +3400,7 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     expect(runtime.started[0]?.account ?? null).toBeNull();
   });
 
-  it("refuses a device_slot account while no slot store exists", async () => {
+  it("refuses a device_slot account whose slot is not on this device", async () => {
     const { id } = await startWith({
       kind: "device_slot",
       accountId: ACCOUNT_A,
@@ -3514,5 +3519,342 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
       resetsAt: null,
     });
     expect(server.allFrames.some((f) => f.type === "account.usage")).toBe(false);
+  });
+
+  it("the handshake reports every Codex slot in accounts.sync, after capabilities, with no credential", async () => {
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const a = await store.create({ label: "ana@acme", origin: "server" });
+    const b = await store.create({ label: "Codex account 2", origin: "cli" });
+    writeFileSync(
+      join(store.homeOf(a.slotId), "auth.json"),
+      JSON.stringify({ tokens: { access_token: "AT" } }),
+    );
+    await store.setPlan(a.slotId, "plus");
+    await daemon.start();
+    const sync = await server.frame("accounts.sync");
+    expect(sync).toEqual({
+      type: "accounts.sync",
+      codexSlots: [
+        {
+          slotId: a.slotId,
+          label: "ana@acme",
+          origin: "server",
+          signedIn: true,
+          planType: "plus",
+          usage: null,
+        },
+        {
+          slotId: b.slotId,
+          label: "Codex account 2",
+          origin: "cli",
+          signedIn: false,
+          planType: null,
+          usage: null,
+        },
+      ],
+    });
+    const types = server.last.frames.map((f) => f.type);
+    expect(types.indexOf("accounts.sync")).toBeGreaterThan(types.indexOf("capabilities"));
+    // auth.json is never read: nothing of it, and no path, leaves the device.
+    expect(JSON.stringify(server.allFrames)).not.toContain("access_token");
+    expect(JSON.stringify(server.allFrames)).not.toContain(home);
+  });
+
+  it("a device_slot account of a known slot reaches the adapter with that slot's CODEX_HOME", async () => {
+    runtime.supportsAccounts = ["token", "device_slot"];
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const slot = await store.create({ label: "ChatGPT A", origin: "server" });
+    const { id } = await startWith({
+      kind: "device_slot",
+      accountId: ACCOUNT_A,
+      label: "ChatGPT A",
+      slotId: slot.slotId,
+    });
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    expect(runtime.started[0]?.account).toEqual({
+      kind: "device_slot",
+      ref: ACCOUNT_A,
+      label: "ChatGPT A",
+      slotId: slot.slotId,
+      codexHome: store.homeOf(slot.slotId),
+    });
+    // The slot's directory stays on the device.
+    expect(JSON.stringify(server.allFrames)).not.toContain(store.homeOf(slot.slotId));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.18-08 Task 2: `account.login` / `account.logout` (D-02, D-10, PD-10, A-08). A scripted in-memory app-server
+// stands in for Codex: no real CLI, no real ChatGPT account, a scratch default Codex home.
+
+/** The account methods of `codex app-server`, scripted per test; "signs in" by writing the slot's auth.json as Codex would. */
+class ScriptedCodexAccounts {
+  readonly spawned: Array<{ cwd: string; env: Record<string, string | undefined> }> = [];
+  readonly methods: string[] = [];
+  /** What the next sign-in does once the code was handed over (`hold` = the test calls `finish`). */
+  outcome: "success" | "denied" | "unsupported" | "hold" = "success";
+  private pending: Array<(ok: boolean, error: string | null) => void> = [];
+
+  finish(ok: boolean, error: string | null = null): void {
+    for (const f of this.pending.splice(0)) f(ok, error);
+  }
+
+  spawn = (opts: { cwd: string; env: Record<string, string | undefined> }) => {
+    this.spawned.push(opts);
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      kill: () => {
+        if (!stdout.writableEnded) stdout.end();
+        setImmediate(() => proc.emit("exit", 0));
+      },
+    });
+    const send = (m: unknown) => {
+      if (!stdout.writableEnded) stdout.write(`${JSON.stringify(m)}\n`);
+    };
+    let buf = "";
+    stdin.setEncoding("utf8");
+    stdin.on("data", (c: string) => {
+      buf += c;
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        const m = JSON.parse(line) as { id?: number; method?: string; params?: unknown };
+        if (m.method) this.methods.push(m.method);
+        if (m.id === undefined) continue;
+        const slotHome = opts.env.CODEX_HOME ?? "";
+        switch (m.method) {
+          case "initialize":
+            send({ id: m.id, result: {} });
+            break;
+          case "account/login/start":
+            if (this.outcome === "unsupported") {
+              send({ id: m.id, error: { code: -32600, message: "unknown variant `chatgptDeviceCode`" } });
+              break;
+            }
+            send({
+              id: m.id,
+              result: {
+                type: "chatgptDeviceCode",
+                loginId: "L1",
+                verificationUrl: "https://auth.openai.com/codex/device",
+                userCode: "WXYZ-9876",
+              },
+            });
+            this.pending.push((ok, error) => {
+              if (ok)
+                writeFileSync(
+                  join(slotHome, "auth.json"),
+                  JSON.stringify({ tokens: { refresh_token: "RT-1" } }),
+                );
+              send({ method: "account/login/completed", params: { loginId: "L1", success: ok, error } });
+            });
+            if (this.outcome === "success") setImmediate(() => this.finish(true));
+            // A Codex error that echoes the code: the daemon must strip it.
+            if (this.outcome === "denied")
+              setImmediate(() => this.finish(false, "access_denied for WXYZ-9876"));
+            break;
+          case "account/read":
+            send({
+              id: m.id,
+              result: {
+                account: { type: "chatgpt", email: "ana@example.com", planType: "pro", workspaceName: null },
+                requiresOpenaiAuth: true,
+              },
+            });
+            break;
+          case "account/logout":
+            rmSync(join(slotHome, "auth.json"), { force: true });
+            send({ id: m.id, result: {} });
+            break;
+          case "account/login/cancel":
+            send({ id: m.id, result: { status: "canceled" } });
+            break;
+          default:
+            send({ id: m.id, error: { code: -32601, message: "method not found" } });
+        }
+      }
+    });
+    return proc;
+  };
+}
+
+describe("07.18-08 account.login / account.logout (D-02, D-10, PD-10)", () => {
+  let codex: ScriptedCodexAccounts;
+  const codexDefault = () => join(home, "codex-default");
+
+  beforeEach(async () => {
+    await daemon.stop();
+    codex = new ScriptedCodexAccounts();
+    daemon = await Daemon.create({
+      home,
+      env: { CODEX_HOME: codexDefault(), PATH: "/usr/bin", OPENAI_API_KEY: "sk-test-not-real" },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      codexAccounts: { spawn: codex.spawn },
+    });
+    await daemon.start();
+    await server.frame("hello");
+  });
+
+  function login(slotId: string, label = "ops@acme"): string {
+    const id = randomUUID();
+    server.send({
+      id,
+      kind: "account.login",
+      sessionId: id,
+      payload: { provider: "chatgpt", slotId, label },
+    });
+    return id;
+  }
+
+  it("creates the slot, runs Codex's device-code login under its CODEX_HOME, sends code then completed, then accounts.sync, then the ack", async () => {
+    const slotId = randomUUID();
+    const id = login(slotId);
+    const ack = await server.frame("ack", (f) => f.commandId === id);
+    expect(ack).toMatchObject({ ok: true });
+    const frames = server.last.frames;
+    const code = frames.find((f) => f.type === "account.login" && f.phase === "code");
+    expect(code).toEqual({
+      type: "account.login",
+      requestId: id,
+      slotId,
+      phase: "code",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "WXYZ-9876",
+      expiresAt: expect.any(String),
+    });
+    const completed = frames.find((f) => f.type === "account.login" && f.phase === "completed");
+    expect(completed).toEqual({
+      type: "account.login",
+      requestId: id,
+      slotId,
+      phase: "completed",
+      planType: "pro",
+    });
+    const syncIndex = frames.findIndex(
+      (f) => f.type === "accounts.sync" && f.codexSlots.some((s) => s.slotId === slotId),
+    );
+    expect(frames.indexOf(code as DeviceToServerFrame)).toBeLessThan(
+      frames.indexOf(completed as DeviceToServerFrame),
+    );
+    expect(frames.indexOf(completed as DeviceToServerFrame)).toBeLessThan(syncIndex);
+    expect(syncIndex).toBeLessThan(frames.indexOf(ack));
+    expect(frames[syncIndex]).toEqual({
+      type: "accounts.sync",
+      codexSlots: [
+        { slotId, label: "ops@acme", origin: "server", signedIn: true, planType: "pro", usage: null },
+      ],
+    });
+    // Codex ran under the slot, with API keys stripped; no e-mail, no token, no path left the device.
+    const slotHome = daemon.codexSlots.homeOf(slotId);
+    expect(codex.spawned.map((s) => [s.cwd, s.env.CODEX_HOME])).toContainEqual([slotHome, slotHome]);
+    expect(codex.spawned.every((s) => s.env.OPENAI_API_KEY === undefined)).toBe(true);
+    const wire = JSON.stringify(server.allFrames);
+    expect(wire).not.toContain("ana@example.com");
+    expect(wire).not.toContain("RT-1");
+    expect(wire).not.toContain(home);
+  });
+
+  it("a declined sign-in sends failed (denied) without the user code, removes the slot and acks with an error", async () => {
+    codex.outcome = "denied";
+    const slotId = randomUUID();
+    const id = login(slotId);
+    const ack = await server.frame("ack", (f) => f.commandId === id);
+    expect(ack).toMatchObject({ ok: false });
+    const failed = await server.frame("account.login", (f) => f.phase === "failed");
+    expect(failed).toMatchObject({ requestId: id, slotId, error: { code: "denied" } });
+    expect(failed.error?.message).not.toContain("WXYZ-9876");
+    expect(JSON.stringify(ack)).not.toContain("WXYZ-9876");
+    expect(existsSync(daemon.codexSlots.homeOf(slotId))).toBe(false);
+    expect(await daemon.codexSlots.list()).toEqual([]);
+    // The shared history is still there.
+    expect(existsSync(join(codexDefault(), "sessions"))).toBe(true);
+  });
+
+  it("a Codex without the device-code login fails unsupported with the update line (A-08)", async () => {
+    codex.outcome = "unsupported";
+    const slotId = randomUUID();
+    const id = login(slotId);
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({
+      ok: false,
+      error: "Update Codex on this device and try again",
+    });
+    expect(await server.frame("account.login", (f) => f.phase === "failed")).toMatchObject({
+      error: { code: "unsupported", message: "Update Codex on this device and try again" },
+    });
+    expect(await daemon.codexSlots.list()).toEqual([]);
+  });
+
+  it("a second login for the same slot while one runs is refused; an invalid payload is refused", async () => {
+    codex.outcome = "hold";
+    const slotId = randomUUID();
+    const first = login(slotId);
+    await server.frame("account.login", (f) => f.phase === "code" && f.requestId === first);
+    const second = login(slotId);
+    expect(await server.frame("ack", (f) => f.commandId === second)).toMatchObject({
+      ok: false,
+      error: "a sign-in is already running for this account slot",
+    });
+    codex.finish(true);
+    expect(await server.frame("ack", (f) => f.commandId === first)).toMatchObject({ ok: true });
+
+    const bad = randomUUID();
+    server.send({
+      id: bad,
+      kind: "account.login",
+      sessionId: bad,
+      payload: { provider: "chatgpt", slotId },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === bad)).toMatchObject({
+      ok: false,
+      error: "invalid payload",
+    });
+  });
+
+  it("account.logout signs the slot out, removes it, re-sends accounts.sync and acks; an unknown slot acks ok", async () => {
+    mkdirSync(join(codexDefault(), "sessions"), { recursive: true });
+    writeFileSync(join(codexDefault(), "sessions", "rollout.jsonl"), "{}\n");
+    const slotId = randomUUID();
+    const loginId = login(slotId);
+    await server.frame("ack", (f) => f.commandId === loginId);
+    const id = randomUUID();
+    server.send({ id, kind: "account.logout", sessionId: id, payload: { slotId } });
+    expect(await server.frame("ack", (f) => f.commandId === id)).toMatchObject({ ok: true });
+    expect(codex.methods).toContain("account/logout");
+    expect(existsSync(daemon.codexSlots.homeOf(slotId))).toBe(false);
+    expect(readFileSync(join(codexDefault(), "sessions", "rollout.jsonl"), "utf8")).toBe("{}\n");
+    const lastSync = server.last.frames.filter((f) => f.type === "accounts.sync").at(-1);
+    expect(lastSync).toEqual({ type: "accounts.sync", codexSlots: [] });
+
+    const again = randomUUID();
+    server.send({ id: again, kind: "account.logout", sessionId: again, payload: { slotId } });
+    expect(await server.frame("ack", (f) => f.commandId === again)).toMatchObject({ ok: true });
+  });
+});
+
+describe("07.18-08 reloadAccounts (PD-11): a slot the CLI added reaches the server at once", () => {
+  it("the control command re-reads the slots and sends accounts.sync; it refuses any value", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    const store = new CodexSlotStore(home, { CODEX_HOME: join(home, "codex-default") });
+    const slot = await store.create({ label: "Codex account 1", origin: "cli" });
+    const res = await controlRequest(socketPath(), { cmd: "reloadAccounts" });
+    expect(res).toEqual({ id: undefined, ok: true, result: { codexSlots: 1 } });
+    expect(
+      await server.frame("accounts.sync", (f) => f.codexSlots.some((s) => s.slotId === slot.slotId)),
+    ).toMatchObject({ codexSlots: [{ slotId: slot.slotId, origin: "cli", signedIn: false }] });
+    const forged = await controlRequest(socketPath(), {
+      cmd: "reloadAccounts",
+      slotId: slot.slotId,
+    } as unknown as ControlRequest);
+    expect(forged).toMatchObject({ ok: false, error: "invalid request" });
   });
 });
