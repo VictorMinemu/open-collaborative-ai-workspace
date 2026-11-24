@@ -25,7 +25,6 @@ let stack: TestStack;
 let su: pg.Client;
 let victor: TestClient; // admin
 let sam: TestClient; // developer, owner of the devices
-let orgId = "";
 
 interface Dev {
   device: FakeDevice;
@@ -117,7 +116,7 @@ beforeAll(async () => {
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
-  const setup = await ok(
+  await ok(
     victor.request("POST", "/api/v1/setup", {
       token: TEST_SETUP_TOKEN,
       name: "Víctor Ruiz",
@@ -126,7 +125,6 @@ beforeAll(async () => {
       orgName: "Autofy Labs",
     }),
   );
-  orgId = setup.organization.id;
   ({ client: sam } = await invite(stack, victor, "sam@example.test", "Sam", "developer"));
   pool = await connectDevice("Pool Mac", "pool-repo", { accountPool: 1, codexLoggedIn: true });
   old = await connectDevice("Old Mac", "old-repo", {});
@@ -203,7 +201,7 @@ const fails = async (res: Promise<{ status: number; body: Json | null }>, status
   const r = await res;
   expect(r.status, JSON.stringify(r.body)).toBe(status);
   expect((r.body?.error as Json | undefined)?.code, JSON.stringify(r.body)).toBe(code);
-  return (r.body?.error as Json).message as string;
+  return (r.body!.error as Json).message as string;
 };
 
 const prompt = async (id: string, body = "Fix the rounding error") =>

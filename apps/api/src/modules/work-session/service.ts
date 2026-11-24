@@ -1,4 +1,5 @@
 import {
+  type AccountSwitchReason,
   type Attachment,
   type DiffResultFrame,
   DiffStat,
@@ -9,6 +10,8 @@ import {
   isFullAccessReport,
   NO_GIT_WORKTREE_MESSAGE,
   onlyRelativePaths,
+  POOL_PROVIDER_OF_RUNTIME,
+  RuntimeInfo,
   type SessionAccount,
   type SessionEvent,
   SessionTitle,
@@ -45,8 +48,16 @@ import {
 } from "@ocw/db";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
+import { z } from "zod";
 import type { Jobs } from "../../lib/jobs";
-import { type AccountPoolPort, type StoredSessionAccount, storedSessionAccount } from "../account-pool";
+import {
+  type AccountPoolPort,
+  noAccountSentence,
+  type PoolAccountRow,
+  type StoredSessionAccount,
+  storedSessionAccount,
+  usableFor,
+} from "../account-pool";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
 import {
@@ -140,6 +151,11 @@ const UNDELIVERED_PROMPT = new Map<string, string>([
 
 /** 07.18 (PD-02): the hub-origin reason of a command whose pool token could not be opened at send time. */
 const ACCOUNT_UNAVAILABLE = "account_unavailable";
+
+/** `ensureAccount`'s answer: the account a command names (undefined = no pool support, null = the device's login). */
+type AccountCheck =
+  | { ok: true; account: StoredSessionAccount | null | undefined }
+  | { ok: false; message: string };
 
 /** What `prepareCommand` hands to `hydrateCommand` (memory only, never stored). */
 interface CommandPlan {
@@ -797,8 +813,9 @@ export class WorkSessionService implements DeviceSessionHandler {
     return row ? storedSessionAccount(row) : null;
   }
 
-  /** (Re)attach the session to a runtime on its device. */
+  /** (Re)attach the session to a runtime on its device (07.18: on an account that can serve, PD-06). */
   async restart(tx: Tx, s: SessionRow): Promise<void> {
+    await this.ensureAccount(tx, s);
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
@@ -821,6 +838,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       .limit(1);
     if (inflight.length > 0) return null;
     let policy: WorkZonePolicy | undefined;
+    let account: AccountCheck | undefined;
     for (;;) {
       const [next] = await tx
         .select()
@@ -867,6 +885,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         await this.refusePrompt(tx, s, next, "images_not_supported");
         continue;
       }
+      // 07.18 (PD-06, PD-16): the session's account, replaced first when it can no longer serve; none at all (fallback
+      // off, or the device's own login is not signed in) refuses the turn with the no_account sentence.
+      account ??= await this.ensureAccount(tx, s);
+      if (!account.ok) {
+        await this.refusePrompt(tx, s, next, "no_account");
+        await this.setStatus(tx, s, s.status, { lastError: account.message });
+        continue;
+      }
       const [dispatched] = await tx
         .update(workPrompts)
         .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
@@ -882,6 +908,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           text: next.body,
           permissionMode: mode,
           ...(images.length > 0 ? { imageAttachmentIds: images.map((a) => a.id) } : {}),
+          // 07.18 (PD-02, PD-03): the stored form; the token is added at send time only.
+          ...(account.account !== undefined ? { account: account.account } : {}),
         },
       });
       // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
@@ -911,6 +939,134 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
+   * 07.18 (D-05, PD-06, PD-16): call with the session row LOCKED, before a turn or a (re)start is enqueued. A session
+   * keeps its account while it can serve; one removed, disabled, needing a new sign-in, cooling or of another kind is
+   * replaced by the strategy's next usable account, else by the device's own login under fallback when that login is
+   * signed in, else refused. A session on the device's own login stays there (a limit moves it: plan 10). `account`
+   * is what the command names: undefined for a device without pool support (no key at all), null for the device's
+   * own login.
+   */
+  private async ensureAccount(tx: Tx, s: SessionRow): Promise<AccountCheck> {
+    const pool = this.deps.pool;
+    if (!pool) return { ok: true, account: undefined };
+    const [d] = await tx
+      .select({ version: devices.accountPoolVersion, runtimeInfo: devices.runtimeInfo })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId));
+    if (!d || d.version === null) return { ok: true, account: undefined };
+    if (s.poolAccountId === null) return { ok: true, account: null };
+    const provider = POOL_PROVIDER_OF_RUNTIME[s.runtime];
+    const now = new Date();
+    const current = await pool.get(tx, s.poolAccountId);
+    const { scope } = await pool.policy(tx, provider);
+    const stored = current ? storedSessionAccount(current) : null;
+    if (
+      current &&
+      stored &&
+      current.provider === provider &&
+      usableFor(current, { deviceId: s.deviceId, consumer: "work_zone", scope, now })
+    ) {
+      return { ok: true, account: stored };
+    }
+    // Must change. A limit (cooling, otherwise fine) says until when; anything else is "no longer available".
+    const until =
+      current?.cooldownUntil && new Date(current.cooldownUntil).getTime() > now.getTime()
+        ? new Date(current.cooldownUntil)
+        : null;
+    const limited =
+      until !== null && current?.removedAt === null && current.enabled && current.credentialState === "ok";
+    const change = { from: current, reason: (limited ? "limit" : "unavailable") as AccountSwitchReason };
+    const picked = await pool.select(tx, {
+      provider,
+      deviceId: s.deviceId,
+      consumer: "work_zone",
+      now,
+      exclude: [s.poolAccountId],
+    });
+    if ("row" in picked) {
+      const next = storedSessionAccount(picked.row);
+      if (next) {
+        await this.switchAccount(tx, s, { ...change, to: picked.row, until: limited ? until : null });
+        return { ok: true, account: next };
+      }
+    }
+    const runtime = z
+      .array(RuntimeInfo)
+      .catch([])
+      .parse(d.runtimeInfo)
+      .find((r) => r.id === s.runtime);
+    if (picked.policy.fallbackToDeviceLogin && runtime?.loggedIn === true) {
+      await this.switchAccount(tx, s, { ...change, to: null, until: limited ? until : null });
+      return { ok: true, account: null };
+    }
+    return { ok: false, message: noAccountSentence("none" in picked ? picked.earliestReset : null) };
+  }
+
+  /**
+   * 07.18 (D-05, D-08, PD-14): moves a LOCKED session to another account (`to` null = the device's own login): the
+   * row, one `account.switched` event on `ws:<id>` (labels only), one `account_pool.switched` audit row (ids, labels,
+   * reason, until; never a token), `lastError` cleared, the session emitted. Plan 10 calls it for limits.
+   */
+  async switchAccount(
+    tx: Tx,
+    s: SessionRow,
+    change: {
+      from: PoolAccountRow | null;
+      to: PoolAccountRow | null;
+      reason: AccountSwitchReason;
+      until: Date | null;
+    },
+  ): Promise<void> {
+    const toId = change.to?.id ?? null;
+    await tx
+      .update(workSessions)
+      .set({ poolAccountId: toId, lastError: null, updatedAt: sql`now()` })
+      .where(eq(workSessions.id, s.id));
+    const fromAccountId = s.poolAccountId;
+    s.poolAccountId = toId;
+    s.lastError = null;
+    const labels = {
+      fromLabel: change.from?.label.slice(0, 120) ?? null,
+      toLabel: change.to?.label.slice(0, 120) ?? null,
+    };
+    const until = change.until?.toISOString() ?? null;
+    const event: SessionEvent = { type: "account.switched", ...labels, reason: change.reason, until };
+    await this.deps.realtime.appendEvent(tx, wsTopic(s.id), EventTypes.workSessionEvent, {
+      at: new Date().toISOString(),
+      event,
+    });
+    await this.deps.audit.record(tx, {
+      action: "account_pool.switched",
+      resourceType: "work_session",
+      resourceId: s.id,
+      sessionId: s.id,
+      deviceId: s.deviceId,
+      metadata: {
+        provider: POOL_PROVIDER_OF_RUNTIME[s.runtime],
+        fromAccountId,
+        toAccountId: toId,
+        ...labels,
+        reason: change.reason,
+        until,
+      },
+    });
+    await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.18 (PD-02): the hub could not open the pool token a command named. A live account whose seal does not open
+   * needs its token entered again (`needs_sign_in`), so the next check moves the session on and never loops on it.
+   */
+  private async accountUnavailable(tx: Tx, cmd: DeviceCommandRow): Promise<void> {
+    const stored = tokenAccountOf(cmd.payload);
+    if (!stored) return;
+    await tx
+      .update(accountPoolAccounts)
+      .set({ credentialState: "needs_sign_in", updatedAt: sql`now()` })
+      .where(and(eq(accountPoolAccounts.id, stored.accountId), isNull(accountPoolAccounts.removedAt)));
+  }
+
+  /**
    * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them; 07.16
    * Pitfall 10, `bot_not_allowed`: the bot's profile is not active for this turn): failed, audited, never sent; the
    * arbiter moves to the next prompt.
@@ -919,7 +1075,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     tx: Tx,
     s: SessionRow,
     p: PromptRow,
-    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed",
+    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed" | "no_account",
   ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
@@ -1496,6 +1652,12 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       }
       if (cmd.kind === "session.start") {
+        if (!ok && origin === "hub" && error === ACCOUNT_UNAVAILABLE && s.status !== "archived") {
+          // 07.18 (PD-02): never sent; start again on an account whose token opens.
+          await this.accountUnavailable(tx, cmd);
+          await this.restart(tx, s);
+          return;
+        }
         if (!ok) {
           // Quick 261119-ngw: a worktree the device refused because the project has no git teaches the API that it
           // has none (an older daemon may never have said so), so the next bot start there runs in place.
@@ -1551,6 +1713,20 @@ export class WorkSessionService implements DeviceSessionHandler {
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
+        if (origin === "hub" && error === ACCOUNT_UNAVAILABLE) {
+          // 07.18 (PD-02): the prompt was never sent. Back at its place in the queue, never failed; the arbiter's
+          // account check moves the session to the next account before it is dispatched again.
+          await this.accountUnavailable(tx, cmd);
+          const [p] = await tx
+            .update(workPrompts)
+            .set({ status: "queued", dispatchedAt: null })
+            .where(and(eq(workPrompts.id, promptId), inArray(workPrompts.status, IN_FLIGHT)))
+            .returning();
+          if (p) await this.emitPrompt(tx, p);
+          if (s.status === "running") await this.setStatus(tx, s, "idle");
+          await this.tryDispatch(tx, s);
+          return;
+        }
         const undelivered = origin === "hub" ? UNDELIVERED_PROMPT.get(error ?? "") : undefined;
         if (undelivered) {
           await this.promptUndelivered(tx, s, promptId, error as UndeliveredReason, undelivered);

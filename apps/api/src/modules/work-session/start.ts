@@ -26,6 +26,7 @@ import {
 import { eq, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
+import { noAccountSentence } from "../account-pool";
 import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, orgResource, type PermissionService } from "../organization";
@@ -61,7 +62,8 @@ export type WorkSessionStartCode =
   | "prompt_not_allowed"
   | "not_in_project"
   | "audience_outside_project"
-  | "team_not_assigned";
+  | "team_not_assigned"
+  | "no_account";
 
 export type WorkSessionStartFailure =
   | {
@@ -92,7 +94,12 @@ export type WorkSessionStartFailure =
       message: string;
       ids: string[];
     }
-  | { ok: false; code: "device_offline" | "runtime_unavailable" | "prompt_not_allowed"; message: string }
+  | {
+      ok: false;
+      /** 07.18 `no_account` (PD-16): no pool account can serve and the device's own login may not (fallback off or not signed in). */
+      code: "device_offline" | "runtime_unavailable" | "prompt_not_allowed" | "no_account";
+      message: string;
+    }
   | { ok: false; code: "settings_denied"; message: string; field: string; reason: ControlDenialReason };
 
 export type WorkSessionStartResult = { ok: true; session: WorkSession } | WorkSessionStartFailure;
@@ -360,6 +367,12 @@ export async function createWorkSession(
       })
     : null;
   const poolAccount = picked && "row" in picked ? picked.row : null;
+  // PD-16: no usable account → the device's own login when fallback is on and it is signed in; otherwise refused. A
+  // provider with no live account at all keeps today's answer for a device that is not signed in.
+  const none = picked && "none" in picked ? picked : null;
+  if (none && (!none.policy.fallbackToDeviceLogin || (!runtime.loggedIn && !none.poolEmpty))) {
+    return { ok: false, code: "no_account", message: noAccountSentence(none.earliestReset) };
+  }
   if (!poolAccount && !runtime.loggedIn) {
     return {
       ok: false,

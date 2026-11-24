@@ -218,6 +218,8 @@ describe("tracer: a session is created by a function for a given member (APPROVE
       worktree: false,
       // 07.9-06: the audience kind it started with (a personal repository: `project`).
       visibility: "project",
+      // 07.18-09: the pool account it started on (null = the device's own login; this daemon has no pool support).
+      poolAccountId: null,
     });
   });
 });
