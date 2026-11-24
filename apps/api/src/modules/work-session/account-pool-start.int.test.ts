@@ -199,6 +199,211 @@ describe("a session starts on a pool account (PD-02, PD-03, PD-04, PD-17)", () =
   });
 });
 
+const fails = async (res: Promise<{ status: number; body: Json | null }>, status: number, code: string) => {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(status);
+  expect((r.body?.error as Json | undefined)?.code, JSON.stringify(r.body)).toBe(code);
+  return (r.body?.error as Json).message as string;
+};
+
+const prompt = async (id: string, body = "Fix the rounding error") =>
+  (await ok(sam.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body }))).id as string;
+
+const promptStatus = async (id: string) =>
+  (await su.query("select status from app.work_prompts where id = $1", [id])).rows[0]?.status as string;
+
+const switchedEvents = async (id: string) =>
+  (
+    await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'work_session.event' and payload->'event'->>'type' = 'account.switched' order by seq",
+      [`ws:${id}`],
+    )
+  ).rows.map((r) => r.payload.event as Json);
+
+const disable = (id: string) =>
+  ok(victor.request("PATCH", `/api/v1/account-pool/accounts/${id}`, { enabled: false }));
+const cool = (id: string, until: Date) =>
+  su.query(
+    "update app.account_pool_accounts set cooldown_until = $2, limit_reason = 'five_hour' where id = $1",
+    [id, until.toISOString()],
+  );
+
+/** Answer the prompt's turn as the daemon does, so the session is idle again. */
+async function finishTurn(dev: Dev, id: string, frame: { id: string; payload: Json }) {
+  dev.device.ack(frame.id);
+  dev.device.event(id, { type: "prompt.started", promptId: frame.payload.promptId });
+  dev.device.event(id, {
+    type: "prompt.completed",
+    promptId: frame.payload.promptId,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+  await eventually(async () => (await promptStatus(frame.payload.promptId as string)) === "completed");
+}
+
+describe("every turn carries the session's account (PD-03)", () => {
+  it("a prompt frame carries the token; the stored prompt command does not", async () => {
+    const a = await addToken("A", TA);
+    const { id } = await startIdle(pool);
+    const p = await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.promptId).toBe(p);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: a, label: "A", oauthToken: TA });
+    const [stored] = await storedCommands(id, "prompt");
+    expect(stored!.payload.account).toEqual({ kind: "token", accountId: a, label: "A" });
+    expect(stored!.text).not.toContain(TA);
+    await finishTurn(pool, id, frame);
+  });
+
+  it("a prompt to a device without accountPool carries no account (E9)", async () => {
+    await addToken("A", TA);
+    const { id } = await startIdle(old);
+    await prompt(id);
+    const frame = await old.device.command("prompt", id);
+    expect("account" in frame.payload).toBe(false);
+    await finishTurn(old, id, frame);
+  });
+
+  it("two concurrent starts under round-robin take two different accounts (E1)", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    await setPolicy({ strategy: "round_robin" });
+    const [one, two] = await Promise.all([ok(startOn(pool)), ok(startOn(pool))]);
+    expect(new Set([one.poolAccount.id, two.poolAccount.id])).toEqual(new Set([a, b]));
+    for (const s of [one, two]) pool.device.ack((await pool.device.command("session.start", s.id)).id);
+  });
+});
+
+describe("no usable account (PD-16, E5, E6)", () => {
+  it("fallback on and the device signed in: the device's own login", async () => {
+    const a = await addToken("A", TA);
+    await disable(a);
+    const session = await ok(startOn(pool));
+    expect(session.poolAccount).toBeNull();
+    const frame = await pool.device.command("session.start", session.id);
+    expect(frame.payload.account).toBeNull();
+    pool.device.ack(frame.id);
+  });
+
+  it("fallback off: refused no_account with the earliest reset", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const soon = new Date(Date.now() + 3_600_000);
+    await cool(a, new Date(Date.now() + 7_200_000));
+    await cool(b, soon);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    const message = await fails(startOn(pool), 409, "no_account");
+    expect(message).toBe(`No account in the pool is ready. The earliest resets at ${soon.toISOString()}.`);
+  });
+
+  it("the device not signed in and no usable account: refused no_account", async () => {
+    const a = await addToken("A", TA);
+    await disable(a);
+    const message = await fails(startOn(noLogin), 409, "no_account");
+    expect(message).toBe("No account in the pool is ready. Add one in Settings › Account pool.");
+  });
+
+  it("an empty pool keeps today's answer for a device that is not signed in", async () => {
+    const message = await fails(startOn(noLogin), 409, "runtime_unavailable");
+    expect(message).toBe("Claude Code is not signed in on Fresh Mac. Sign in from a terminal first.");
+  });
+});
+
+describe("a session moves before its turn when its account can no longer serve (PD-06, E7)", () => {
+  async function onA() {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const { id } = await startIdle(pool);
+    expect((await sessionRow(id)).pool_account_id).toBe(a);
+    return { a, b, id };
+  }
+
+  async function expectSwitched(id: string, a: string, b: string, event: Json) {
+    await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: b, label: "B", oauthToken: TB });
+    expect(await switchedEvents(id)).toEqual([
+      { type: "account.switched", fromLabel: "A", toLabel: "B", ...event },
+    ]);
+    const [audit, ...more] = await auditOf("account_pool.switched", id);
+    expect(more).toHaveLength(0);
+    expect(audit!.metadata).toMatchObject({
+      fromAccountId: a,
+      toAccountId: b,
+      fromLabel: "A",
+      toLabel: "B",
+      reason: event.reason,
+    });
+    const s = await sessionOf(id);
+    expect(s.poolAccount).toEqual({ id: b, label: "B", provider: "claude" });
+    expect(s.lastError).toBeNull();
+    await finishTurn(pool, id, frame);
+  }
+
+  it("a disabled account: the next prompt goes out on B", async () => {
+    const { a, b, id } = await onA();
+    await disable(a);
+    await expectSwitched(id, a, b, { reason: "unavailable", until: null });
+  });
+
+  it("a removed account: the next prompt goes out on B", async () => {
+    const { a, b, id } = await onA();
+    await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${a}`));
+    await expectSwitched(id, a, b, { reason: "unavailable", until: null });
+  });
+
+  it("a cooling account: reason limit with its until", async () => {
+    const { a, b, id } = await onA();
+    const until = new Date(Date.now() + 3_600_000);
+    await cool(a, until);
+    await expectSwitched(id, a, b, { reason: "limit", until: until.toISOString() });
+  });
+
+  it("no usable account under fallback: the device's own login", async () => {
+    const { a, b, id } = await onA();
+    await disable(b);
+    await disable(a);
+    await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.account).toBeNull();
+    expect(await switchedEvents(id)).toEqual([
+      { type: "account.switched", fromLabel: "A", toLabel: null, reason: "unavailable", until: null },
+    ]);
+    expect((await sessionOf(id)).poolAccount).toBeNull();
+    await finishTurn(pool, id, frame);
+  });
+
+  it("no usable account and fallback off: the prompt is refused with the no_account sentence", async () => {
+    const { a, b, id } = await onA();
+    await disable(b);
+    await disable(a);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    const p = await prompt(id);
+    await eventually(async () => (await promptStatus(p)) === "failed");
+    expect((await sessionOf(id)).lastError).toBe(
+      "No account in the pool is ready. Add one in Settings › Account pool.",
+    );
+    const [refused] = await auditOf("work_prompt.refused", id);
+    expect(refused!.metadata.reason).toBe("no_account");
+    expect(pool.device.pending("prompt").filter((f) => f.sessionId === id)).toHaveLength(0);
+  });
+
+  it("a token that cannot be opened at send time re-queues the prompt and sends it on the next account", async () => {
+    const { a, id } = await onA();
+    await su.query(
+      "update app.secrets set tag = 'AAAAAAAAAAAAAAAAAAAAAA==' where id = (select secret_id from app.account_pool_accounts where id = $1)",
+      [a],
+    );
+    const p = await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.promptId).toBe(p);
+    expect((frame.payload.account as Json).label).toBe("B");
+    expect((frame.payload.account as Json).oauthToken).toBe(TB);
+    expect((await accountRow(a)).credential_state).toBe("needs_sign_in");
+    expect(await promptStatus(p)).not.toBe("failed");
+    await finishTurn(pool, id, frame);
+  });
+});
+
 // Kept last: every scenario above has run, so the scan covers them all.
 describe("E8: the tokens never reach the database outside the secret store", () => {
   it("no device command, audit row or stream event contains a token", async () => {
@@ -218,10 +423,5 @@ describe("E8: the tokens never reach the database outside the secret store", () 
       );
       expect([commands.rows[0].n, audit.rows[0].n, events.rows[0].n]).toEqual([0, 0, 0]);
     }
-    void TB;
-    void TC;
-    void setPolicy;
-    void startIdle;
-    void orgId;
   });
 });
