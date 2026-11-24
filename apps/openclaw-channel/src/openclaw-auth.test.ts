@@ -78,16 +78,22 @@ function fakeOpenClaw(accounts: Signed[] = [{ email: "owner@example.test", plan:
     },
   };
   const removed: Array<Record<string, unknown>> = [];
+  /** Lock contention: the removal changes nothing and resolves null (as 2026.9.7's compat wrapper does). */
+  const busy = { on: false };
   const providerAuth = {
-    async removeProviderAuthProfilesWithLock(p: { provider: string }) {
+    async removeProviderAuthProfilesWithLock(p: { provider: string; profileIds?: string[] }) {
       removed.push(p);
-      for (const [id, c] of Object.entries(profiles)) if (c.provider === p.provider) delete profiles[id];
+      if (busy.on) return null;
+      // 2026.9.7: exact ids when given (whatever their provider), else every profile of the provider.
+      for (const [id, c] of Object.entries(profiles)) {
+        if (p.profileIds ? p.profileIds.includes(id) : c.provider === p.provider) delete profiles[id];
+      }
       return {};
     },
   };
   const load = async (specifier: string) =>
     specifier.endsWith("provider-auth-login-flow-runtime") ? loginFlow : providerAuth;
-  return { runtime, load, profiles, calls, refreshes, removed };
+  return { runtime, load, profiles, calls, refreshes, removed, busy };
 }
 
 describe("OpenClaw auth driver", () => {
@@ -145,6 +151,40 @@ describe("OpenClaw auth driver", () => {
     expect(Object.keys(oc.profiles)).toEqual(["anthropic:default"]);
     expect(oc.refreshes).toEqual(["main"]);
     expect(await driver.status("openai-codex")).toBeNull();
+  });
+
+  it("logout with profile ids removes only those profiles of the provider (E15)", async () => {
+    const oc = fakeOpenClaw();
+    oc.profiles["openai:pool-a"] = { type: "oauth", provider: "openai", refresh: "r", email: "a@y.z" };
+    oc.profiles[POOL_B] = { type: "oauth", provider: "openai", refresh: "r", email: "b@y.z" };
+    oc.profiles["anthropic:pool-c"] = { type: "token", provider: "anthropic", tokenRef: {} };
+    const driver = createOpenClawAuthDriver({ runtime: oc.runtime, load: oc.load });
+    // An id of another provider is never removed through an openai revoke.
+    await driver.logout("openai-codex", [POOL_B, "anthropic:pool-c"]);
+    expect(oc.removed).toEqual([
+      { cfg: { agents: { entries: {} } }, provider: "openai", profileIds: [POOL_B] },
+    ]);
+    expect(Object.keys(oc.profiles)).toEqual(["openai:pool-a", "anthropic:pool-c"]);
+    expect(oc.refreshes).toEqual(["main"]);
+    expect((await driver.profiles?.("openai-codex"))?.map((p) => p.profileId)).toEqual(["openai:pool-a"]);
+    expect(await driver.status("openai-codex")).toEqual({ email: "a@y.z", planType: null });
+
+    // Nothing of this provider left to remove: no call at all (never widened to "every profile").
+    await driver.logout("openai-codex", ["anthropic:pool-c"]);
+    await driver.logout("openai-codex", []);
+    expect(oc.removed).toHaveLength(1);
+  });
+
+  it("a per-profile logout whose profile is still there reports the busy store", async () => {
+    const oc = fakeOpenClaw();
+    oc.profiles["openai:pool-a"] = { type: "oauth", provider: "openai", refresh: "r" };
+    oc.profiles[POOL_B] = { type: "oauth", provider: "openai", refresh: "r" };
+    oc.busy.on = true;
+    const driver = createOpenClawAuthDriver({ runtime: oc.runtime, load: oc.load });
+    await expect(driver.logout("openai-codex", [POOL_B])).rejects.toThrow(
+      "the auth store is busy; the credential is still present",
+    );
+    await expect(driver.logout("openai-codex")).rejects.toThrow("the auth store is busy");
   });
 
   it("propagates an abort (cancel) from the login", async () => {

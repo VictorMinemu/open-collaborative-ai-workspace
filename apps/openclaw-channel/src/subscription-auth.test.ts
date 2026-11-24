@@ -308,7 +308,60 @@ describe("subscription sign-in in the cell", () => {
     driver.stored.set("openai-codex", ACCOUNT);
     await auth.handleRevoke({ type: "provider.auth.revoke", seq: 3, provider: "openai-codex" });
     expect(driver.logouts).toBe(1);
+    // No profile ids: every profile of the provider, as before 07.18.
+    expect(driver.logoutCalls).toEqual([undefined]);
     expect(await driver.driver.status("openai-codex")).toBeNull();
+    expect(api.authReports).toEqual([]);
+  });
+
+  it("a revoke with profile ids signs out only those; the next credential report lists the rest (E15)", async () => {
+    const { auth, driver } = setup(fakeDriver({ profiles: true }));
+    driver.profileStore.set("openai:owner@example.test", { ...ACCOUNT, usable: true });
+    driver.profileStore.set(PROFILE_B, { ...BOTS_ACCOUNT, usable: true });
+    await auth.handleRevoke({
+      type: "provider.auth.revoke",
+      seq: 3,
+      provider: "openai-codex",
+      profileIds: [PROFILE_B],
+    });
+    expect(driver.logoutCalls).toEqual([[PROFILE_B]]);
+    expect([...driver.profileStore.keys()]).toEqual(["openai:owner@example.test"]);
+    expect(api.authReports).toEqual([
+      {
+        provider: "openai-codex",
+        flowId: null,
+        reporterId: "cell-test-1",
+        state: "connected",
+        account: ACCOUNT,
+        profiles: [
+          { profileId: "openai:owner@example.test", email: ACCOUNT.email, planType: "plus", usable: true },
+        ],
+      },
+    ]);
+
+    // The last profile goes: the report says the provider is signed out, with an empty list.
+    await auth.handleRevoke({
+      type: "provider.auth.revoke",
+      seq: 4,
+      provider: "openai-codex",
+      profileIds: ["openai:owner@example.test"],
+    });
+    expect(api.authReports.at(-1)).toMatchObject({ flowId: null, state: "disconnected", profiles: [] });
+  });
+
+  it("a per-profile revoke leaves a running sign-in of another profile alone", async () => {
+    const { auth, driver } = setup(fakeDriver({ profiles: true }));
+    auth.handleStart(start({ profileId: PROFILE_B }));
+    await api.waitFor(() => api.authReports.length >= 1);
+    await auth.handleRevoke({
+      type: "provider.auth.revoke",
+      seq: 3,
+      provider: "openai-codex",
+      profileIds: ["openai:pool-other"],
+    });
+    driver.approve(BOTS_ACCOUNT);
+    await api.waitFor(() => api.authReports.some((r) => r.state === "connected" && r.flowId === FLOW));
+    expect(driver.profileStore.has(PROFILE_B)).toBe(true);
   });
 
   it("sync: ready when signed in; reports a lost sign-in once; drops credentials disconnected while offline", async () => {

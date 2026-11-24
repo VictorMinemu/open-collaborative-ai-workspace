@@ -202,21 +202,27 @@ export function createOpenClawAuthDriver(opts: {
       return profilesFromStore(readStore() as never, TARGET[provider].provider);
     },
 
-    async logout(provider) {
+    async logout(provider, profileIds) {
       const target = TARGET[provider];
+      // 07.18 (E15): only this provider's ids. OpenClaw removes exact ids whatever their provider, so an id of
+      // another provider never goes through here, and an empty filter never widens to "every profile".
+      const only = profileIds?.filter((id) => id.startsWith(`${target.provider}:`));
+      if (only?.length === 0) return;
       const auth = (await load(PROVIDER_AUTH_MODULE)) as typeof import("openclaw/plugin-sdk/provider-auth");
       await auth.removeProviderAuthProfilesWithLock({
         cfg: runtime.config.current(),
         provider: target.provider,
+        ...(only ? { profileIds: only } : {}),
       });
       await refreshGateway().catch((error: unknown) => {
         opts.log?.warn?.(
           `auth refresh after sign-out failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
-      if (accountFromStore(readStore() as never, target.provider)) {
-        throw new Error("the auth store is busy; the credential is still present");
-      }
+      const left = only
+        ? profilesFromStore(readStore() as never, target.provider).some((p) => only.includes(p.profileId))
+        : accountFromStore(readStore() as never, target.provider) !== null;
+      if (left) throw new Error("the auth store is busy; the credential is still present");
     },
   };
   return driver;

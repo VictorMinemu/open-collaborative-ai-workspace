@@ -88,7 +88,13 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
   const reporterId = opts.reporterId ?? `cell-${randomUUID()}`;
   const flows = new Map<
     string,
-    { provider: SubscriptionProviderId; abort: AbortController; done: Promise<void> }
+    {
+      provider: SubscriptionProviderId;
+      /** 07.18: the profile this sign-in stores (absent = the provider's default). */
+      profileId?: string;
+      abort: AbortController;
+      done: Promise<void>;
+    }
   >();
   /** Providers already reported as missing credentials (report once until it changes). */
   const reportedMissing = new Set<string>();
@@ -212,7 +218,12 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
       opts.signal.removeEventListener("abort", onStop);
       flows.delete(ev.flowId);
     });
-    flows.set(ev.flowId, { provider: ev.provider, abort, done });
+    flows.set(ev.flowId, {
+      provider: ev.provider,
+      ...(ev.profileId ? { profileId: ev.profileId } : {}),
+      abort,
+      done,
+    });
     log.info?.(`sign-in ${ev.flowId} (${ev.provider}): starting device-code flow`);
   }
 
@@ -221,11 +232,29 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
   }
 
   async function handleRevoke(ev: ProviderAuthRevokeEvent): Promise<void> {
-    for (const f of flows.values())
-      if (f.provider === ev.provider) f.abort.abort(new FlowStopped("cancelled"));
-    await opts.driver.logout(ev.provider);
-    reportedMissing.delete(ev.provider);
-    log.info?.(`subscription ${ev.provider}: credentials removed (disconnected by an admin)`);
+    const only = ev.profileIds;
+    for (const f of flows.values()) {
+      if (f.provider !== ev.provider) continue;
+      // 07.18 (E15): a per-profile revoke stops only a sign-in of one of those profiles.
+      if (only && !(f.profileId && only.includes(f.profileId))) continue;
+      f.abort.abort(new FlowStopped("cancelled"));
+    }
+    if (!only) {
+      await opts.driver.logout(ev.provider);
+      reportedMissing.delete(ev.provider);
+      log.info?.(`subscription ${ev.provider}: credentials removed (disconnected by an admin)`);
+      return;
+    }
+    await opts.driver.logout(ev.provider, only);
+    log.info?.(`subscription ${ev.provider}: ${only.length} profile(s) removed (by an admin)`);
+    // The API learns what is left: the other profiles, or that the provider is signed out.
+    const [account, profiles] = await Promise.all([
+      opts.driver.status(ev.provider).catch(() => null),
+      storedProfiles(ev.provider),
+    ]);
+    if (account) reportedMissing.delete(ev.provider);
+    else reportedMissing.add(ev.provider);
+    await reportCredentialState(ev.provider, account, profiles);
   }
 
   /**
