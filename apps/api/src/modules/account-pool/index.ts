@@ -3,6 +3,7 @@ import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
 export type { AccountPoolDeps } from "./routes";
 export {
+  addClaudeToken,
   insertPoolAccount,
   listPoolAccounts,
   loadPoolPolicy,
@@ -12,9 +13,14 @@ export {
   type PoolAccountRow,
   type PoolChange,
   type PoolDevice,
+  type PoolPorts,
   poolAccountStatus,
   poolDevices,
+  removePoolAccount,
+  reorderPool,
   toPoolAccount,
+  updatePoolAccount,
+  updatePoolPolicy,
 } from "./store";
 export { openPoolToken, poolTokenAad, replacePoolToken, sealPoolToken } from "./tokens";
 
@@ -26,7 +32,9 @@ export { openPoolToken, poolTokenAad, replacePoolToken, sealPoolToken } from "./
  * returned by any route, audit row or log line.
  *
  * Routes (all `authz: user`, `provider.manage`, `cache-control: no-store`): GET `/account-pool`, POST
- * `/account-pool/claude/accounts`.
+ * `/account-pool/claude/accounts`, PATCH and DELETE `/account-pool/accounts/:id` (removal is soft, PD-25), PUT
+ * `/account-pool/:provider/order` and PUT `/account-pool/:provider/policy`. Every write is audited `account_pool.*` in
+ * its transaction and reported to `deps.onChange` there.
  */
 export function createAccountPoolModule(core: Core, deps: AccountPoolDeps = {}): ApiModule {
   return {

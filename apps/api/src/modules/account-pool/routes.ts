@@ -1,13 +1,32 @@
-import { randomUUID } from "node:crypto";
-import { AccountPoolView, AddClaudeTokenRequest, PoolAccount } from "@ocw/contracts";
+import {
+  AccountPoolView,
+  AddClaudeTokenRequest,
+  IdParams,
+  Ok,
+  PoolAccount,
+  PoolPolicy,
+  PoolProvider,
+  ReorderPoolRequest,
+  UpdatePoolAccountRequest,
+  UpdatePoolPolicyRequest,
+} from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { type App, type Core, tenant } from "../../core";
 import { badRequest } from "../../lib/errors";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
-import { insertPoolAccount, loadPoolView, type PoolChange, toPoolAccount } from "./store";
-import { sealPoolToken } from "./tokens";
+import {
+  addClaudeToken,
+  loadPoolView,
+  type PoolChange,
+  type PoolPorts,
+  removePoolAccount,
+  reorderPool,
+  updatePoolAccount,
+  updatePoolPolicy,
+} from "./store";
 
 const tags = ["account-pool"];
 
@@ -38,18 +57,20 @@ async function refuseApiKey(req: FastifyRequest): Promise<void> {
   }
 }
 
+const ProviderParams = z.object({ provider: PoolProvider });
+
 /**
- * Settings › Account pool (Phase 07.18, D-01, D-10, D-13, PD-19 … PD-22, ADR-0044). Every route needs
+ * Settings › Account pool (Phase 07.18, D-01, D-04, D-10, D-13, PD-19 … PD-22, PD-25, ADR-0044). Every route needs
  * `provider.manage` (admins), decided before the body is read, and answers `cache-control: no-store`. No response
- * carries a token.
+ * carries a token. Another organization's account is not found (RLS in the tenant transaction).
  */
 export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoolDeps = {}) {
   const perms = createPermissionService(core);
-  const admin = {
-    config: { authz: "user" as const },
-    preValidation: [core.identity.requireUser, perms.requirePermission("provider.manage")],
-  };
-  const ports = { audit: core.audit, secrets: core.secrets, onChange: deps.onChange };
+  const auth = [core.identity.requireUser, perms.requirePermission("provider.manage")];
+  const admin = { config: { authz: "user" as const }, preValidation: auth };
+  /** The routes whose body may carry a setup-token. */
+  const adminWithToken = { ...admin, preValidation: [...auth, refuseApiKey] };
+  const ports: PoolPorts = { audit: core.audit, secrets: core.secrets, onChange: deps.onChange };
 
   app.get(
     "/account-pool",
@@ -62,28 +83,60 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
 
   app.post(
     "/account-pool/claude/accounts",
+    { ...adminWithToken, schema: { tags, body: AddClaudeTokenRequest, response: { 200: PoolAccount } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) => addClaudeToken(tx, ports, req.body));
+    },
+  );
+
+  app.patch(
+    "/account-pool/accounts/:id",
     {
-      ...admin,
-      preValidation: [...admin.preValidation, refuseApiKey],
-      schema: { tags, body: AddClaudeTokenRequest, response: { 200: PoolAccount } },
+      ...adminWithToken,
+      schema: { tags, params: IdParams, body: UpdatePoolAccountRequest, response: { 200: PoolAccount } },
     },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
-      const body = req.body;
-      return core.db.withTenant(tenant(req), async (tx) => {
-        // The id exists before the token is sealed, so the AAD binds the ciphertext to this one account (PD-21).
-        const id = randomUUID();
-        const secretId = await sealPoolToken(tx, ports.secrets, id, body.token);
-        const row = await insertPoolAccount(tx, ports.audit, {
-          id,
-          provider: "claude",
-          kind: "token",
-          label: body.label,
-          secretId,
-        });
-        await ports.onChange?.(tx, { provider: "claude", reason: "added", account: row });
-        return toPoolAccount(row, new Map(), new Date());
-      });
+      return core.db.withTenant(tenant(req), (tx) => updatePoolAccount(tx, ports, req.params.id, req.body));
+    },
+  );
+
+  app.put(
+    "/account-pool/:provider/order",
+    {
+      ...admin,
+      schema: { tags, params: ProviderParams, body: ReorderPoolRequest, response: { 200: AccountPoolView } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) =>
+        reorderPool(tx, ports, req.params.provider, req.body.accountIds),
+      );
+    },
+  );
+
+  app.put(
+    "/account-pool/:provider/policy",
+    {
+      ...admin,
+      schema: { tags, params: ProviderParams, body: UpdatePoolPolicyRequest, response: { 200: PoolPolicy } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) =>
+        updatePoolPolicy(tx, ports, req.params.provider, req.body),
+      );
+    },
+  );
+
+  app.delete(
+    "/account-pool/accounts/:id",
+    { ...admin, schema: { tags, params: IdParams, response: { 200: Ok } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      await core.db.withTenant(tenant(req), (tx) => removePoolAccount(tx, ports, req.params.id));
+      return { ok: true as const };
     },
   );
 }
