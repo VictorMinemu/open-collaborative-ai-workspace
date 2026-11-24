@@ -204,12 +204,14 @@ describe("subscription sign-in in the cell", () => {
 
     driver.approve();
     await api.waitFor(() => api.authReports.length >= 2);
+    // 07.18-16: the profile OpenClaw stored it under travels too (`openai:<email>` for a sign-in that named none).
     expect(api.authReports[1]).toEqual({
       provider: "openai-codex",
       flowId: FLOW,
       reporterId: "cell-test-1",
       state: "connected",
       account: ACCOUNT,
+      profileId: "openai:owner@example.test",
     });
     expect(logs.join("\n")).not.toContain("ABCD-EFGHI");
     expect(await driver.driver.status("openai-codex")).toEqual(ACCOUNT);
@@ -217,7 +219,7 @@ describe("subscription sign-in in the cell", () => {
 
   it("a pool start signs in under its profile id; connected carries it; a second account joins the first (PD-12)", async () => {
     const { auth, driver } = setup(fakeDriver({ profiles: true }));
-    // The pre-07.18 sign-in (no profile id) …
+    // The Models page sign-in (no profile id asked) reports the profile OpenClaw chose (07.18-16) …
     auth.handleStart(start());
     await api.waitFor(() => api.authReports.length >= 1);
     driver.approve(ACCOUNT);
@@ -228,6 +230,7 @@ describe("subscription sign-in in the cell", () => {
       reporterId: "cell-test-1",
       state: "connected",
       account: ACCOUNT,
+      profileId: "openai:owner@example.test",
     });
     // … then a pool account for bots under `openai:pool-<accountId>`.
     auth.handleStart(start({ flowId: FLOW_B, profileId: PROFILE_B }));

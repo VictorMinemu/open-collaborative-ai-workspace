@@ -177,13 +177,17 @@ export function createSubscriptionAuth(opts: SubscriptionAuthOptions) {
       });
       reportedMissing.delete(provider);
       const account: SubscriptionAccount = { email: signedIn.email, planType: signedIn.planType };
+      // 07.18 (PD-12): the profile id OpenClaw stored (the requested one when the flow honoured it, else its own
+      // `openai:<email>`). Sent for every sign-in (07.18-16): a Models page sign-in then joins the pool at once, also
+      // when the pool keeps bots off the subscription (every bot account removed or off), where the snapshot no
+      // longer lists it and no credential state report would ever name the new profile.
+      const profileId = signedIn.profileId ?? ev.profileId;
       await report({
         provider,
         flowId,
         state: "connected",
         account,
-        // 07.18 (PD-12): the profile id OpenClaw stored (the requested one when the flow honoured it).
-        ...(ev.profileId ? { profileId: signedIn.profileId ?? ev.profileId } : {}),
+        ...(profileId ? { profileId } : {}),
       });
       log.info?.(`sign-in ${flowId} (${provider}): connected`);
     } catch (error) {
