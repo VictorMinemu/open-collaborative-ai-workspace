@@ -1,7 +1,9 @@
 import {
+  type AccountLogoutPayload,
   AccountPoolPreview,
   AccountPoolView,
   AddClaudeTokenRequest,
+  DeviceSignIn,
   Id,
   IdParams,
   Ok,
@@ -9,6 +11,7 @@ import {
   PoolPolicy,
   PoolProvider,
   ReorderPoolRequest,
+  StartDeviceSignInRequest,
   UpdatePoolAccountRequest,
   UpdatePoolPolicyRequest,
 } from "@ocw/contracts";
@@ -21,6 +24,7 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, notFound } from "../../lib/errors";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { createPermissionService } from "../organization";
+import { createDeviceSignIns } from "./device-sign-ins";
 import { previewAccountSources } from "./preview";
 import {
   addClaudeToken,
@@ -64,6 +68,7 @@ async function refuseApiKey(req: FastifyRequest): Promise<void> {
 
 const ProviderParams = z.object({ provider: PoolProvider });
 const PreviewQuery = z.object({ deviceId: Id });
+const DeviceQuery = z.object({ deviceId: Id });
 
 /**
  * Settings › Account pool (Phase 07.18, D-01, D-04, D-10, D-13, PD-19 … PD-22, PD-25, ADR-0044). Every route needs
@@ -76,7 +81,35 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
   const admin = { config: { authz: "user" as const }, preValidation: auth };
   /** The routes whose body may carry a setup-token. */
   const adminWithToken = { ...admin, preValidation: [...auth, refuseApiKey] };
-  const ports: PoolPorts = { audit: core.audit, secrets: core.secrets, onChange: deps.onChange };
+  const ports: PoolPorts = {
+    audit: core.audit,
+    secrets: core.secrets,
+    // PD-25: a removed slot is signed out on its device. The command waits in the queue while the device is offline;
+    // the row is removed now either way. Then the module's own listener (the cell, plan 14).
+    async onChange(tx, change) {
+      const row = change.account;
+      if (change.reason === "removed" && row?.kind === "device_slot" && row.deviceId && row.slotId) {
+        if (!deps.hub) throw new Error("removing a device slot needs the device hub");
+        const payload: AccountLogoutPayload = { slotId: row.slotId };
+        await deps.hub.enqueue(tx, {
+          deviceId: row.deviceId,
+          workSessionId: null,
+          kind: "account.logout",
+          payload,
+        });
+      }
+      await deps.onChange?.(tx, change);
+    },
+  };
+  const signIns = createDeviceSignIns(core, deps.hub);
+
+  /** A device of the caller's organization (RLS: another organization's is not found). */
+  const requireDevice = async (req: FastifyRequest, deviceId: string) => {
+    const found = await core.db.withTenant(tenant(req), (tx) =>
+      tx.select({ id: devices.id }).from(devices).where(eq(devices.id, deviceId)),
+    );
+    if (found.length === 0) throw notFound("Device not found");
+  };
 
   app.get(
     "/account-pool",
@@ -174,6 +207,37 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
       reply.header("cache-control", "no-store");
       await core.db.withTenant(tenant(req), (tx) => removePoolAccount(tx, ports, req.params.id));
       return { ok: true as const };
+    },
+  );
+
+  // D-10 (07.18-13): ChatGPT accounts signed in on a service device. The device runs Codex's own device-code login; the
+  // code is answered here only, to admins, and never put on a stream or in audit.
+  app.post(
+    "/account-pool/chatgpt/device-sign-ins",
+    { ...admin, schema: { tags, body: StartDeviceSignInRequest, response: { 200: DeviceSignIn } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return signIns.start(tenant(req), req.body);
+    },
+  );
+
+  app.get(
+    "/account-pool/chatgpt/device-sign-ins/current",
+    { ...admin, schema: { tags, querystring: DeviceQuery, response: { 200: DeviceSignIn.nullable() } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      await requireDevice(req, req.query.deviceId);
+      return signIns.status(authOf(req).organizationId, req.query.deviceId);
+    },
+  );
+
+  app.delete(
+    "/account-pool/chatgpt/device-sign-ins/current",
+    { ...admin, schema: { tags, querystring: DeviceQuery, response: { 200: DeviceSignIn.nullable() } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      await requireDevice(req, req.query.deviceId);
+      return signIns.cancel(tenant(req), req.query.deviceId);
     },
   );
 }
