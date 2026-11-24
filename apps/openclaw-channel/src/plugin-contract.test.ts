@@ -4872,9 +4872,11 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     ProviderAuthRevokeEvent: Schema;
     AgentChannelProviderAuthReport: Schema;
     CellAuthProfileReport: Schema;
+    AgentChannelPoolHealthReport: Schema;
     poolProfileId: (id: string) => string;
     claudeTokenProfileId: (id: string) => string;
     POOL_TOKEN_ENV_RE: RegExp;
+    poolTokenEnvName: (id: string) => string;
   };
   const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
   // Token-shaped values are assembled at runtime so no credential-shaped literal sits whole in the repository.
@@ -4907,7 +4909,9 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
   const claudeToken = (n: number) => ({
     accountId: U(10 + n),
     profileId: `anthropic:pool-${U(10 + n)}`,
-    envName: `OCW_POOL_TOKEN_${n}`,
+    envName: `OCW_POOL_TOKEN_${U(10 + n)
+      .replaceAll("-", "")
+      .toUpperCase()}`,
     token: token(n),
   });
   const accountPool = {
@@ -4982,7 +4986,12 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
       if (a.success && b.success) expect(a.data).toEqual(b.data);
     }
     expect(m.POOL_TOKEN_ENV_RE.source).toBe(channel.POOL_TOKEN_ENV_RE.source);
-    expect(m.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(true);
+    // 07.18-19 R2.3: the name is the account id's hex digits (stable), never a list position.
+    expect(channel.poolTokenEnvName(U(11))).toBe(claudeToken(1).envName);
+    expect(m.POOL_TOKEN_ENV_RE.test(channel.poolTokenEnvName(U(11)))).toBe(true);
+    expect(m.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(false);
+    expect(channel.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(false);
+    expect(m.POOL_TOKEN_ENV_RE.test(`OCW_POOL_TOKEN_${"a".repeat(32)}`)).toBe(false);
     expect(m.POOL_TOKEN_ENV_RE.test("OCW_PROVIDER_KEY_X")).toBe(false);
   });
 
@@ -5072,5 +5081,53 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     expect(m.claudeTokenProfileId(U(11))).toBe(`anthropic:pool-${U(11)}`);
     expect(m.poolProfileId(U(21))).toBe(channel.poolProfileId(U(21)));
     expect(m.claudeTokenProfileId(U(11))).toBe(channel.claudeTokenProfileId(U(11)));
+  });
+
+  it("07.18-19 R2.2: the token health report agrees in both copies, at most 20 profiles, never a token field", async () => {
+    const { channel, m } = await load();
+    const report = {
+      claude: [
+        { profileId: `anthropic:pool-${U(11)}`, usable: false },
+        { profileId: `anthropic:pool-${U(12)}`, usable: true },
+      ],
+    };
+    const cases: [unknown, boolean][] = [
+      [report, true],
+      [{ claude: [] }, true],
+      [
+        {
+          claude: Array.from({ length: 20 }, (_, i) => ({
+            profileId: `anthropic:pool-${U(i)}`,
+            usable: true,
+          })),
+        },
+        true,
+      ],
+      [
+        {
+          claude: Array.from({ length: 21 }, (_, i) => ({
+            profileId: `anthropic:pool-${U(i)}`,
+            usable: true,
+          })),
+        },
+        false,
+      ],
+      [{ claude: [{ profileId: "", usable: true }] }, false],
+      [{ claude: [{ profileId: "x".repeat(121), usable: true }] }, false],
+      [{}, false],
+    ];
+    for (const [v, ok] of cases) {
+      const a = m.AgentChannelPoolHealthReport.safeParse(v);
+      const b = channel.AgentChannelPoolHealthReport.safeParse(v);
+      expect(a.success, JSON.stringify(v).slice(0, 120)).toBe(ok);
+      expect(b.success, JSON.stringify(v).slice(0, 120)).toBe(ok);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+    // Unknown keys (a token, say) are dropped by both copies, never carried.
+    const withToken = { claude: [{ ...report.claude[0], token: token(1) }] };
+    expect(JSON.stringify(m.AgentChannelPoolHealthReport.parse(withToken))).not.toContain("sk-");
+    expect(JSON.stringify(channel.AgentChannelPoolHealthReport.safeParse(withToken).data)).not.toContain(
+      "sk-",
+    );
   });
 });

@@ -522,6 +522,19 @@ export const AgentChannelProviderAuthReport = z.object({
 });
 export type AgentChannelProviderAuthReport = z.infer<typeof AgentChannelProviderAuthReport>;
 
+/**
+ * 07.18-19 R2.2: `POST /agent-channel/v1/pool-health` — the health of the Claude pool token profiles the cell holds
+ * (`anthropic:pool-<accountId>`), read from OpenClaw's own failure state: `usable: false` = OpenClaw refused the token
+ * for an auth failure (revoked, disabled). The API then marks the account `needs_sign_in` (a new token restores it).
+ * Profile ids and flags only, never a token.
+ */
+export const AgentChannelPoolHealthReport = z.object({
+  claude: z
+    .array(z.object({ profileId: z.string().min(1).max(120), usable: z.boolean() }))
+    .max(POOL_LIMITS.accountsPerProvider),
+});
+export type AgentChannelPoolHealthReport = z.infer<typeof AgentChannelPoolHealthReport>;
+
 // ---------------------------------------------------------------- MCP probe (Phase 3.1, D-13, additive)
 
 /**
@@ -775,8 +788,19 @@ export function claudeTokenProfileId(accountId: string): string {
   return `anthropic:pool-${accountId}`;
 }
 
-/** 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). */
-export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9]{1,2}$/;
+/**
+ * 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). 07.18-19
+ * R2.3: named after the account's stable id (`poolTokenEnvName`), never its position in the list.
+ */
+export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9A-F]{32}$/;
+
+/**
+ * 07.18-19 R2.3: the env var of a Claude pool account's token: its id's 32 hex digits, upper case. A reorder, or another
+ * account disabled or removed, never moves a token under a name another profile references.
+ */
+export function poolTokenEnvName(accountId: string): string {
+  return `OCW_POOL_TOKEN_${accountId.replaceAll("-", "").toUpperCase()}`;
+}
 
 /**
  * 07.18 (D-02, D-04, PD-13, PD-18): the organization's pool as the cell applies it. `order` null = no explicit order

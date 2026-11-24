@@ -7,11 +7,14 @@ import { describe, expect, it } from "vitest";
 import type { CellAccountPool, CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import {
   applyCellAccountPool,
+  authRefused,
   type CellPoolDriver,
   type CellPoolStoreState,
   createOpenClawPoolDriver,
+  createPoolHealthReporter,
   ORG_KEY_PROFILE_ID,
   planCellAccountPool,
+  poolTokenHealth,
 } from "./cell-account-pool.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { envRef } from "./reconciler.js";
@@ -24,6 +27,9 @@ const Q = "0199a000-0000-7000-8000-0000000000d4";
 const TOKEN_A = ["sk-ant", "oat01", "AAAAAAAAAAAAAAAAAAAAAAAA"].join("-");
 const TOKEN_B = ["sk-ant", "oat01", "BBBBBBBBBBBBBBBBBBBBBBBB"].join("-");
 const KEY_ENV = "OCW_PROVIDER_KEY_ANTHROPIC";
+/** 07.18-19 R2.3: the env name the API derives from each account id (`poolTokenEnvName`). */
+const ENV_A = `OCW_POOL_TOKEN_${A.replaceAll("-", "").toUpperCase()}`;
+const ENV_B = `OCW_POOL_TOKEN_${B.replaceAll("-", "").toUpperCase()}`;
 
 function pool(
   over: { claude?: Partial<CellAccountPool["claude"]>; chatgpt?: Partial<CellAccountPool["chatgpt"]> } = {},
@@ -32,8 +38,8 @@ function pool(
     claude: {
       order: [`anthropic:pool-${A}`, `anthropic:pool-${B}`],
       tokens: [
-        { accountId: A, profileId: `anthropic:pool-${A}`, envName: "OCW_POOL_TOKEN_1", token: TOKEN_A },
-        { accountId: B, profileId: `anthropic:pool-${B}`, envName: "OCW_POOL_TOKEN_2", token: TOKEN_B },
+        { accountId: A, profileId: `anthropic:pool-${A}`, envName: ENV_A, token: TOKEN_A },
+        { accountId: B, profileId: `anthropic:pool-${B}`, envName: ENV_B, token: TOKEN_B },
       ],
       apiKeyLast: true,
       ...over.claude,
@@ -53,10 +59,10 @@ describe("planCellAccountPool", () => {
   it("two Claude tokens: env names with their values, env-referenced token profiles, the org key last", () => {
     const plan = planCellAccountPool(pool(), { anthropicKeyEnv: KEY_ENV });
     expect(plan.managed).toBe(true);
-    expect(plan.env).toEqual({ OCW_POOL_TOKEN_1: TOKEN_A, OCW_POOL_TOKEN_2: TOKEN_B });
+    expect(plan.env).toEqual({ [ENV_A]: TOKEN_A, [ENV_B]: TOKEN_B });
     expect(plan.profiles).toEqual([
-      { profileId: `anthropic:pool-${A}`, provider: "anthropic", type: "token", envName: "OCW_POOL_TOKEN_1" },
-      { profileId: `anthropic:pool-${B}`, provider: "anthropic", type: "token", envName: "OCW_POOL_TOKEN_2" },
+      { profileId: `anthropic:pool-${A}`, provider: "anthropic", type: "token", envName: ENV_A },
+      { profileId: `anthropic:pool-${B}`, provider: "anthropic", type: "token", envName: ENV_B },
       { profileId: ORG_KEY_PROFILE_ID, provider: "anthropic", type: "api_key", envName: KEY_ENV },
     ]);
     // Only env names reach the profiles: never the literal token.
@@ -172,7 +178,7 @@ describe("applyCellAccountPool", () => {
     expect(store.state.profiles[`anthropic:pool-${A}`]).toEqual({
       provider: "anthropic",
       type: "token",
-      envName: "OCW_POOL_TOKEN_1",
+      envName: ENV_A,
     });
     expect(JSON.stringify(store.state)).not.toContain("sk-ant");
 
@@ -212,7 +218,7 @@ describe("applyCellAccountPool", () => {
 
     const leftover = fakeStore({
       profiles: {
-        [`anthropic:pool-${A}`]: { provider: "anthropic", type: "token", envName: "OCW_POOL_TOKEN_1" },
+        [`anthropic:pool-${A}`]: { provider: "anthropic", type: "token", envName: ENV_A },
         [ORG_KEY_PROFILE_ID]: { provider: "anthropic", type: "api_key", envName: KEY_ENV },
       },
       order: { anthropic: [`anthropic:pool-${A}`] },
@@ -294,7 +300,7 @@ describe("createOpenClawPoolDriver (2026.9.7 provider-auth stand-ins)", () => {
       profileId: `anthropic:pool-${A}`,
       provider: "anthropic",
       type: "token",
-      envName: "OCW_POOL_TOKEN_1",
+      envName: ENV_A,
     });
     await driver.writeProfile({
       profileId: ORG_KEY_PROFILE_ID,
@@ -305,7 +311,7 @@ describe("createOpenClawPoolDriver (2026.9.7 provider-auth stand-ins)", () => {
     expect(sdk.store.profiles[`anthropic:pool-${A}`]).toEqual({
       type: "token",
       provider: "anthropic",
-      tokenRef: { source: "env", provider: "default", id: "OCW_POOL_TOKEN_1" },
+      tokenRef: { source: "env", provider: "default", id: ENV_A },
     });
     expect(sdk.store.profiles[ORG_KEY_PROFILE_ID]).toEqual({
       type: "api_key",
@@ -316,7 +322,7 @@ describe("createOpenClawPoolDriver (2026.9.7 provider-auth stand-ins)", () => {
     expect(read?.profiles[`anthropic:pool-${A}`]).toEqual({
       provider: "anthropic",
       type: "token",
-      envName: "OCW_POOL_TOKEN_1",
+      envName: ENV_A,
     });
     expect(read?.profiles["openai:owner@example.test"]).toEqual({
       provider: "openai",
@@ -351,7 +357,7 @@ describe("createOpenClawPoolDriver (2026.9.7 provider-auth stand-ins)", () => {
         profileId: `anthropic:pool-${A}`,
         provider: "anthropic",
         type: "token",
-        envName: "OCW_POOL_TOKEN_1",
+        envName: ENV_A,
       }),
     ).rejects.toThrow(/busy/);
   });
@@ -407,9 +413,12 @@ describe("real port: the snapshot's pool is applied after each reconcile", () =>
     const port = createOpenClawPort({ runtime, accountId: "default", cfg: {}, poolDriver: store.driver });
     const before = { ...process.env };
     try {
+      // 07.18-19 R2.3: a position-named variable an earlier build wrote is cleared, never left with a token in it.
+      process.env.OCW_POOL_TOKEN_1 = TOKEN_B;
       await port.reconcile(snapshot(pool()));
-      expect(process.env.OCW_POOL_TOKEN_1).toBe(TOKEN_A);
-      expect(process.env.OCW_POOL_TOKEN_2).toBe(TOKEN_B);
+      expect(process.env[ENV_A]).toBe(TOKEN_A);
+      expect(process.env[ENV_B]).toBe(TOKEN_B);
+      expect(process.env.OCW_POOL_TOKEN_1).toBeUndefined();
       const providers = (config.models as { providers: Record<string, Record<string, unknown>> }).providers;
       expect(providers.anthropic).not.toHaveProperty("apiKey");
       expect(JSON.stringify(config)).not.toContain("sk-ant");
@@ -424,11 +433,127 @@ describe("real port: the snapshot's pool is applied after each reconcile", () =>
 
       // The pool goes away: its env leaves the gateway, the key comes back to the entry, the profiles go.
       await port.reconcile(snapshot());
-      expect(process.env.OCW_POOL_TOKEN_1).toBeUndefined();
+      expect(process.env[ENV_A]).toBeUndefined();
       expect(providers.anthropic?.apiKey).toBe(envRef(KEY_ENV));
       expect(Object.keys(store.state.profiles)).toEqual([]);
     } finally {
       for (const k of Object.keys(process.env)) if (!(k in before)) delete process.env[k];
     }
+  });
+});
+
+describe("Claude token health (07.18-19 R2.2)", () => {
+  const NOW = Date.parse("2026-11-24T12:00:00.000Z");
+  const later = NOW + 60_000;
+  const earlier = NOW - 60_000;
+
+  it("an active auth failure (cooldown or disable) refuses the token; limits, billing and expired windows do not", () => {
+    expect(authRefused(undefined, NOW)).toBe(false);
+    expect(authRefused({ lastUsed: earlier }, NOW)).toBe(false);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "auth" }, NOW)).toBe(true);
+    expect(authRefused({ disabledUntil: later, disabledReason: "auth_permanent" }, NOW)).toBe(true);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "auth_permanent" }, NOW)).toBe(true);
+    // A usage limit, an overload or billing is not a bad credential.
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "rate_limit" }, NOW)).toBe(false);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "overloaded" }, NOW)).toBe(false);
+    expect(authRefused({ disabledUntil: later, disabledReason: "billing" }, NOW)).toBe(false);
+    expect(authRefused({ blockedUntil: later, blockedReason: "subscription_limit" }, NOW)).toBe(false);
+    // A window that ended: OpenClaw tries the token again, so it is not reported as refused.
+    expect(authRefused({ cooldownUntil: earlier, cooldownReason: "auth" }, NOW)).toBe(false);
+    expect(authRefused({ disabledUntil: earlier, disabledReason: "auth_permanent" }, NOW)).toBe(false);
+    expect(authRefused("junk", NOW)).toBe(false);
+  });
+
+  it("the real driver reads OpenClaw's usage stats; the health lists only pool token profiles", async () => {
+    const soon = Date.now() + 120_000;
+    const store = {
+      profiles: {
+        [`anthropic:pool-${A}`]: {
+          type: "token",
+          provider: "anthropic",
+          tokenRef: { source: "env", id: "E1" },
+        },
+        [`anthropic:pool-${B}`]: {
+          type: "token",
+          provider: "anthropic",
+          tokenRef: { source: "env", id: "E2" },
+        },
+        [ORG_KEY_PROFILE_ID]: {
+          type: "api_key",
+          provider: "anthropic",
+          keyRef: { source: "env", id: KEY_ENV },
+        },
+        "openai:owner@example.test": { type: "oauth", provider: "openai", refresh: "R" },
+      },
+      usageStats: {
+        [`anthropic:pool-${A}`]: { cooldownUntil: soon, cooldownReason: "auth" },
+        [ORG_KEY_PROFILE_ID]: { disabledUntil: soon, disabledReason: "auth_permanent" },
+        "openai:owner@example.test": { cooldownUntil: soon, cooldownReason: "auth" },
+      },
+    };
+    const runtime = {
+      config: { current: () => ({}) },
+      channel: {},
+      modelAuth: { ensureAuthProfileStore: () => structuredClone(store) },
+    } as unknown as PluginRuntimeLike;
+    const state = (await createOpenClawPoolDriver({ runtime }).read()) as CellPoolStoreState;
+    expect(state.profiles[`anthropic:pool-${A}`]).toMatchObject({ refused: true });
+    expect(state.profiles[`anthropic:pool-${B}`]?.refused).toBeUndefined();
+    expect(poolTokenHealth(state)).toEqual([
+      { profileId: `anthropic:pool-${A}`, usable: false },
+      { profileId: `anthropic:pool-${B}`, usable: true },
+    ]);
+  });
+
+  it("the reporter sends a changed list once, retries after a failure and stays quiet with no tokens", async () => {
+    const token = (refused?: true) => ({
+      profiles: {
+        [`anthropic:pool-${A}`]: {
+          provider: "anthropic",
+          type: "token",
+          envName: "E1",
+          ...(refused ? { refused } : {}),
+        },
+      },
+      order: {},
+    });
+    let state: CellPoolStoreState | null = token();
+    const sent: unknown[] = [];
+    let fail = false;
+    const reporter = createPoolHealthReporter({
+      driver: { read: async () => structuredClone(state) },
+      report: async (body) => {
+        if (fail) throw new Error("API down");
+        sent.push(body);
+      },
+    });
+    await reporter.check();
+    await reporter.check();
+    expect(sent).toEqual([{ claude: [{ profileId: `anthropic:pool-${A}`, usable: true }] }]);
+
+    state = token(true);
+    fail = true;
+    await reporter.check(); // never throws
+    fail = false;
+    await reporter.check();
+    await reporter.check();
+    expect(sent).toEqual([
+      { claude: [{ profileId: `anthropic:pool-${A}`, usable: true }] },
+      { claude: [{ profileId: `anthropic:pool-${A}`, usable: false }] },
+    ]);
+
+    // An unreadable store reports nothing new; a cell without pool tokens reports nothing at all.
+    state = null;
+    await reporter.check();
+    expect(sent).toHaveLength(2);
+    const quiet: unknown[] = [];
+    const empty = createPoolHealthReporter({
+      driver: { read: async () => ({ profiles: {}, order: {} }) },
+      report: async (body) => {
+        quiet.push(body);
+      },
+    });
+    await empty.check();
+    expect(quiet).toEqual([]);
   });
 });

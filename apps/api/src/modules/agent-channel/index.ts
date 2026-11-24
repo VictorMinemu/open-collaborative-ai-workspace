@@ -3,6 +3,7 @@ import {
   AGENT_CHANNEL_PROTOCOL_VERSION,
   Agent,
   AgentCellStatus,
+  AgentChannelPoolHealthReport,
   AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   AgentChannelProviderAuthReport,
@@ -25,7 +26,14 @@ import { z } from "zod";
 import { type ApiModule, type App, authOf, type Core, tenant } from "../../core";
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
-import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import {
+  applyCellStatus,
+  cellAgents,
+  cellPoolClaudeProvider,
+  cellProviders,
+  cellSubscriptions,
+  findAgent,
+} from "../agent";
 import { linkTurnAttachments, type ObjectStorage } from "../artifact";
 import type { AutomationFanOut, AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
@@ -50,7 +58,7 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
-import { cellAccountPool } from "./cell-pool";
+import { applyCellTokenHealth, cellAccountPool } from "./cell-pool";
 import { registerChainUserRoutes } from "./chain-routes";
 import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
@@ -408,6 +416,14 @@ export function createAgentChannelModule(
                   const pool = await cellAccountPool(tx, core, {
                     anthropicKey: providers.some((p) => p.kind === "anthropic"),
                   });
+                  // 07.18-19 R2.1 (D-15): Claude bots run on the pool's tokens alone when there is no usable key.
+                  if (
+                    pool.accountPool?.claude.tokens.length &&
+                    !providers.some((p) => p.kind === "anthropic")
+                  ) {
+                    const claude = await cellPoolClaudeProvider(core, tx);
+                    if (claude) providers.push(claude);
+                  }
                   const connected = await cellSubscriptions(tx);
                   const subscriptions = connected.filter((s) => !pool.withheldSubscriptions.includes(s.id));
                   // 07.18 gap: a connected subscription the pool withholds is named, so the cell keeps its sign-ins
@@ -602,6 +618,20 @@ export function createAgentChannelModule(
             },
             async (req) => {
               await providerAuth.report(cellOf(req).organizationId, req.body);
+              return { ok: true as const };
+            },
+          );
+
+          // 07.18-19 R2.2: the health of the Claude pool tokens the cell holds (profile ids and flags, never a token).
+          scope.post(
+            "/pool-health",
+            {
+              ...cellRoute,
+              schema: { tags, security: bearer, body: AgentChannelPoolHealthReport, response: { 200: Ok } },
+            },
+            async (req) => {
+              const ctx = { organizationId: cellOf(req).organizationId, userId: null };
+              await core.db.withTenant(ctx, (tx) => applyCellTokenHealth(core, tx, req.body));
               return { ok: true as const };
             },
           );

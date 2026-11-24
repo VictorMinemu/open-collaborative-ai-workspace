@@ -8,8 +8,8 @@ import type { PluginRuntimeLike } from "./openclaw-port.js";
  * store after each reconcile.
  *
  * - Claude setup-tokens become `anthropic` **token profiles** (`anthropic:pool-<accountId>`). A token lives only in the
- *   gateway env (`OCW_POOL_TOKEN_<n>`); the stored profile references it (`tokenRef`, an env SecretRef) and never holds
- *   the literal. The org's Anthropic API key, when the API puts it last (`apiKeyLast`), becomes one more `api_key`
+ *   gateway env (`OCW_POOL_TOKEN_<account id hex>`, named after the account, 07.18-19 R2.3); the stored profile
+ *   references it (`tokenRef`, an env SecretRef) and never holds the literal. The org's Anthropic API key, when the API puts it last (`apiKeyLast`), becomes one more `api_key`
  *   profile referencing the env var it already lives in, and the provider entry drops its `apiKey` (see reconciler).
  *   OpenClaw tries profiles before a provider entry's key (probe A-05), so the key is the last resort.
  * - The order the strategy sets is written per provider (`anthropic`, `openai`) as the store order, the one
@@ -52,9 +52,12 @@ export type CellPoolPlan = {
   keyInProfiles: boolean;
 };
 
-/** What the plan reads back from the store: each profile's provider, type and env reference (no secret). */
+/**
+ * What the plan reads back from the store: each profile's provider, type and env reference (no secret), and (07.18-19
+ * R2.2) `refused: true` while OpenClaw holds the profile out for an auth failure (`authRefused`).
+ */
 export type CellPoolStoreState = {
-  profiles: Record<string, { provider: string; type: string; envName: string | null }>;
+  profiles: Record<string, { provider: string; type: string; envName: string | null; refused?: true }>;
   order: Partial<Record<string, string[]>>;
 };
 
@@ -206,6 +209,93 @@ export async function applyCellAccountPool(
   return { ok, writes };
 }
 
+// ---------------------------------------------------------------- token health (07.18-19 R2.2)
+
+/** OpenClaw's failure reasons that mean the credential itself was refused (2026.9.7 `usage-state` priority list). */
+const AUTH_FAILURE_REASONS = new Set(["auth", "auth_permanent"]);
+
+function activeUntil(value: unknown, now: number): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > now;
+}
+
+/**
+ * Pure: whether OpenClaw holds a profile out right now because the provider refused its credential. OpenClaw 2026.9.7
+ * keeps per-profile `usageStats` in the auth store (`profile-usage-stats`, `usage-failure-state`): a 401/403 or a
+ * revoked-key message is `auth` (a cooldown of 30 s to 5 min), a high-confidence revoke or deactivation is
+ * `auth_permanent` (a disable window of 10 min to 1 h), and a successful run clears both. Rate limits, overloads,
+ * billing and subscription blocks are not a bad credential. A window that ended is not reported (OpenClaw tries the
+ * profile again).
+ */
+export function authRefused(stats: unknown, now: number): boolean {
+  if (!stats || typeof stats !== "object") return false;
+  const s = stats as Record<string, unknown>;
+  const disabled = activeUntil(s.disabledUntil, now) && AUTH_FAILURE_REASONS.has(String(s.disabledReason));
+  const cooling = activeUntil(s.cooldownUntil, now) && AUTH_FAILURE_REASONS.has(String(s.cooldownReason));
+  return disabled || cooling;
+}
+
+export type PoolTokenHealth = { profileId: string; usable: boolean };
+
+/** Pure: the pool's Claude token profiles in the store (`anthropic:pool-*`), by id, with whether they can be used. */
+export function poolTokenHealth(state: CellPoolStoreState): PoolTokenHealth[] {
+  return Object.entries(state.profiles)
+    .filter(
+      ([id, p]) =>
+        id.startsWith(POOL_TOKEN_PROFILE_PREFIX) && p.provider === "anthropic" && p.type === "token",
+    )
+    .map(([profileId, p]) => ({ profileId, usable: p.refused !== true }))
+    .sort((a, b) => (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0));
+}
+
+/**
+ * Reports the pool tokens' health to the API (`POST /agent-channel/v1/pool-health`) when it changed since the last
+ * report the API took, the way the ChatGPT profile list is reported (subscription-auth.ts). Checked after every cell sync
+ * and after every bot turn, while OpenClaw's failure window is still open. Never throws; a failed report is retried on
+ * the next check. Ids and flags only, never a token. Concurrent checks share one run.
+ */
+export function createPoolHealthReporter(opts: {
+  driver: Pick<CellPoolDriver, "read">;
+  report: (body: { claude: PoolTokenHealth[] }) => Promise<void>;
+  log?: EventStreamLogger;
+}) {
+  let last: string | null = null;
+  let running: Promise<void> | null = null;
+  async function run(): Promise<void> {
+    let state: CellPoolStoreState | null;
+    try {
+      state = await opts.driver.read();
+    } catch {
+      return;
+    }
+    if (!state) return;
+    const claude = poolTokenHealth(state).slice(0, 20);
+    const key = JSON.stringify(claude);
+    // Nothing to say: no token was ever reported and the cell holds none.
+    if (key === last || (last === null && claude.length === 0)) return;
+    try {
+      await opts.report({ claude });
+      last = key;
+      const refused = claude.filter((t) => !t.usable).length;
+      if (refused > 0)
+        opts.log?.warn?.(`account pool: ${refused} Claude token(s) refused by the provider; reported`);
+    } catch (error) {
+      opts.log?.warn?.(
+        `account pool: token health not reported (retried on the next check): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return {
+    check(): Promise<void> {
+      running ??= run().finally(() => {
+        running = null;
+      });
+      return running;
+    },
+  };
+}
+
+export type PoolHealthReporter = ReturnType<typeof createPoolHealthReporter>;
+
 const PROVIDER_AUTH_MODULE = "openclaw/plugin-sdk/provider-auth";
 const LOGIN_FLOW_MODULE = "openclaw/plugin-sdk/provider-auth-login-flow-runtime";
 
@@ -254,12 +344,15 @@ export function createOpenClawPoolDriver(opts: {
         allowKeychainPrompt: false,
       });
       const profiles: CellPoolStoreState["profiles"] = {};
+      const usage = (store as { usageStats?: Record<string, unknown> } | undefined)?.usageStats ?? {};
+      const now = Date.now();
       for (const [id, cred] of Object.entries(store?.profiles ?? {})) {
         if (!cred || typeof cred !== "object") continue;
         profiles[id] = {
           provider: typeof cred.provider === "string" ? cred.provider : "",
           type: typeof cred.type === "string" ? cred.type : "",
           envName: envNameOf(cred),
+          ...(authRefused(usage[id], now) ? { refused: true as const } : {}),
         };
       }
       const order: CellPoolStoreState["order"] = {};
