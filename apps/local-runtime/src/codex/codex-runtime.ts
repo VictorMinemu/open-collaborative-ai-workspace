@@ -11,8 +11,11 @@
 // - slash commands never reach Codex as text (D-13): `/compact` runs the native `thread/compact/start`,
 //   everything else is refused with `slash_command_refused`. A readback reporting an unrestricted sandbox or
 //   the `never` policy aborts the running turn unless that turn is an authorized fullAccess turn (D-03).
-// - runs on the user's local Codex login (ChatGPT subscription); OPENAI_API_KEY / CODEX_API_KEY are
-//   stripped from the child environment unless `useApiKey` is set. OCW_* never reaches Codex.
+// - billing (07.18 D-02, D-15, PD-10): a session runs on the device's own Codex login (ChatGPT subscription), or on
+//   the account slot the platform chose: its app-server gets `CODEX_HOME` = that slot's directory, nothing else. The
+//   slot's tokens stay in its `auth.json`, written and refreshed by Codex only; this adapter never reads it.
+//   OPENAI_API_KEY / CODEX_API_KEY are stripped from the child environment unless `useApiKey` is set, and always for a
+//   slot session (subscriptions first). OCW_* never reaches Codex.
 // - approval requests (commands, patches, extra permissions) are forwarded as approval.requested
 //   and answered from approval.resolve; secret paths are declined without asking.
 // - one update authority (07.11 D-12): every app-server the daemon launches (sessions, catalog, titles) runs with
@@ -46,9 +49,11 @@ import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
+  type AccountSignal,
   type AgentRuntime,
   type EventSink,
   type FullAccessGateOptions,
+  type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -138,6 +143,18 @@ export function codexChildEnv(
 
 type Outcome = ApprovalDecision | "expired";
 
+/** 07.18 (PD-10): the only pool account kind Codex runs: a ChatGPT account slot on this device. */
+type SlotAccount = Extract<RuntimeAccount, { kind: "device_slot" }>;
+
+/** A start's or a switch's account for this adapter: a slot, or null (the device's own login). */
+function slotAccountOf(account: RuntimeAccount | null | undefined): SlotAccount | null {
+  if (!account) return null;
+  if (account.kind !== "device_slot") {
+    throw new RuntimeError(`codex cannot run a session on a ${account.kind} account`, "runtime_unavailable");
+  }
+  return account;
+}
+
 /** What the platform authorized for the session (merged `configure()` patches; null = runtime default). */
 interface ConfiguredSettings {
   model: string | null;
@@ -182,6 +199,10 @@ interface Session {
    * that resumes `threadId`.
    */
   dormant: boolean;
+  /** 07.18 (D-02): the slot the app-server runs under (its `CODEX_HOME`), or null for the device's own login. */
+  account: SlotAccount | null;
+  /** 07.18 (PD-05, PD-09): where limits and usage of the session's account go. */
+  onAccountSignal: ((signal: AccountSignal) => void) | null;
 }
 
 /** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
@@ -230,6 +251,8 @@ export class CodexRuntime implements AgentRuntime {
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
       supportsImages: true,
+      // 07.18 (D-02): ChatGPT account slots only; a Claude token never reaches Codex.
+      supportsAccounts: ["device_slot"],
     };
   }
 
@@ -333,7 +356,8 @@ export class CodexRuntime implements AgentRuntime {
       throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
 
-    const proc = this.spawnSessionServer(options.sessionId, options.cwd);
+    const account = slotAccountOf(options.account);
+    const proc = this.spawnSessionServer(options.sessionId, options.cwd, account);
 
     // The session object is completed once the thread exists; handlers only run after that.
     const startMode: CodexPolicyMode = mode.data;
@@ -373,6 +397,8 @@ export class CodexRuntime implements AgentRuntime {
       finished: false,
       retired: new WeakSet(),
       dormant: false,
+      account,
+      onAccountSignal: options.onAccountSignal ?? null,
     } as Omit<Session, "peer" | "exited"> as Session;
     this.attach(session, proc);
 
@@ -618,9 +644,15 @@ export class CodexRuntime implements AgentRuntime {
     return child as ChildProcess & AppServerProcess;
   }
 
-  /** A session's app-server (start and wake-up): the same filtered env and arguments every time. */
-  private spawnSessionServer(sessionId: string, cwd: string): AppServerProcess {
-    const env = codexChildEnv(process.env, this.opts.useApiKey ?? false);
+  /**
+   * A session's app-server (start and wake-up): the same filtered env and arguments every time. A slot session runs
+   * with `CODEX_HOME` = the slot's directory and never with an API key (07.18 D-02, D-15); without one the env is
+   * exactly as before 07.18.
+   */
+  private spawnSessionServer(sessionId: string, cwd: string, account: SlotAccount | null): AppServerProcess {
+    const env = account
+      ? { ...codexChildEnv(process.env, false), CODEX_HOME: account.codexHome }
+      : codexChildEnv(process.env, this.opts.useApiKey ?? false);
     const proc = this.opts.spawnAppServer ? this.opts.spawnAppServer({ cwd, env }) : this.spawnReal(cwd, env);
     proc.stderr?.setEncoding("utf8");
     proc.stderr?.on("data", (d: string) => this.log.debug(`[codex ${sessionId}] ${redact(d.trimEnd())}`));
@@ -683,7 +715,7 @@ export class CodexRuntime implements AgentRuntime {
    */
   private async wake(s: Session): Promise<void> {
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
-    const proc = this.spawnSessionServer(s.id, s.cwd);
+    const proc = this.spawnSessionServer(s.id, s.cwd, s.account);
     this.attach(s, proc);
     s.dormant = false;
     const { peer, exited } = s;
