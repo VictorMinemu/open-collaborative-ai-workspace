@@ -49,6 +49,7 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
+import { cellAccountPool } from "./cell-pool";
 import { registerChainUserRoutes } from "./chain-routes";
 import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
@@ -399,7 +400,13 @@ export function createAgentChannelModule(
                 async (tx) => {
                   const topic = cellTopic(cell.cellId);
                   const providers = await cellProviders(core, tx);
-                  const subscriptions = await cellSubscriptions(tx);
+                  // 07.18 (D-02, D-12, PD-13): the account pool for bots; the org key goes after its tokens (D-15).
+                  const pool = await cellAccountPool(tx, core, {
+                    anthropicKey: providers.some((p) => p.kind === "anthropic"),
+                  });
+                  const subscriptions = (await cellSubscriptions(tx)).filter(
+                    (s) => !pool.withheldSubscriptions.includes(s.id),
+                  );
                   // Per-agent tool sets (D-08 layer 2) and the org's search provider (D-09).
                   const capabilities = await cellAgentCapabilities(tx, core.env);
                   const policy = await loadPolicy(tx);
@@ -424,6 +431,7 @@ export function createAgentChannelModule(
                       subscriptions: subscriptions.map((p) => p.id),
                       mcpServers: mcpServers.map((s) => s.id),
                       plugins: plugins.map((p) => p.pluginRowId),
+                      poolAccounts: pool.accountIds,
                       credential: cell.source,
                     },
                   });
@@ -441,6 +449,7 @@ export function createAgentChannelModule(
                     conversations: policy.conversations,
                     mcpServers,
                     plugins,
+                    ...(pool.accountPool ? { accountPool: pool.accountPool } : {}),
                   } as const;
                 },
               );
