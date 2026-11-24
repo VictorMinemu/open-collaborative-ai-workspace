@@ -13,6 +13,7 @@ import {
   POOL_LIMITS,
   POOL_PROVIDER_OF_RUNTIME,
   RuntimeInfo,
+  SERVER_ONLY_SESSION_EVENTS,
   type SessionAccount,
   type SessionAccountLimitedFrame,
   type SessionEvent,
@@ -2050,6 +2051,15 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   async onEvent(device: DeviceRef, frame: EventFrame): Promise<void> {
     const ev = frame.event;
+    // 07.18 (PD-14, E12, T-07.18-10-04): only the API writes these (e.g. `account.switched`); a device's is dropped
+    // before it reaches the session's stream. Logged with the session id and the type, never the event body.
+    if (SERVER_ONLY_SESSION_EVENTS.has(ev.type)) {
+      this.deps.log.warn(
+        { workSessionId: frame.sessionId, type: ev.type },
+        "dropped a server-only session event sent by a device",
+      );
+      return;
+    }
     if (ev.type === "assistant.delta") {
       // Ephemeral: never persisted. The device link is per-device, so only this device's sessions reach here,
       // but check ownership cheaply before fan-out.
