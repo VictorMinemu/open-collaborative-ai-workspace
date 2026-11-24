@@ -32,7 +32,7 @@ import { redisRateLimitStore } from "./lib/rate-limit-store";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAccountPoolModule, createDeviceAccountHandler } from "./modules/account-pool";
-import { createAgentModule } from "./modules/agent";
+import { createAgentModule, notifyCellOfPoolChange } from "./modules/agent";
 import {
   type BrowserBudgets,
   createAgentChannelModule,
@@ -422,8 +422,13 @@ export async function buildApp(
       ...(opts.sandboxBudgetsMs ? { sandboxBudgets: opts.sandboxBudgetsMs } : {}),
     }),
     deviceModule, // B3
-    // Phase 07.18: the subscription account pool (ADR-0044); the hub serves the ChatGPT slot commands (07.18-13)
-    createAccountPoolModule(core, { hub: deviceModule.hub }),
+    // Phase 07.18: the subscription account pool (ADR-0044); the hub serves the ChatGPT slot commands (07.18-13).
+    // D-12 (07.18-14): every pool change the bots see tells the cell to re-read its config, in the change's
+    // transaction; removing a ChatGPT account for bots signs only that profile out in the cell (PD-25, E15).
+    createAccountPoolModule(core, {
+      hub: deviceModule.hub,
+      onChange: (tx, change) => notifyCellOfPoolChange(core, tx, change),
+    }),
     workSession, // B3 (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)

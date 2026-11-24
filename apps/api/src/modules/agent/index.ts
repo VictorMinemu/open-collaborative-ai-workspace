@@ -72,11 +72,14 @@ export {
   findAgent,
   listAgents,
   loadAgentUnit,
+  notifyCell,
   toAgentDto,
 } from "./service";
 export {
   applySubscriptionConnected,
   markSubscriptionNeedsReconnect,
+  notifyCellOfPoolChange,
+  revokeSubscriptionInCell,
   subscriptionAccount,
 } from "./subscription";
 
