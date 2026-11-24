@@ -3,6 +3,20 @@ import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
 export type { AccountPoolDeps } from "./routes";
 export {
+  type AccountPoolPort,
+  createAccountPoolPort,
+  getPoolAccount,
+  noAccountSentence,
+  type PoolConsumer,
+  type SelectAccountInput,
+  type SelectAccountResult,
+  type StoredSessionAccount,
+  selectAccount,
+  servesConsumer,
+  storedSessionAccount,
+  usableFor,
+} from "./selection";
+export {
   addClaudeToken,
   insertPoolAccount,
   listPoolAccounts,

@@ -9,6 +9,7 @@ import {
   isFullAccessReport,
   NO_GIT_WORKTREE_MESSAGE,
   onlyRelativePaths,
+  type SessionAccount,
   type SessionEvent,
   SessionTitle,
   type SessionVisibilityKind,
@@ -26,6 +27,7 @@ import {
   type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
+  accountPoolAccounts,
   agents,
   conversations,
   deviceCommands,
@@ -44,9 +46,16 @@ import {
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { Jobs } from "../../lib/jobs";
+import { type AccountPoolPort, type StoredSessionAccount, storedSessionAccount } from "../account-pool";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
-import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
+import {
+  CommandUndeliverableError,
+  type DeviceCommandRow,
+  type DeviceHub,
+  type DeviceRef,
+  type DeviceSessionHandler,
+} from "../device";
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
@@ -129,6 +138,33 @@ const UNDELIVERED_PROMPT = new Map<string, string>([
   ["frame_too_large", "The images are too large to send to the device"],
 ]);
 
+/** 07.18 (PD-02): the hub-origin reason of a command whose pool token could not be opened at send time. */
+const ACCOUNT_UNAVAILABLE = "account_unavailable";
+
+/** What `prepareCommand` hands to `hydrateCommand` (memory only, never stored). */
+interface CommandPlan {
+  images: PromptImagesPlan | undefined;
+  account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
+}
+
+/** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
+function tokenAccountOf(
+  payload: Record<string, unknown>,
+): Extract<StoredSessionAccount, { kind: "token" }> | null {
+  const a = payload.account;
+  if (typeof a !== "object" || a === null) return null;
+  const { kind, accountId, label } = a as Record<string, unknown>;
+  if (
+    kind !== "token" ||
+    typeof accountId !== "string" ||
+    !UUID_RE.test(accountId) ||
+    typeof label !== "string"
+  ) {
+    return null;
+  }
+  return { kind, accountId, label };
+}
+
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
 type ApprovalRow = typeof workApprovals.$inferSelect;
@@ -168,6 +204,12 @@ export interface WorkSessionDeps {
    * summary job in the same transaction; the job decides (consent, linked team project, new work). Null = no jobs.
    */
   jobs?: Pick<Jobs, "sendInTx"> | null;
+  /**
+   * Phase 07.18 (D-02, D-05, PD-02, PD-06): the organization's account pool. A session on a pool-capable device starts
+   * on an account the strategy chose, keeps it while it serves, and its device gets the token only in the frame sent.
+   * Null = no pool (services built directly in unit tests): every session runs on its device's own login.
+   */
+  pool?: AccountPoolPort | null;
 }
 
 /**
@@ -184,6 +226,11 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   constructor(private readonly deps: WorkSessionDeps) {
     this.background = new OrgQueue({ log: deps.log, ...deps.background });
+  }
+
+  /** 07.18: the account pool `createWorkSession` selects from (null = no pool: the device's own login). */
+  get pool(): AccountPoolPort | null {
+    return this.deps.pool ?? null;
   }
 
   /** Resolves once the background work of the organization (or of every organization) is done (tests, perf). */
@@ -260,10 +307,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceOwner: devices.ownerUserId,
         unitPath: orgUnits.path,
         access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
+        poolId: accountPoolAccounts.id,
+        poolLabel: accountPoolAccounts.label,
+        poolProvider: accountPoolAccounts.provider,
       })
       .from(workSessions)
       .innerJoin(projects, eq(projects.id, workSessions.projectId))
       .innerJoin(devices, eq(devices.id, workSessions.deviceId))
+      .leftJoin(accountPoolAccounts, eq(accountPoolAccounts.id, workSessions.poolAccountId))
       .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, workSessions.projectId))
       .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
       .where(filter)
@@ -300,7 +351,19 @@ export class WorkSessionService implements DeviceSessionHandler {
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
     const since = new Map(running.map((r) => [r.id, r.since]));
     return rows.map(
-      ({ s, projectName, deviceName, deviceStatus, deviceRevoked, deviceOwner, unitPath, access }) => {
+      ({
+        s,
+        projectName,
+        deviceName,
+        deviceStatus,
+        deviceRevoked,
+        deviceOwner,
+        unitPath,
+        access,
+        poolId,
+        poolLabel,
+        poolProvider,
+      }) => {
         const effective = EffectiveSessionSettings.safeParse(s.effectiveSettings);
         const diffStat = DiffStat.safeParse(s.diffStat);
         const summary = summaries.get(s.id);
@@ -344,6 +407,11 @@ export class WorkSessionService implements DeviceSessionHandler {
           createdAt: new Date(s.createdAt).toISOString(),
           updatedAt: new Date(s.updatedAt).toISOString(),
           startedByAgent: agentRefOf(s.startedByAgentId, starters),
+          // 07.18 (D-11, PD-19): the account's label only; null = the device's own login.
+          poolAccount:
+            poolId !== null && poolLabel !== null && poolProvider !== null
+              ? { id: poolId, label: poolLabel, provider: poolProvider }
+              : null,
         };
         return {
           dto,
@@ -694,6 +762,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       .from(projects)
       .where(eq(projects.id, s.projectId));
     const requested = requestedSettings(s);
+    const account = await this.commandAccount(tx, s);
     return {
       projectLocalId: p?.localId ?? "",
       runtime: s.runtime,
@@ -704,7 +773,28 @@ export class WorkSessionService implements DeviceSessionHandler {
       ...(requested.contextWindow ? { contextWindow: requested.contextWindow } : {}),
       ...(s.worktree ? { worktree: true } : {}),
       ...(s.runtimeSessionId ? { resumeRuntimeSessionId: s.runtimeSessionId } : {}),
+      // 07.18 (PD-02, PD-03): the stored form only (no token); absent for a device without pool support.
+      ...(account !== undefined ? { account } : {}),
     };
+  }
+
+  /**
+   * The account a command of this session names (PD-03): undefined for a device without pool support (the key is
+   * left out, so an older daemon sees today's payload), null for the device's own login, else the stored form.
+   */
+  private async commandAccount(
+    tx: Tx,
+    s: Pick<SessionRow, "deviceId" | "poolAccountId">,
+  ): Promise<StoredSessionAccount | null | undefined> {
+    if (!this.deps.pool) return undefined;
+    const [d] = await tx
+      .select({ version: devices.accountPoolVersion })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId));
+    if (!d || d.version === null) return undefined;
+    if (s.poolAccountId === null) return null;
+    const row = await this.deps.pool.get(tx, s.poolAccountId);
+    return row ? storedSessionAccount(row) : null;
   }
 
   /** (Re)attach the session to a runtime on its device. */
@@ -1337,18 +1427,50 @@ export class WorkSessionService implements DeviceSessionHandler {
     });
   }
 
-  /** 06.1-02 (P-03): a prompt's images, chosen inside the hub's flush transaction (database work only). */
+  /**
+   * Inside the hub's flush transaction (database work only): 06.1-02 (P-03) a prompt's images, and 07.18 (PD-02) the
+   * token of the pool account a `session.start` or `prompt` names, opened from the secret store. The plan lives in
+   * memory only; undefined when the stored payload is sent as is.
+   */
   async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
-    return preparePromptImages(tx, cmd);
+    const images = await preparePromptImages(tx, cmd);
+    const account = await this.prepareAccount(tx, cmd);
+    if (images === undefined && account === undefined) return undefined;
+    return { images, account } satisfies CommandPlan;
   }
 
-  /** 06.1-02 (P-03): the image bytes, read after the flush transaction committed; never stored. */
+  /**
+   * 07.18 (PD-02): a command naming a token account gets its token, or `{ token: null }` when it cannot be opened
+   * (removed, no secret, a seal that does not open). Only commands of this device are flushed here, and the account is
+   * the one the API itself wrote into the stored payload.
+   */
+  private async prepareAccount(tx: Tx, cmd: DeviceCommandRow): Promise<CommandPlan["account"]> {
+    if (!this.deps.pool || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    const stored = tokenAccountOf(cmd.payload);
+    if (!stored) return undefined;
+    const row = await this.deps.pool.get(tx, stored.accountId);
+    const token = row && row.kind === "token" ? await this.deps.pool.open(tx, row) : null;
+    return { stored, token };
+  }
+
+  /**
+   * After the flush transaction committed: 06.1-02 the image bytes, then 07.18 (PD-02) the token added to the copy that
+   * is sent. Never written back. A token that could not be opened fails the command `account_unavailable`.
+   */
   async hydrateCommand(
     _device: DeviceRef,
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    return hydratePromptImages(this.deps.storage ?? null, cmd, plan as PromptImagesPlan);
+    const { images, account } = plan as CommandPlan;
+    if (account && account.token === null) {
+      throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
+    }
+    const payload = images ? await hydratePromptImages(this.deps.storage ?? null, cmd, images) : cmd.payload;
+    if (!account?.token) return payload;
+    // The sent copy only: `SessionAccount` with the token, on its way to this session's own device.
+    const sent: SessionAccount = { ...account.stored, oauthToken: account.token };
+    return { ...payload, account: sent };
   }
 
   async onCommandResult(

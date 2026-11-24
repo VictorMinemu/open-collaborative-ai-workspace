@@ -452,6 +452,9 @@ export class DeviceHub {
           // service daemons (a desktop or unknown host reporting the mark is stored as false).
           hostKind: hello.device.host ?? null,
           isolatedServer: hello.device.host === "service" && hello.isolatedServer === true,
+          // 07.18 (PD-04): written only from the device's own hello; a daemon without pool support stores null and
+          // never gets a pool account.
+          accountPoolVersion: hello.accountPool ?? null,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
