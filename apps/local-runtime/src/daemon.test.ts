@@ -3446,6 +3446,42 @@ describe("07.18 pool accounts on the device (D-02, D-07, PD-03, PD-04, PD-05)", 
     expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
   });
 
+  it("a prompt naming another account switches before the turn; absent or the same one changes nothing", async () => {
+    const ACCOUNT_B = "1f0e0d0c-0b0a-4908-8706-050403020101";
+    const { id, sessionId } = await startWith(tokenAccount());
+    await server.frame("ack", (f) => f.commandId === id);
+    const prompt = async (promptId: string, account?: unknown) => {
+      const cid = randomUUID();
+      server.send({
+        id: cid,
+        kind: "prompt",
+        sessionId,
+        payload: { promptId, text: "go", ...(account !== undefined ? { account } : {}) },
+      });
+      return server.frame("ack", (f) => f.commandId === cid);
+    };
+    expect(await prompt("p1")).toMatchObject({ ok: true });
+    expect(await prompt("p2", tokenAccount())).toMatchObject({ ok: true });
+    expect(runtime.accountSwitches).toEqual([]);
+    expect(await prompt("p3", tokenAccount(ACCOUNT_B, "Team B"))).toMatchObject({ ok: true });
+    expect(await prompt("p4", null)).toMatchObject({ ok: true });
+    expect(runtime.calls).toEqual(["prompt:p1", "prompt:p2", `useAccount:${ACCOUNT_B}`, "prompt:p3", "useAccount:device", "prompt:p4"]);
+    expect(runtime.accountSwitches[0]?.account).toEqual({
+      kind: "token",
+      ref: ACCOUNT_B,
+      label: "Team B",
+      oauthToken: POOL_TOKEN,
+    });
+    // The stored ref follows: a limit now names the device's own login.
+    runtime.started[0]?.onAccountSignal?.({ kind: "limited", promptId: "p4", reason: "rate_limit", resetsAt: null });
+    expect(await server.frame("session.account_limited")).toMatchObject({ promptId: "p4", accountId: null });
+    // A slot account in a prompt is refused before the turn, like at start.
+    const slot = await prompt("p5", { kind: "device_slot", accountId: ACCOUNT_B, label: "C", slotId: randomUUID() });
+    expect(slot).toMatchObject({ ok: false, error: "account slot not found on this device" });
+    expect(runtime.calls.at(-1)).toBe("prompt:p4");
+    expect(JSON.stringify(server.allFrames)).not.toContain(POOL_TOKEN);
+  });
+
   it("a limit on the device's own login names no account; its usage sends nothing", async () => {
     const { id, sessionId } = await startWith(null);
     await server.frame("ack", (f) => f.commandId === id);
