@@ -1,6 +1,11 @@
 "use client";
 
-import type { WorkApproval, WorkPrompt, WorkSession } from "@ocw/contracts";
+import {
+  accountSwitchedSentence,
+  type WorkApproval,
+  type WorkPrompt,
+  type WorkSession,
+} from "@ocw/contracts";
 import {
   Check,
   ChevronRight,
@@ -56,7 +61,13 @@ export type Item = { key: string; at?: string } & (
   | { kind: "error"; message: string }
 );
 
-export function buildItems(state: LiveSession): Item[] {
+const ACCOUNT_SWITCH_LINE = "account-switch-line";
+
+/** The timeline's short time, in the viewer's locale and time zone ("15:40"). */
+const hhmm = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+export function buildItems(state: LiveSession, formatTime: (iso: string) => string = hhmm): Item[] {
   const prompts = new Map(state.prompts.map((p) => [p.id, p]));
   const approvals = new Map(state.approvals.map((a) => [a.id, a]));
   const items: Item[] = [];
@@ -161,6 +172,17 @@ export function buildItems(state: LiveSession): Item[] {
         items.push({ kind: "system", key, at, text, testId: "runtime-update-line" });
         break;
       }
+      case "account.switched":
+        // 07.18 (D-08, PD-14): the API writes this event when a session moves to another pool account, so every viewer
+        // sees when and why, also after a reload. Labels only; plain text through React.
+        items.push({
+          kind: "system",
+          key,
+          at,
+          text: accountSwitchedSentence(e, formatTime),
+          testId: ACCOUNT_SWITCH_LINE,
+        });
+        break;
       default:
         break;
     }
@@ -256,6 +278,8 @@ export function EventStream({
   );
 }
 
+const isAccountSwitch = (i: Item) => i.kind === "system" && i.testId === ACCOUNT_SWITCH_LINE;
+
 /** A turn of ref-4: prompt bubble, then the work (collapsed once done), the final message and its footer. */
 function TurnBlock({
   turn,
@@ -267,9 +291,14 @@ function TurnBlock({
   changesCard: ReactNode;
 }) {
   const work = (
-    <TurnItems items={turn.items.filter((i) => i.kind !== "error")} session={session} running={!turn.done} />
+    <TurnItems
+      items={turn.items.filter((i) => i.kind !== "error" && !(turn.done && isAccountSwitch(i)))}
+      session={session}
+      running={!turn.done}
+    />
   );
-  const errors = turn.items.filter((i) => i.kind === "error");
+  // Errors, and once the turn is done its account switches (07.18), stay visible below the collapsed work.
+  const errors = turn.items.filter((i) => i.kind === "error" || (turn.done && isAccountSwitch(i)));
   return (
     <section
       className="grid grid-cols-[minmax(0,1fr)] gap-4"
@@ -364,9 +393,6 @@ function ToolGroup({
     </div>
   );
 }
-
-const hhmm = (iso: string) =>
-  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
 /** Copy + time under a turn's final message (ref-4). */
 function MessageFooter({ item }: { item: Extract<Item, { kind: "assistant" }> }) {
