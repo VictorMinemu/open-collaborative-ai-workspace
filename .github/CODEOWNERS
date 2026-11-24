@@ -172,6 +172,9 @@
 /apps/api/src/modules/agent-channel/task-wakes.ts           @VictorMinemu
 /apps/api/src/modules/agent-channel/task-routes.ts          @VictorMinemu
 /apps/api/src/modules/agent-channel/task-process-wakes.ts   @VictorMinemu
+# Phase 07.18 (ADR-0044): the subscription account pool: who may manage it, the sealed Claude setup-tokens and the
+# writes that change which account a session or a bot runs on.
+/apps/api/src/modules/account-pool/                         @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu
