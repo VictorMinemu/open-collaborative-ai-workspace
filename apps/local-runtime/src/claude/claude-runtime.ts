@@ -312,12 +312,15 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     if (this.catalogInFlight) return this.catalogInFlight;
     this.catalogInFlight = (async () => {
       const info = await this.detect();
-      if (!info.installed || !info.loggedIn) return null;
+      if (!info.installed) return null;
+      // 07.18-19 R1.8: a device without its own login describes what a live pool session's account offers.
+      const pool = info.loggedIn ? null : this.readyPoolAccount();
+      if (!info.loggedIn && !pool) return null;
       const cwd = this.opts.catalogCwd ?? ocwHome();
       await mkdir(cwd, { recursive: true });
       const value = await collectClaudeCatalog(this.queryFn, {
         claudePath: this.claudePath,
-        env: childEnv(process.env, this.opts.useApiKey ?? false),
+        ...this.credentialEnv(pool),
         cwd,
         runtimeVersion: info.version,
         permissionModes: [...this.capabilities.supportsPermissionModes],
@@ -337,14 +340,43 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   async generateTitle(req: TitleRequest): Promise<string> {
     const catalog = await this.collectCatalog();
     const row = catalog?.models.find((m) => m.id === req.model);
+    // 07.18-19 R1.8: a pool session's title runs on that session's own token, never the device owner's login.
+    const own = req.sessionId ? (this.sessions.get(req.sessionId)?.account ?? null) : null;
     return generateClaudeTitle(this.queryFn, {
       claudePath: this.claudePath,
-      env: childEnv(process.env, this.opts.useApiKey ?? false),
+      ...this.credentialEnv(own),
       prompt: req.prompt,
       model: req.model,
       resolvedModel: row?.resolvedModel ?? null,
       signal: req.signal,
     });
+  }
+
+  /** 07.18-19 R1.8: a pool token is in memory (a live session runs on one), so a signed-out device has a catalog. */
+  catalogReadyWithoutLogin(): boolean {
+    return this.readyPoolAccount() !== null;
+  }
+
+  /** The account of the most recently started live pool session, or null. Never copied, logged or kept elsewhere. */
+  private readyPoolAccount(): SessionAccount | null {
+    let found: SessionAccount | null = null;
+    for (const s of this.sessions.values()) if (s.account && !s.stopping) found = s.account;
+    return found;
+  }
+
+  /**
+   * The child env (and flag-settings env) of a side query (catalog, title): a pool account's exactly as its session's
+   * (`poolChildEnv` + `poolFlagEnv`), else the device's own login as before.
+   */
+  private credentialEnv(account: SessionAccount | null): {
+    env: Record<string, string | undefined>;
+    flagEnv?: Record<string, string>;
+  } {
+    if (!account) return { env: childEnv(process.env, this.opts.useApiKey ?? false) };
+    return {
+      env: poolChildEnv(childEnv(process.env, false), account.oauthToken),
+      flagEnv: poolFlagEnv(process.env),
+    };
   }
 
   hasSession(sessionId: string): boolean {

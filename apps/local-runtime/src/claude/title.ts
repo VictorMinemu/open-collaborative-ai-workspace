@@ -16,8 +16,10 @@ import { secretDenyRules } from "./tool-policy.js";
 export interface ClaudeTitleOptions {
   /** The CLI the sessions use (PATH `claude`); null = the SDK's bundled CLI. */
   claudePath: string | null;
-  /** `childEnv(...)`: API keys and OCW_* stripped. */
+  /** `childEnv(...)`: API keys and OCW_* stripped (a pool session's: `poolChildEnv`, with its token). */
   env: Record<string, string | undefined>;
+  /** 07.18-19 R1.8: the flag-settings env of a pool token (`poolFlagEnv`), when the title runs on one. */
+  flagEnv?: Record<string, string>;
   prompt: string;
   /** The catalog id (`haiku`). */
   model: string;
@@ -39,7 +41,10 @@ export function titleQueryOptions(o: ClaudeTitleOptions, cwd: string, abort: Abo
     canUseTool: async () => ({ behavior: "deny", message: "Session titles never use tools." }),
     settingSources: [],
     strictMcpConfig: true,
-    settings: { permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" } },
+    settings: {
+      permissions: { deny: secretDenyRules(), disableBypassPermissionsMode: "disable" },
+      ...(o.flagEnv ? { env: o.flagEnv } : {}),
+    },
     persistSession: false,
     maxTurns: 1,
     // The 2.1.289 title fixture shows Haiku thinking ~3.7k tokens (31 s) for a title, past the daemon's 20 s

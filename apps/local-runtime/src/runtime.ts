@@ -25,6 +25,11 @@ export interface TitleRequest {
   model: string;
   /** Fired by the daemon's own timeout; the adapter stops the call and releases its process. */
   signal: AbortSignal;
+  /**
+   * 07.18-19 R1.8: the session the title is for. An adapter runs a pool session's title on that session's own account
+   * (never the device owner's login); absent or unknown = the device's own login, as before.
+   */
+  sessionId?: string;
 }
 
 export interface RuntimeCapabilities {
@@ -136,6 +141,11 @@ export interface AgentRuntime {
    * no catalog (the web then shows no model choices, D-08).
    */
   catalog?(): Promise<RuntimeCatalog | null>;
+  /**
+   * 07.18-19 R1.8: whether `catalog()` can answer although the device's own login is signed out (a pool account is in
+   * the adapter's memory). Absent = only with the device's own login.
+   */
+  catalogReadyWithoutLogin?(): boolean;
   /**
    * Generate a short session title with a small model, isolated from every session (D-18). Returns the model's raw
    * text; the daemon normalizes, sanitizes and validates it (`runTitle`). Absent = no automatic titles.

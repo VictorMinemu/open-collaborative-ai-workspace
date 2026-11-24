@@ -1053,6 +1053,78 @@ describe("ClaudeCodeRuntime — catalog() (no turn, D-08 … D-11)", () => {
   });
 });
 
+// 07.18-19 R1.8: a device whose own Claude CLI is signed out still has a catalog and titles through a pool token.
+describe("ClaudeCodeRuntime — a device without its own Claude login (07.18-19 R1.8)", () => {
+  const signedOut = () =>
+    Promise.resolve({ id: "claude-code" as const, installed: true, version: "2.1.289", loggedIn: false });
+  const titleQuery = (queries: FakeQuery[]) => queries.find((q) => Array.isArray(q.params.options.tools));
+  const flagEnv = (q: FakeQuery | undefined) =>
+    (q?.params.options.settings as { env?: Record<string, string> } | undefined)?.env;
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("no pool session: no catalog and no query, as before", async () => {
+    const { runtime, queries } = setup({ detect: signedOut, prepare: prepareProbe });
+    expect(runtime.catalogReadyWithoutLogin()).toBe(false);
+    await expect(runtime.catalog()).resolves.toBeNull();
+    expect(queries).toHaveLength(0);
+  });
+
+  it("collects the catalog with a live pool session's token, stripped and pinned like that session", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    const { runtime, queries, start } = setup({ detect: signedOut, prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    expect(runtime.catalogReadyWithoutLogin()).toBe(true);
+    const catalog = await runtime.catalog();
+    expect(catalog?.models.length).toBeGreaterThan(0);
+    const probe = queries.at(-1);
+    expect(probe?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    expect(probe?.params.options.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(flagEnv(probe)).toMatchObject({
+      ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+      ANTHROPIC_API_KEY: "",
+    });
+    expect(probe?.prompts).toEqual([]);
+    await runtime.stop("s1");
+    expect(runtime.catalogReadyWithoutLogin()).toBe(false);
+  });
+
+  it("a signed-in device keeps its own login for the catalog, even with a pool session", async () => {
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    await runtime.catalog();
+    const probe = queries.at(-1);
+    expect(probe?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(flagEnv(probe)).toBeUndefined();
+  });
+
+  it("a pool session's title runs on that session's token, never the device's login", async () => {
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default", { account: tokenAccount("a", POOL_TOKEN_A) });
+    await runtime
+      .generateTitle({ sessionId: "s1", prompt: "fix the bug", model: "haiku", signal: signal() })
+      .catch(() => undefined);
+    const title = titleQuery(queries);
+    expect(title?.params.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(POOL_TOKEN_A);
+    expect(flagEnv(title)).toMatchObject({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
+    expect(JSON.stringify(title?.params.options.settings)).not.toContain(POOL_TOKEN_A);
+  });
+
+  it("a session on the device's own login keeps that login for its title", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-parent-one";
+    const { runtime, queries, start } = setup({ prepare: prepareProbe });
+    await start("default");
+    await runtime
+      .generateTitle({ sessionId: "s1", prompt: "fix the bug", model: "haiku", signal: signal() })
+      .catch(() => undefined);
+    const title = titleQuery(queries);
+    expect(title?.params.options.env).toEqual(childEnv(process.env, false));
+    expect(flagEnv(title)).toBeUndefined();
+  });
+});
+
 describe("ClaudeCodeRuntime — effort, fast mode, context window, modes (D-09 … D-12)", () => {
   it("effort and fast mode go through applyFlagSettings with only the changed scalar keys", async () => {
     const { start, runtime, events } = setup();
