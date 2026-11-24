@@ -206,7 +206,13 @@ describe("the code view (Task 3)", () => {
     const view = viewOfDeviceSignIn(signIn());
     if (!view) throw new Error("no view");
     const html = render(
-      <SignInCodeView view={view} where="device" now={NOW} onCancel={() => undefined} onRetry={() => undefined} />,
+      <SignInCodeView
+        view={view}
+        where="device"
+        now={NOW}
+        onCancel={() => undefined}
+        onRetry={() => undefined}
+      />,
     );
     const link = tagsOf(html, "chatgpt-verification-url")[0] ?? "";
     expect(link).toContain(`href="${URL}"`);
@@ -219,7 +225,9 @@ describe("the code view (Task 3)", () => {
   });
 
   it("shows Connected, and an error in plain words with Try again", () => {
-    const connected = viewOfDeviceSignIn(signIn({ state: "connected", userCode: null, verificationUrl: null }));
+    const connected = viewOfDeviceSignIn(
+      signIn({ state: "connected", userCode: null, verificationUrl: null }),
+    );
     if (!connected) throw new Error("no view");
     const ok = render(
       <SignInCodeView view={connected} where="device" onCancel={() => undefined} onRetry={() => undefined} />,
@@ -273,11 +281,15 @@ describe("the sign-in routes (Task 3)", () => {
     vi.mocked(api.post).mockResolvedValue(botStatus({ state: "starting", userCode: null }));
     const qc = new QueryClient();
     await new MutationObserver(qc, startBotPoolSignInMutation(qc)).mutate({ label: "bots@acme" });
-    await new MutationObserver(qc, startBotPoolSignInMutation(qc)).mutate({ label: "bots@acme", restart: true });
+    await new MutationObserver(qc, startBotPoolSignInMutation(qc)).mutate({
+      label: "bots@acme",
+      restart: true,
+    });
     const [path, opts] = vi.mocked(api.post).mock.calls[0] ?? [];
     expect(path).toBe("/api/v1/model-providers/openai-codex/auth");
     expect((opts as { body: unknown }).body).toEqual({ poolAccount: { label: "bots@acme" } });
-    expect((vi.mocked(api.post).mock.calls[1]?.[1] as { body: unknown }).body).toEqual({
+    const [, retry] = vi.mocked(api.post).mock.calls[1] ?? [];
+    expect((retry as { body: unknown }).body).toEqual({
       poolAccount: { label: "bots@acme" },
       restart: true,
     });
@@ -285,10 +297,15 @@ describe("the sign-in routes (Task 3)", () => {
   });
 
   it("on a device starts and cancels the device sign-in", async () => {
-    vi.mocked(api.post).mockResolvedValue(signIn({ state: "starting", userCode: null, verificationUrl: null }));
+    vi.mocked(api.post).mockResolvedValue(
+      signIn({ state: "starting", userCode: null, verificationUrl: null }),
+    );
     vi.mocked(api.del).mockResolvedValue(null);
     const qc = new QueryClient();
-    await new MutationObserver(qc, startDeviceSignInMutation(qc)).mutate({ deviceId: SERVER, label: "ops@acme" });
+    await new MutationObserver(qc, startDeviceSignInMutation(qc)).mutate({
+      deviceId: SERVER,
+      label: "ops@acme",
+    });
     const [path, opts] = vi.mocked(api.post).mock.calls[0] ?? [];
     expect(path).toBe("/api/v1/account-pool/chatgpt/device-sign-ins");
     expect((opts as { body: unknown }).body).toEqual({ deviceId: SERVER, label: "ops@acme" });
@@ -301,7 +318,9 @@ describe("the sign-in routes (Task 3)", () => {
   });
 
   it("for bots cancels through the Models sign-in route", async () => {
-    vi.mocked(api.del).mockResolvedValue(botStatus({ state: "error", error: { code: "cancelled", message: "" } }));
+    vi.mocked(api.del).mockResolvedValue(
+      botStatus({ state: "error", error: { code: "cancelled", message: "" } }),
+    );
     const qc = new QueryClient();
     await new MutationObserver(qc, cancelBotPoolSignInMutation(qc)).mutate();
     expect(vi.mocked(api.del).mock.calls[0]?.[0]).toBe("/api/v1/model-providers/openai-codex/auth");

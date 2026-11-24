@@ -118,11 +118,11 @@ export function AccountPoolRow({
       <div
         data-testid={`pool-account-${a.id}`}
         className={cn(
-          "flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:gap-4 sm:px-5",
+          "flex flex-wrap items-start gap-3 px-4 py-3.5 sm:flex-nowrap sm:items-center sm:gap-4 sm:px-5",
           !a.enabled && "bg-muted/30",
         )}
       >
-        <div className="grid min-w-0 flex-1 gap-1.5">
+        <div className="order-1 grid min-w-0 flex-1 basis-0 gap-1.5">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             {editing ? (
               <RenameField
@@ -160,7 +160,8 @@ export function AccountPoolRow({
           {bars.length > 0 ? <UsageBars bars={bars} /> : null}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1 sm:shrink-0 sm:flex-nowrap">
+        {/* On a phone the switch sits on the label's line and the actions take their own line below. */}
+        <div className="order-3 -ml-2.5 flex basis-full flex-wrap items-center gap-1 sm:order-2 sm:ml-0 sm:basis-auto sm:shrink-0 sm:flex-nowrap">
           {weighted ? <WeightField account={a} onSave={(weight) => save({ weight })} /> : null}
           <Button
             variant="ghost"
@@ -212,16 +213,16 @@ export function AccountPoolRow({
           >
             <Trash2 />
           </Button>
-          <span className="ml-auto flex items-center pl-2 max-md:min-h-11">
-            <Switch
-              checked={a.enabled}
-              aria-label={`Use ${a.label}`}
-              onCheckedChange={(enabled) =>
-                void save({ enabled }, enabled ? `${a.label} is on` : `${a.label} is off`)
-              }
-            />
-          </span>
         </div>
+        <span className="order-2 flex shrink-0 items-center max-md:-my-3 max-md:min-h-11 sm:order-3 sm:pl-1">
+          <Switch
+            checked={a.enabled}
+            aria-label={`Use ${a.label}`}
+            onCheckedChange={(enabled) =>
+              void save({ enabled }, enabled ? `${a.label} is on` : `${a.label} is off`)
+            }
+          />
+        </span>
       </div>
       <RemoveAccountDialog account={a} open={removing} onOpenChange={setRemoving} />
     </li>
@@ -324,7 +325,7 @@ function WeightField({
     if (weight !== a.weight && !(await onSave(weight))) setValue(String(a.weight));
   }
   return (
-    <span className="mr-1 flex items-center gap-1.5">
+    <span className="mr-1 flex items-center gap-1.5 max-sm:w-full max-sm:pb-1 max-sm:pl-2.5">
       <span aria-hidden className="text-muted-foreground text-xs">
         Weight
       </span>

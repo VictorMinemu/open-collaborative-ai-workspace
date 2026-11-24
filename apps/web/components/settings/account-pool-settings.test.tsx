@@ -305,8 +305,8 @@ describe("account rows (Task 2)", () => {
 
   it("stacks on a phone: no fixed widths that would scroll sideways", () => {
     const row = tagsOf(html, `pool-account-${ANA}`)[0] ?? "";
-    expect(row).toContain("flex-col");
-    expect(row).toContain("sm:flex-row");
+    expect(row).toContain("flex-wrap");
+    expect(row).toContain("sm:flex-nowrap");
   });
 });
 

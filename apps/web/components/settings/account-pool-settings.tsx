@@ -24,6 +24,7 @@ import { useAccountPool, useReorderPool, useUpdatePoolPolicy } from "@/lib/accou
 import { errorMessage } from "@/lib/api";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { AccountPoolRow } from "./account-pool-row";
+import { AddChatgptAccountDialog } from "./add-chatgpt-account-dialog";
 import { AddClaudeAccountDialog } from "./add-claude-account-dialog";
 
 /** Per provider: the section's title, what kind of subscription it holds, and its empty state. */
@@ -133,6 +134,12 @@ export function PoolSections({
       <AddClaudeAccountDialog
         open={adding?.provider === "claude"}
         replacing={adding?.provider === "claude" ? adding.replacing : null}
+        onOpenChange={(o) => {
+          if (!o) setAdding(null);
+        }}
+      />
+      <AddChatgptAccountDialog
+        open={adding?.provider === "chatgpt"}
         onOpenChange={(o) => {
           if (!o) setAdding(null);
         }}
