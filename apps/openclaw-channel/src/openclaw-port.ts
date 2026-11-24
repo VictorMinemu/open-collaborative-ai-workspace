@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import { type CellSnapshot, POOL_TOKEN_ENV_RE } from "./agent-channel-protocol.js";
+import { type CellSnapshot, POOL_TOKEN_ENV_PREFIX } from "./agent-channel-protocol.js";
 import { type OpenClawPort, TurnRanError, type TurnRun } from "./bridge.js";
 import {
   applyCellAccountPool,
@@ -204,7 +204,7 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
       for (const [name, value] of Object.entries(pool.env)) process.env[name] = value;
       let poolEnvChanged = referenced.some((name, i) => process.env[name] !== referencedBefore[i]);
       for (const name of Object.keys(process.env)) {
-        if (POOL_TOKEN_ENV_RE.test(name) && !(name in pool.env)) {
+        if (name.startsWith(POOL_TOKEN_ENV_PREFIX) && !(name in pool.env)) {
           delete process.env[name];
           poolEnvChanged = true;
         }

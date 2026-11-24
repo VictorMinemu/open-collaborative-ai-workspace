@@ -4876,6 +4876,7 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     poolProfileId: (id: string) => string;
     claudeTokenProfileId: (id: string) => string;
     POOL_TOKEN_ENV_RE: RegExp;
+    poolTokenEnvName: (id: string) => string;
   };
   const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
   // Token-shaped values are assembled at runtime so no credential-shaped literal sits whole in the repository.
@@ -4908,7 +4909,9 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
   const claudeToken = (n: number) => ({
     accountId: U(10 + n),
     profileId: `anthropic:pool-${U(10 + n)}`,
-    envName: `OCW_POOL_TOKEN_${n}`,
+    envName: `OCW_POOL_TOKEN_${U(10 + n)
+      .replaceAll("-", "")
+      .toUpperCase()}`,
     token: token(n),
   });
   const accountPool = {
@@ -4983,7 +4986,12 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
       if (a.success && b.success) expect(a.data).toEqual(b.data);
     }
     expect(m.POOL_TOKEN_ENV_RE.source).toBe(channel.POOL_TOKEN_ENV_RE.source);
-    expect(m.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(true);
+    // 07.18-19 R2.3: the name is the account id's hex digits (stable), never a list position.
+    expect(channel.poolTokenEnvName(U(11))).toBe(claudeToken(1).envName);
+    expect(m.POOL_TOKEN_ENV_RE.test(channel.poolTokenEnvName(U(11)))).toBe(true);
+    expect(m.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(false);
+    expect(channel.POOL_TOKEN_ENV_RE.test("OCW_POOL_TOKEN_1")).toBe(false);
+    expect(m.POOL_TOKEN_ENV_RE.test(`OCW_POOL_TOKEN_${"a".repeat(32)}`)).toBe(false);
     expect(m.POOL_TOKEN_ENV_RE.test("OCW_PROVIDER_KEY_X")).toBe(false);
   });
 

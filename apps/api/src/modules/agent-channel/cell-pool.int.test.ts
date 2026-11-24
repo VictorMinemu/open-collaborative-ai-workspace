@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { claudeTokenProfileId, poolProfileId } from "@ocw/contracts";
+import { claudeTokenProfileId, poolProfileId, poolTokenEnvName } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
@@ -116,7 +116,7 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
     expect((await configReads()).at(-1)).toMatchObject({ poolAccounts: [] });
   });
 
-  it("failover: two Claude tokens with OCW_POOL_TOKEN_<n> in priority order, the org key last; ids only in the audit", async () => {
+  it("failover: two Claude tokens with OCW_POOL_TOKEN_<account> in priority order, the org key last; ids only in the audit", async () => {
     await ok(
       admin.request("POST", "/api/v1/model-providers", {
         provider: "anthropic",
@@ -131,8 +131,8 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
       claude: {
         order: [claudeTokenProfileId(a), claudeTokenProfileId(b)],
         tokens: [
-          { accountId: a, profileId: claudeTokenProfileId(a), envName: "OCW_POOL_TOKEN_1", token: TA },
-          { accountId: b, profileId: claudeTokenProfileId(b), envName: "OCW_POOL_TOKEN_2", token: TB },
+          { accountId: a, profileId: claudeTokenProfileId(a), envName: poolTokenEnvName(a), token: TA },
+          { accountId: b, profileId: claudeTokenProfileId(b), envName: poolTokenEnvName(b), token: TB },
         ],
         apiKeyLast: true,
       },
@@ -146,6 +146,28 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
     for (const m of audits) for (const s of SECRETS) expect(m).not.toContain(s);
     // The org key leaves the pool's audit and stays the provider's (deleted for the next cases).
     await ok(admin.request("DELETE", "/api/v1/model-providers/anthropic"));
+  });
+
+  it("07.18-19 R2.3: a token's env name comes from its account id, unchanged by a reorder or another's removal", async () => {
+    const a = await addToken("ana@acme", TA);
+    const b = await addToken("bo@acme", TB);
+    const c = await addToken("cy@acme", TC);
+    const names = async () =>
+      Object.fromEntries(
+        ((await snapshot()).accountPool.claude.tokens as Json[]).map((t) => [t.accountId, t.envName]),
+      );
+    const first = await names();
+    expect(first).toEqual({ [a]: poolTokenEnvName(a), [b]: poolTokenEnvName(b), [c]: poolTokenEnvName(c) });
+    expect(poolTokenEnvName(a)).toBe(`OCW_POOL_TOKEN_${a.replaceAll("-", "").toUpperCase()}`);
+    expect(new Set(Object.values(first)).size).toBe(3);
+
+    await ok(admin.request("PUT", "/api/v1/account-pool/claude/order", { accountIds: [c, a, b] }));
+    expect((await snapshot()).accountPool.claude.tokens.map((t: Json) => t.accountId)).toEqual([c, a, b]);
+    expect(await names()).toEqual(first);
+
+    await ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${c}`));
+    await patchAccount(a, { enabled: false });
+    expect(await names()).toEqual({ [b]: first[b] });
   });
 
   it("round-robin: no order while every token is enabled; a disabled token leaves the tokens and the order", async () => {
@@ -176,8 +198,8 @@ describe("the cell receives the pool with its order (07.18-14 T1)", () => {
     ]);
     let pool = (await snapshot()).accountPool;
     expect(pool.claude.tokens.map((t: Json) => [t.accountId, t.envName])).toEqual([
-      [a, "OCW_POOL_TOKEN_1"],
-      [c, "OCW_POOL_TOKEN_2"],
+      [a, poolTokenEnvName(a)],
+      [c, poolTokenEnvName(c)],
     ]);
     expect(pool.claude.order).toEqual([claudeTokenProfileId(a), claudeTokenProfileId(c)]);
 

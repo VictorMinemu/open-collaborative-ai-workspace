@@ -1881,8 +1881,13 @@ export function claudeTokenProfileId(accountId: string): string {
   return `anthropic:pool-${accountId}`;
 }
 
-/** 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). */
-export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9]{1,2}$/;
+/**
+ * 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). 07.18-19
+ * R2.3: named after the account's stable id (its 32 hex digits, upper case), never its position in the list.
+ */
+export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9A-F]{32}$/;
+/** Every env var this plugin may have written for a pool token, older names included (cleared when no longer wanted). */
+export const POOL_TOKEN_ENV_PREFIX = "OCW_POOL_TOKEN_";
 
 /** Mirror of `ClaudeSetupToken` (packages/contracts account-pool.ts): a `claude setup-token`, never an API key. */
 const ClaudeSetupToken = z

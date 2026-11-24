@@ -788,8 +788,19 @@ export function claudeTokenProfileId(accountId: string): string {
   return `anthropic:pool-${accountId}`;
 }
 
-/** 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). */
-export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9]{1,2}$/;
+/**
+ * 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). 07.18-19
+ * R2.3: named after the account's stable id (`poolTokenEnvName`), never its position in the list.
+ */
+export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9A-F]{32}$/;
+
+/**
+ * 07.18-19 R2.3: the env var of a Claude pool account's token: its id's 32 hex digits, upper case. A reorder, or another
+ * account disabled or removed, never moves a token under a name another profile references.
+ */
+export function poolTokenEnvName(accountId: string): string {
+  return `OCW_POOL_TOKEN_${accountId.replaceAll("-", "").toUpperCase()}`;
+}
 
 /**
  * 07.18 (D-02, D-04, PD-13, PD-18): the organization's pool as the cell applies it. `order` null = no explicit order

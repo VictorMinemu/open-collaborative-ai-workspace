@@ -8,6 +8,7 @@ import {
   POOL_LIMITS,
   type PoolPolicy,
   type PoolProvider,
+  poolTokenEnvName,
   type SubscriptionProviderKind,
 } from "@ocw/contracts";
 import { accountPoolAccounts, type Tx } from "@ocw/db";
@@ -93,7 +94,7 @@ export async function cellAccountPool(
     tokens.push({
       accountId: row.id,
       profileId: claudeTokenProfileId(row.id),
-      envName: `OCW_POOL_TOKEN_${tokens.length + 1}`,
+      envName: poolTokenEnvName(row.id),
       token,
     });
   }

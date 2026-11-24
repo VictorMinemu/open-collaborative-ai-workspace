@@ -8,8 +8,8 @@ import type { PluginRuntimeLike } from "./openclaw-port.js";
  * store after each reconcile.
  *
  * - Claude setup-tokens become `anthropic` **token profiles** (`anthropic:pool-<accountId>`). A token lives only in the
- *   gateway env (`OCW_POOL_TOKEN_<n>`); the stored profile references it (`tokenRef`, an env SecretRef) and never holds
- *   the literal. The org's Anthropic API key, when the API puts it last (`apiKeyLast`), becomes one more `api_key`
+ *   gateway env (`OCW_POOL_TOKEN_<account id hex>`, named after the account, 07.18-19 R2.3); the stored profile
+ *   references it (`tokenRef`, an env SecretRef) and never holds the literal. The org's Anthropic API key, when the API puts it last (`apiKeyLast`), becomes one more `api_key`
  *   profile referencing the env var it already lives in, and the provider entry drops its `apiKey` (see reconciler).
  *   OpenClaw tries profiles before a provider entry's key (probe A-05), so the key is the last resort.
  * - The order the strategy sets is written per provider (`anthropic`, `openai`) as the store order, the one

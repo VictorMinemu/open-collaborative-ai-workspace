@@ -99,7 +99,7 @@ describe("planReconcile", () => {
           {
             accountId: "0199a000-0000-7000-8000-0000000000a1",
             profileId: "anthropic:pool-0199a000-0000-7000-8000-0000000000a1",
-            envName: "OCW_POOL_TOKEN_1",
+            envName: "OCW_POOL_TOKEN_0199A0000000700080000000000000A1",
             token,
           },
         ],
@@ -167,7 +167,7 @@ describe("planReconcile", () => {
           {
             accountId: "0199a000-0000-7000-8000-0000000000b1",
             profileId: "anthropic:pool-0199a000-0000-7000-8000-0000000000b1",
-            envName: "OCW_POOL_TOKEN_1",
+            envName: "OCW_POOL_TOKEN_0199A0000000700080000000000000B1",
             token,
           },
         ],
