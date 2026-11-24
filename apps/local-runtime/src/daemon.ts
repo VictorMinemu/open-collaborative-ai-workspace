@@ -187,6 +187,24 @@ interface FullAccessGate {
   source: FullAccessSource;
 }
 
+/** What the daemon hands the adapters it builds (and a test's runtime factory). */
+export interface RuntimeFactoryContext {
+  /**
+   * 07.18 (D-02): the `CODEX_HOME` of the first signed-in Codex account slot, or null. The Codex adapter asks only when
+   * the device's own Codex login is signed out, to collect its model catalog under that slot (no turn).
+   */
+  codexCatalogHome: () => Promise<string | null>;
+}
+
+/**
+ * 07.18 (D-02): the first slot (creation order) whose `auth.json` exists. The file is only tested for existence, never
+ * read; the home stays on the device.
+ */
+async function firstSignedInSlotHome(slots: CodexSlotStore): Promise<string | null> {
+  const first = (await slots.report().catch(() => [])).find((s) => s.signedIn);
+  return first ? slots.homeOf(first.slotId) : null;
+}
+
 export interface DaemonOptions {
   /** Defaults to OCW_HOME or ~/.ocw */
   home?: string;
@@ -194,8 +212,10 @@ export interface DaemonOptions {
   config?: Partial<RuntimeConfig>;
   /** Override the token (tests); otherwise OCW_DEVICE_TOKEN or the token file. */
   token?: string | null;
-  /** Adapters to drive (tests), or a factory that receives the daemon's Full access gate. */
-  runtimes?: AgentRuntime[] | ((allowFullAccess: () => boolean) => AgentRuntime[]);
+  /** Adapters to drive (tests), or a factory that receives the daemon's Full access gate and the runtime context. */
+  runtimes?:
+    | AgentRuntime[]
+    | ((allowFullAccess: () => boolean, ctx: RuntimeFactoryContext) => AgentRuntime[]);
   logger?: Logger;
   link?: Partial<
     Pick<DeviceLinkOptions, "heartbeatMs" | "backoffMinMs" | "backoffMaxMs" | "maxOfflineFrames">
@@ -433,9 +453,10 @@ export class Daemon {
     private readonly opts: DaemonOptions,
     private readonly env: NodeJS.ProcessEnv,
     private readonly gate: FullAccessGate,
+    codexSlots: CodexSlotStore,
   ) {
     this.registry = new ProjectRegistry(home);
-    this.codexSlots = new CodexSlotStore(home, env);
+    this.codexSlots = codexSlots;
     for (const r of runtimes) {
       this.runtimes.set(r.id, r);
       this.gates.set(r.id, new RuntimeGate());
@@ -456,7 +477,11 @@ export class Daemon {
     const fake = env.OCW_RUNTIME_FAKE === "1";
     if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
     const delay = env.OCW_RUNTIME_FAKE_DELAY_MS ? Number(env.OCW_RUNTIME_FAKE_DELAY_MS) : undefined;
-    const runtimes = (typeof opts.runtimes === "function" ? opts.runtimes(allowFullAccess) : opts.runtimes) ??
+    const codexSlots = new CodexSlotStore(home, env);
+    const ctx: RuntimeFactoryContext = { codexCatalogHome: () => firstSignedInSlotHome(codexSlots) };
+    const runtimes = (typeof opts.runtimes === "function"
+      ? opts.runtimes(allowFullAccess, ctx)
+      : opts.runtimes) ??
       (fake
         ? [
             new FakeRuntime("claude-code", delay, { allowFullAccess }),
@@ -473,10 +498,11 @@ export class Daemon {
           logger: log,
           useApiKey: config.codex.useApiKey,
           allowFullAccess,
+          catalogHome: ctx.codexCatalogHome,
           ...(config.codex.path ? { codexPath: config.codex.path } : {}),
         }),
       ];
-    const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
+    const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate, codexSlots);
     // 07.16 (PD-18): the entry is the running script; it is compared with the installed bundle here only.
     daemon.hostKind = await resolveHostKind({ env, home, entry: process.argv[1] });
     daemon.isolated = resolveIsolatedServer(config, env);
@@ -826,7 +852,9 @@ export class Daemon {
     const out: RuntimeCatalog[] = [];
     for (const r of this.runtimes.values()) {
       const info = infos.find((i) => i.id === r.id);
-      if (!info?.installed || !info.loggedIn || !r.catalog) continue;
+      if (!info?.installed || !r.catalog) continue;
+      // 07.18 (D-02): a signed-out Codex still has a catalog when one of its account slots is signed in.
+      if (!info.loggedIn && !(r.id === "codex" && (await firstSignedInSlotHome(this.codexSlots)))) continue;
       // 07.11 (PD-07): never while this runtime's CLI updates; the capabilities sent after the run cover it.
       const gate = this.gates.get(r.id);
       if (gate && !gate.isOpen) continue;

@@ -57,6 +57,13 @@ export type RuntimeAccount = { ref: string; label: string } & (
 );
 
 /**
+ * 07.18 (A-01, A-02 fallback): the session could not resume its conversation under the next account. The turn fails
+ * with this message; an adapter never starts a fresh conversation silently instead.
+ */
+export const ACCOUNT_SWITCH_FAILED_MESSAGE =
+  "This conversation could not continue on the next account. Start a new session.";
+
+/**
  * 07.18 (D-07, D-09, PD-05, PD-09): what an adapter reports about the account of a session. `limited` is sent before
  * the turn's `prompt.completed`, at most once per turn; `usage` whenever the runtime reports usage. Signals carry no
  * credential and no account e-mail; the daemon adds the account ref it stored.

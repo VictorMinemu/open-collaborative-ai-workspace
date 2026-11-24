@@ -43,6 +43,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
+import { CodexRuntime } from "./codex/codex-runtime.js";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { type ControlRequest, controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
@@ -3856,5 +3857,112 @@ describe("07.18-08 reloadAccounts (PD-11): a slot the CLI added reaches the serv
       slotId: slot.slotId,
     } as unknown as ControlRequest);
     expect(forged).toMatchObject({ ok: false, error: "invalid request" });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.18-11 (D-02): a device whose own Codex login is signed out still reports a Codex catalog, collected under its
+// first signed-in slot. A scripted in-memory app-server answers `model/list` only; no real Codex, no turn.
+
+const CODEX_MODEL_LIST = JSON.parse(
+  readFileSync(
+    join(
+      fileURLToPath(new URL(".", import.meta.url)),
+      "codex",
+      "__fixtures__",
+      "codex-0.160.0.model-list.json",
+    ),
+    "utf8",
+  ),
+) as { data: unknown[] };
+
+function modelListAppServer(spawned: Array<{ env: Record<string, string | undefined>; methods: string[] }>) {
+  return ({ env }: { cwd: string; env: Record<string, string | undefined> }) => {
+    const record = { env, methods: [] as string[] };
+    spawned.push(record);
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      kill: () => {
+        if (!stdout.writableEnded) stdout.end();
+        setImmediate(() => proc.emit("exit", 0));
+      },
+    });
+    let buf = "";
+    stdin.setEncoding("utf8");
+    stdin.on("data", (c: string) => {
+      buf += c;
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        const m = JSON.parse(line) as { id?: number; method?: string };
+        if (m.method) record.methods.push(m.method);
+        if (m.id === undefined || stdout.writableEnded) continue;
+        const result =
+          m.method === "model/list"
+            ? { data: CODEX_MODEL_LIST.data, nextCursor: null }
+            : m.method === "initialize"
+              ? {}
+              : null;
+        stdout.write(
+          `${JSON.stringify(result ? { id: m.id, result } : { id: m.id, error: { code: -32601, message: "no" } })}\n`,
+        );
+      }
+    });
+    return proc;
+  };
+}
+
+describe("07.18-11 the Codex catalog under a slot when the device's own login is signed out (D-02)", () => {
+  const spawned: Array<{ env: Record<string, string | undefined>; methods: string[] }> = [];
+
+  beforeEach(async () => {
+    await daemon.stop();
+    spawned.length = 0;
+    daemon = await Daemon.create({
+      home,
+      env: { CODEX_HOME: join(home, "codex-default") },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: (allowFullAccess, ctx) => [
+        new CodexRuntime({
+          allowFullAccess,
+          detect: async () => ({ id: "codex", installed: true, version: "0.172.0", loggedIn: false }),
+          catalogHome: ctx.codexCatalogHome,
+          spawnAppServer: modelListAppServer(spawned),
+        }),
+      ],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+  });
+
+  it("collects it with CODEX_HOME = the first signed-in slot, and sends no turn", async () => {
+    await daemon.codexSlots.create({ label: "Signed out", origin: "server" });
+    const b = await daemon.codexSlots.create({ label: "Signed in", origin: "server" });
+    const c = await daemon.codexSlots.create({ label: "Also signed in", origin: "server" });
+    for (const slot of [b, c]) writeFileSync(join(daemon.codexSlots.homeOf(slot.slotId), "auth.json"), "{}");
+    await daemon.start();
+    const caps = await server.frame("capabilities");
+    expect(caps.catalogs.map((x) => x.runtime)).toEqual(["codex"]);
+    expect(caps.catalogs[0]?.models.length).toBeGreaterThan(0);
+    expect(spawned.map((x) => x.env.CODEX_HOME)).toEqual([daemon.codexSlots.homeOf(b.slotId)]);
+    const methods = spawned.flatMap((x) => x.methods);
+    expect(methods).toContain("model/list");
+    expect(methods.filter((m) => m.startsWith("thread/") || m.startsWith("turn/"))).toEqual([]);
+    // The slot's directory stays on the device.
+    expect(JSON.stringify(server.allFrames)).not.toContain(home);
+  });
+
+  it("with no signed-in slot there is no Codex catalog and nothing is spawned", async () => {
+    await daemon.codexSlots.create({ label: "Signed out", origin: "server" });
+    await daemon.start();
+    const caps = await server.frame("capabilities");
+    expect(caps.catalogs).toEqual([]);
+    expect(spawned).toEqual([]);
   });
 });
