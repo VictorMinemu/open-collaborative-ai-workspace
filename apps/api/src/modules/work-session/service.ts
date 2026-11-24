@@ -10,9 +10,11 @@ import {
   isFullAccessReport,
   NO_GIT_WORKTREE_MESSAGE,
   onlyRelativePaths,
+  POOL_LIMITS,
   POOL_PROVIDER_OF_RUNTIME,
   RuntimeInfo,
   type SessionAccount,
+  type SessionAccountLimitedFrame,
   type SessionEvent,
   SessionTitle,
   type SessionVisibilityKind,
@@ -52,6 +54,11 @@ import { z } from "zod";
 import type { Jobs } from "../../lib/jobs";
 import {
   type AccountPoolPort,
+  cooldownUntil,
+  earliestPoolReset,
+  everyAccountLimitedSentence,
+  markLimited,
+  markNeedsSignIn,
   noAccountSentence,
   type PoolAccountRow,
   type StoredSessionAccount,
@@ -949,11 +956,8 @@ export class WorkSessionService implements DeviceSessionHandler {
   private async ensureAccount(tx: Tx, s: SessionRow): Promise<AccountCheck> {
     const pool = this.deps.pool;
     if (!pool) return { ok: true, account: undefined };
-    const [d] = await tx
-      .select({ version: devices.accountPoolVersion, runtimeInfo: devices.runtimeInfo })
-      .from(devices)
-      .where(eq(devices.id, s.deviceId));
-    if (!d || d.version === null) return { ok: true, account: undefined };
+    const device = await this.deviceAccountState(tx, s);
+    if (!device.pool) return { ok: true, account: undefined };
     if (s.poolAccountId === null) return { ok: true, account: null };
     const provider = POOL_PROVIDER_OF_RUNTIME[s.runtime];
     const now = new Date();
@@ -990,16 +994,32 @@ export class WorkSessionService implements DeviceSessionHandler {
         return { ok: true, account: next };
       }
     }
+    if (picked.policy.fallbackToDeviceLogin && device.loggedIn) {
+      await this.switchAccount(tx, s, { ...change, to: null, until: limited ? until : null });
+      return { ok: true, account: null };
+    }
+    return { ok: false, message: noAccountSentence("none" in picked ? picked.earliestReset : null) };
+  }
+
+  /**
+   * 07.18 (PD-04, PD-16): whether the session's device runs sessions on pool accounts (`hello.accountPool`), and whether
+   * the session's runtime reports a login of its own there (the fallback).
+   */
+  private async deviceAccountState(
+    tx: Tx,
+    s: Pick<SessionRow, "deviceId" | "runtime">,
+  ): Promise<{ pool: boolean; loggedIn: boolean }> {
+    const [d] = await tx
+      .select({ version: devices.accountPoolVersion, runtimeInfo: devices.runtimeInfo })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId));
+    if (!d || d.version === null) return { pool: false, loggedIn: false };
     const runtime = z
       .array(RuntimeInfo)
       .catch([])
       .parse(d.runtimeInfo)
       .find((r) => r.id === s.runtime);
-    if (picked.policy.fallbackToDeviceLogin && runtime?.loggedIn === true) {
-      await this.switchAccount(tx, s, { ...change, to: null, until: limited ? until : null });
-      return { ok: true, account: null };
-    }
-    return { ok: false, message: noAccountSentence("none" in picked ? picked.earliestReset : null) };
+    return { pool: true, loggedIn: runtime?.loggedIn === true };
   }
 
   /**
@@ -1928,6 +1948,103 @@ export class WorkSessionService implements DeviceSessionHandler {
         ...(frame.git === false ? { git: false } : {}),
       };
       await this.deps.realtime.appendEvent(tx, wsTopic(s.id), EventTypes.workSessionChanges, changes);
+    });
+  }
+
+  /**
+   * 07.18 (D-06, D-07, D-08, PD-05, PD-08, PD-15, PD-16; E4, E11, E17): the device says the account of one of its
+   * sessions reached its limit, before the turn's `prompt.completed`. The frame acts only when the session is this
+   * device's, active, and uses exactly that account (null = the device's own login); anything else changes nothing.
+   * The account cools until its reset (`auth_failed`: needs a new sign-in instead). When the frame names the turn still
+   * in flight and it has switched fewer than `POOL_LIMITS.switchesPerTurn` times, the turn goes back to its place in the
+   * queue (`account_switches + 1`) and the session moves to the strategy's next usable account (or, under fallback, to
+   * the device's own signed-in login): the device's following `prompt.completed` finds nothing in flight and the arbiter
+   * dispatches the same prompt again with the new account. Otherwise the turn fails as the device reports it and
+   * `lastError` says why, with the earliest reset. A replayed frame changes nothing more: the session no longer uses
+   * the account it names, or the account already cools until that reset.
+   */
+  async onAccountLimited(device: DeviceRef, frame: SessionAccountLimitedFrame): Promise<void> {
+    const pool = this.deps.pool;
+    if (!pool || !UUID_RE.test(frame.sessionId)) return;
+    await this.deps.db.withTenant(this.sys(device), async (tx) => {
+      const s = await this.lock(tx, frame.sessionId);
+      if (!s || s.deviceId !== device.deviceId || !ACTIVE_STATES.includes(s.status)) return;
+      // E11 (T-07.18-10-01): only the account this very session uses; another account, slot or organization is inert.
+      if (frame.accountId !== s.poolAccountId) return;
+      const state = await this.deviceAccountState(tx, s);
+      if (!state.pool) return;
+      const provider = POOL_PROVIDER_OF_RUNTIME[s.runtime];
+      const now = new Date();
+      const resetsAt = frame.resetsAt ? new Date(frame.resetsAt) : null;
+      const authFailed = frame.reason === "auth_failed";
+      let from: PoolAccountRow | null = null;
+      let until: Date | null = null;
+      if (s.poolAccountId !== null) {
+        from = await pool.get(tx, s.poolAccountId);
+        if (!from || from.provider !== provider) return;
+        const report = { account: from, now, deviceId: device.deviceId, sessionId: s.id };
+        until = authFailed
+          ? (await markNeedsSignIn(tx, this.deps.audit, report)).until
+          : (await markLimited(tx, this.deps.audit, { ...report, reason: frame.reason, resetsAt })).until;
+      } else if (!authFailed && resetsAt) {
+        // The device's own login has no row to cool; the switch line still says until when it is limited.
+        until = cooldownUntil(resetsAt, now);
+      }
+      // Only the turn still in flight is re-run; a frame for a finished or unknown prompt only cools the account.
+      if (frame.promptId === null || !UUID_RE.test(frame.promptId)) return;
+      const [p] = await tx
+        .select()
+        .from(workPrompts)
+        .where(
+          and(
+            eq(workPrompts.id, frame.promptId),
+            eq(workPrompts.workSessionId, s.id),
+            inArray(workPrompts.status, IN_FLIGHT),
+          ),
+        );
+      if (!p) return;
+      if (p.accountSwitches >= POOL_LIMITS.switchesPerTurn) {
+        // PD-15, E4: the turn already moved three times; it fails as the device reports it.
+        const earliest = await earliestPoolReset(tx, {
+          provider,
+          deviceId: s.deviceId,
+          consumer: "work_zone",
+          now,
+        });
+        await this.setStatus(tx, s, s.status, { lastError: everyAccountLimitedSentence(earliest) });
+        return;
+      }
+      const picked = await pool.select(tx, {
+        provider,
+        deviceId: s.deviceId,
+        consumer: "work_zone",
+        now,
+        exclude: from ? [from.id] : [],
+      });
+      // undefined = nowhere to go; null = the device's own login (PD-16), never when that login is what was limited.
+      let to: PoolAccountRow | null | undefined;
+      if ("row" in picked && storedSessionAccount(picked.row)) to = picked.row;
+      else if (from !== null && picked.policy.fallbackToDeviceLogin && state.loggedIn) to = null;
+      if (to === undefined) {
+        // PD-16: no account for this turn; it fails as the device reports it. A session on the device's own login in an
+        // organization without a pool keeps the runtime's own error.
+        if ("none" in picked && (from !== null || !picked.poolEmpty)) {
+          await this.setStatus(tx, s, s.status, { lastError: noAccountSentence(picked.earliestReset) });
+        }
+        return;
+      }
+      const [requeued] = await tx
+        .update(workPrompts)
+        .set({ status: "queued", dispatchedAt: null, accountSwitches: p.accountSwitches + 1 })
+        .where(and(eq(workPrompts.id, p.id), inArray(workPrompts.status, IN_FLIGHT)))
+        .returning();
+      if (requeued) await this.emitPrompt(tx, requeued);
+      await this.switchAccount(tx, s, {
+        from,
+        to,
+        reason: authFailed ? "unavailable" : "limit",
+        until: authFailed ? null : until,
+      });
     });
   }
 

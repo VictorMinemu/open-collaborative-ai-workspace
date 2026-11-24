@@ -95,7 +95,8 @@ const accountRow = async (id: string) =>
   (await su.query("select * from app.account_pool_accounts where id = $1", [id])).rows[0] as Json;
 
 const promptRow = async (id: string) =>
-  (await su.query("select status, account_switches from app.work_prompts where id = $1", [id])).rows[0] as Json;
+  (await su.query("select status, account_switches from app.work_prompts where id = $1", [id]))
+    .rows[0] as Json;
 
 const auditOf = async (action: string, sessionId: string) =>
   (
@@ -223,7 +224,13 @@ describe("a limit mid-turn cools the account and the same turn re-runs on the ne
     expect(await promptRow(p)).toMatchObject({ account_switches: 1 });
     expect((await sessionRow(id)).pool_account_id).toBe(b);
     expect(await switchedEvents(id)).toEqual([
-      { type: "account.switched", fromLabel: "A", toLabel: "B", reason: "limit", until: resetsAt.toISOString() },
+      {
+        type: "account.switched",
+        fromLabel: "A",
+        toLabel: "B",
+        reason: "limit",
+        until: resetsAt.toISOString(),
+      },
     ]);
     const s = await sessionOf(id);
     expect(s.poolAccount).toEqual({ id: b, label: "B", provider: "claude" });

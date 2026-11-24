@@ -14,6 +14,7 @@ import {
   type RuntimeUpdateRunFrame,
   type RuntimeUpdatesLevel,
   type ServerToDeviceFrame,
+  type SessionAccountLimitedFrame,
   stripImageData,
   type TitleResultFrame,
 } from "@ocw/contracts";
@@ -50,6 +51,12 @@ export interface DeviceSessionHandler {
   /** The device stayed disconnected past the grace period. */
   onOffline(device: DeviceRef): Promise<void>;
   onEvent(device: DeviceRef, frame: EventFrame): Promise<void>;
+  /**
+   * 07.18 (D-07, D-08, PD-05): the device's runtime says a session's account reached its limit (or its sign-in failed),
+   * before the turn's `prompt.completed`. The handler decides whether the frame may act at all (the session is this
+   * device's and uses that account) and re-runs the turn on the next account.
+   */
+  onAccountLimited?(device: DeviceRef, frame: SessionAccountLimitedFrame): Promise<void>;
   /**
    * A command's outcome: the device's ack (`origin: "device"`), or the hub failing it before it was sent
    * (`origin: "hub"`, 06.1: `error` is then the reason, e.g. `image_unavailable`; never device-supplied text).

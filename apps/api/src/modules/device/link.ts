@@ -190,6 +190,9 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
             return hub.onRuntimeMaintenance(device, frame);
           case "runtime.update.run":
             return hub.onRuntimeUpdateRun(device, frame);
+          // 07.18 (D-07, PD-05): the work-session module decides whether the frame may act (its own session's account).
+          case "session.account_limited":
+            return hub.sessionHandler?.onAccountLimited?.(device, frame);
         }
       };
 

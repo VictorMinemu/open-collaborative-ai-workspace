@@ -1,8 +1,17 @@
 import type { ApiModule, Core } from "../../core";
 import { type AccountPoolDeps, registerAccountPoolRoutes } from "./routes";
 
+export {
+  earliestPoolReset,
+  everyAccountLimitedSentence,
+  type LimitInput,
+  type LimitResult,
+  markLimited,
+  markNeedsSignIn,
+} from "./limits";
 export { previewAccountSources } from "./preview";
 export type { AccountPoolDeps } from "./routes";
+export { cooldownUntil } from "./select";
 export {
   type AccountPoolPort,
   createAccountPoolPort,
