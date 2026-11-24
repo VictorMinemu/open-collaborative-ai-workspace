@@ -1,6 +1,6 @@
 // Codex's own ChatGPT sign-in for one account slot (07.18, D-02, D-10, PD-10, A-08).
 //
-// Each call spawns one `codex app-server` (the daemon's usual arguments, `CODEX_APP_SERVER_ARGS`) with the filtered
+// Each call spawns one `codex app-server` (the slot arguments, `CODEX_SLOT_APP_SERVER_ARGS`: 07.18-19 R1.7) with the filtered
 // child environment (`codexChildEnv`, API keys stripped) plus `CODEX_HOME` = the slot directory, and cwd = the slot. Codex
 // itself runs the device-code flow and writes the slot's `auth.json`; this module never reads, copies or logs it.
 //
@@ -15,6 +15,7 @@ import { POOL_LIMITS, type PoolSignInErrorCode } from "@ocw/contracts";
 import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
+  CODEX_SLOT_APP_SERVER_ARGS,
   codexChildEnv,
   type SpawnAppServer,
 } from "../codex/codex-runtime.js";
@@ -84,11 +85,11 @@ export interface CodexDeviceLoginOptions extends AppServerCall {
  * arguments. No CLI → `unsupported`. A spawn that fails later (EACCES) ends the output, so the call fails as `failed`.
  */
 export function codexAccountSpawner(codexPath: string | null, log: Logger = silentLogger): SpawnAppServer {
-  return ({ cwd, env }) => {
+  return ({ cwd, env, args = CODEX_APP_SERVER_ARGS }) => {
     if (!codexPath || !existsSync(codexPath)) {
       throw new CodexLoginError("unsupported", CODEX_NOT_AVAILABLE_MESSAGE);
     }
-    const child = spawn(codexPath, [...CODEX_APP_SERVER_ARGS], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(codexPath, [...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     child.on("error", (err) => {
       // The code only: the error text names the binary's absolute path.
       log.warn("codex app-server for an account slot could not be started", {
@@ -115,7 +116,7 @@ async function withAppServer<T>(call: AppServerCall, fn: (c: Connection) => Prom
   const env = { ...codexChildEnv(call.env ?? process.env, false), CODEX_HOME: call.home };
   let proc: AppServerProcess;
   try {
-    proc = call.spawn({ cwd: call.home, env });
+    proc = call.spawn({ cwd: call.home, env, args: CODEX_SLOT_APP_SERVER_ARGS });
   } catch (err) {
     if (err instanceof CodexLoginError) throw err;
     throw new CodexLoginError("unsupported", CODEX_NOT_AVAILABLE_MESSAGE);

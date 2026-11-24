@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppServerProcess } from "../codex/codex-runtime.js";
+import { type AppServerProcess, CODEX_SLOT_APP_SERVER_ARGS } from "../codex/codex-runtime.js";
 import {
   CODEX_LOGIN_TIMEOUT_MS,
   CodexLoginError,
@@ -117,12 +117,14 @@ const HOME = "/scratch/ocw/accounts/codex/11111111-2222-4333-8444-555555555555";
 
 function fakeSpawn(configure: (s: FakeAccountServer) => void = () => undefined) {
   const servers: FakeAccountServer[] = [];
-  const spawn = vi.fn((opts: { cwd: string; env: Record<string, string | undefined> }) => {
-    const s = new FakeAccountServer(opts.cwd, opts.env);
-    configure(s);
-    servers.push(s);
-    return s;
-  });
+  const spawn = vi.fn(
+    (opts: { cwd: string; env: Record<string, string | undefined>; args?: readonly string[] }) => {
+      const s = new FakeAccountServer(opts.cwd, opts.env);
+      configure(s);
+      servers.push(s);
+      return s;
+    },
+  );
   return { spawn, servers };
 }
 
@@ -270,6 +272,21 @@ describe("readCodexAccount / logoutCodex", () => {
       s.account = { account: null, userId: null, requiresOpenaiAuth: true };
     });
     expect(await readCodexAccount({ spawn, home: HOME })).toEqual({ signedIn: false, planType: null });
+  });
+
+  // 07.18-19 R1.7: a linked config.toml could choose the keyring; a slot always keeps its own auth.json.
+  it("every account app-server runs with the file credential store", async () => {
+    const { spawn } = fakeSpawn((s) => {
+      s.autoComplete = { success: true, error: null };
+    });
+    await runCodexDeviceLogin({ spawn, home: HOME, onCode: () => undefined });
+    await readCodexAccount({ spawn, home: HOME });
+    await logoutCodex({ spawn, home: HOME });
+    expect(spawn.mock.calls.map(([o]) => o.args)).toEqual([
+      CODEX_SLOT_APP_SERVER_ARGS,
+      CODEX_SLOT_APP_SERVER_ARGS,
+      CODEX_SLOT_APP_SERVER_ARGS,
+    ]);
   });
 
   it("logoutCodex calls account/logout under the slot", async () => {

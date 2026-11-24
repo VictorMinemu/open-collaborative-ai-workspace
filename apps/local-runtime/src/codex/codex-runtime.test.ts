@@ -14,6 +14,7 @@ import {
 import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
+  CODEX_SLOT_APP_SERVER_ARGS,
   CodexRuntime,
   codexChildEnv,
 } from "./codex-runtime.js";
@@ -48,6 +49,8 @@ class FakeAppServer extends EventEmitter implements AppServerProcess {
   private readonly waiters = new Map<number, (m: Msg) => void>();
   onTurnStart: (params: Record<string, unknown>) => void = () => undefined;
 
+  /** The arguments the runtime spawned it with (07.18-19 R1.7). */
+  args: readonly string[] = [];
   constructor(readonly env: Record<string, string | undefined>) {
     super();
     let buf = "";
@@ -1590,8 +1593,9 @@ function poolSetup(opts: { useApiKey?: boolean } = {}) {
   const runtime = new CodexRuntime({
     codexPath: "/usr/local/bin/codex",
     ...(opts.useApiKey ? { useApiKey: true } : {}),
-    spawnAppServer: ({ env }) => {
+    spawnAppServer: ({ env, args }) => {
       const s = (next.shift() ?? ((e) => new FakeAppServer(e)))(env);
+      s.args = args ?? [];
       servers.push(s);
       return s;
     },
@@ -1668,6 +1672,26 @@ describe("CodexRuntime — a session on a ChatGPT account slot (07.18 D-02, PD-0
     await runtime.stopAll();
   });
 
+  // 07.18-19 R1.7: a slot's credentials always live in its own auth.json (a linked config.toml could pick the keyring).
+  it("runs a slot app-server with the file credential store; the device's own login keeps today's arguments", async () => {
+    expect(CODEX_SLOT_APP_SERVER_ARGS).toEqual([
+      ...CODEX_APP_SERVER_ARGS,
+      "-c",
+      'cli_auth_credentials_store="file"',
+    ]);
+    const { start, runtime, servers } = poolSetup();
+    await start(slotAccount(SLOT_A));
+    expect(servers[0]?.args).toEqual(CODEX_SLOT_APP_SERVER_ARGS);
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    await runtime.prompt("s1", { promptId: "p1", text: "again" });
+    await wait();
+    expect(servers[1]?.args).toEqual(CODEX_SLOT_APP_SERVER_ARGS);
+    await runtime.stopAll();
+    const own = poolSetup();
+    await own.start(null);
+    expect(own.servers[0]?.args).toEqual([]);
+  });
+
   it("refuses a token account before spawning anything", async () => {
     const { runtime, cwd, servers } = poolSetup();
     await expect(
@@ -1682,6 +1706,98 @@ describe("CodexRuntime — a session on a ChatGPT account slot (07.18 D-02, PD-0
       ),
     ).rejects.toBeInstanceOf(RuntimeError);
     expect(servers).toHaveLength(0);
+  });
+});
+
+// 07.18-19 R1.7: Codex 0.172 serialises a refresh only inside one process (`refresh_lock`) and holds the cross-process
+// `auth.json.lock` only for the commit ("network requests never hold it"). App-servers of one slot that start together
+// would each see the same expiring token and exchange the same single-use refresh token; so they start one at a time,
+// each holding the slot until its first authenticated read (`account/rateLimits/read`) has settled.
+describe("CodexRuntime — app-servers of one slot start one at a time (07.18-19 R1.7)", () => {
+  /** Holds its `account/rateLimits/read` answer until the test releases it. */
+  class HeldReadServer extends FakeAppServer {
+    release: () => void = () => undefined;
+    fail = false;
+    protected override handleExtra(m: Msg): boolean {
+      if (m.method !== "account/rateLimits/read") return false;
+      this.release = () =>
+        this.fail
+          ? this.send({ id: m.id, error: { code: -32000, message: "refresh failed" } })
+          : this.send({ id: m.id, result: { rateLimits: { primary: null, secondary: null } } });
+      return true;
+    }
+  }
+  const startAs = (runtime: CodexRuntime, cwd: string, sessionId: string, account: RuntimeAccount) =>
+    runtime.start({ sessionId, cwd, permissionMode: "default", account }, () => undefined);
+
+  it("a second app-server of the same slot waits until the first one's read settled", async () => {
+    const { runtime, cwd, servers, next } = poolSetup();
+    next.push(
+      (e) => new HeldReadServer(e),
+      (e) => new HeldReadServer(e),
+    );
+    const first = startAs(runtime, cwd, "s1", slotAccount(SLOT_A, "acct-a1"));
+    const second = startAs(runtime, cwd, "s2", slotAccount(SLOT_A, "acct-a2"));
+    await first; // start() itself does not wait for the read
+    await wait(20);
+    expect(servers).toHaveLength(1);
+    (servers[0] as HeldReadServer).release();
+    await second;
+    expect(servers).toHaveLength(2);
+    expect(servers[1]?.env.CODEX_HOME).toBe(slotAccount(SLOT_A).codexHome);
+    (servers[1] as HeldReadServer).release();
+    await runtime.stopAll();
+  });
+
+  it("other slots and the device's own login do not wait", async () => {
+    const { runtime, cwd, servers, next } = poolSetup();
+    next.push((e) => new HeldReadServer(e));
+    await startAs(runtime, cwd, "s1", slotAccount(SLOT_A));
+    await startAs(runtime, cwd, "s2", slotAccount(SLOT_B));
+    await runtime.start({ sessionId: "s3", cwd, permissionMode: "default", account: null }, () => undefined);
+    expect(servers).toHaveLength(3);
+    await runtime.stopAll();
+  });
+
+  it("a failed read or a failed start frees the slot", async () => {
+    const { runtime, cwd, servers, next } = poolSetup();
+    const failing = new HeldReadServer({});
+    failing.fail = true;
+    next.push(() => failing);
+    await startAs(runtime, cwd, "s1", slotAccount(SLOT_A));
+    failing.release();
+    await startAs(runtime, cwd, "s2", slotAccount(SLOT_A));
+    expect(servers).toHaveLength(2);
+    // A start whose thread/start is refused frees the slot as well.
+    class RefusingServer extends FakeAppServer {
+      protected override handleExtra(m: Msg): boolean {
+        if (m.method !== "thread/start") return false;
+        this.send({ id: m.id, error: { code: -32000, message: "no" } });
+        return true;
+      }
+    }
+    next.push((e) => new RefusingServer(e));
+    await expect(startAs(runtime, cwd, "s3", slotAccount(SLOT_A))).rejects.toBeInstanceOf(RuntimeError);
+    await startAs(runtime, cwd, "s4", slotAccount(SLOT_A));
+    expect(servers).toHaveLength(4);
+    await runtime.stopAll();
+  });
+
+  it("a slot session waking up takes its turn on the slot too", async () => {
+    const { runtime, cwd, servers, next } = poolSetup();
+    await startAs(runtime, cwd, "s1", slotAccount(SLOT_A));
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    next.push((e) => new HeldReadServer(e));
+    await startAs(runtime, cwd, "s2", slotAccount(SLOT_A));
+    const prompt = runtime.prompt("s1", { promptId: "p1", text: "wake" });
+    await wait(20);
+    expect(servers).toHaveLength(2);
+    (servers[1] as HeldReadServer).release();
+    await prompt;
+    await wait();
+    expect(servers).toHaveLength(3);
+    expect(servers[2]?.received.map((m) => m.method)).toContain("thread/resume");
+    await runtime.stopAll();
   });
 });
 
@@ -1963,14 +2079,21 @@ describe("CodexRuntime.catalog() — under a slot when the default home is signe
         asked.push(1);
         return o.home;
       },
-      spawnAppServer: ({ env }) => {
+      spawnAppServer: ({ env, args }) => {
         const s = new CatalogAppServer(env);
+        s.args = args ?? [];
         servers.push(s);
         return s;
       },
     });
     return { runtime, servers, asked };
   };
+
+  it("pins the file credential store for a slot's catalog (07.18-19 R1.7)", async () => {
+    const { runtime, servers } = make({ loggedIn: false, home: "/tmp/ocw-slots/a" });
+    await runtime.catalog();
+    expect(servers[0]?.args).toEqual(CODEX_SLOT_APP_SERVER_ARGS);
+  });
 
   it("collects model/list with CODEX_HOME = the slot's home, never a thread or a turn", async () => {
     const { runtime, servers } = make({ loggedIn: false, home: "/tmp/ocw-slots/a" });
