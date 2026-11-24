@@ -3,6 +3,7 @@ import {
   AGENT_CHANNEL_PROTOCOL_VERSION,
   Agent,
   AgentCellStatus,
+  AgentChannelPoolHealthReport,
   AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   AgentChannelProviderAuthReport,
@@ -57,7 +58,7 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
-import { cellAccountPool } from "./cell-pool";
+import { applyCellTokenHealth, cellAccountPool } from "./cell-pool";
 import { registerChainUserRoutes } from "./chain-routes";
 import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
@@ -617,6 +618,20 @@ export function createAgentChannelModule(
             },
             async (req) => {
               await providerAuth.report(cellOf(req).organizationId, req.body);
+              return { ok: true as const };
+            },
+          );
+
+          // 07.18-19 R2.2: the health of the Claude pool tokens the cell holds (profile ids and flags, never a token).
+          scope.post(
+            "/pool-health",
+            {
+              ...cellRoute,
+              schema: { tags, security: bearer, body: AgentChannelPoolHealthReport, response: { 200: Ok } },
+            },
+            async (req) => {
+              const ctx = { organizationId: cellOf(req).organizationId, userId: null };
+              await core.db.withTenant(ctx, (tx) => applyCellTokenHealth(core, tx, req.body));
               return { ok: true as const };
             },
           );

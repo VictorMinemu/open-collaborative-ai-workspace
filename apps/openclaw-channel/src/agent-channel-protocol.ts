@@ -1743,6 +1743,17 @@ export type AgentChannelProviderAuthReport = {
   profiles?: CellAuthProfileReport[];
 };
 
+/**
+ * 07.18-19 R2.2: POST /pool-health. The health of the Claude pool token profiles this cell holds
+ * (`anthropic:pool-<accountId>`): `usable: false` while OpenClaw holds one out for an auth failure. Never a token.
+ */
+export const AgentChannelPoolHealthReport = z.object({
+  claude: z
+    .array(z.object({ profileId: z.string().min(1).max(120), usable: z.boolean() }))
+    .max(POOL_ACCOUNTS_PER_PROVIDER),
+});
+export type AgentChannelPoolHealthReport = z.infer<typeof AgentChannelPoolHealthReport>;
+
 /** Plugin → server. `sub` without afterSeq starts LIVE (no replay). */
 export type AgentChannelClientFrame = { op: "sub"; topic: string; afterSeq?: number } | { op: "ping" };
 

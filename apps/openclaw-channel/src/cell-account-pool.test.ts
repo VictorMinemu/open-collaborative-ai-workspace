@@ -7,11 +7,14 @@ import { describe, expect, it } from "vitest";
 import type { CellAccountPool, CellAgent, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
 import {
   applyCellAccountPool,
+  authRefused,
   type CellPoolDriver,
   type CellPoolStoreState,
   createOpenClawPoolDriver,
+  createPoolHealthReporter,
   ORG_KEY_PROFILE_ID,
   planCellAccountPool,
+  poolTokenHealth,
 } from "./cell-account-pool.js";
 import { createOpenClawPort, type PluginRuntimeLike } from "./openclaw-port.js";
 import { envRef } from "./reconciler.js";
@@ -430,5 +433,121 @@ describe("real port: the snapshot's pool is applied after each reconcile", () =>
     } finally {
       for (const k of Object.keys(process.env)) if (!(k in before)) delete process.env[k];
     }
+  });
+});
+
+describe("Claude token health (07.18-19 R2.2)", () => {
+  const NOW = Date.parse("2026-11-24T12:00:00.000Z");
+  const later = NOW + 60_000;
+  const earlier = NOW - 60_000;
+
+  it("an active auth failure (cooldown or disable) refuses the token; limits, billing and expired windows do not", () => {
+    expect(authRefused(undefined, NOW)).toBe(false);
+    expect(authRefused({ lastUsed: earlier }, NOW)).toBe(false);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "auth" }, NOW)).toBe(true);
+    expect(authRefused({ disabledUntil: later, disabledReason: "auth_permanent" }, NOW)).toBe(true);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "auth_permanent" }, NOW)).toBe(true);
+    // A usage limit, an overload or billing is not a bad credential.
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "rate_limit" }, NOW)).toBe(false);
+    expect(authRefused({ cooldownUntil: later, cooldownReason: "overloaded" }, NOW)).toBe(false);
+    expect(authRefused({ disabledUntil: later, disabledReason: "billing" }, NOW)).toBe(false);
+    expect(authRefused({ blockedUntil: later, blockedReason: "subscription_limit" }, NOW)).toBe(false);
+    // A window that ended: OpenClaw tries the token again, so it is not reported as refused.
+    expect(authRefused({ cooldownUntil: earlier, cooldownReason: "auth" }, NOW)).toBe(false);
+    expect(authRefused({ disabledUntil: earlier, disabledReason: "auth_permanent" }, NOW)).toBe(false);
+    expect(authRefused("junk", NOW)).toBe(false);
+  });
+
+  it("the real driver reads OpenClaw's usage stats; the health lists only pool token profiles", async () => {
+    const soon = Date.now() + 120_000;
+    const store = {
+      profiles: {
+        [`anthropic:pool-${A}`]: {
+          type: "token",
+          provider: "anthropic",
+          tokenRef: { source: "env", id: "E1" },
+        },
+        [`anthropic:pool-${B}`]: {
+          type: "token",
+          provider: "anthropic",
+          tokenRef: { source: "env", id: "E2" },
+        },
+        [ORG_KEY_PROFILE_ID]: {
+          type: "api_key",
+          provider: "anthropic",
+          keyRef: { source: "env", id: KEY_ENV },
+        },
+        "openai:owner@example.test": { type: "oauth", provider: "openai", refresh: "R" },
+      },
+      usageStats: {
+        [`anthropic:pool-${A}`]: { cooldownUntil: soon, cooldownReason: "auth" },
+        [ORG_KEY_PROFILE_ID]: { disabledUntil: soon, disabledReason: "auth_permanent" },
+        "openai:owner@example.test": { cooldownUntil: soon, cooldownReason: "auth" },
+      },
+    };
+    const runtime = {
+      config: { current: () => ({}) },
+      channel: {},
+      modelAuth: { ensureAuthProfileStore: () => structuredClone(store) },
+    } as unknown as PluginRuntimeLike;
+    const state = (await createOpenClawPoolDriver({ runtime }).read()) as CellPoolStoreState;
+    expect(state.profiles[`anthropic:pool-${A}`]).toMatchObject({ refused: true });
+    expect(state.profiles[`anthropic:pool-${B}`]?.refused).toBeUndefined();
+    expect(poolTokenHealth(state)).toEqual([
+      { profileId: `anthropic:pool-${A}`, usable: false },
+      { profileId: `anthropic:pool-${B}`, usable: true },
+    ]);
+  });
+
+  it("the reporter sends a changed list once, retries after a failure and stays quiet with no tokens", async () => {
+    const token = (refused?: true) => ({
+      profiles: {
+        [`anthropic:pool-${A}`]: {
+          provider: "anthropic",
+          type: "token",
+          envName: "E1",
+          ...(refused ? { refused } : {}),
+        },
+      },
+      order: {},
+    });
+    let state: CellPoolStoreState | null = token();
+    const sent: unknown[] = [];
+    let fail = false;
+    const reporter = createPoolHealthReporter({
+      driver: { read: async () => structuredClone(state) },
+      report: async (body) => {
+        if (fail) throw new Error("API down");
+        sent.push(body);
+      },
+    });
+    await reporter.check();
+    await reporter.check();
+    expect(sent).toEqual([{ claude: [{ profileId: `anthropic:pool-${A}`, usable: true }] }]);
+
+    state = token(true);
+    fail = true;
+    await reporter.check(); // never throws
+    fail = false;
+    await reporter.check();
+    await reporter.check();
+    expect(sent).toEqual([
+      { claude: [{ profileId: `anthropic:pool-${A}`, usable: true }] },
+      { claude: [{ profileId: `anthropic:pool-${A}`, usable: false }] },
+    ]);
+
+    // An unreadable store reports nothing new; a cell without pool tokens reports nothing at all.
+    state = null;
+    await reporter.check();
+    expect(sent).toHaveLength(2);
+    const quiet: unknown[] = [];
+    const empty = createPoolHealthReporter({
+      driver: { read: async () => ({ profiles: {}, order: {} }) },
+      report: async (body) => {
+        quiet.push(body);
+      },
+    });
+    await empty.check();
+    expect(quiet).toEqual([]);
   });
 });

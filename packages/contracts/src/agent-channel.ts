@@ -522,6 +522,19 @@ export const AgentChannelProviderAuthReport = z.object({
 });
 export type AgentChannelProviderAuthReport = z.infer<typeof AgentChannelProviderAuthReport>;
 
+/**
+ * 07.18-19 R2.2: `POST /agent-channel/v1/pool-health` — the health of the Claude pool token profiles the cell holds
+ * (`anthropic:pool-<accountId>`), read from OpenClaw's own failure state: `usable: false` = OpenClaw refused the token
+ * for an auth failure (revoked, disabled). The API then marks the account `needs_sign_in` (a new token restores it).
+ * Profile ids and flags only, never a token.
+ */
+export const AgentChannelPoolHealthReport = z.object({
+  claude: z
+    .array(z.object({ profileId: z.string().min(1).max(120), usable: z.boolean() }))
+    .max(POOL_LIMITS.accountsPerProvider),
+});
+export type AgentChannelPoolHealthReport = z.infer<typeof AgentChannelPoolHealthReport>;
+
 // ---------------------------------------------------------------- MCP probe (Phase 3.1, D-13, additive)
 
 /**

@@ -1,4 +1,5 @@
 import {
+  type AgentChannelPoolHealthReport,
   type AgentChannelProviderAuthReport,
   CELL_CLAUDE_TOKENS,
   type CellAccountPool,
@@ -376,4 +377,45 @@ export async function applyCellProfileReport(
     changed,
     usableProfiles: profiles ? new Set(profiles.filter((p) => p.usable).map((p) => p.profileId)).size : null,
   };
+}
+
+/**
+ * 07.18-19 R2.2: the cell's `POST /pool-health`. A Claude token profile OpenClaw refused for an auth failure (revoked,
+ * disabled) moves its live pool account to `needs_sign_in`, as the Work Zone's `auth_failed` does: it leaves the cell's
+ * snapshot and every selection until an admin pastes a new token. One-way: `usable: true` never revives an account (the
+ * cell no longer holds its token). Only the transaction's organization (the cell's own) is read and written; unknown or
+ * foreign profile ids are ignored. Audited `account_pool.account_updated` with ids and labels only, never a token.
+ */
+export async function applyCellTokenHealth(
+  core: Core,
+  tx: Tx,
+  report: AgentChannelPoolHealthReport,
+): Promise<{ changed: number }> {
+  const refused = new Set(report.claude.filter((p) => !p.usable).map((p) => p.profileId));
+  if (refused.size === 0) return { changed: 0 };
+  await lockPool(tx, "claude");
+  const rows = (await listPoolAccounts(tx, "claude")).filter(
+    (r) => r.kind === "token" && r.credentialState === "ok" && refused.has(claudeTokenProfileId(r.id)),
+  );
+  for (const row of rows) {
+    await patchAccount(tx, row.id, { credentialState: "needs_sign_in" });
+    await core.audit.record(tx, {
+      action: "account_pool.account_updated",
+      resourceType: "account_pool_account",
+      resourceId: row.id,
+      actorKind: "system",
+      clientKind: "agent",
+      metadata: {
+        provider: "claude",
+        kind: "token",
+        label: row.label,
+        changed: ["credentialState"],
+        credentialState: "needs_sign_in",
+        source: "openclaw_cell",
+      },
+    });
+  }
+  // The token leaves the snapshot: the cell re-reads its config and drops the profile.
+  if (rows.length > 0) await notifyCell(core, tx, "providers.updated", null);
+  return { changed: rows.length };
 }

@@ -4872,6 +4872,7 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     ProviderAuthRevokeEvent: Schema;
     AgentChannelProviderAuthReport: Schema;
     CellAuthProfileReport: Schema;
+    AgentChannelPoolHealthReport: Schema;
     poolProfileId: (id: string) => string;
     claudeTokenProfileId: (id: string) => string;
     POOL_TOKEN_ENV_RE: RegExp;
@@ -5072,5 +5073,53 @@ describe("account pool mirror parity (07.18-01: plugin ↔ packages/contracts ag
     expect(m.claudeTokenProfileId(U(11))).toBe(`anthropic:pool-${U(11)}`);
     expect(m.poolProfileId(U(21))).toBe(channel.poolProfileId(U(21)));
     expect(m.claudeTokenProfileId(U(11))).toBe(channel.claudeTokenProfileId(U(11)));
+  });
+
+  it("07.18-19 R2.2: the token health report agrees in both copies, at most 20 profiles, never a token field", async () => {
+    const { channel, m } = await load();
+    const report = {
+      claude: [
+        { profileId: `anthropic:pool-${U(11)}`, usable: false },
+        { profileId: `anthropic:pool-${U(12)}`, usable: true },
+      ],
+    };
+    const cases: [unknown, boolean][] = [
+      [report, true],
+      [{ claude: [] }, true],
+      [
+        {
+          claude: Array.from({ length: 20 }, (_, i) => ({
+            profileId: `anthropic:pool-${U(i)}`,
+            usable: true,
+          })),
+        },
+        true,
+      ],
+      [
+        {
+          claude: Array.from({ length: 21 }, (_, i) => ({
+            profileId: `anthropic:pool-${U(i)}`,
+            usable: true,
+          })),
+        },
+        false,
+      ],
+      [{ claude: [{ profileId: "", usable: true }] }, false],
+      [{ claude: [{ profileId: "x".repeat(121), usable: true }] }, false],
+      [{}, false],
+    ];
+    for (const [v, ok] of cases) {
+      const a = m.AgentChannelPoolHealthReport.safeParse(v);
+      const b = channel.AgentChannelPoolHealthReport.safeParse(v);
+      expect(a.success, JSON.stringify(v).slice(0, 120)).toBe(ok);
+      expect(b.success, JSON.stringify(v).slice(0, 120)).toBe(ok);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+    // Unknown keys (a token, say) are dropped by both copies, never carried.
+    const withToken = { claude: [{ ...report.claude[0], token: token(1) }] };
+    expect(JSON.stringify(m.AgentChannelPoolHealthReport.parse(withToken))).not.toContain("sk-");
+    expect(JSON.stringify(channel.AgentChannelPoolHealthReport.safeParse(withToken).data)).not.toContain(
+      "sk-",
+    );
   });
 });

@@ -875,3 +875,138 @@ describe("Claude bots run on the pool's tokens with no Anthropic API key (07.18-
     expect((await claudeModels()).map((m) => m.modelId)).toEqual(["claude-haiku-4-5"]);
   });
 });
+
+// ---------------------------------------------------------------- 07.18-19 R2.2: Claude token health from the cell
+
+describe("the cell reports the health of its Claude token profiles (07.18-19 R2.2)", () => {
+  beforeEach(resetPool);
+
+  const health = (claude: Json[]) => cell.request<Json>("POST", "/pool-health", { claude });
+  const tokenRow = async (id: string): Promise<Json> =>
+    (
+      await su.query(
+        "select credential_state, enabled, removed_at from app.account_pool_accounts where id = $1",
+        [id],
+      )
+    ).rows[0] as Json;
+  const statusOf = async (id: string): Promise<string> =>
+    (await ok(admin.request("GET", "/api/v1/account-pool"))).claude.accounts.find((a: Json) => a.id === id)
+      ?.status;
+
+  it("a revoked token reads needs_sign_in, leaves the snapshot and is audited once without a token", async () => {
+    const a = await addToken("ana@acme", TA);
+    const b = await addToken("bo@acme", TB);
+    const auditsBefore = (await poolAudits()).length;
+    const configChanges = async (): Promise<number> =>
+      (
+        await su.query(
+          "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'cell.config.changed'",
+          [`cell:${orgA}`],
+        )
+      ).rows[0].n as number;
+    const changesBefore = await configChanges();
+
+    // Healthy reports change nothing.
+    expect(
+      (
+        await health([
+          { profileId: claudeTokenProfileId(a), usable: true },
+          { profileId: claudeTokenProfileId(b), usable: true },
+        ])
+      ).status,
+    ).toBe(200);
+    expect((await tokenRow(a)).credential_state).toBe("ok");
+    expect((await poolAudits()).length).toBe(auditsBefore);
+    expect(await configChanges()).toBe(changesBefore);
+
+    const res = await health([
+      { profileId: claudeTokenProfileId(a), usable: false },
+      { profileId: claudeTokenProfileId(b), usable: true },
+    ]);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await tokenRow(a)).toMatchObject({
+      credential_state: "needs_sign_in",
+      enabled: true,
+      removed_at: null,
+    });
+    expect((await tokenRow(b)).credential_state).toBe("ok");
+    expect(await statusOf(a)).toBe("needs_sign_in");
+
+    const added = (await poolAudits()).slice(auditsBefore);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      action: "account_pool.account_updated",
+      resource_id: a,
+      metadata: {
+        provider: "claude",
+        kind: "token",
+        label: "ana@acme",
+        changed: ["credentialState"],
+        credentialState: "needs_sign_in",
+        source: "openclaw_cell",
+      },
+    });
+    for (const s of SECRETS) expect(JSON.stringify(added)).not.toContain(s);
+
+    // The token no longer reaches the cell; the cell was told to re-read its config.
+    const snap = await snapshot();
+    expect(snap.accountPool.claude.tokens.map((t: Json) => t.accountId)).toEqual([b]);
+    expect(await configChanges()).toBe(changesBefore + 1);
+
+    // The same report again writes nothing; a later "usable" never revives it (a new token does, R3).
+    await health([{ profileId: claudeTokenProfileId(a), usable: false }]);
+    await health([{ profileId: claudeTokenProfileId(a), usable: true }]);
+    expect((await tokenRow(a)).credential_state).toBe("needs_sign_in");
+    expect((await poolAudits()).slice(auditsBefore)).toHaveLength(1);
+    expect(await configChanges()).toBe(changesBefore + 1);
+  });
+
+  it("only this organization's live pool tokens move; other ids are ignored", async () => {
+    const a = await addToken("ana@acme", TA);
+    const removed = await addToken("old@acme", TB);
+    await ok(admin.request("DELETE", `/api/v1/account-pool/accounts/${removed}`));
+
+    // Another organization's token, reported by org A's cell: never touched.
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Org B', $2)", [
+      orgB,
+      `b-${orgB}`,
+    ]);
+    const foreign = randomUUID();
+    const foreignSecret = randomUUID();
+    await su.query(
+      "insert into app.secrets (id, organization_id, name, kind, provider, ciphertext, iv, tag) values ($1, $2, 'pool token', 'pool_token', 'claude', 'c', 'i', 't')",
+      [foreignSecret, orgB],
+    );
+    await su.query(
+      `insert into app.account_pool_accounts (id, organization_id, provider, kind, label, secret_id)
+       values ($1, $2, 'claude', 'token', 'b@b.test', $3)`,
+      [foreign, orgB, foreignSecret],
+    );
+
+    const res = await health([
+      { profileId: claudeTokenProfileId(foreign), usable: false },
+      { profileId: claudeTokenProfileId(removed), usable: false },
+      { profileId: "anthropic:ocw-org-key", usable: false },
+      { profileId: "openai:pool-x", usable: false },
+    ]);
+    expect(res.status).toBe(200);
+    expect((await tokenRow(a)).credential_state).toBe("ok");
+    expect((await tokenRow(removed)).credential_state).toBe("ok");
+    expect((await tokenRow(foreign)).credential_state).toBe("ok");
+
+    // Bounds: an oversized report is refused.
+    const many = Array.from({ length: 21 }, () => ({ profileId: claudeTokenProfileId(a), usable: false }));
+    expect((await health(many)).status).toBe(400);
+    expect((await tokenRow(a)).credential_state).toBe("ok");
+  });
+
+  it("needs the cell's own credential", async () => {
+    const res = await fetch(`${stack.baseUrl}/agent-channel/v1/pool-health`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claude: [] }),
+    });
+    expect(res.status).toBe(401);
+  });
+});

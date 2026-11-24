@@ -118,6 +118,11 @@ export type BridgeOptions = {
   mcpProbe?: typeof probeMcpServer;
   /** Marketplace executor for `plugin.install.v1` / `plugin.uninstall.v1` (D-14); omitted → those events are ignored. */
   plugins?: PluginInstaller;
+  /**
+   * 07.18-19 R2.2: reports the Claude pool tokens' health (cell-account-pool.ts `createPoolHealthReporter`), checked
+   * after every cell sync and after every bot turn, while OpenClaw's auth-failure window is still open. Never throws.
+   */
+  poolHealth?: { check(): Promise<void> };
 };
 
 /**
@@ -288,6 +293,7 @@ export function createBridge(opts: BridgeOptions) {
       `cell synced: ${cell.agents.length} bot(s), ${cell.providers.length} provider(s), ${cell.mcpServers?.length ?? 0} MCP server(s)${changed ? ", OpenClaw updated" : ""}`,
     );
     await reportStatuses(results);
+    await opts.poolHealth?.check().catch(() => undefined);
     // The boot render's fallback list of installed marketplace plugins follows the API's view (never trusted for installs).
     await opts.plugins?.writeBootCache().catch((error: unknown) => {
       log.warn?.(
@@ -619,6 +625,8 @@ export function createBridge(opts: BridgeOptions) {
         await reportDone(event, mention.ocwAgentId, label, index > 0 || taskAnswered);
       }
       await stopTyping();
+      // 07.18-19 R2.2: a token the provider refused during this turn is reported while OpenClaw still holds it out.
+      if (!opts.signal.aborted) void opts.poolHealth?.check().catch(() => undefined);
     }
   }
 
