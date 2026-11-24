@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { type AccountSignal, type RuntimeAccount, RuntimeError } from "../runtime.js";
+import {
+  ACCOUNT_SWITCH_FAILED_MESSAGE,
+  type AccountSignal,
+  type RuntimeAccount,
+  RuntimeError,
+} from "../runtime.js";
 import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
@@ -1562,6 +1567,7 @@ describe("CodexRuntime — retire idle and resume (07.11 D-03a)", () => {
 // 07.18 (D-02, D-08, PD-03, PD-10): a session runs under the CODEX_HOME of the slot the server chose.
 
 const SLOT_A = "11111111-1111-4111-8111-111111111111";
+const SLOT_B = "22222222-2222-4222-8222-222222222222";
 
 function slotAccount(slotId: string, ref = `acct-${slotId.slice(0, 4)}`) {
   return {
@@ -1668,5 +1674,135 @@ describe("CodexRuntime — a session on a ChatGPT account slot (07.18 D-02, PD-0
       ),
     ).rejects.toBeInstanceOf(RuntimeError);
     expect(servers).toHaveLength(0);
+  });
+});
+
+describe("CodexRuntime — useAccount moves the thread to another slot between turns (07.18 D-08, PD-03, A-02)", () => {
+  const sessionEnds = (events: SessionEvent[]) =>
+    events.filter(
+      (e) =>
+        (e.type === "session.error" && e.message !== ACCOUNT_SWITCH_FAILED_MESSAGE) ||
+        (e.type === "session.state" && (e.status === "completed" || e.status === "failed")),
+    );
+  const methods = (s: FakeAppServer | undefined) =>
+    (s?.received ?? []).map((m) => m.method).filter((m) => m !== "account/rateLimits/read");
+
+  it("another slot: stops the idle app-server, then the next prompt resumes the same thread under the new home", async () => {
+    const { start, runtime, servers, events } = poolSetup();
+    const a = await start(slotAccount(SLOT_A));
+    const startParams = a.received.find((m) => m.method === "thread/start")?.params;
+    const b = slotAccount(SLOT_B);
+    await runtime.useAccount("s1", b);
+    expect(a.killed).toEqual(["SIGTERM"]);
+    expect(servers).toHaveLength(1);
+    await wait();
+    expect(sessionEnds(events)).toEqual([]);
+
+    await runtime.prompt("s1", { promptId: "p1", text: "go on" });
+    await wait();
+    expect(servers).toHaveLength(2);
+    const next = servers[1] as FakeAppServer;
+    expect(next.env.CODEX_HOME).toBe(b.codexHome);
+    expect(methods(next)).toEqual(["initialize", "initialized", "thread/resume", "turn/start"]);
+    expect(next.received.find((m) => m.method === "thread/resume")?.params).toEqual({
+      ...startParams,
+      threadId: "thread-1",
+    });
+    next.completeTurn();
+    await wait();
+    expect(events.filter((e) => e.type === "prompt.completed")).toEqual([
+      expect.not.objectContaining({ isError: true }),
+    ]);
+    expect(sessionEnds(events)).toEqual([]);
+    await runtime.stop("s1");
+    expect(next.killed).toContain("SIGTERM");
+  });
+
+  it("the same slot changes nothing", async () => {
+    const { start, runtime, servers } = poolSetup();
+    const a = await start(slotAccount(SLOT_A));
+    await runtime.useAccount("s1", slotAccount(SLOT_A));
+    await runtime.prompt("s1", { promptId: "p1", text: "same" });
+    await wait();
+    expect(a.killed).toEqual([]);
+    expect(servers).toHaveLength(1);
+    expect(methods(a)).toContain("turn/start");
+    await runtime.stopAll();
+  });
+
+  it("null resumes under the device's default Codex home (no CODEX_HOME override)", async () => {
+    process.env.CODEX_HOME = "/parent/codex-home";
+    const { start, runtime, servers } = poolSetup();
+    await start(slotAccount(SLOT_A));
+    await runtime.useAccount("s1", null);
+    await runtime.prompt("s1", { promptId: "p1", text: "on my login" });
+    await wait();
+    expect(servers).toHaveLength(2);
+    expect(servers[1]?.env).toEqual(codexChildEnv(process.env, false));
+    expect(methods(servers[1])).toEqual(["initialize", "initialized", "thread/resume", "turn/start"]);
+    await runtime.stopAll();
+  });
+
+  it("asked during a turn, the switch waits for it and the queued prompt runs on the new slot", async () => {
+    const { start, runtime, servers, events } = poolSetup();
+    const a = await start(slotAccount(SLOT_A));
+    await runtime.prompt("s1", { promptId: "p1", text: "long" });
+    await wait();
+    const b = slotAccount(SLOT_B);
+    await runtime.useAccount("s1", b);
+    await runtime.prompt("s1", { promptId: "p2", text: "next" });
+    await wait();
+    expect(a.killed).toEqual([]);
+    expect(servers).toHaveLength(1);
+
+    a.completeTurn();
+    await wait(20);
+    expect(a.killed).toEqual(["SIGTERM"]);
+    expect(servers).toHaveLength(2);
+    expect(servers[1]?.env.CODEX_HOME).toBe(b.codexHome);
+    expect(methods(servers[1])).toEqual(["initialize", "initialized", "thread/resume", "turn/start"]);
+    expect(methods(a).filter((m) => m === "turn/start")).toHaveLength(1);
+    expect(sessionEnds(events)).toEqual([]);
+    await runtime.stopAll();
+  });
+
+  it("a resume that fails under the new slot fails the turn with the A-02 message and starts no new thread", async () => {
+    const { start, runtime, servers, next, events } = poolSetup();
+    await start(slotAccount(SLOT_A));
+    class NoThread extends FakeAppServer {
+      protected override handleExtra(m: Msg): boolean {
+        if (m.method !== "thread/resume") return false;
+        this.send({ id: m.id, error: { code: -32000, message: "no rollout found" } });
+        return true;
+      }
+    }
+    next.push((env) => new NoThread(env));
+    await runtime.useAccount("s1", slotAccount(SLOT_B));
+    await runtime.prompt("s1", { promptId: "p1", text: "go on" });
+    await wait(20);
+    const failing = servers[1] as FakeAppServer;
+    expect(failing).toBeInstanceOf(NoThread);
+    expect(methods(failing)).not.toContain("thread/start");
+    expect(methods(failing)).not.toContain("turn/start");
+    expect(failing.killed).toContain("SIGTERM");
+    expect(events.filter((e) => e.type === "session.error")).toEqual([
+      { type: "session.error", message: ACCOUNT_SWITCH_FAILED_MESSAGE },
+    ]);
+    expect(events.filter((e) => e.type === "prompt.completed")).toEqual([
+      expect.objectContaining({ promptId: "p1", isError: true }),
+    ]);
+    expect(events.some((e) => e.type === "session.state" && e.status === "failed")).toBe(false);
+    expect(runtime.activeTurns()).toBe(0);
+    await runtime.stopAll();
+  });
+
+  it("refuses a token account and a stopping session", async () => {
+    const { start, runtime } = poolSetup();
+    await start(slotAccount(SLOT_A));
+    await expect(
+      runtime.useAccount("s1", { kind: "token", ref: "r", label: "T", oauthToken: "x" }),
+    ).rejects.toBeInstanceOf(RuntimeError);
+    await runtime.stop("s1");
+    await expect(runtime.useAccount("s1", null)).rejects.toBeInstanceOf(RuntimeError);
   });
 });
