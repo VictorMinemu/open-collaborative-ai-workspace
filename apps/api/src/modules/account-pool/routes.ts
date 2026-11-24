@@ -1,6 +1,8 @@
 import {
+  AccountPoolPreview,
   AccountPoolView,
   AddClaudeTokenRequest,
+  Id,
   IdParams,
   Ok,
   PoolAccount,
@@ -10,13 +12,16 @@ import {
   UpdatePoolAccountRequest,
   UpdatePoolPolicyRequest,
 } from "@ocw/contracts";
-import type { Tx } from "@ocw/db";
+import { devices, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { type App, type Core, tenant } from "../../core";
-import { badRequest } from "../../lib/errors";
-import type { DeviceHub } from "../device";
+import { markDecided } from "../../authz";
+import { type App, authOf, type Core, tenant } from "../../core";
+import { badRequest, notFound } from "../../lib/errors";
+import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { createPermissionService } from "../organization";
+import { previewAccountSources } from "./preview";
 import {
   addClaudeToken,
   loadPoolView,
@@ -58,6 +63,7 @@ async function refuseApiKey(req: FastifyRequest): Promise<void> {
 }
 
 const ProviderParams = z.object({ provider: PoolProvider });
+const PreviewQuery = z.object({ deviceId: Id });
 
 /**
  * Settings › Account pool (Phase 07.18, D-01, D-04, D-10, D-13, PD-19 … PD-22, PD-25, ADR-0044). Every route needs
@@ -78,6 +84,37 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), (tx) => loadPoolView(tx, new Date()));
+    },
+  );
+
+  // D-11, PD-19: any member who may use the device (device.use, decided as createWorkSession decides it) sees what a
+  // new session there would run on; no label, id or token. Another organization's or an unusable device: 404.
+  app.get(
+    "/account-pool/preview",
+    {
+      config: { authz: "user" },
+      preValidation: [core.identity.requireUser],
+      schema: { tags, querystring: PreviewQuery, response: { 200: AccountPoolPreview } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      const userId = authOf(req).userId;
+      const answer = await core.db.withTenant(tenant(req), async (tx) => {
+        const [d] = await tx.select().from(devices).where(eq(devices.id, req.query.deviceId));
+        if (!d) return null;
+        const access = await loadDeviceAccess(tx, userId);
+        const use = await perms.decide(
+          tx,
+          { kind: "user", userId },
+          "device.use",
+          deviceFacts(d, userId, access),
+        );
+        if (!use.allowed) return null;
+        return previewAccountSources(tx, { deviceId: d.id, now: new Date() });
+      });
+      markDecided(req);
+      if (!answer) throw notFound("Device not found");
+      return answer;
     },
   );
 
