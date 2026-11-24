@@ -26,6 +26,8 @@
 import { realpathSync } from "node:fs";
 import { arch, homedir, platform, userInfo } from "node:os";
 import {
+  AccountLoginPayload,
+  AccountLogoutPayload,
   ApprovalResolvePayload,
   type CommandFrame,
   DEVICE_ACCOUNT_POOL_VERSION,
@@ -62,9 +64,15 @@ import {
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
 } from "@ocw/contracts";
+import {
+  CodexLoginError,
+  codexAccountSpawner,
+  logoutCodex,
+  runCodexDeviceLogin,
+} from "./accounts/codex-login.js";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
-import { CodexRuntime } from "./codex/codex-runtime.js";
+import { CodexRuntime, type SpawnAppServer } from "./codex/codex-runtime.js";
 import {
   deviceName,
   ensureOcwHome,
@@ -85,6 +93,7 @@ import {
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { boundDiffFrame } from "./diff-frame.js";
+import { findExecutable } from "./exec-path.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
@@ -214,6 +223,11 @@ export interface DaemonOptions {
   selfUpdate?: Partial<SelfUpdateOptions>;
   /** Tests only (07.17.1.1): the waits before retrying a 503 transfer (default `FILE_TRANSFER_RETRY_DELAYS_MS`). */
   fileRetryDelaysMs?: readonly number[];
+  /**
+   * Tests only (07.18-08): how the app-servers of Codex account slots are spawned (a scripted fake) and a shorter
+   * sign-in bound. Without it the daemon spawns the configured or detected `codex` (in fake mode only a configured one).
+   */
+  codexAccounts?: { spawn?: SpawnAppServer; loginTimeoutMs?: number };
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -271,6 +285,14 @@ interface ActiveSession {
   mode: PermissionMode;
   /** 07.18 (PD-03): the pool account ref the session runs on (null = the device's own login). Never the token. */
   accountRef: string | null;
+}
+
+/** 07.18 (D-02, T-07.18-08-05): one sign-in per slot at a time. */
+export const SIGN_IN_RUNNING_MESSAGE = "a sign-in is already running for this account slot";
+
+/** 07.18 (T-07.18-08-06): the user code never leaves in a failure message (it went to the admin in the code frame). */
+function withoutUserCode(message: string, userCode: string | null): string {
+  return userCode ? message.split(userCode).join("[code]") : message;
 }
 
 /** 07.18 (D-02): a `device_slot` account whose slot is not in this device's slot store. */
@@ -399,6 +421,8 @@ export class Daemon {
   private hostKind: DeviceHostKind | null = null;
   /** 07.16 (D-19): the owner's local isolated-server mark, re-read on `reloadConfig`. */
   private isolated: { on: boolean; source: IsolatedServerSource } = { on: false, source: "config" };
+  /** 07.18 (T-07.18-08-05): the Codex sign-ins running now, by slot id; aborted on stop. */
+  private readonly accountLogins = new Map<string, AbortController>();
 
   private constructor(
     readonly home: string,
@@ -685,6 +709,8 @@ export class Daemon {
    */
   async stop(): Promise<void> {
     this.stopping = true;
+    // 07.18: a sign-in in progress is cancelled at Codex (its slot removed); the admin starts it again.
+    for (const login of this.accountLogins.values()) login.abort();
     for (const gate of this.gates.values()) gate.seal();
     await this.selfUpdate?.stop();
     if (this.selfUpdate?.holding) {
@@ -1285,6 +1311,14 @@ export class Daemon {
         case "runtime.update":
           await this.requestRuntimeUpdate(cmd);
           break;
+        // 07.18 (D-02, D-10, PD-10): outside the session chains; Codex's gate holds them while its CLI updates. A
+        // sign-in acks only after its outcome frame.
+        case "account.login":
+          await this.accountLogin(cmd);
+          break;
+        case "account.logout":
+          await this.accountLogout(cmd);
+          break;
       }
       if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
         this.rememberFileOutcome(cmd.id, undefined);
@@ -1334,6 +1368,126 @@ export class Daemon {
     if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
     const answer = await this.maintenance.requestUpdate(runtime, "manual", cmd.id);
     if (!answer.accepted) throw new Error(answer.reason);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Codex account slots (07.18, D-02, D-10, PD-10, PD-25)
+
+  /** How account app-servers start: the test seam, else the configured CLI, else (not in fake mode) the detected one. */
+  private codexAccountsSpawn(): SpawnAppServer {
+    const seam = this.opts.codexAccounts?.spawn;
+    if (seam) return seam;
+    const fake = this.env.OCW_RUNTIME_FAKE === "1";
+    const path = this.config.codex.path ?? (fake ? null : findExecutable("codex", this.env));
+    return codexAccountSpawner(path, this.log);
+  }
+
+  /** Runs `fn` through Codex's gate (a sign-in never starts while its CLI updates, and holds the update meanwhile). */
+  private admitCodex<T>(fn: () => Promise<T>): Promise<T> {
+    const gate = this.gates.get("codex");
+    return gate ? gate.admit(fn) : fn();
+  }
+
+  /**
+   * `account.login` (D-02, D-10): the slot (created with `origin: "server"` unless it exists), Codex's device-code
+   * login under its `CODEX_HOME`, frames `code` then `completed` (or `failed`) with this command's id, then
+   * `accounts.sync`. A failure removes a slot this sign-in created and fails the ack with the same message, stripped of
+   * the user code (T-07.18-08-06).
+   */
+  private async accountLogin(cmd: CommandFrame): Promise<void> {
+    const payload = AccountLoginPayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const { slotId, label } = payload.data;
+    if (this.accountLogins.has(slotId)) throw new Error(SIGN_IN_RUNNING_MESSAGE);
+    const controller = new AbortController();
+    this.accountLogins.set(slotId, controller);
+    let created = false;
+    let userCode: string | null = null;
+    try {
+      if (!(await this.codexSlots.get(slotId))) {
+        await this.codexSlots.create({ label, origin: "server", slotId });
+        created = true;
+      }
+      const home = this.codexSlots.homeOf(slotId);
+      const timeoutMs = this.opts.codexAccounts?.loginTimeoutMs;
+      const result = await this.admitCodex(() =>
+        runCodexDeviceLogin({
+          spawn: this.codexAccountsSpawn(),
+          home,
+          env: this.env,
+          signal: controller.signal,
+          ...(timeoutMs ? { timeoutMs } : {}),
+          onCode: (code) => {
+            userCode = code.userCode;
+            this.send({ type: "account.login", requestId: cmd.id, slotId, phase: "code", ...code });
+          },
+        }),
+      );
+      await this.codexSlots.setPlan(slotId, result.planType);
+      this.send({
+        type: "account.login",
+        requestId: cmd.id,
+        slotId,
+        phase: "completed",
+        ...(result.planType ? { planType: result.planType } : {}),
+      });
+      this.log.info("Codex account signed in", { slotId });
+      await this.sendAccountsSync();
+    } catch (err) {
+      const code = err instanceof CodexLoginError ? err.code : "failed";
+      const message = sanitizeString(withoutUserCode(errorMessage(err), userCode), [this.home]).slice(0, 300);
+      this.send({
+        type: "account.login",
+        requestId: cmd.id,
+        slotId,
+        phase: "failed",
+        error: { code, message },
+      });
+      if (created) {
+        await this.codexSlots.remove(slotId).catch((e: unknown) =>
+          this.log.warn("could not remove the slot of a failed sign-in", {
+            slotId,
+            error: sanitizeString(errorMessage(e), [this.home]),
+          }),
+        );
+      }
+      throw new Error(message);
+    } finally {
+      this.accountLogins.delete(slotId);
+    }
+  }
+
+  /**
+   * `account.logout` (PD-25): a running sign-in of the slot is cancelled, Codex signs it out, then the slot is removed
+   * (the shared `sessions/` stays) and `accounts.sync` re-sent. Unknown slot: done already (idempotent). A sign-out
+   * Codex refuses still removes the slot: its `auth.json` goes with the directory.
+   */
+  private async accountLogout(cmd: CommandFrame): Promise<void> {
+    const payload = AccountLogoutPayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const { slotId } = payload.data;
+    this.accountLogins.get(slotId)?.abort();
+    if (!(await this.codexSlots.get(slotId))) {
+      if (await this.codexSlots.remove(slotId)) await this.sendAccountsSync();
+      return;
+    }
+    try {
+      await this.admitCodex(() =>
+        logoutCodex({
+          spawn: this.codexAccountsSpawn(),
+          home: this.codexSlots.homeOf(slotId),
+          env: this.env,
+        }),
+      );
+    } catch (err) {
+      this.log.warn("Codex could not sign the slot out; removing it anyway", {
+        slotId,
+        error: sanitizeString(errorMessage(err), [this.home]),
+      });
+    }
+    await this.codexSlots.remove(slotId);
+    this.log.info("Codex account slot removed", { slotId });
+    await this.sendAccountsSync();
   }
 
   /** A prompt (or steer), checked after admission so a held prompt sees the device's current gates. */

@@ -214,7 +214,9 @@ describe("runCodexDeviceLogin (07.18 D-02, PD-10, A-08)", () => {
     expect((err as CodexLoginError).code).toBe("cancelled");
     const s = servers[0];
     expect(s?.methods()).toContain("account/login/cancel");
-    expect(s?.received.find((m) => m.method === "account/login/cancel")?.params).toEqual({ loginId: "login-1" });
+    expect(s?.received.find((m) => m.method === "account/login/cancel")?.params).toEqual({
+      loginId: "login-1",
+    });
     expect(s?.killed.length).toBeGreaterThan(0);
   });
 
@@ -251,7 +253,6 @@ describe("runCodexDeviceLogin (07.18 D-02, PD-10, A-08)", () => {
     }).catch((e: unknown) => e);
     expect((err as CodexLoginError).code).toBe("unsupported");
   });
-
 });
 
 describe("readCodexAccount / logoutCodex", () => {

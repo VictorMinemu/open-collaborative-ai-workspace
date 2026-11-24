@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -3645,12 +3645,17 @@ class ScriptedCodexAccounts {
               },
             });
             this.pending.push((ok, error) => {
-              if (ok) writeFileSync(join(slotHome, "auth.json"), JSON.stringify({ tokens: { refresh_token: "RT-1" } }));
+              if (ok)
+                writeFileSync(
+                  join(slotHome, "auth.json"),
+                  JSON.stringify({ tokens: { refresh_token: "RT-1" } }),
+                );
               send({ method: "account/login/completed", params: { loginId: "L1", success: ok, error } });
             });
             if (this.outcome === "success") setImmediate(() => this.finish(true));
             // A Codex error that echoes the code: the daemon must strip it.
-            if (this.outcome === "denied") setImmediate(() => this.finish(false, "access_denied for WXYZ-9876"));
+            if (this.outcome === "denied")
+              setImmediate(() => this.finish(false, "access_denied for WXYZ-9876"));
             break;
           case "account/read":
             send({
