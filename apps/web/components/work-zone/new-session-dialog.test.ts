@@ -4,7 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
 import {
+  AccountLine,
   AddServerLink,
+  accountLine,
   audienceRefusal,
   preselectedRepo,
   runtimeCardState,
@@ -294,5 +296,83 @@ describe("worktreeChoice (quick 261113-hu7)", () => {
     expect(worktreeChoice({ git: true }, true)).toEqual({ checked: true, disabled: false });
     expect(worktreeChoice({}, true)).toEqual({ checked: true, disabled: false });
     expect(worktreeChoice(null, false)).toEqual({ checked: false, disabled: false });
+  });
+});
+
+/**
+ * 07.18-12 (D-06, D-11, D-15, PD-16, PD-17): the dialog only says which account a new session will use (no choice, no
+ * toggle); a runtime that is installed but not signed in on the device can start when the pool serves it.
+ */
+describe("runtimeCardState with the account source (PD-17)", () => {
+  const signedOut = { id: "claude-code" as const, installed: true, version: "2.1.200", loggedIn: false };
+  const ask = "ask Owen to update";
+  const pool = { source: "pool" as const, strategy: "failover" as const, ready: 2 };
+
+  it("a runtime the pool serves is ready without a sign-in on the device", () => {
+    expect(runtimeCardState(signedOut, "supported", ask, pool)).toEqual({
+      ready: true,
+      note: null,
+      tone: "muted",
+    });
+  });
+
+  it("without the pool it keeps saying it is not signed in", () => {
+    for (const source of [
+      { source: "device_login" as const },
+      { source: "none" as const, resetsAt: null },
+      undefined,
+    ]) {
+      expect(runtimeCardState(signedOut, "supported", ask, source)).toEqual({
+        ready: false,
+        note: "Not signed in on this device",
+        tone: "muted",
+      });
+    }
+  });
+
+  it("the pool never hides a missing install or a version that can't run sessions", () => {
+    expect(runtimeCardState(undefined, undefined, ask, pool).note).toBe("Not installed on this device");
+    expect(runtimeCardState(signedOut, "broken", ask, pool)).toEqual({
+      ready: false,
+      note: "2.1.200 can't run sessions · ask Owen to update",
+      tone: "destructive",
+    });
+    expect(runtimeCardState(signedOut, "unsupported", ask, pool).tone).toBe("warning");
+  });
+});
+
+describe("accountLine (D-11)", () => {
+  const at = (iso: string) => (iso === "2026-11-24T15:40:00.000Z" ? "15:40" : iso);
+
+  it("names the pool and its strategy", () => {
+    expect(accountLine({ source: "pool", strategy: "failover", ready: 1 }, at)).toBe(
+      "Account: pool (failover)",
+    );
+    expect(accountLine({ source: "pool", strategy: "round_robin", ready: 3 }, at)).toBe(
+      "Account: pool (round-robin)",
+    );
+    expect(accountLine({ source: "pool", strategy: "weighted", ready: 2 }, at)).toBe(
+      "Account: pool (weighted)",
+    );
+  });
+
+  it("names the device's own login", () => {
+    expect(accountLine({ source: "device_login" }, at)).toBe("This device's login");
+  });
+
+  it("says no pool account is ready, with the reset when known", () => {
+    expect(accountLine({ source: "none", resetsAt: "2026-11-24T15:40:00.000Z" }, at)).toBe(
+      "No pool account is ready · resets at 15:40",
+    );
+    expect(accountLine({ source: "none", resetsAt: null }, at)).toBe("No pool account is ready");
+  });
+
+  it("AccountLine: muted text with a key icon, wrapping, and no control to choose an account (D-15)", () => {
+    const html = renderToStaticMarkup(createElement(AccountLine, { text: "Account: pool (failover)" }));
+    expect(html).toContain('data-testid="new-session-account"');
+    expect(html).toContain("Account: pool (failover)");
+    expect(html).toContain("text-muted-foreground");
+    expect(html).not.toContain("truncate");
+    expect(html).not.toMatch(/<(button|input|select)\b/);
   });
 });

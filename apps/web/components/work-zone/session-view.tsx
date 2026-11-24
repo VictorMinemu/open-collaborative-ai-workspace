@@ -13,6 +13,7 @@ import {
   ArrowLeft,
   FileDiff,
   Info,
+  KeyRound,
   ListOrdered,
   Lock,
   MoreHorizontal,
@@ -120,6 +121,65 @@ export function SessionBackLink({ origin }: { origin: WorkSessionOrigin }) {
       <ArrowLeft aria-hidden />
       <span className="truncate">{back.label}</span>
     </Link>
+  );
+}
+
+const ACCOUNT_LABEL_MAX = 32;
+
+/**
+ * 07.18-12 (D-11): which account a session runs on, as every viewer sees it (label only): "Account: <label>" for a pool
+ * account (cut to 32 characters), "This device's login" for the device's own sign-in, and null for an older API that
+ * does not send the field (nothing is shown).
+ */
+export function sessionAccountLabel(session: Pick<WorkSession, "poolAccount">): string | null {
+  const a = session.poolAccount;
+  if (a === undefined) return null;
+  if (a === null) return "This device's login";
+  const label = a.label.length > ACCOUNT_LABEL_MAX ? `${a.label.slice(0, ACCOUNT_LABEL_MAX - 1)}…` : a.label;
+  return `Account: ${label}`;
+}
+
+/** The chip's tooltip: the whole label and the device it runs on. */
+export function sessionAccountTooltip(
+  session: Pick<WorkSession, "poolAccount" | "deviceName" | "runtime">,
+): string | null {
+  const a = session.poolAccount;
+  if (a === undefined) return null;
+  if (a === null) return `${RUNTIMES[session.runtime].label} uses its own sign-in on ${session.deviceName}`;
+  return `Pool account ${a.label} · on ${session.deviceName}`;
+}
+
+/** The quiet account chip of the session header (D-11); renders nothing without the field. */
+export function SessionAccountChip({
+  session,
+  compact = false,
+  className,
+}: {
+  session: Pick<WorkSession, "poolAccount" | "deviceName" | "runtime">;
+  /** Icon only below 1280 px (the wide header row is already full there); the tooltip keeps the label. */
+  compact?: boolean;
+  className?: string;
+}) {
+  const label = sessionAccountLabel(session);
+  const tooltip = sessionAccountTooltip(session);
+  if (label === null || tooltip === null) return null;
+  return (
+    <Tooltip content={tooltip}>
+      <span
+        data-testid="session-account"
+        className={cn(
+          "inline-flex h-6 min-w-0 max-w-[16rem] items-center gap-1 rounded-full bg-muted px-2 text-[12px] text-muted-foreground",
+          compact && "max-xl:w-6 max-xl:shrink-0 max-xl:justify-center max-xl:px-0",
+          className,
+        )}
+      >
+        <KeyRound aria-hidden className="size-3 shrink-0" />
+        <span aria-hidden className={cn("truncate", compact && "max-xl:hidden")}>
+          {label}
+        </span>
+        <span className="sr-only">{tooltip}</span>
+      </span>
+    </Tooltip>
   );
 }
 
@@ -640,6 +700,7 @@ function SessionHeader({
           ) : null}
         </nav>
         <div className="flex min-w-0 items-center gap-1.5 md:shrink-0">
+          {md ? <SessionAccountChip session={session} compact className="mr-0.5" /> : null}
           {md && session.fullAccess ? <FullAccessBadge /> : null}
           <VisibilityChip session={session} viewerId={me} canChange={canChangeVisibility} />
           <div className="flex items-center" data-testid="session-viewers">
@@ -708,6 +769,12 @@ function SessionHeader({
         </div>
       </div>
       {md ? null : title}
+      {/* Below 768 the account chip sits on its own line under the title, so it never squeezes it (07.18, D-11). */}
+      {md || session.poolAccount === undefined ? null : (
+        <div className="mt-1 flex min-w-0">
+          <SessionAccountChip session={session} className="max-w-full" />
+        </div>
+      )}
       {session.lastError && (session.status === "failed" || session.status === "idle") ? (
         <p className="mt-1 line-clamp-2 text-destructive text-xs">{session.lastError}</p>
       ) : null}
