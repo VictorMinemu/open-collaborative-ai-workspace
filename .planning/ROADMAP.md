@@ -412,14 +412,33 @@ OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 
 
 ### Phase 07.18: Subscription account pool: Work Zone (local Claude Code and Codex) and bots draw from an organization pool of Claude and ChatGPT accounts, with configurable distribution (failover on limit, round-robin, weighted, fill-first) (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** An organization keeps a pool of Claude and ChatGPT subscription accounts; Work Zone sessions (Claude Code and
+Codex on a device) and bots (OpenClaw) draw an account from it with a configurable distribution (failover = fill-first,
+round-robin, weighted), sticky per session; an account that hits its usage limit cools down until its reset and the
+turn continues on the next account (CONTEXT D-01 … D-14, ADR-0044)
+**Requirements**: POOL-01, POOL-02, POOL-03, POOL-04, POOL-05, POOL-06, POOL-07 (phase-local, defined in 07.18-01)
 **Depends on:** Phase 07
-**Plans:** 0 plans
+**Plans:** 17 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.18 to break down)
+- [ ] 07.18-01-PLAN.md — contracts (pool vocabulary, Device Link account fields and frames, switch event, cell pool) + phase hub
+- [ ] 07.18-02-PLAN.md — the one migration: pool accounts and policies, session/prompt/device columns, `pool_token` secret, RLS
+- [ ] 07.18-03-PLAN.md — ADR-0044 and the AGENTS.md row
+- [ ] 07.18-04-PLAN.md — pure selection (failover, round-robin, smooth WRR) and cooldown bounds (TDD)
+- [ ] 07.18-05-PLAN.md — `account-pool` API module: admin routes, sealed setup-tokens, audit, tenant isolation
+- [ ] 07.18-06-PLAN.md — daemon: Claude sessions on a pool token in memory, switch between turns, limit and usage signals
+- [ ] 07.18-07-PLAN.md — plugin: several ChatGPT profiles, per-profile sign-out, Claude token profiles, order in the cell
+- [ ] 07.18-08-PLAN.md — daemon: Codex account slots, device-code login, `accounts.sync`, `ocw-runtime account`
+- [ ] 07.18-09-PLAN.md — API tracer: a session starts on a pool account (token only in the sent frame), fallback, preview
+- [ ] 07.18-10-PLAN.md — API end to end: a limit cools the account and the same turn re-runs on the next one (≤ 3)
+- [ ] 07.18-11-PLAN.md — daemon: Codex under each slot's CODEX_HOME, slot switch with thread resume, limits and usage
+- [ ] 07.18-12-PLAN.md — web: session header account, switch line in the timeline, new-session account line
+- [ ] 07.18-13-PLAN.md — API: ChatGPT accounts on a service device (slot rows, device sign-in flow, sign-out)
+- [ ] 07.18-14-PLAN.md — API: bots draw from the pool (cell snapshot, sign-in per account, legacy adoption, order)
+- [ ] 07.18-15-PLAN.md — web: Settings › Account pool (D-10)
+- [ ] 07.18-16-PLAN.md — browser journey e2e (real daemon, fake runtime; fake cell), desktop and mobile, light and dark
+- [ ] 07.18-17-PLAN.md — admin docs, release notes draft, STATUS/DEMO, owner UAT checklist, phase gate
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
 
