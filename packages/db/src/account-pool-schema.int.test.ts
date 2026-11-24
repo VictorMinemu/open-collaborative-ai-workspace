@@ -327,3 +327,164 @@ describe("the session's account and the device cascade (07.18, PD-25)", () => {
     A.slotDevice = await device(A.id, A.user, "build server 2");
   });
 });
+
+describe("account pool checks and keys (07.18, D-01, D-03, PD-15, PD-25)", () => {
+  it("refuses every malformed account, each by its named check", async () => {
+    const secret = await poolSecret(A);
+    const token = { provider: "claude", kind: "token", secret_id: secret };
+    const slot = { provider: "chatgpt", kind: "device_slot", device_id: A.slotDevice, slot_id: randomUUID() };
+    const cell = {
+      provider: "chatgpt",
+      kind: "cell_profile",
+      cell_profile_id: `openai:pool-${randomUUID()}`,
+    };
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...token, secret_id: null }, "account_pool_accounts_shape_ck"],
+      [{ ...token, provider: "chatgpt" }, "account_pool_accounts_shape_ck"],
+      [{ ...token, device_id: A.slotDevice }, "account_pool_accounts_shape_ck"],
+      [{ ...token, cell_profile_id: "openai:x" }, "account_pool_accounts_shape_ck"],
+      [{ ...slot, slot_id: null }, "account_pool_accounts_shape_ck"],
+      [{ ...slot, device_id: null }, "account_pool_accounts_shape_ck"],
+      [{ ...slot, provider: "claude" }, "account_pool_accounts_shape_ck"],
+      [{ ...cell, cell_profile_id: null }, "account_pool_accounts_shape_ck"],
+      [{ ...cell, provider: "claude" }, "account_pool_accounts_shape_ck"],
+      [{ ...cell, cell_profile_id: "" }, "account_pool_accounts_cell_profile_id_ck"],
+      [{ ...cell, cell_profile_id: "p".repeat(121) }, "account_pool_accounts_cell_profile_id_ck"],
+      [{ ...token, weight: 0 }, "account_pool_accounts_weight_ck"],
+      [{ ...token, weight: 101 }, "account_pool_accounts_weight_ck"],
+      [{ ...token, priority: -1 }, "account_pool_accounts_priority_ck"],
+      [{ ...token, label: "" }, "account_pool_accounts_label_ck"],
+      [{ ...token, label: "l".repeat(121) }, "account_pool_accounts_label_ck"],
+      [{ ...token, plan_type: "p".repeat(65) }, "account_pool_accounts_plan_type_ck"],
+      [{ ...token, limit_reason: "quota" }, "account_pool_accounts_limit_reason_ck"],
+      [{ ...token, origin: "cli" }, "account_pool_accounts_origin_ck"],
+      [{ ...token, credential_state: "expired" }, "account_pool_accounts_credential_state_ck"],
+      [{ ...token, provider: "gemini" }, "account_pool_accounts_provider_ck"],
+      [{ ...token, kind: "api_key" }, "account_pool_accounts_kind_ck"],
+    ];
+    for (const [cols, constraint] of cases) await refused(account(A, cols), { constraint });
+    // The bounds themselves are accepted.
+    const ok = await account(A, { ...token, weight: 100, label: "l".repeat(120), plan_type: "p".repeat(64) });
+    const edge = await account(A, {
+      ...cell,
+      weight: 1,
+      cell_profile_id: "p".repeat(120),
+      limit_reason: "unknown",
+    });
+    const stored = await db.query(
+      "select count(*)::int as n from app.account_pool_accounts where id = any($1)",
+      [[ok, edge]],
+    );
+    expect(stored.rows[0].n).toBe(2);
+  });
+
+  it("accepts a removed token without its secret (soft removal)", async () => {
+    const removed = await account(A, {
+      provider: "claude",
+      kind: "token",
+      secret_id: null,
+      removed_at: new Date().toISOString(),
+    });
+    const row = await db.query(
+      "select secret_id, removed_at is not null as removed from app.account_pool_accounts where id = $1",
+      [removed],
+    );
+    expect(row.rows).toEqual([{ secret_id: null, removed: true }]);
+  });
+
+  it("holds one live row per (device, slot) and per cell profile id; a removed row frees the key", async () => {
+    const slotId = randomUUID();
+    const first = await slotAccount(A, { slot_id: slotId });
+    await refused(slotAccount(A, { slot_id: slotId }), { constraint: "account_pool_accounts_slot_uq" });
+    await db.query("update app.account_pool_accounts set removed_at = now() where id = $1", [first]);
+    const second = await slotAccount(A, { slot_id: slotId });
+    expect(second).not.toBe(first);
+    // The same slot id on another device is its own key.
+    const otherDevice = await device(A.id, A.user, "desktop");
+    await slotAccount(A, { slot_id: slotId, device_id: otherDevice });
+
+    const profileId = `openai:pool-${randomUUID()}`;
+    const cell = await cellAccount(A, { cell_profile_id: profileId });
+    await refused(cellAccount(A, { cell_profile_id: profileId }), {
+      constraint: "account_pool_accounts_profile_uq",
+    });
+    await db.query("update app.account_pool_accounts set removed_at = now() where id = $1", [cell]);
+    await cellAccount(A, { cell_profile_id: profileId });
+    // Another organization's cell may hold the same profile id.
+    await cellAccount(B, { cell_profile_id: profileId });
+  });
+
+  it("stores a pool_token secret; deleting it unlinks the removed account and keeps its organization", async () => {
+    const secret = await poolSecret(A);
+    const acc = await account(A, { provider: "claude", kind: "token", secret_id: secret });
+    // A live token must keep its secret: the shape check refuses the unlink, so the account is removed first.
+    await refused(db.query("delete from app.secrets where id = $1", [secret]), {
+      constraint: "account_pool_accounts_shape_ck",
+    });
+    await db.query("update app.account_pool_accounts set removed_at = now() where id = $1", [acc]);
+    await db.query("delete from app.secrets where id = $1", [secret]);
+    const row = await db.query(
+      "select organization_id, secret_id from app.account_pool_accounts where id = $1",
+      [acc],
+    );
+    expect(row.rows).toEqual([{ organization_id: A.id, secret_id: null }]);
+    await refused(
+      db.query(
+        "insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag) values ($1, 'k', 'pool_key', 'c', 'i', 't')",
+        [A.id],
+      ),
+      { constraint: "secrets_kind_check" },
+    );
+  });
+
+  it("refuses references into another organization: its device, its secret, its account", async () => {
+    // Composite keys carry the organization (FKs bypass RLS).
+    await refused(slotAccount(A, { device_id: B.slotDevice }), {
+      constraint: "account_pool_accounts_device_fk",
+    });
+    const bSecret = await poolSecret(B);
+    await refused(account(A, { provider: "claude", kind: "token", secret_id: bSecret }), {
+      constraint: "account_pool_accounts_secret_fk",
+    });
+    const bAccount = await tokenAccount(B);
+    await refused(
+      db.query("update app.work_sessions set pool_account_id = $2 where id = $1", [A.session, bAccount]),
+      { constraint: "work_sessions_pool_account_fk" },
+    );
+  });
+
+  it("bounds the prompt's account switches, the device's pool version and the policy's strategy and scope", async () => {
+    const prompt = await db.query(
+      "insert into app.work_prompts (organization_id, work_session_id, author_user_id, body, position) values ($1, $2, $3, 'Fix the build', 1) returning id, account_switches",
+      [A.id, A.session, A.user],
+    );
+    expect(prompt.rows[0].account_switches).toBe(0);
+    const promptId = prompt.rows[0].id as string;
+    for (const n of [-1, 4])
+      await refused(
+        db.query("update app.work_prompts set account_switches = $2 where id = $1", [promptId, n]),
+        { constraint: "work_prompts_account_switches_ck" },
+      );
+    await db.query("update app.work_prompts set account_switches = 3 where id = $1", [promptId]);
+
+    const dev = await db.query("select account_pool_version from app.devices where id = $1", [A.device]);
+    expect(dev.rows).toEqual([{ account_pool_version: null }]);
+    for (const v of [0, 101])
+      await refused(
+        db.query("update app.devices set account_pool_version = $2 where id = $1", [A.device, v]),
+        { constraint: "devices_account_pool_version_ck" },
+      );
+    await db.query("update app.devices set account_pool_version = 1 where id = $1", [A.device]);
+
+    const policy = (cols: Record<string, string>) => {
+      const set = Object.entries({ organization_id: B.id, provider: "claude", ...cols });
+      return db.query(
+        `insert into app.account_pool_policies (${set.map(([k]) => k).join(", ")}) values (${set.map((_, i) => `$${i + 1}`).join(", ")})`,
+        set.map(([, v]) => v),
+      );
+    };
+    await refused(policy({ strategy: "random" }), { constraint: "account_pool_policies_strategy_ck" });
+    await refused(policy({ scope: "ai_chats" }), { constraint: "account_pool_policies_scope_ck" });
+    await refused(policy({ provider: "gemini" }), { constraint: "account_pool_policies_provider_ck" });
+  });
+});

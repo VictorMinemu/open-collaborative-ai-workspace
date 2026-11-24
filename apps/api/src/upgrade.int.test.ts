@@ -147,6 +147,7 @@ const HEAD_ONLY = [
   "20261113035112_bot_task_process_ends",
   "20261113175346_projects_git",
   "20261113182003_bot_policy_conversations",
+  "20261124150907_account_pool",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -970,6 +971,65 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       const queues = await pgbossQueues();
       expect(queues).toContain("bot_task.continue");
       expect(queues).toContain("bot_task.tick");
+    });
+
+    it("keeps every existing device, session and prompt as it was, on no pool account, opens an empty pool and accepts a pool token (Phase 07.18, D-01, D-03, PD-04, PD-15, PD-21)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const devices = await c.query(
+          "select id, name, platform, host_kind, account_pool_version from app.devices order by id",
+        );
+        expect(devices.rows).toEqual([
+          { id: N1_DEVICE, name: "laptop", platform: "darwin", host_kind: null, account_pool_version: null },
+        ]);
+        const sessions = await c.query(
+          "select id, title, device_id, created_by, pool_account_id from app.work_sessions order by id",
+        );
+        expect(sessions.rows).toEqual([
+          {
+            id: N1_SESSION,
+            title: "Fix the build",
+            device_id: N1_DEVICE,
+            created_by: ADA_ADMIN,
+            pool_account_id: null,
+          },
+        ]);
+        const prompts = await c.query(
+          "select id, body, author_user_id, position, account_switches from app.work_prompts order by id",
+        );
+        expect(prompts.rows).toEqual([
+          {
+            id: N1_PROMPT,
+            body: "Fix the build",
+            author_user_id: ADA_ADMIN,
+            position: 1,
+            account_switches: 0,
+          },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.account_pool_accounts) as accounts, (select count(*)::int from app.account_pool_policies) as policies",
+        );
+        expect(empty.rows).toEqual([{ accounts: 0, policies: 0 }]);
+        // The widened kind check takes a sealed pool token and its account (rolled back: the row counts the other cases
+        // read stay the dump's).
+        await c.query("begin");
+        try {
+          const secret = await c.query(
+            "insert into app.secrets (organization_id, name, kind, provider, ciphertext, iv, tag) values ($1, 'pool token', 'pool_token', 'claude', 'c', 'i', 't') returning id",
+            [ORG_A],
+          );
+          const account = await c.query(
+            "insert into app.account_pool_accounts (organization_id, provider, kind, label, secret_id) values ($1, 'claude', 'token', 'Max', $2)",
+            [ORG_A, secret.rows[0].id],
+          );
+          expect(account.rowCount).toBe(1);
+        } finally {
+          await c.query("rollback");
+        }
+      } finally {
+        await c.end();
+      }
     });
 
     it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {

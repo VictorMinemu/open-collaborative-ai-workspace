@@ -756,6 +756,25 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.bot_task_processes (organization_id, task_id, agent_id, process_id, event_id, deadline_at) values ($1, $2, $3, 'p-seed', $4, now() + interval '10 minutes')",
     [org, botTask, agent, taskEvent],
   );
+  // Phase 07.18 (D-01, D-03, PD-21): the account pool: a Claude token account (its token only a sealed `pool_token`
+  // secret), a ChatGPT sign-in slot on the device, and the Claude strategy.
+  const poolSecret = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, provider, ciphertext, iv, tag) values ($1, $2, 'pool token', 'pool_token', 'claude', 'c', 'i', 't')",
+    [poolSecret, org],
+  );
+  await q(
+    "insert into app.account_pool_accounts (organization_id, provider, kind, label, secret_id) values ($1, 'claude', 'token', 'Max', $2)",
+    [org, poolSecret],
+  );
+  await q(
+    "insert into app.account_pool_accounts (organization_id, provider, kind, label, device_id, slot_id) values ($1, 'chatgpt', 'device_slot', 'Plus', $2, $3)",
+    [org, device, randomUUID()],
+  );
+  await q(
+    "insert into app.account_pool_policies (organization_id, provider, strategy) values ($1, 'claude', 'round_robin')",
+    [org],
+  );
 
   // Phase 07.17 (D-02, D-03): a fan-out automation posting to the channel, one Run now and the one item it opened, with
   // the channel's message as its root (the item's key is stored only as a sha256 hex).
@@ -788,6 +807,9 @@ const BOT_FILE_TABLES = ["app.bot_work_session_files"] as const;
 
 /** Phase 07.17.1.1.2: a bot's long tasks and the background processes they wait for. */
 const BOT_TASK_TABLES = ["app.bot_tasks", "app.bot_task_processes"] as const;
+
+/** Phase 07.18: the subscription account pool and its strategies. */
+const ACCOUNT_POOL_TABLES = ["app.account_pool_accounts", "app.account_pool_policies"] as const;
 
 /** Phase 07.7: the agent-to-agent ledger (chains and their hops). */
 const AGENT_CHAIN_TABLES = ["app.agent_chains", "app.agent_chain_hops"] as const;
@@ -3195,6 +3217,25 @@ describe("tenant isolation (RLS)", () => {
   it("Phase 07.17.1.1.2: the bot task tables are org-scoped, forced, seeded, invisible across tenants and never truncated by the app role (D-01, E22)", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     for (const tbl of BOT_TASK_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      for (const org of [A, B]) {
+        const own = await inTenant(org, () => app.query(`select count(*)::int as n from ${tbl}`));
+        expect(own.rows[0].n, `${tbl} seeded for ${org}`).toBeGreaterThan(0);
+      }
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      await expect(
+        inTenant(A, () => app.query(`truncate ${tbl}`)),
+        `truncate ${tbl}`,
+      ).rejects.toThrow(/permission denied/);
+    }
+  });
+
+  it("Phase 07.18: the account pool tables are org-scoped, forced, seeded, invisible across tenants and never truncated by the app role (D-03, D-13)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of ACCOUNT_POOL_TABLES) {
       expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
       for (const org of [A, B]) {
         const own = await inTenant(org, () => app.query(`select count(*)::int as n from ${tbl}`));
