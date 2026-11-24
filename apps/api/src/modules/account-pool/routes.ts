@@ -3,6 +3,8 @@ import {
   AccountPoolPreview,
   AccountPoolView,
   AddClaudeTokenRequest,
+  ClaudeSignInStart,
+  CompleteClaudeSignInRequest,
   DeviceSignIn,
   Id,
   IdParams,
@@ -11,6 +13,7 @@ import {
   PoolPolicy,
   PoolProvider,
   ReorderPoolRequest,
+  StartClaudeSignInRequest,
   StartDeviceSignInRequest,
   UpdatePoolAccountRequest,
   UpdatePoolPolicyRequest,
@@ -24,6 +27,7 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, notFound } from "../../lib/errors";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { createPermissionService } from "../organization";
+import { createClaudeSignIns } from "./claude-sign-in";
 import { createDeviceSignIns } from "./device-sign-ins";
 import { previewAccountSources } from "./preview";
 import {
@@ -102,6 +106,7 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
     },
   };
   const signIns = createDeviceSignIns(core, deps.hub);
+  const claudeSignIns = createClaudeSignIns(core);
 
   /** A device of the caller's organization (RLS: another organization's is not found). */
   const requireDevice = async (req: FastifyRequest, deviceId: string) => {
@@ -157,6 +162,26 @@ export function registerAccountPoolRoutes(app: App, core: Core, deps: AccountPoo
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), (tx) => addClaudeToken(tx, ports, req.body));
+    },
+  );
+
+  // 07.18-19 R3.1: "Connect a Claude account", the `claude setup-token` flow run by the API (claude-sign-in.ts). Start
+  // answers Anthropic's page only; complete takes the pasted code and answers the account, never the token.
+  app.post(
+    "/account-pool/claude/sign-ins",
+    { ...admin, schema: { tags, body: StartClaudeSignInRequest, response: { 200: ClaudeSignInStart } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return claudeSignIns.start(tenant(req), req.body);
+    },
+  );
+
+  app.post(
+    "/account-pool/claude/sign-ins/complete",
+    { ...admin, schema: { tags, body: CompleteClaudeSignInRequest, response: { 200: PoolAccount } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return claudeSignIns.complete(tenant(req), ports, req.body);
     },
   );
 

@@ -197,9 +197,9 @@ describe("the two provider sections (Task 1)", () => {
   });
 });
 
-describe("Add Claude account (Task 1)", () => {
+describe("Add Claude account: paste a setup-token (Task 1; the fallback since R3.1)", () => {
   it("explains claude setup-token and asks for a label and a password-type token", () => {
-    const html = inDialog(<ClaudeAccountForm onDone={() => undefined} />);
+    const html = inDialog(<ClaudeAccountForm onDone={() => undefined} initial={{ mode: "paste" }} />);
     expect(SETUP_TOKEN_HELP).toBe(
       "Run `claude setup-token` in a terminal where you are signed in to the Claude account, then paste the token here.",
     );
@@ -219,7 +219,10 @@ describe("Add Claude account (Task 1)", () => {
     const key = `sk-ant-api03-${"a".repeat(40)}`;
     expect(claudeTokenError(key)).toBe("This is an API key. Add it in Settings › Models.");
     const html = inDialog(
-      <ClaudeAccountForm onDone={() => undefined} initial={{ label: "ana@acme", token: key }} />,
+      <ClaudeAccountForm
+        onDone={() => undefined}
+        initial={{ mode: "paste", label: "ana@acme", token: key }}
+      />,
     );
     const alert = html.match(/<p[^>]*role="alert"[^>]*>([^<]*)<\/p>/)?.[1] ?? "";
     expect(alert).toBe("This is an API key. Add it in Settings › Models.");
@@ -230,7 +233,7 @@ describe("Add Claude account (Task 1)", () => {
     const html = inDialog(
       <ClaudeAccountForm
         onDone={() => undefined}
-        initial={{ label: "ana@acme", token: `sk-ant-oat01-${"b".repeat(40)}` }}
+        initial={{ mode: "paste", label: "ana@acme", token: `sk-ant-oat01-${"b".repeat(40)}` }}
       />,
     );
     expect(tagsOf(html, "claude-account-save")[0]).not.toContain(` disabled=""`);
