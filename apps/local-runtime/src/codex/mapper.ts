@@ -1,7 +1,17 @@
 // Maps `codex app-server` notifications to the Unified Session Event Protocol. Pure and stateful
 // per session; tested against recorded fixtures. Output is NOT sanitised yet (the daemon does it).
 
-import type { SessionEvent, Usage } from "@ocw/contracts";
+import {
+  browserToolFromName,
+  canonicalBrowserTool,
+  originOf,
+  type SessionEvent,
+  type Usage,
+  WORK_BROWSER_MCP_SERVER,
+  WORK_BROWSER_REFUSAL_TEXT,
+  type WorkBrowserTool,
+} from "@ocw/contracts";
+import { INVALID_REQUEST_TEXT } from "../browser/tools.js";
 import { rawEvent, TOOL_OUTPUT_MAX_BYTES } from "../claude/mapper.js";
 import { truncateBytes } from "../sanitize.js";
 import type { AgentMessageDeltaNotification } from "./generated/v2/AgentMessageDeltaNotification.js";
@@ -54,7 +64,83 @@ const IGNORED: ReadonlySet<string> = new Set([
   "deprecationNotice",
 ]);
 
+// ------------------------------------------------------------------ the Work Zone browser (07.13 D-09, PD-11)
+//
+// An `ocw_browser` call (our shim, codex-runtime.ts) shows the action and the origin only, under its canonical name
+// (`ocw_browser_open`, as audit and approvals name it). The item's `arguments` carry what the model typed and its
+// `result` the page's text (and a screenshot's base64): neither is copied into an event (Pitfall 2). The completed
+// summary is the result's first text line, which the manager writes as the summary, and only when it reads like one.
+
+type McpItem = Extract<ThreadItem, { type: "mcpToolCall" }>;
+
+/** The item when it is an `ocw_browser` call, else null (not a type guard: other MCP items keep their own path). */
+const browserItem = (item: ThreadItem): McpItem | null =>
+  item.type === "mcpToolCall" && item.server === WORK_BROWSER_MCP_SERVER ? item : null;
+
+/** What a browser call is doing while it runs (no element, no typed text, no path or query). */
+const BROWSER_STARTED: Readonly<Record<Exclude<WorkBrowserTool, "open">, string>> = {
+  snapshot: "Reading the page",
+  act: "Acting on the page",
+  screenshot: "Taking a screenshot",
+  wait: "Waiting on the page",
+  close: "Closing the browser",
+  signin: "Asking for a sign-in",
+};
+
+function browserName(item: McpItem): string {
+  const tool = browserToolFromName(item.tool);
+  return tool ? canonicalBrowserTool(tool) : WORK_BROWSER_MCP_SERVER;
+}
+
+function browserStartedSummary(item: McpItem): string {
+  const tool = browserToolFromName(item.tool);
+  if (tool === "open") {
+    const url = (item.arguments as { url?: unknown } | null)?.url;
+    const origin = typeof url === "string" ? originOf(url) : null;
+    return origin ? `Opening ${origin}` : "Opening a page";
+  }
+  return tool ? BROWSER_STARTED[tool] : "Using the browser";
+}
+
+const HOST_PORT = String.raw`(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?`;
+const ON_TARGET =
+  /^(?:Opened|Read|Clicked on|Typed on|Selected on|Pressed a key on|Scrolled|Acted on|Took a screenshot of|Waited on|Sign-in on) /;
+const SUMMARY_TARGET = new RegExp(`^(?:the page|${HOST_PORT})$`, "i");
+const FIXED_SUMMARIES: ReadonlySet<string> = new Set([
+  "Opened a page",
+  "Closed the browser",
+  "Sign-in",
+  `Refused: ${INVALID_REQUEST_TEXT}`,
+  ...Object.values(WORK_BROWSER_REFUSAL_TEXT).map((t) => `Refused: ${t}`),
+]);
+
+/** The manager's summary line (tools.ts `browserToolSummary`), or null for anything else. */
+export function browserSummaryLine(line: string): string | null {
+  if (FIXED_SUMMARIES.has(line)) return line;
+  const verb = line.match(ON_TARGET);
+  if (verb && SUMMARY_TARGET.test(line.slice(verb[0].length))) return line;
+  return null;
+}
+
+function browserCompletion(item: McpItem): { ok: boolean; summary: string } {
+  const name = browserName(item);
+  if (item.error !== null || item.status !== "completed") return { ok: false, summary: `${name} failed` };
+  const content = Array.isArray(item.result?.content) ? item.result.content : [];
+  const first = content.find(
+    (c): c is { type: "text"; text: string } =>
+      typeof c === "object" &&
+      c !== null &&
+      (c as { type?: unknown }).type === "text" &&
+      typeof (c as { text?: unknown }).text === "string",
+  );
+  const summary = first ? browserSummaryLine(first.text.split("\n")[0] ?? "") : null;
+  if (!summary) return { ok: true, summary: `${name} completed` };
+  return { ok: !summary.startsWith("Refused: "), summary };
+}
+
 export function toolNameForItem(item: ThreadItem): string | null {
+  const browser = browserItem(item);
+  if (browser) return browserName(browser);
   switch (item.type) {
     case "commandExecution":
       return "Bash";
@@ -81,6 +167,8 @@ function clip(s: string, max: number): string {
 }
 
 export function summarizeItem(item: ThreadItem): string {
+  const browser = browserItem(item);
+  if (browser) return browserStartedSummary(browser);
   switch (item.type) {
     case "commandExecution":
       return `$ ${clip(item.command, 300)}`;
@@ -104,6 +192,9 @@ export function summarizeItem(item: ThreadItem): string {
 }
 
 function completion(item: ThreadItem): { ok: boolean; summary: string; output?: string } {
+  // Never an `output` for the browser: the result is page content (PD-11, Pitfall 2).
+  const browser = browserItem(item);
+  if (browser) return browserCompletion(browser);
   switch (item.type) {
     case "commandExecution": {
       const ok = item.status === "completed" && (item.exitCode === null || item.exitCode === 0);

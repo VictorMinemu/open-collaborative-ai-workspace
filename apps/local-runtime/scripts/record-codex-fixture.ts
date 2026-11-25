@@ -34,8 +34,17 @@
 //                     (PATH omitted) and exits; a non-loopback `--fake-url` exits non-zero before anything starts.
 //                     `--approval-mode prompt` (control run) writes `…browser-mcp.prompt-mode.rpc.jsonl` instead: the
 //                     same turn with `default_tools_approval_mode = "prompt"`, so Codex asks through elicitations.
+//                     `--shim` (07.13-14) runs the same offline setup through the real adapter instead: CodexRuntime
+//                     starts the app-server with `codexBrowserArgs` (the real `ocw-runtime browser-mcp` shim), and a
+//                     local BrowserManager + control socket in the temp OCW home drive the pinned headless shell (the
+//                     test cache, never downloaded here) on a loopback fixture site. One turn calls `open`. With
+//                     `--check` nothing is written: it prints `check: Tool open said: <summary>` (the Codex
+//                     `Wall time … Output:` prefix and everything after the summary line cut) and the mapped tool
+//                     events (name, summary, whether an output was attached); without it, it writes
+//                     `…browser-mcp.shim.rpc.jsonl`.
 
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -44,10 +53,16 @@ import { fileURLToPath } from "node:url";
 import {
   normalizeSessionTitle,
   type PermissionMode,
+  type SessionBrowserGrant,
   type SessionEvent,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
 import { createFakeModelServer, type FakeModelRequest } from "../../../infra/fake-model/server.mjs";
+import { browsersRoot } from "../src/browser/install.js";
+import { BrowserManager } from "../src/browser/manager.js";
+import { CFT_VERSION } from "../src/browser/pins.js";
+import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "../src/browser/test-browser.js";
+import { startTestSite } from "../src/browser/test-site.js";
 import { listCodexModels } from "../src/codex/catalog.js";
 import {
   type AppServerProcess,
@@ -65,6 +80,7 @@ import {
   type JsonRpcRequest,
 } from "../src/codex/jsonrpc.js";
 import { generateCodexTitle } from "../src/codex/title.js";
+import { ControlSocketServer, controlSocketPath } from "../src/control-socket.js";
 import {
   isLoopbackUrl,
   makeOfflineDirs,
@@ -553,6 +569,173 @@ async function recordBrowserMcp(): Promise<void> {
   console.log(`wrote ${rpc.length} JSON-RPC messages -> ${String(placeholders(file, roots))}`);
 }
 
+/** The grant of the `--shim` session's turn: a person's, every rule at its default (PD-09). */
+const SHIM_GRANT: SessionBrowserGrant = {
+  allowed: true,
+  reason: "ok",
+  askerId: "00000000-0000-4000-8000-000000000001",
+  askerIsBot: false,
+  alwaysAsk: [],
+  whenTainted: [],
+  signinAllowed: false,
+};
+
+/**
+ * `print … said:` of the fake's reply as the check line: the Codex `Wall time: … Output:` prefix removed and the tool's
+ * answer cut after its summary (the shim's `open` answers `Signed in: …` and the page block after it).
+ */
+function shimCheckLines(finalText: string): string[] {
+  return finalText
+    .split("\n")
+    .filter((l) => l.startsWith("Tool "))
+    .map((l) =>
+      l
+        .replace(/^(Tool \S+ said: )Wall time: [\d.]+ seconds Output: /, "$1")
+        .replace(/ Signed in: .*$/, "")
+        .replace(/ \[tool-images:\d+\]$/, ""),
+    );
+}
+
+/**
+ * The browser-mcp scenario through the adapter and the real shim (07.13-14, `--shim`): offline as every browser-mcp
+ * run (temp homes, the loopback fake, no login), the real codex 0.172 app-server started by CodexRuntime with
+ * `codexBrowserArgs`, a BrowserManager + control socket in the temp OCW home, the pinned headless shell from the test
+ * cache on a loopback fixture site. `--check` writes nothing and prints the check line.
+ */
+async function recordBrowserShim(): Promise<void> {
+  if ((arg("approval-mode") ?? "approve") !== "approve") {
+    throw new Error("--shim always runs with default_tools_approval_mode = approve (codexBrowserArgs)");
+  }
+  const checkOnly = process.argv.includes("--check");
+  const run = await openOffline();
+  if (!run) return;
+  const executable = await testBrowser();
+  if (!executable) {
+    await run.close();
+    throw new Error(TEST_BROWSER_HINT);
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  const entry = resolve(here, "..", "bin", "ocw-runtime");
+  const repoRoot = resolve(here, "..", "..", "..");
+  const home = join(run.tmp, "ocw");
+  const repo = join(run.tmp, "repo");
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  await mkdir(repo, { recursive: true });
+  await writeFile(join(repo, "hello.txt"), "Hello from the fixture repo.\n");
+  execFileSync("git", ["init", "-q"], { cwd: repo, env: run.env });
+
+  const site = await startTestSite();
+  const browserEvents: SessionEvent[] = [];
+  const manager = new BrowserManager({
+    root: browsersRoot({ OCW_HOME: home }),
+    link: { send: () => undefined, sendBinary: () => false },
+    api: { put: async () => 404 },
+    optIn: () => true,
+    sandbox: () => testSandbox(),
+    emit: (_sid, ev) => browserEvents.push(ev),
+    browsers: {
+      installed: async () => ({ executable, version: CFT_VERSION }),
+      install: async () => {
+        throw new Error("the recorder never installs a browser");
+      },
+    },
+    childEntry: [entry],
+  });
+  const control = new ControlSocketServer(controlSocketPath(home), async (req) => {
+    if (req.cmd !== "browserCall") throw new Error("unsupported");
+    return manager.shimCall(req);
+  });
+  await control.listen();
+
+  const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({
+    spawnAppServer: offlineSpawn(run),
+    browserShim: { command: process.execPath, entry: [entry], home },
+    onRpcMessage: (dir, msg) => rpc.push({ dir, msg }),
+  });
+  const sid = randomUUID();
+  let failure: unknown = null;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    manager.onPrompt(sid, null, SHIM_GRANT);
+    let done: () => void = () => undefined;
+    const completed = new Promise<void>((ok) => {
+      done = ok;
+    });
+    await runtime.start(
+      { sessionId: sid, cwd: repo, permissionMode: "default", browser: manager.forSession(sid) },
+      (ev) => {
+        events.push(ev);
+        // Nothing in this turn needs an approval: anything asked is declined.
+        if (ev.type === "approval.requested") runtime.resolveApproval(sid, ev.approvalId, "deny");
+        if (ev.type === "prompt.completed") done();
+      },
+    );
+    manager.onPrompt(sid, "p1", SHIM_GRANT);
+    manager.onTurnStarted(sid, "p1");
+    await runtime.prompt(sid, {
+      promptId: "p1",
+      text: `[[call open ${JSON.stringify({ url: site.url("/") })}]]`,
+    });
+    await Promise.race([
+      completed,
+      new Promise<void>((_, no) => {
+        timer = setTimeout(
+          () => no(new Error("the browser-mcp --shim turn did not complete in time")),
+          BROWSER_MCP_TURN_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } catch (err) {
+    failure = err;
+  } finally {
+    clearTimeout(timer);
+    await runtime.stopAll();
+    await manager.stopAll();
+    await control.close();
+    await site.close();
+  }
+
+  const roots: Array<[string, string]> = [
+    [run.realTmp, "<tmp>"],
+    [run.tmp, "<tmp>"],
+    [entry, "<entry>"],
+    [process.execPath, "<node>"],
+    [repoRoot, "<repo>"],
+    [site.origin, "http://127.0.0.1:<site>"],
+    [site.host, "127.0.0.1:<site>"],
+  ];
+  if (process.env.HOME) roots.push([process.env.HOME, "<home>"]);
+  roots.sort((a, b) => b[0].length - a[0].length);
+  if (!failure && !checkOnly) {
+    const file = join(fixtureDir(), `codex-${run.version}.browser-mcp.shim.rpc.jsonl`);
+    await mkdir(fixtureDir(), { recursive: true });
+    await writeFile(file, `${rpc.map((r) => JSON.stringify(placeholders(r, roots))).join("\n")}\n`);
+    console.log(`wrote ${rpc.length} JSON-RPC messages -> ${String(placeholders(file, roots))}`);
+  }
+  await run.close();
+
+  const finalText = [...events].reverse().find((e) => e.type === "assistant.message");
+  const tools = events
+    .filter((e) => e.type === "tool.started" || e.type === "tool.completed")
+    .map((e) =>
+      e.type === "tool.started"
+        ? `${e.type} ${e.name}: ${e.summary}`
+        : `${e.type} ${e.ok ? "ok" : "failed"}: ${e.summary}${e.output !== undefined ? " (with output)" : ""}`,
+    );
+  console.log(`tool events: ${JSON.stringify(tools)}`);
+  console.log(`browser events: ${JSON.stringify(browserEvents.map((e) => e.type))}`);
+  for (const line of shimCheckLines(finalText?.type === "assistant.message" ? finalText.text : "")) {
+    console.log(`check: ${line}`);
+  }
+  if (failure) throw failure;
+  // PD-11: the timeline shows summaries only; a browser result never rides an event.
+  if (events.some((e) => e.type === "tool.completed" && e.output !== undefined)) {
+    throw new Error("a browser tool event carried the tool's output");
+  }
+}
+
 /** Drops the notifications that only describe a personal Codex config (see PERSONAL). */
 const notPersonal = (r: { msg: unknown }) =>
   !PERSONAL.test(String((r.msg as { method?: unknown }).method ?? ""));
@@ -687,7 +870,9 @@ async function recordOffline(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  if (scenario === "browser-mcp") return recordBrowserMcp();
+  if (scenario === "browser-mcp") {
+    return process.argv.includes("--shim") ? recordBrowserShim() : recordBrowserMcp();
+  }
   if (offline) return recordOffline();
   const info = await detectCodex(codexPath ? { codexPath } : {});
   if (!info.installed || !info.loggedIn) {
