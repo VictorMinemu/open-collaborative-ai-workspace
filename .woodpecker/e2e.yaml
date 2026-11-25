@@ -61,7 +61,7 @@ variables:
     OCW_E2E_SANDBOX: fake
     # 07.13-22 (PD-19): the pinned headless shell of the Work Zone browser journey, installed once per pins on the
     # shared cache volume by the install step (sha256-verified); each spec daemon links it into a root of its own.
-    OCW_E2E_BROWSERS_DIR: /home/ocw-ci/cache/ocw-e2e-browsers
+    OCW_E2E_BROWSERS_DIR: /home/ocw-ci/cache/e2e-browsers
 
 steps:
   - name: ci-image
@@ -88,7 +88,7 @@ steps:
       # 07.13-22 (PD-19): the device's pinned browser (Chrome for Testing headless shell), downloaded and verified
       # against the sha256 in apps/local-runtime/src/browser/pins.ts; a cache that holds the build answers at once.
       # One install at a time per cache (.install.lock), so both viewports may run this together.
-      - OCW_BROWSERS_DIR=/home/ocw-ci/cache/ocw-e2e-browsers apps/local-runtime/bin/ocw-runtime browser install
+      - OCW_BROWSERS_DIR=/home/ocw-ci/cache/e2e-browsers apps/local-runtime/bin/ocw-runtime browser install
 
   - name: e2e
     image: ocw-ci:${CI_COMMIT_SHA}
