@@ -503,9 +503,18 @@ export class BrowserManager {
   // ------------------------------------------------------------------ sign-ins (19: D-22, PD-15)
 
   /** A person took control: the page's site state is fingerprinted now (hex, in memory), for the hand back's `changed`. */
-  private onHeld(sessionId: string, leaseId: string): void {
+  private async onHeld(sessionId: string, leaseId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    // HI-03: the lease frame does not name its holder; the API grants it to the asker of the in-flight (newest
+    // dispatched) or last prompt. While a member's sign-in is loaded, the lease is applied only when every prompt that
+    // could be that one is the member's own; otherwise the input is cut off now and the page is re-sealed and closed
+    // before anyone can see or type into it (the API ends the lease on `closed`).
+    if (s.loaded && !this.onlyAskerIs(s, s.loaded.userId)) {
+      this.takeover.end(sessionId);
+      await this.closePage(s, "closed", s.turn?.promptId ?? null);
+      return;
+    }
     const child = s.child;
     const origin = s.origin;
     // The API lets only the asker of the running (or last) turn take control: what they type is theirs (D-25).
@@ -518,6 +527,20 @@ export class BrowserManager {
           )
         : Promise.resolve(null);
     s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * HI-03: true when `userId` is the only person the API could name as this session's asker now: the running (or last)
+   * turn's and every prompt this device was handed that has not started yet (a bot's prompt names nobody, so it fails).
+   */
+  private onlyAskerIs(s: SessionState, userId: string): boolean {
+    const current = s.turn ? s.turn.grant : undefined;
+    const now = s.turn ? (current && !current.askerIsBot ? current.askerId : null) : s.lastAskerId;
+    if (now !== userId) return false;
+    for (const pending of s.pendingGrants.values()) {
+      if (!pending.grant || pending.grant.askerIsBot || pending.grant.askerId !== userId) return false;
+    }
+    return true;
   }
 
   /**
@@ -594,7 +617,9 @@ export class BrowserManager {
     // HI-02: the turn object is this load's token. The member's turn may have ended (Stop completes the turn while the
     // child still loads the state), the opt-in gone off, or the session's child changed meanwhile: the late signed-in
     // page is then re-sealed and closed now, and never becomes the session's loaded sign-in.
-    if (s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child) {
+    // HI-03: a lease taken while the state loaded may be another person's: the page is not theirs to see.
+    const heldByOther = this.takeover.isPaused(s.id) && !this.onlyAskerIs(s, grant.askerId);
+    if (s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child || heldByOther) {
       await this.killChild(s, child, turn.promptId, loaded);
       this.event(s, turn.promptId, "signin_unloaded", origin);
       throw Object.assign(new Error("the turn ended"), { code: "not_allowed" });
