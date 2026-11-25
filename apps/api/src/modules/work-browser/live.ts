@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
+  type BrowserEndReason,
   BrowserHost,
   type LiveServerFrame,
   type LiveStateFrame,
+  WORK_BROWSER_AUDIT,
   WORK_BROWSER_LIMITS,
   type WorkBrowserFrame,
 } from "@ocw/contracts";
-import { workBrowsers, workSessions } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { auditEvents, orgMembers, type Tx, workBrowsers, workSessions } from "@ocw/db";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { markDecided } from "../../authz";
@@ -35,6 +37,20 @@ import { sessionFacts } from "../work-session";
  * device) and are fanned out through the bots' `FrameSlot` (latest wins: a slow viewer never buffers more than the
  * frame being written plus one waiting).
  *
+ * The privacy gate (D-20, D-27, PD-13) decides per viewer from the session's `work_browsers` row, polled every second
+ * while watched, and is asked again by `FrameSlot` at the moment a frame is written (a frame that waited while the page
+ * turned private is dropped):
+ * - **takeover:** while `lease_id` is set, frames go only to the socket registered for that lease
+ *   (`registerLeaseSocket`, 07.13-18); every other viewer, the holder's other sockets included, gets `private`
+ *   (`takeover`). A lease no socket here registered (held on another instance) lets nothing through here;
+ * - **member sign-in:** while `signin_user_id` is M, only M's sockets get frames; the others get `private`
+ *   (`member_session`) with M's display name, never the page's host;
+ * - **ended:** a closed row ends every viewer (`ended` with the reason of the page's last close) and closes 1000.
+ *
+ * Live re-authorization (ADR-0009): the gateway's invalidation bus (a device grant, a team project, a unit or a rule
+ * changed), session revocations and the per-socket session recheck re-decide `work_session.read`; a viewer that lost it
+ * gets `no_permission` and 4403, and no frame after. Every viewer gets its current state again every 10 s (heartbeat).
+ *
  * Nothing of a frame or an input is persisted, logged or put in a span: log lines carry ids, counts and error names.
  */
 
@@ -51,6 +67,8 @@ export interface WorkLiveDeps {
   sessionRecheckMs?: number;
   /** `browser.frames { on: true }` again this often while watched (default `watchPingMs`). */
   pingMs?: number;
+  /** Every viewer gets its current state again this often (default 10 s; `heartbeat()` is also callable). */
+  heartbeatMs?: number;
 }
 
 export interface WorkLiveStats {
@@ -63,6 +81,15 @@ export interface WorkLiveStats {
 export interface WorkLiveHub {
   /** A frame of `sessionId` from the device link of this instance (the module checked it runs on that device). */
   onFrame(organizationId: string, frame: WorkBrowserFrame): void;
+  /**
+   * 07.13-18: the socket `viewerId` (a viewer of `sessionId` on this instance) holds lease `leaseId`: while the row's
+   * `lease_id` is that lease, only this socket receives frames. False when no such viewer is here.
+   */
+  registerLeaseSocket(sessionId: string, leaseId: string, viewerId: string): boolean;
+  /** 07.13-18: this instance holds no socket for the session's lease any more. */
+  clearLeaseSocket(sessionId: string): void;
+  /** Sends every open viewer its current state frame again (the client's liveness signal). */
+  heartbeat(): void;
   stats(): WorkLiveStats;
   close(): Promise<void>;
 }
@@ -71,10 +98,29 @@ interface Decision {
   watch: boolean;
 }
 
+/** Why a Work Zone page ended, as a viewer is told (`closed_by_bot`, `kill_switch` and `module_off` are the bots'). */
+type WorkEndReason = Extract<BrowserEndReason, "idle" | "crashed" | "access_lost" | "takeover_abandoned">;
+const END_REASONS: readonly string[] = ["idle", "crashed", "access_lost", "takeover_abandoned"];
+
+/** The session's page row as the gate reads it: states and ids only. */
+interface PageRow {
+  state: "open" | "closed";
+  origin: string | null;
+  leaseId: string | null;
+  controllerUserId: string | null;
+  signinUserId: string | null;
+}
+
 /** The session and its page as the hub reads them (system, the session's tenant): ids, origin and states only. */
 interface View {
   deviceId: string;
-  page: { state: "open" | "closed"; origin: string | null } | null;
+  page: PageRow | null;
+  /** The signed-in member's display name (`member_session`). */
+  memberName: string | null;
+  /** The lease holder's display name (`takeover`). */
+  controllerName: string | null;
+  /** The reason of the page's last close, when the row is closed. */
+  endReason: WorkEndReason | null;
 }
 
 interface Viewer {
@@ -106,6 +152,8 @@ interface Entry {
   ping: NodeJS.Timeout | null;
   /** The device the last `on: true` went to (the `on: false` goes there too). */
   pinged: string | null;
+  /** The socket here holding the page's lease (07.13-18), with the lease id it holds. */
+  lease: { leaseId: string; viewerId: string } | null;
 }
 
 const name = (err: unknown) => (err as Error | undefined)?.name ?? "Error";
@@ -143,12 +191,52 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         .limit(1);
       if (!session) return null;
       const [row] = await tx
-        .select({ state: workBrowsers.state, origin: workBrowsers.origin })
+        .select({
+          state: workBrowsers.state,
+          origin: workBrowsers.origin,
+          leaseId: workBrowsers.leaseId,
+          controllerUserId: workBrowsers.controllerUserId,
+          signinUserId: workBrowsers.signinUserId,
+        })
         .from(workBrowsers)
         .where(eq(workBrowsers.workSessionId, e.sessionId))
         .limit(1);
-      return { deviceId: session.deviceId, page: row ?? null };
+      const page = row ?? null;
+      const people = [page?.signinUserId, page?.controllerUserId].filter((x): x is string => !!x);
+      const names = people.length
+        ? await tx
+            .select({ userId: orgMembers.userId, name: orgMembers.displayName })
+            .from(orgMembers)
+            .where(inArray(orgMembers.userId, people))
+        : [];
+      const nameOf = (id: string | null | undefined) =>
+        id ? (names.find((n) => n.userId === id)?.name ?? null) : null;
+      return {
+        deviceId: session.deviceId,
+        page,
+        memberName: nameOf(page?.signinUserId),
+        controllerName: nameOf(page?.controllerUserId),
+        endReason: page?.state === "closed" ? await lastEndReason(tx, e.sessionId) : null,
+      };
     });
+  }
+
+  /** The `endReason` of the page's last `work_browser.closed` audit (a plain close is `idle`: the device's idle close). */
+  async function lastEndReason(tx: Tx, sessionId: string): Promise<WorkEndReason> {
+    const [last] = await tx
+      .select({ metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.resourceType, "work_session"),
+          eq(auditEvents.resourceId, sessionId),
+          eq(auditEvents.action, WORK_BROWSER_AUDIT.closed),
+        ),
+      )
+      .orderBy(desc(auditEvents.occurredAt))
+      .limit(1);
+    const reason = last?.metadata.endReason;
+    return typeof reason === "string" && END_REASONS.includes(reason) ? (reason as WorkEndReason) : "idle";
   }
 
   /** Re-reads the session and pushes the new state to every viewer (coalesced: at most one read per session). */
@@ -244,6 +332,48 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     const page = view.page;
     // No page yet: nothing private can be loaded in it (a sign-in and a lease live on the page's row).
     if (!page) return { frame: { ...base, state: "connecting" }, frames: true, close: null };
+    if (page.state === "closed") {
+      return {
+        frame: { ...base, state: "ended", endReason: view.endReason ?? "idle" },
+        frames: false,
+        close: LIVE_CLOSE.ended,
+      };
+    }
+    if (page.leaseId) {
+      const lease = v.entry.lease;
+      if (lease && lease.leaseId === page.leaseId && lease.viewerId === v.id) {
+        return {
+          frame: { ...base, ...hostOf(page.origin), state: "controlling", controller: "self" },
+          frames: true,
+          close: null,
+        };
+      }
+      // D-20: during a takeover only the controlling socket receives frames.
+      return {
+        frame: {
+          ...base,
+          state: "private",
+          privateReason: "takeover",
+          controller: page.controllerUserId === v.auth.userId ? "other_device" : "other",
+          ...(view.controllerName ? { memberName: view.controllerName.slice(0, 200) } : {}),
+        },
+        frames: false,
+        close: null,
+      };
+    }
+    if (page.signinUserId && page.signinUserId !== v.auth.userId) {
+      // D-27: a member's signed-in page is theirs alone; the others learn who, not where.
+      return {
+        frame: {
+          ...base,
+          state: "private",
+          privateReason: "member_session",
+          ...(view.memberName ? { memberName: view.memberName.slice(0, 200) } : {}),
+        },
+        frames: false,
+        close: null,
+      };
+    }
     return { frame: { ...base, ...hostOf(page.origin), state: "live" }, frames: true, close: null };
   }
 
@@ -322,6 +452,48 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     for (const v of e.viewers) if (mayReceive(v)) v.slot.offer(jpeg);
   }
 
+  // ---------------------------------------------------------------- re-authorization (shared subscriptions, once)
+
+  let shared: Promise<Array<() => Promise<void>>> | null = null;
+  const ensureShared = () => {
+    shared ??= Promise.all([
+      core.realtime.onRevocation((ev) => {
+        for (const e of entries.values()) {
+          for (const v of e.viewers) {
+            if (ev.sessionIds?.includes(v.auth.sessionId) || (ev.userId && ev.userId === v.auth.userId)) {
+              v.closed = true;
+              v.socket.close(LIVE_CLOSE.sessionExpired, "session revoked");
+            }
+          }
+        }
+      }),
+      core.realtime.onSubscriptionInvalidation((ev) => {
+        for (const e of entries.values()) {
+          if (e.orgId !== ev.organizationId) continue;
+          // A topic-scoped invalidation concerns this session only when it names its `ws:` stream.
+          if (ev.topics && !ev.topics.includes(`ws:${e.sessionId}`)) continue;
+          for (const v of e.viewers) if (!ev.userIds || ev.userIds.includes(v.auth.userId)) redecide(v);
+        }
+      }),
+    ]);
+    shared.catch(() => {
+      shared = null;
+    });
+    return shared;
+  };
+
+  /** The liveness signal: the last state each viewer was sent, again (no new decision, nothing else). */
+  function heartbeat(): void {
+    for (const e of entries.values()) {
+      for (const v of e.viewers) {
+        if (v.closed || !v.last.state || v.socket.readyState !== v.socket.OPEN) continue;
+        v.socket.send(v.last.state);
+      }
+    }
+  }
+  const beat = setInterval(heartbeat, deps.heartbeatMs ?? 10_000);
+  beat.unref();
+
   // ---------------------------------------------------------------- the route
 
   function entryFor(orgId: string, sessionId: string): Entry {
@@ -338,6 +510,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         refreshAgain: false,
         ping: null,
         pinged: null,
+        lease: null,
       };
       created.poll.unref();
       entries.set(key, created);
@@ -352,6 +525,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     v.slot.clear();
     const e = v.entry;
     e.viewers.delete(v);
+    if (e.lease?.viewerId === v.id) e.lease = null;
     if (e.viewers.size === 0) {
       clearInterval(e.poll);
       stopPing(e);
@@ -381,6 +555,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         if (!UUID.test(sessionId)) {
           return reply.code(404).send({ error: { code: "not_found", message: "Not found" } });
         }
+        await ensureShared();
         req.auth = verdict.auth;
       },
     },
@@ -449,6 +624,24 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       const e = entries.get(keyOf(organizationId, frame.sessionId));
       if (e) deliver(e, frame.jpeg);
     },
+    registerLeaseSocket(sessionId, leaseId, viewerId) {
+      for (const e of entries.values()) {
+        if (e.sessionId !== sessionId.toLowerCase()) continue;
+        if (![...e.viewers].some((v) => v.id === viewerId && !v.closed)) continue;
+        e.lease = { leaseId, viewerId };
+        for (const v of e.viewers) pushState(v);
+        return true;
+      }
+      return false;
+    },
+    clearLeaseSocket(sessionId) {
+      for (const e of entries.values()) {
+        if (e.sessionId !== sessionId.toLowerCase() || !e.lease) continue;
+        e.lease = null;
+        for (const v of e.viewers) pushState(v);
+      }
+    },
+    heartbeat,
     stats() {
       return {
         sessions: [...entries.values()].map((e) => ({
@@ -464,12 +657,15 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       };
     },
     async close() {
+      clearInterval(beat);
       for (const e of entries.values()) {
         clearInterval(e.poll);
         if (e.ping) clearInterval(e.ping);
         for (const v of e.viewers) if (v.recheck) clearInterval(v.recheck);
       }
       entries.clear();
+      const stops = await shared?.catch(() => []);
+      for (const stop of stops ?? []) await stop().catch(() => {});
     },
   };
 }
