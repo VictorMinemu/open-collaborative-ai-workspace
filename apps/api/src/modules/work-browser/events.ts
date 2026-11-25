@@ -37,7 +37,7 @@ async function applyBrowserEvent(core: Core, tx: Tx, device: DeviceRef, frame: B
     .for("update");
   if (!session || session.deviceId !== device.deviceId) return;
 
-  const audit = await applyKind(tx, device, frame);
+  const audit = await applyKind(core, tx, device, frame);
   if (!audit) return;
 
   const author = await promptAuthor(tx, session.id, frame.promptId);
@@ -74,14 +74,20 @@ type EndReason = "crashed" | "takeover_abandoned";
  * | `opened`, `navigated` | open on `origin` | `.opened` / `.navigated { origin }` |
  * | `acted` | unchanged | `.acted { origin, action }` |
  * | `refused` | unchanged | `.refused { origin, action?, refusal?, failure? }`, result `denied` |
- * | `closed` | closed, lease cleared | `.closed { origin }` |
- * | `crashed`, `takeover_abandoned` | closed, lease cleared | `.closed { origin, endReason }` |
+ * | `closed` | closed, lease cleared | `.closed { origin }` (+ `.takeover_ended { page_ended }` under a lease) |
+ * | `crashed`, `takeover_abandoned` | closed, lease cleared | `.closed { origin, endReason }` (idem) |
+ * | `takeover_abandoned` on a row the API already closed (07.13-18) | unchanged | none |
  * | `signin_loaded` | unchanged (the load already recorded it, 07.13-17) | none |
  * | `signin_unloaded` | `signin_id` / `signin_user_id` cleared (07.13-17, PD-17) | none |
  *
  * A close without an origin audits the page's last origin.
  */
-async function applyKind(tx: Tx, device: DeviceRef, frame: BrowserEventFrame): Promise<EventAudit | null> {
+async function applyKind(
+  core: Core,
+  tx: Tx,
+  device: DeviceRef,
+  frame: BrowserEventFrame,
+): Promise<EventAudit | null> {
   switch (frame.kind) {
     case "opened":
     case "navigated":
@@ -111,7 +117,12 @@ async function applyKind(tx: Tx, device: DeviceRef, frame: BrowserEventFrame): P
     case "closed":
     case "crashed":
     case "takeover_abandoned": {
+      const before = await pageBefore(tx, frame.sessionId);
+      // 07.13-18: the API closed the page itself when it abandoned the takeover (and audited it then): the device's
+      // echo changes nothing more.
+      if (frame.kind === "takeover_abandoned" && before?.state === "closed") return null;
       const last = await closeRow(tx, frame.sessionId);
+      if (before?.leaseId && before.controller) await leaseEndedWithPage(core, tx, device, frame, before);
       const endReason: EndReason | null = frame.kind === "closed" ? null : frame.kind;
       return {
         action: WORK_BROWSER_AUDIT.closed,
@@ -150,6 +161,46 @@ function metadataOf(fields: {
     if (value) out[key] = value;
   }
   return out;
+}
+
+/** The page's row before a close (the session row is locked by the caller): its state and lease, ids only. */
+async function pageBefore(tx: Tx, sessionId: string) {
+  const [row] = await tx
+    .select({
+      state: workBrowsers.state,
+      origin: workBrowsers.origin,
+      leaseId: workBrowsers.leaseId,
+      controller: workBrowsers.controllerUserId,
+    })
+    .from(workBrowsers)
+    .where(eq(workBrowsers.workSessionId, sessionId))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * 07.13-18 (D-28): a page that ended under a person's takeover lease ends the lease with it; audited
+ * `work_browser.takeover_ended { origin, reason: page_ended }` (the page's own end is no abandonment: it closed anyway).
+ */
+async function leaseEndedWithPage(
+  core: Core,
+  tx: Tx,
+  device: DeviceRef,
+  frame: BrowserEventFrame,
+  before: { origin: string | null; controller: string | null },
+): Promise<void> {
+  const origin = frame.origin ?? before.origin;
+  await core.audit.record(tx, {
+    action: WORK_BROWSER_AUDIT.takeover_ended,
+    resourceType: "work_session",
+    resourceId: frame.sessionId,
+    actorKind: "device",
+    actorId: device.deviceId,
+    deviceId: device.deviceId,
+    sessionId: frame.sessionId,
+    userId: before.controller,
+    metadata: { ...(origin ? { origin } : {}), reason: "page_ended", saved: false, abandoned: false },
+  });
 }
 
 /**

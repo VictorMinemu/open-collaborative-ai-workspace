@@ -4,6 +4,7 @@ import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { BROWSER_SWEEP_MS } from "../browser";
 import type { DeviceHub } from "../device";
+import { announceLease, DEAD_LEASE_GRACE_MS, sweepLapsedLeases, tellDeviceEnded } from "./lease";
 
 /**
  * The Work Zone browser sweep (Phase 07.13; D-23, D-28; the bots' `browser/sweep.ts` shape): every `BROWSER_SWEEP_MS`,
@@ -13,7 +14,10 @@ import type { DeviceHub } from "../device";
  * loaded is closed on its device (`browser.close { reason: revoked }`) and its loaded fields are cleared, as a revoke
  * does. The organizations with work come from `app.work_browser_sweep_organizations` (ids only); every change happens
  * in that organization's own user-less `withTenant` transaction. One API process sweeps at a time (advisory lock).
- * 07.13-18 adds the lapsed-lease step here.
+ *
+ * 07.13-18 (D-20, PD-14): the takeover leases that lapsed more than `DEAD_LEASE_GRACE_MS` ago with nobody to end them
+ * (the holding API instance died) are ended as `idle` (`sweepLapsedLeases`): after input the page is abandoned (closed
+ * on the row, `browser.lease { abandoned }` to the device), else released; every instance is told (ids only).
  */
 
 const PAGE = 200;
@@ -21,8 +25,8 @@ const PAGE = 200;
 const SWEEP_LOCK_KEY = 0x0c3a_1317;
 
 export interface WorkBrowserSweeper {
-  /** One pass at `nowMs` (tests pass a clock); how many sign-ins expired. */
-  runOnce(nowMs?: number): Promise<{ expired: number }>;
+  /** One pass at `nowMs` (tests pass a clock); how many sign-ins expired and how many lapsed leases ended. */
+  runOnce(nowMs?: number): Promise<{ expired: number; leases: number }>;
   start(): void;
   stop(): void;
 }
@@ -93,17 +97,19 @@ export function createWorkBrowserSweeper(
   hub: Pick<DeviceHub, "sendBrowserFrame">,
 ): WorkBrowserSweeper {
   let timer: NodeJS.Timeout | null = null;
-  let running: Promise<{ expired: number }> | null = null;
+  let running: Promise<{ expired: number; leases: number }> | null = null;
 
   async function organizations(nowMs: number): Promise<string[]> {
     const out: string[] = [];
     let after: string | null = null;
     const at = new Date(nowMs).toISOString();
+    // A lease counts once its grace passed (its holder's own live view ends it before that).
+    const lapsed = new Date(nowMs - DEAD_LEASE_GRACE_MS).toISOString();
     for (;;) {
       const rows: Array<{ organization_id: string }> = (
         await core.db.pool.query<{ organization_id: string }>(
           "select organization_id from app.work_browser_sweep_organizations($1, $2, $3, $4)",
-          [at, at, after, PAGE],
+          [lapsed, at, after, PAGE],
         )
       ).rows;
       out.push(...rows.map((r) => r.organization_id));
@@ -132,24 +138,32 @@ export function createWorkBrowserSweeper(
         });
       }
       const closed = rows.length > 0 ? await unlinkGonePages(tx, loaded) : [];
-      return { expired: rows.length, closed };
+      // 07.13-18: the lapsed leases of this organization's pages, in the same user-less transaction.
+      const leases = await sweepLapsedLeases(tx, core, nowMs);
+      return { expired: rows.length, closed, leases };
     });
   }
 
   async function sweep(nowMs: number) {
     const lock = await core.db.pool.connect();
     let expired = 0;
+    let leases = 0;
     try {
       const got = await lock.query<{ ok: boolean }>("select pg_try_advisory_lock($1) as ok", [
         SWEEP_LOCK_KEY,
       ]);
-      if (!got.rows[0]?.ok) return { expired };
+      if (!got.rows[0]?.ok) return { expired, leases };
       try {
         for (const organizationId of await organizations(nowMs)) {
           try {
             const result = await purgeOrganization(organizationId, nowMs);
             expired += result.expired;
+            leases += result.leases.length;
             await closePages(hub, result.closed);
+            for (const ended of result.leases) {
+              await tellDeviceEnded(hub, ended);
+              await announceLease(core.bus, organizationId, ended.sessionId);
+            }
           } catch (err) {
             core.log.warn(
               { organizationId, error: (err as Error | undefined)?.name },
@@ -163,7 +177,7 @@ export function createWorkBrowserSweeper(
     } finally {
       lock.release();
     }
-    return { expired };
+    return { expired, leases };
   }
 
   function runOnce(nowMs = Date.now()) {

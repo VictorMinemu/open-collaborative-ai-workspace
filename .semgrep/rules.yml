@@ -182,9 +182,11 @@ rules:
     languages: [typescript]
     severity: ERROR
     message: >-
-      What a person types while controlling a bot's browser is never logged (07.8 D-07, P-10, ADR-0029): a live input
-      frame, a live client frame, a sandboxd input batch, their `text`, `key`, `events` or `inputs` fields, or the web's
-      DOM input (`data`, `value`, `clipboardData`) must not reach a logger. Log the context id and an error name only.
+      What a person types while controlling a bot's browser or a Work Zone session's browser is never logged (07.8 D-07,
+      P-10, ADR-0029; 07.13 D-20, D-33): a live input frame, a live client frame (the bots' or the Work Zone's), a
+      sandboxd input batch, a Device Link `browser.input` frame, their `text`, `key`, `events` or `inputs` fields, or
+      the web's DOM input (`data`, `value`, `clipboardData`) must not reach a logger. Log the context or session id and
+      an error name only.
     patterns:
       - pattern-either:
           - patterns:
@@ -215,7 +217,7 @@ rules:
                       ...
               - metavariable-regex:
                   metavariable: $T
-                  regex: ^(LiveInputFrame|LiveClientFrame|SandboxdContextInput)(\[\])?$
+                  regex: ^(LiveInputFrame|LiveClientFrame|SandboxdContextInput|WorkLiveClientFrame|BrowserInputFrame)(\[\])?$
               - pattern: $F
           - pattern: "{..., text, ...}"
           - pattern: "{..., key, ...}"
@@ -240,6 +242,9 @@ rules:
         - /apps/sandboxd/src/server.ts
         # 07.8-22: the web live view (the input mappers, the socket and the frame that captures the keyboard).
         - /apps/web/components/browser/
+        # 07.13-18: the Work Zone browser: the API's live socket and lease, and the device's browser (takeover input).
+        - /apps/api/src/modules/work-browser/
+        - /apps/local-runtime/src/browser/
       exclude:
         - "*.test.ts"
         - "*.test.tsx"

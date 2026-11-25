@@ -452,7 +452,7 @@ describe("07.13-17 Task 3: revoke closes a loaded page, and expired sign-ins are
     await loadInto(s, SWEPT_ORIGIN, aId, owenId);
     const kept = (await signinRows(owenId)).map((r) => r.id).filter((id) => id !== aId);
 
-    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1 });
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1, leases: 0 });
     expect(await signinById(aId)).toBeUndefined();
     expect(await signinById(bId)).toBeDefined();
     expect((await signinRows(owenId)).map((r) => r.id)).toEqual(kept);
@@ -473,7 +473,7 @@ describe("07.13-17 Task 3: revoke closes a loaded page, and expired sign-ins are
     });
     await eventually(async () => (await browserRow(s)).signin_user_id === null || undefined);
 
-    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 0 });
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 0, leases: 0 });
     expect(await audits("work_browser.signin_revoked", aId)).toHaveLength(1);
   });
 
@@ -502,7 +502,7 @@ describe("07.13-17 Task 3: revoke closes a loaded page, and expired sign-ins are
       new Date(now + 3600_000).toISOString(),
     ]);
     const before = await signinRows(owenId);
-    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1 });
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1, leases: 0 });
     expect(await signinById(bId)).toBeUndefined();
     expect(await signinRows(owenId)).toEqual(before);
     const inB = await su.query(
