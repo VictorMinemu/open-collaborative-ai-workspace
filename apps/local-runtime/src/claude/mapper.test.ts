@@ -517,7 +517,7 @@ describe("ClaudeEventMapper — the Work Zone browser tools (07.13-13)", () => {
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>)
       .filter((l) => typeof l.type === "string");
-    const events = run(lines.map(sdk)).map(sanitizeEvent);
+    const events = run(lines.map(sdk)).map((e) => sanitizeEvent(e, [FIXTURE_ROOT]));
     const json = JSON.stringify(events);
     const image = lines
       .flatMap(
