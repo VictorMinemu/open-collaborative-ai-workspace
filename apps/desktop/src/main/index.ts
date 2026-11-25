@@ -64,8 +64,10 @@ import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launc
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
 import {
+  readDaemonBrowser,
   readDaemonFullAccess,
   readDaemonRuntimeUpdates,
+  writeDaemonBrowser,
   writeDaemonFullAccess,
   writeDaemonRuntimeUpdates,
 } from "./runtime-config";
@@ -97,6 +99,8 @@ let externalDaemon = false;
 let lastReport: DaemonStatusPayload | null = null;
 /** runtime.json's Full access opt-in as last read here (shown while the daemon is unreachable). */
 let localFullAccess = false;
+/** runtime.json's browser opt-in as last read here (07.13, D-10); the menu shows it, web content never sees it. */
+let localBrowser = false;
 /** runtime.json's runtime updates level as last read here (shown while the daemon is unreachable). */
 let localUpdatesLevel: DesktopRuntimeUpdatesLevel = "automatic";
 /** What the menu last showed about runtime updates: they are not part of DesktopStatus (web content never sees them). */
@@ -149,6 +153,7 @@ function spawnDaemon(): ChildProcess {
     token: store.token(),
     apiUrl: store.config.apiUrl,
     electronAsNode: cmd.electronAsNode,
+    appVersion: app.getVersion(),
   });
   const out = openDaemonLog();
   try {
@@ -593,6 +598,80 @@ async function setFullAccess(on: boolean): Promise<void> {
   refreshChrome();
 }
 
+// 07.13 (D-10, PD-27): what the owner allows, in plain words, before the browser is turned on.
+const BROWSER_WARNING =
+  "Agents in Work Zone sessions on this computer can open web pages, your localhost included, in a separate browser " +
+  "with its own empty profile. Your own browser and its cookies are never used.";
+
+/** `OCW_ALLOW_BROWSER` in this app's environment reaches the daemon it starts and wins over runtime.json (PD-27). */
+function browserEnv(): boolean | null {
+  if (externalDaemon) return null;
+  const raw = process.env.OCW_ALLOW_BROWSER;
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return null;
+}
+
+async function readLocalBrowser(): Promise<void> {
+  try {
+    localBrowser = await readDaemonBrowser(ocwHome);
+  } catch {
+    localBrowser = false; // a malformed runtime.json is reported when the owner tries to change it
+  }
+}
+
+/**
+ * The device owner's browser opt-in (07.13, D-10, PD-27), one of the three switches the browser needs (the
+ * organization's policy and a capable device are the others). Turning it on needs the native confirmation (Cancel is
+ * the default); turning it off is immediate. Written to runtime.json; the daemon reloads it at once. Main-process menu
+ * only: never reachable from web content or the preload API.
+ */
+async function setBrowser(on: boolean): Promise<void> {
+  if (on) {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Allow the browser", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: "Allow the browser on this computer?",
+      detail: BROWSER_WARNING,
+    });
+    if (response !== 0) {
+      refreshChrome(); // the checkbox flipped itself on click; put it back
+      return;
+    }
+  }
+  try {
+    await writeDaemonBrowser(ocwHome, on);
+    localBrowser = on;
+  } catch (err) {
+    dialog.showErrorBox(
+      "The browser setting was not changed",
+      err instanceof Error ? err.message : "The runtime configuration could not be written.",
+    );
+    refreshChrome();
+    return;
+  }
+  await controlRequest(socketPath, { cmd: "reloadConfig" }).catch(() => undefined); // daemon down: read at start
+  log(`browser ${on ? "allowed" : "turned off"} on this computer`);
+  await pollStatus();
+  refreshChrome();
+}
+
+function browserItem(): MenuItemConstructorOptions {
+  const fromEnv = browserEnv();
+  return {
+    label:
+      fromEnv === null
+        ? "Allow the browser on this computer…"
+        : "Allow the browser on this computer… (set by OCW_ALLOW_BROWSER)",
+    type: "checkbox",
+    checked: fromEnv ?? localBrowser,
+    enabled: fromEnv === null,
+    click: () => void setBrowser(!localBrowser),
+  };
+}
+
 async function readLocalUpdatesLevel(): Promise<void> {
   try {
     localUpdatesLevel = await readDaemonRuntimeUpdates(ocwHome);
@@ -685,6 +764,7 @@ function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
     },
     { type: "separator" },
     fullAccessItem(s),
+    browserItem(),
     ...runtimeUpdatesItems(),
   ];
 }
@@ -798,6 +878,7 @@ async function main(): Promise<void> {
   });
   await store.load();
   await readLocalFullAccess();
+  await readLocalBrowser();
   await readLocalUpdatesLevel();
 
   supervisor = new DaemonSupervisor({

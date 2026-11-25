@@ -1,6 +1,7 @@
 // The Local Runtime daemon's own config file (`<OCW_HOME>/runtime.json`) as far as the desktop app touches it: the
-// device owner's Full access opt-in (ADR-0012, P-12) and runtime updates level (07.11, D-02). Only the main process
-// writes it, from the Runtime menu (Full access after a native confirmation); the web origin and the preload API can
+// device owner's Full access opt-in (ADR-0012, P-12), runtime updates level (07.11, D-02) and browser opt-in (07.13,
+// D-10, PD-27). Only the main process writes it, from the Runtime menu (Full access and the browser after a native
+// confirmation); the web origin and the preload API can
 // never change it. The daemon picks the change up on the `reloadConfig` control request (no restart). No Electron
 // imports (unit-tested).
 
@@ -58,10 +59,22 @@ export async function writeDaemonRuntimeUpdates(
   await patchSection(ocwHome, "runtimeUpdates", { level: DesktopRuntimeUpdatesLevel.parse(level) });
 }
 
+/** The browser opt-in as runtime.json says it (false when the file or the key is missing, or the value is not true). */
+export async function readDaemonBrowser(ocwHome: string): Promise<boolean> {
+  const config = await readObject(ocwHome);
+  const browser = config.browser as { optIn?: unknown } | undefined;
+  return browser?.optIn === true;
+}
+
+/** Sets `browser.optIn` atomically (temp file + rename, mode 0600), keeping `browser.sandbox` and every other key. */
+export async function writeDaemonBrowser(ocwHome: string, on: boolean): Promise<void> {
+  await patchSection(ocwHome, "browser", { optIn: on === true });
+}
+
 /** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
 async function patchSection(
   ocwHome: string,
-  section: "fullAccess" | "runtimeUpdates",
+  section: "fullAccess" | "runtimeUpdates" | "browser",
   patch: Record<string, unknown>,
 ): Promise<void> {
   await mkdir(ocwHome, { recursive: true, mode: 0o700 });
