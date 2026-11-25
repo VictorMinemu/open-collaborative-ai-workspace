@@ -2,19 +2,27 @@
 // of the bots' brw agent ops it needs (`infra/sandbox/browser/agent.mjs`), on one page in one in-memory context, with
 // the same redaction, isolated world and masked screenshots from `@ocw/browser-engine`, reused unchanged.
 //
-// Changed from brw: no proxy (the device's own network), no downloads (the context refuses them), no site lock or
-// sign-in yet (19), one page per session (`open` on an open page navigates it), and every page is http(s): a URL with
+// Changed from brw: no proxy (the device's own network), no downloads (the context refuses them), one page per session
+// (`open` on an open page navigates it), and every page is http(s): a URL with
 // another scheme or a cloud metadata host is refused before navigating, and a route aborts every main-frame navigation
 // (a redirect, a link, a pop-up) that is not http(s) and every request to a metadata host. Chromium is launched by
 // playwright-core over a pipe (`--remote-debugging-pipe`): no debugging port, no listening socket. Chromium's sandbox is
 // on unless `resolveChromiumSandbox` allowed container mode, and a launch that finds no usable sandbox fails; it is never
 // retried without it.
 //
-// The caller never gets page script, DOM, HTML, cookies or an evaluated value: a page is seen only through
-// `serializeSnapshot` over the accessibility tree and through screenshots with masked fields. Errors are `AgentError`s
-// with fixed messages (never page text, a URL or a path); events name a page by its origin only.
+// The caller never gets page script, DOM, HTML or an evaluated value: a page is seen only through `serializeSnapshot`
+// over the accessibility tree and through screenshots with masked fields. Errors are `AgentError`s with fixed messages
+// (never page text, a URL or a path); events name a page by its origin only.
+//
+// Sign-ins (07.13-19, D-22, D-24, D-26, PD-15 … PD-17): the one exception to "never cookies" is `exportState`, which
+// answers the site's own storage state (`filterStateForSite`: cookies that domain-match the host, that host's origin
+// storage) to the parent, which uploads it to the API and keeps nothing. `openWithState` puts a member's state into a
+// NEW in-memory context (`newContext({ storageState })`, never a file) locked to its site: a top-level navigation to
+// another host is aborted and reported in the op's answer (`blocked`, an origin only) until the parent says
+// `allowCrossSite` after the member's own yes. `fingerprint` hashes the site's state (hex only) so the parent can tell
+// whether a hand back changed it.
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   type CdpSession,
   type MaskRect,
@@ -31,6 +39,7 @@ import {
   type Marks,
   serializeSnapshot,
 } from "@ocw/browser-engine/redact";
+import { filterStateForSite, type StorageState } from "@ocw/browser-engine/site";
 import { createWorld, replaceWorldScript } from "@ocw/browser-engine/world";
 import {
   type BrowserOrigin,
@@ -46,6 +55,7 @@ import {
   type WorkBrowserLaunchFailure,
   WorkBrowserOpenInput,
   type WorkBrowserRefusal,
+  WorkBrowserStorageState,
   WorkBrowserWaitInput,
 } from "@ocw/contracts";
 // Types only: playwright-core is loaded on the first launch, so the daemon bundle never links it at start (it is an
@@ -64,8 +74,9 @@ import { z } from "zod";
 // ---------------------------------------------------------------- ops, errors, events
 
 /**
- * The ops the child dispatches (`main.ts` reads only this list). Later plans add theirs here (19: `exportState`,
- * `lock`, `loadState`) together with their `runOp` arm. 15 added `frames` (the live screencast), `takeover` and `input`.
+ * The ops the child dispatches (`main.ts` reads only this list); a new op goes here together with its `runOp` arm. 15
+ * added `frames` (the live screencast), `takeover` and `input`; 19 the sign-in ops (`exportState`, `fingerprint`,
+ * `openWithState`, `lock`, `allowCrossSite`).
  */
 export const AGENT_OPS = [
   "open",
@@ -78,6 +89,11 @@ export const AGENT_OPS = [
   "frames",
   "takeover",
   "input",
+  "exportState",
+  "fingerprint",
+  "openWithState",
+  "lock",
+  "allowCrossSite",
 ] as const;
 export type AgentOp = (typeof AGENT_OPS)[number];
 
@@ -148,6 +164,29 @@ export interface ActResult {
   download: null;
   /** A navigation this action started that the route refused. */
   refused: "navigation_refused" | "metadata_refused" | null;
+  /**
+   * 19 (D-26): on a site-locked page, the origin of another host this action tried to navigate to. The navigation was
+   * aborted (the page stayed); `allowCrossSite` with that host replays it after the member said yes.
+   */
+  blocked: BrowserOrigin | null;
+}
+/** 19: the site's storage state (`siteState`) and its fingerprint. Never logged, never written to disk. */
+export interface ExportStateResult {
+  state: WorkBrowserStorageState;
+  fingerprint: string;
+}
+/** 19: the SHA-256 (hex) of the site's state now, or null when no page is open. */
+export interface FingerprintResult {
+  fingerprint: string | null;
+}
+/** 19: a page opened with a member's state, locked to `siteHost`; `fingerprint` is that state's as loaded. */
+export interface OpenWithStateResult extends OpenResult {
+  fingerprint: string;
+}
+/** 19: an allowed cross-site navigation (replayed when it was the last one blocked). */
+export interface AllowCrossSiteResult {
+  host: string;
+  navigated: boolean;
 }
 export interface WaitResult {
   ok: boolean;
@@ -194,6 +233,19 @@ export interface BrowserAgent {
   screenshot(input: OpInput): Promise<ScreenshotResult>;
   close(input: OpInput): Promise<{ closed: boolean }>;
   info(input: OpInput): Promise<InfoResult>;
+  /** 19 (D-22, PD-15): `{ host }` → the site's state; `too_large` over `storageStateMaxBytes`. */
+  exportState(input: OpInput): Promise<ExportStateResult>;
+  /** 19 (PD-15): `{ host }` → the hash of the site's state now (taken when a person takes control). */
+  fingerprint(input: OpInput): Promise<FingerprintResult>;
+  /**
+   * 19 (D-24, D-26, PD-16): `{ url, state, siteHost }` → closes the open context, opens a new in-memory one with `state`
+   * (service workers blocked, downloads refused), locked to `siteHost`, and navigates to `url` (on that host).
+   */
+  openWithState(input: OpInput): Promise<OpenWithStateResult>;
+  /** 19: `{ siteHost }` locks the open context to its site in place (idempotent; another host is refused). */
+  lock(input: OpInput): Promise<{ locked: boolean }>;
+  /** 19 (D-26): `{ host }` the member allowed on the locked page: allowed from now on, the blocked navigation replayed. */
+  allowCrossSite(input: OpInput): Promise<AllowCrossSiteResult>;
 }
 
 /** One op by name (`main.ts` calls only this, after `isAgentOp`). */
@@ -219,14 +271,77 @@ export function runOp(agent: BrowserAgent, op: AgentOp, input: OpInput): Promise
       return agent.takeover(input);
     case "input":
       return agent.input(input);
+    case "exportState":
+      return agent.exportState(input);
+    case "fingerprint":
+      return agent.fingerprint(input);
+    case "openWithState":
+      return agent.openWithState(input);
+    case "lock":
+      return agent.lock(input);
+    case "allowCrossSite":
+      return agent.allowCrossSite(input);
   }
 }
 
-/** The child's deadline for one op: `open` may launch Chromium first. */
+/** The child's deadline for one op: `open` and `openWithState` may launch Chromium first. */
 export function opDeadlineMs(op: AgentOp): number {
-  return op === "open"
+  return op === "open" || op === "openWithState"
     ? WORK_BROWSER_TIMEOUTS_MS.launch + WORK_BROWSER_TIMEOUTS_MS.op
     : WORK_BROWSER_TIMEOUTS_MS.op;
+}
+
+// ---------------------------------------------------------------- sign-in state (19)
+
+/** A host as `URL.host` writes it (`127.0.0.1:8080`, `github.com`), lower case; null for anything else. */
+function siteHostOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const h = value.toLowerCase();
+  return /^[a-z0-9.\-[\]:]{1,260}$/.test(h) ? h : null;
+}
+
+const byKey =
+  <T>(key: (v: T) => string) =>
+  (a: T, b: T): number => {
+    const ka = key(a);
+    const kb = key(b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  };
+
+/**
+ * The site's part of a storage state (`filterStateForSite`) in a fixed order (cookies by domain, path and name;
+ * origins by origin; storage items by name), so the same state always serialises, and so hashes, the same way.
+ */
+export function siteState(host: string, state: Partial<StorageState>): WorkBrowserStorageState {
+  const filtered = filterStateForSite(host, state);
+  const cookies = filtered.cookies
+    .map((c) => {
+      const { partitionKey } = c as { partitionKey?: unknown };
+      return {
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        expires: c.expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+        ...(typeof partitionKey === "string" ? { partitionKey } : {}),
+      };
+    })
+    .sort(byKey((c) => `${c.domain}\u0000${c.path}\u0000${c.name}`));
+  const origins = filtered.origins
+    .map((o) => ({
+      origin: o.origin,
+      localStorage: o.localStorage.map((i) => ({ name: i.name, value: i.value })).sort(byKey((i) => i.name)),
+    }))
+    .sort(byKey((o) => o.origin));
+  return { cookies, origins };
+}
+
+/** SHA-256 (hex) of a site state as `siteState` orders it. */
+export function stateFingerprint(state: WorkBrowserStorageState): string {
+  return createHash("sha256").update(JSON.stringify(state)).digest("hex");
 }
 
 // ---------------------------------------------------------------- launch
@@ -398,6 +513,16 @@ interface Session {
   buttons: number;
   /** The last focus hint sent (null: none yet in this takeover, so the next report always goes). */
   lastFocusSensitive: boolean | null;
+  /** 19 (D-26): the host (`URL.host`) the page is locked to, or null for a public page. */
+  siteLock: string | null;
+  /** 19: the page was opened with a member's state (`openWithState`). */
+  signedIn: boolean;
+  /** 19: other hosts the member allowed on this locked page. */
+  crossAllowed: Set<string>;
+  /** 19: the last top-level navigation the lock aborted (its URL stays here, in the child, never in an answer). */
+  blocked: { host: string; url: string } | null;
+  /** 19: the origin the lock blocked during the current op. */
+  opBlocked: BrowserOrigin | null;
 }
 
 /** The live screencast's settings (D-15): the bounds of every Work Zone frame. */
@@ -477,7 +602,16 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     }
     if (!metadata && !topLevel) return route.fallback();
     const refusal = urlRefusal(url);
-    if (!refusal) return route.fallback();
+    if (!refusal) {
+      // 19 (D-26): a locked page's top-level navigation to another host waits for the member's yes.
+      const host = hostOf(url);
+      if (host && lockedOut(s, host)) {
+        s.blocked = { host, url };
+        s.opBlocked = originOf(url);
+        return route.abort("aborted");
+      }
+      return route.fallback();
+    }
     if (req.isNavigationRequest() && topLevel) {
       s.refused = refusal;
       emit({ event: "refused", refusal });
@@ -486,13 +620,26 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     return route.abort("aborted");
   }
 
+  /** 19: the page is locked to its site and `host` is neither that site nor one the member allowed. */
+  function lockedOut(s: Session, host: string): boolean {
+    const h = host.toLowerCase();
+    return s.siteLock !== null && h !== s.siteLock && !s.crossAllowed.has(h);
+  }
+
+  /** A URL the page may not stay on: a refused one, or another host while the page is locked (19). */
+  function offLimits(s: Session, url: string): boolean {
+    if (urlRefusal(url) !== null) return true;
+    const host = hostOf(url);
+    return host !== null && lockedOut(s, host);
+  }
+
   /** Single-page policy (PD-24): a pop-up is never kept; an http(s) one is opened in the session's page instead. */
   async function onPopup(s: Session, popup: Page): Promise<void> {
     if (popup === s.page) return;
     await popup.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
     const url = popup.url();
     await popup.close().catch(() => {});
-    if (urlRefusal(url) !== null) return;
+    if (offLimits(s, url)) return;
     await serial(async () => {
       if (session !== s) return;
       await s.page.goto(url, { timeout: WORK_BROWSER_TIMEOUTS_MS.navigation }).catch(() => {});
@@ -506,10 +653,16 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
       s.navCount += 1;
       const url = frame.url();
       const origin = originOf(url);
-      if (origin && urlRefusal(url) === null) {
+      if (origin && !offLimits(s, url)) {
         s.lastGoodUrl = url;
         emit({ event: "navigated", origin });
       } else if (url !== "about:blank") {
+        // A redirect the route does not see took a locked page to another host (19): reported like a block.
+        const host = hostOf(url);
+        if (host && urlRefusal(url) === null && lockedOut(s, host)) {
+          s.blocked = { host, url };
+          s.opBlocked ??= origin;
+        }
         // An error page or another scheme committed outside an op's own check: go back before the next op runs.
         void serial(() => (session === s ? restore(s) : Promise.resolve()));
       }
@@ -541,14 +694,22 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     s.context.on("page", (p) => void onPopup(s, p));
   }
 
-  async function openSession(): Promise<Session> {
+  /**
+   * The session's one context and page, created on first use. 19: `signIn` opens it with a member's state, held in
+   * memory only (`newContext({ storageState })` with an object, never a file), and locked to that site.
+   */
+  async function openSession(signIn?: {
+    state: WorkBrowserStorageState;
+    siteHost: string;
+  }): Promise<Session> {
     if (session) return session;
     const b = await launch();
     const context = await b.newContext({
       viewport: VIEWPORT,
-      // A service worker could answer a navigation outside request routing.
+      // A service worker could answer a navigation outside request routing (and so outside the site lock).
       serviceWorkers: "block",
       acceptDownloads: false,
+      ...(signIn ? { storageState: signIn.state } : {}),
     });
     try {
       const page = await context.newPage();
@@ -568,6 +729,11 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         frames: null,
         buttons: 0,
         lastFocusSensitive: null,
+        siteLock: signIn ? signIn.siteHost : null,
+        signedIn: signIn !== undefined,
+        crossAllowed: new Set(),
+        blocked: null,
+        opBlocked: null,
       };
       await context.route("**/*", (route) => onRoute(s, route));
       await cdp.send("Page.enable");
@@ -589,13 +755,13 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
    */
   async function restore(s: Session): Promise<void> {
     const url = s.page.url();
-    if (url === "about:blank" || urlRefusal(url) === null) return;
+    if (url === "about:blank" || !offLimits(s, url)) return;
     const timeout = WORK_BROWSER_TIMEOUTS_MS.navigation;
     if (s.lastGoodUrl) {
       await s.page.goBack({ timeout }).catch(() => null);
-      if (urlRefusal(s.page.url()) === null) return;
+      if (!offLimits(s, s.page.url())) return;
       await s.page.goto(s.lastGoodUrl, { timeout }).catch(() => null);
-      if (urlRefusal(s.page.url()) === null) return;
+      if (!offLimits(s, s.page.url())) return;
     }
     await s.page.goto("about:blank", { timeout }).catch(() => null);
   }
@@ -993,7 +1159,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
           await restore(s);
           return fail(s.refused ?? "navigation_refused");
         }
-        return { ...(await pageState(s)), signedIn: false };
+        return { ...(await pageState(s)), signedIn: s.signedIn };
       });
     },
 
@@ -1015,6 +1181,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         let backendNodeId: number | null = null;
         if (body.ref !== undefined) backendNodeId = resolveRef(s, body.ref);
         s.refused = null;
+        s.opBlocked = null;
         const before = s.navCount;
         await perform(s, body, backendNodeId);
         await settle(s);
@@ -1024,6 +1191,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
           navigated: s.navCount > before,
           download: null,
           refused: s.refused,
+          blocked: s.opBlocked,
         };
       });
     },
@@ -1114,7 +1282,122 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         pages: session ? session.context.pages().length : 0,
       };
     },
+
+    exportState(input) {
+      return serial(async () => {
+        const s = current();
+        const host = exportHost(s, input.host);
+        const state = siteState(host, await s.context.storageState());
+        if (Buffer.byteLength(JSON.stringify(state), "utf8") > WORK_BROWSER_LIMITS.storageStateMaxBytes) {
+          return fail("too_large");
+        }
+        return { state, fingerprint: stateFingerprint(state) };
+      });
+    },
+
+    fingerprint(input) {
+      return serial(async () => {
+        const s = session;
+        if (!s) return { fingerprint: null };
+        const host = exportHost(s, input.host);
+        return { fingerprint: stateFingerprint(siteState(host, await s.context.storageState())) };
+      });
+    },
+
+    openWithState(input) {
+      const url = typeof input.url === "string" ? input.url : "";
+      const siteHost = siteHostOf(input.siteHost);
+      const parsed = WorkBrowserStorageState.safeParse(input.state);
+      const refusal = urlRefusal(url);
+      if (refusal) {
+        emit({ event: "refused", refusal });
+        return Promise.reject(new AgentError(refusal));
+      }
+      if (!siteHost || !parsed.success || hostOf(url)?.toLowerCase() !== siteHost) {
+        return Promise.reject(new AgentError("invalid_request"));
+      }
+      // Only the site's own part ever goes into the context, whatever the API sent.
+      const state = siteState(siteHost, parsed.data);
+      return serial(async () => {
+        await closeSession();
+        const s = await openSession({ state, siteHost });
+        try {
+          // The state as loaded: a later re-seal says whether it changed since (PD-17).
+          const fingerprint = stateFingerprint(siteState(siteHost, await s.context.storageState()));
+          s.refused = null;
+          s.opBlocked = null;
+          try {
+            await s.page.goto(url, { waitUntil: "load", timeout: WORK_BROWSER_TIMEOUTS_MS.navigation });
+          } catch (err) {
+            await settle(s);
+            if (s.refused) return fail(s.refused);
+            if (isTimeout(err)) return fail("timeout");
+            return fail("navigation_refused");
+          }
+          if (s.refused || offLimits(s, s.page.url())) return fail(s.refused ?? "navigation_refused");
+          return { ...(await pageState(s)), signedIn: true, fingerprint };
+        } catch (err) {
+          // A signed-in page that did not open is not kept: the member's state leaves memory with its context.
+          if (session === s) await closeSession();
+          throw err;
+        }
+      });
+    },
+
+    lock(input) {
+      const lock = siteHostOf(input.siteHost);
+      if (!lock) return Promise.reject(new AgentError("invalid_request", "siteHost is not a host."));
+      return serial(async () => {
+        const s = current();
+        if (s.siteLock && s.siteLock !== lock) {
+          return fail("invalid_request", "The page is locked to another site.");
+        }
+        s.siteLock = lock;
+        return { locked: true };
+      });
+    },
+
+    allowCrossSite(input) {
+      const host = siteHostOf(input.host);
+      if (!host) return Promise.reject(new AgentError("invalid_request"));
+      return serial(async () => {
+        const s = current();
+        if (!s.siteLock) return { host: (await pageState(s)).host, navigated: false };
+        s.crossAllowed.add(host);
+        const blocked = s.blocked;
+        s.blocked = null;
+        if (blocked?.host.toLowerCase() !== host) {
+          return { host: (await pageState(s)).host, navigated: false };
+        }
+        const before = s.navCount;
+        s.refused = null;
+        await s.page
+          .goto(blocked.url, { waitUntil: "load", timeout: WORK_BROWSER_TIMEOUTS_MS.navigation })
+          .catch(() => null);
+        await settle(s);
+        await restore(s);
+        return { host: (await pageState(s)).host, navigated: s.navCount > before };
+      });
+    },
   };
+
+  /** The host a state is exported for: the asked one, which must be the page's lock when the page is locked. */
+  function exportHost(s: Session, asked: unknown): string {
+    const host = siteHostOf(asked);
+    if (!host) return fail("invalid_request");
+    if (s.siteLock && s.siteLock !== host)
+      return fail("invalid_request", "The page is locked to another site.");
+    return host;
+  }
+
+  /** Ends the open context; the browser stays for the next one. */
+  async function closeSession(): Promise<void> {
+    const s = session;
+    session = null;
+    if (!s) return;
+    await stopFrames(s);
+    await s.context.close().catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------- helpers (brw's, unchanged)

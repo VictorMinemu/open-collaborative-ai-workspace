@@ -37,13 +37,11 @@ const APPROVAL_MS = WORK_BROWSER_LIMITS.hostApprovalMinutes * 60_000;
 const OP_MS = WORK_BROWSER_TIMEOUTS_MS.op + WORK_BROWSER_TIMEOUTS_MS.navigation;
 
 /**
- * Every tool but `signin` (written by 07.13-19, so its key is optional here): description, body and budget. `open`
- * gets the sign-in budget (16 min), which covers a host approval, the browser's launch and the navigation.
+ * Every tool: description, body and budget. `open` gets the sign-in budget (16 min), which covers a host approval, the
+ * browser's launch and the navigation; `signin` (19) waits up to 15 minutes for the person, so the device answers
+ * `signin_expired` itself before the adapter's timeout.
  */
-export const WORK_BROWSER_TOOL_TABLE: Readonly<
-  Record<Exclude<WorkBrowserTool, "signin">, WorkBrowserToolSpec> &
-    Partial<Record<"signin", WorkBrowserToolSpec>>
-> = {
+export const WORK_BROWSER_TOOL_TABLE: Readonly<Record<WorkBrowserTool, WorkBrowserToolSpec>> = {
   open: {
     description: `Open a web page (http or https) in this session's browser on the device; the device's own localhost works too. Opening a page replaces the one that is open. The answer names the page's host and whether a sign-in is loaded. ${UNTRUSTED}`,
     input: WORK_BROWSER_INPUTS.open,
@@ -73,6 +71,12 @@ export const WORK_BROWSER_TOOL_TABLE: Readonly<
     description: "Close this session's browser page. The next open starts a new one.",
     input: WORK_BROWSER_INPUTS.close,
     timeoutMs: APPROVAL_MS + OP_MS,
+  },
+  signin: {
+    description:
+      "Ask the person you work for to sign in to a site in this browser (host such as github.com, with a short reason they will read). The page opens on that site and they sign in themselves from the live view; this call waits until they saved the sign-in (at most 15 minutes) or said no. Never ask for a password, a code or any credential in chat. A saved sign-in is used only in their own turns of a session only they can see, and only on that site.",
+    input: WORK_BROWSER_INPUTS.signin,
+    timeoutMs: WORK_BROWSER_TIMEOUTS_MS.signin,
   },
 };
 

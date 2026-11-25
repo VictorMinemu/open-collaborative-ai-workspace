@@ -13,6 +13,8 @@ import {
   launchFailureOf,
   launchOptionsFor,
   metadataResolverRules,
+  siteState,
+  stateFingerprint,
   urlRefusal,
 } from "./ops.js";
 import { resolveChromiumSandbox } from "./sandbox.js";
@@ -447,3 +449,122 @@ describe.skipIf(!executable)("takeover input on a real Chromium (07.13-15 Task 2
     await agent.takeover({ on: false });
   }, 60_000);
 });
+
+describe("site states (07.13-19: P-09, PD-15)", () => {
+  const cookie = (name: string, domain: string) => ({
+    name,
+    value: `${name}-value`,
+    domain,
+    path: "/",
+    expires: -1,
+    httpOnly: false,
+    secure: false,
+    sameSite: "Lax" as const,
+  });
+
+  it("keeps the site's cookies and origin storage only, in a fixed order, with one fingerprint", () => {
+    const state = {
+      cookies: [cookie("b", "127.0.0.1"), cookie("idp", "accounts.example.com"), cookie("a", "127.0.0.1")],
+      origins: [
+        {
+          origin: "http://127.0.0.1:3000",
+          localStorage: [
+            { name: "z", value: "1" },
+            { name: "y", value: "2" },
+          ],
+        },
+        { origin: "http://localhost:3000", localStorage: [{ name: "x", value: "3" }] },
+      ],
+    };
+    const kept = siteState("127.0.0.1:3000", state);
+    expect(kept.cookies.map((c) => c.name)).toEqual(["a", "b"]);
+    expect(kept.origins).toEqual([
+      {
+        origin: "http://127.0.0.1:3000",
+        localStorage: [
+          { name: "y", value: "2" },
+          { name: "z", value: "1" },
+        ],
+      },
+    ]);
+    const reordered = { cookies: [...state.cookies].reverse(), origins: [...state.origins].reverse() };
+    expect(stateFingerprint(siteState("127.0.0.1:3000", reordered))).toBe(stateFingerprint(kept));
+    expect(stateFingerprint(kept)).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe.skipIf(!executable)("sign-in contexts on a real Chromium (07.13-19 Task 3: D-24, D-26)", () => {
+  let site: TestSite;
+  let agent: BrowserAgent;
+
+  beforeAll(async () => {
+    site = await startTestSite();
+    agent = createBrowserAgent({ executablePath: executable as string, chromiumSandbox: testSandbox() });
+  }, 120_000);
+
+  afterAll(async () => {
+    await agent?.close({});
+    await site?.close();
+  }, 60_000);
+
+  const sealed = () => ({
+    cookies: [
+      {
+        name: "fixture_session",
+        value: site.sessionCookie,
+        domain: "127.0.0.1",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: false,
+        sameSite: "Lax" as const,
+      },
+    ],
+    origins: [],
+  });
+
+  it("opens a member's state in a new locked context; other hosts are blocked until allowed", async () => {
+    const other = `http://localhost:${new URL(site.origin).port}/`;
+    await agent.open({ url: site.url("/") });
+    const opened = await agent.openWithState({
+      url: site.url(`/account?away=${encodeURIComponent(other)}`),
+      state: sealed(),
+      siteHost: site.host,
+    });
+    expect(opened).toMatchObject({ host: site.host, signedIn: true });
+    expect(opened.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    const snap = await agent.snapshot({});
+    expect(snap.text).toContain("Signed in as fixture-user");
+
+    const exported = await agent.exportState({ host: site.host });
+    expect(exported.state.cookies.map((c) => c.value)).toEqual([site.sessionCookie]);
+    expect(exported.fingerprint).toBe(opened.fingerprint);
+    expect((await agent.fingerprint({ host: site.host })).fingerprint).toBe(opened.fingerprint);
+    // A locked page exports for its own site only.
+    expect(await refusal(agent.exportState({ host: "localhost" }))).toBe("invalid_request");
+
+    const act = await agent.act({ action: "click", ref: refOf(snap.text, "link", "Away link") });
+    expect(act.blocked).toBe(originOfUrl(other));
+    expect((await agent.snapshot({})).text).toContain("Signed in as fixture-user");
+
+    const allowed = await agent.allowCrossSite({ host: new URL(other).host });
+    expect(allowed).toMatchObject({ host: new URL(other).host, navigated: true });
+    expect((await agent.snapshot({})).text).toContain("Fixture heading");
+  }, 60_000);
+
+  it("a plain open after it starts public again; a state for another host is refused", async () => {
+    await agent.close({});
+    await agent.open({ url: site.url("/account") });
+    expect((await agent.snapshot({})).text).toContain("Not signed in");
+    expect(
+      await refusal(
+        agent.openWithState({ url: site.url("/account"), state: sealed(), siteHost: "localhost" }),
+      ),
+    ).toBe("invalid_request");
+  }, 60_000);
+});
+
+function originOfUrl(url: string): string {
+  const u = new URL(url);
+  return `${u.protocol}//${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+}

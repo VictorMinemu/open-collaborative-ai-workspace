@@ -23,8 +23,11 @@ import {
   runOp,
 } from "./ops.js";
 
-/** One stdin line at most (a typed text and its JSON envelope fit far below). */
-const STDIN_LINE_MAX_BYTES = 1024 * 1024;
+/**
+ * One stdin line at most: a member's storage state at its cap (`openWithState`, 07.13-19) and its JSON envelope fit
+ * below. An answer is still one frame of at most 1 MiB, so a state exported back over that answers `too_large`.
+ */
+const STDIN_LINE_MAX_BYTES = 3 * 1024 * 1024;
 /** A live frame is dropped while this much is still unread on stdout (drop on slow, like brw). */
 const STDOUT_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 

@@ -3,6 +3,7 @@
 // form whose password field is `autocomplete=current-password`, a slow text, redirects and links to every scheme the
 // browser refuses, a pop-up and a download. Test-only (imported by *.test.ts files, never by runtime code).
 
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -17,6 +18,11 @@ export interface TestSite {
    * here (through the site, never through the agent).
    */
   lastLogin(): Readonly<Record<string, string>> | null;
+  /**
+   * 07.13-19: the value of the `fixture_session` cookie `POST /login` sets (a per-site canary, so a test can look for it
+   * on disk and in logs). `/account` reads as signed in for exactly this value.
+   */
+  sessionCookie: string;
   close(): Promise<void>;
 }
 
@@ -47,13 +53,17 @@ function send(res: ServerResponse, status: number, html: string, headers: Record
   res.end(html);
 }
 
-function signedIn(req: IncomingMessage): boolean {
-  return /(?:^|;\s*)fixture_session=signed-in(?:;|$)/.test(req.headers.cookie ?? "");
+function signedIn(state: SiteState, req: IncomingMessage): boolean {
+  return (req.headers.cookie ?? "").split(/;\s*/).includes(`fixture_session=${state.sessionCookie}`);
 }
 
 interface SiteState {
   lastLogin: Record<string, string> | null;
+  sessionCookie: string;
 }
+
+/** The value of the cookie `/other-site` sets for whatever host it is served on (07.13-19: never exported for another). */
+export const OTHER_SITE_COOKIE = "fixture-other-site-cookie-91d2";
 
 function handle(state: SiteState, req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -122,7 +132,7 @@ requestAnimationFrame(tick); })();</script>`,
           state.lastLogin = Object.fromEntries(new URLSearchParams(body));
           res.writeHead(302, {
             location: "/account",
-            "set-cookie": "fixture_session=signed-in; Path=/; HttpOnly; SameSite=Lax",
+            "set-cookie": `fixture_session=${state.sessionCookie}; Path=/; HttpOnly; SameSite=Lax`,
             "cache-control": "no-store",
           });
           res.end();
@@ -148,9 +158,31 @@ requestAnimationFrame(tick); })();</script>`,
         200,
         page(
           "Account",
-          signedIn(req)
-            ? "<h1>Signed in as fixture-user</h1>"
+          signedIn(state, req)
+            ? `<h1>Signed in as fixture-user</h1><a href="${escapeAttr(url.searchParams.get("away") ?? "/")}">Away link</a>`
             : '<h1>Not signed in</h1><a href="/login">Sign in</a>',
+        ),
+      );
+    case "/other-site":
+      // 07.13-19: opened on another host name of this server (`localhost:<port>`): a cookie and origin storage that
+      // belong to that host only, so a sign-in exported for `127.0.0.1:<port>` must leave both out.
+      return send(
+        res,
+        200,
+        page(
+          "Other site",
+          `<h1>Other site</h1><script>localStorage.setItem("other_site", "${OTHER_SITE_COOKIE}");</script>`,
+        ),
+        { "set-cookie": `other_site=${OTHER_SITE_COOKIE}; Path=/; SameSite=Lax` },
+      );
+    case "/big-storage":
+      // 07.13-19: origin storage over the 2 MiB sign-in cap (`storageStateMaxBytes`).
+      return send(
+        res,
+        200,
+        page(
+          "Big storage",
+          `<h1>Big storage</h1><script>localStorage.setItem("big", "x".repeat(2200 * 1024));</script>`,
         ),
       );
     case "/slow":
@@ -211,7 +243,7 @@ requestAnimationFrame(tick); })();</script>`,
 
 /** Starts the site on 127.0.0.1 and a random port. */
 export async function startTestSite(): Promise<TestSite> {
-  const state: SiteState = { lastLogin: null };
+  const state: SiteState = { lastLogin: null, sessionCookie: `signed-in-${randomUUID()}` };
   const server = createServer((req, res) => handle(state, req, res));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -224,6 +256,7 @@ export async function startTestSite(): Promise<TestSite> {
     host: `127.0.0.1:${port}`,
     url: (path) => `${origin}${path}`,
     lastLogin: () => state.lastLogin,
+    sessionCookie: state.sessionCookie,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

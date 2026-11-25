@@ -31,13 +31,16 @@ import {
   type WorkBrowserEventKind,
   WorkBrowserLaunchFailure,
   WorkBrowserRefusal,
+  type WorkBrowserSignInInput,
   type WorkBrowserTool,
 } from "@ocw/contracts";
 import { type Logger, silentLogger } from "../logger.js";
 import type {
   ActResult,
   AgentOp,
+  FingerprintResult,
   OpenResult,
+  OpenWithStateResult,
   ScreenshotResult,
   SnapshotResult,
   WaitResult,
@@ -47,9 +50,11 @@ import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js"
 import { type LiveClock, LiveFrames } from "./frames.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
 import { ensureShimToken, SHIM_TOKEN_FILE, verifyShimToken } from "./shim-token.js";
+import { reseal, SignInLoads, saveHandback, siteHostOfOrigin } from "./signin.js";
 import { Takeover } from "./takeover.js";
 import {
   browserToolSummary,
+  hostPortOf,
   invalidResult,
   pageContent,
   refusedResult,
@@ -126,6 +131,8 @@ export interface BrowserManagerOptions {
   idleMs?: number;
   /** Tests: the clock of the live frames' watch lapse (15). */
   liveClock?: LiveClock;
+  /** Tests: how long an `open` waits for the API's answer to a sign-in load (default `SIGNIN_LOAD_TIMEOUT_MS`, 19). */
+  signinLoadTimeoutMs?: number;
   log?: Logger;
 }
 
@@ -164,6 +171,30 @@ interface SessionState {
   chain: Promise<void>;
   /** The idle close of the open page (PD-24). */
   idle: NodeJS.Timeout | null;
+  /** 19 (PD-15): the lease held now and the fingerprint of the page's site state taken when it was taken. */
+  held: { leaseId: string; fingerprint: Promise<string | null> } | null;
+  /** 19 (D-21): `ocw_browser_signin` calls waiting for the person's saved sign-in, by origin. */
+  signinWaits: Set<{ origin: BrowserOrigin; saved: () => void }>;
+  /** 19 (D-24, PD-16): the member's sign-in loaded into the page now (ids and a hash only, never the state). */
+  loaded: LoadedSignIn | null;
+  /**
+   * 19 (D-25): the person who took control of this page (the asker of the turn running then, or of the last one):
+   * whatever they typed into it is theirs, so the page closes before anyone else's call.
+   */
+  memberPage: string | null;
+  /** The asker of the turn running now or of the last one (the API lets only them take control, PD-14). */
+  lastAskerId: string | null;
+  /** 19: origins the API had no sign-in to load for in this turn (asked once per turn). */
+  noSignIn: Set<BrowserOrigin>;
+}
+
+interface LoadedSignIn {
+  signinId: string;
+  /** The member whose turn loaded it: any other asker's call unloads it first. */
+  userId: string;
+  origin: BrowserOrigin;
+  /** The state's hash as loaded (the re-seal's `changed`). */
+  fingerprint: string;
 }
 
 /** At most this many prompts' grants are kept waiting for their turn (a steady queue is far smaller). */
@@ -267,9 +298,15 @@ export class BrowserManager {
   private readonly live: LiveFrames;
   /** Who holds which session's page (15): the agent waits, only the holder's input reaches it. */
   private readonly takeover: Takeover;
+  /** The `browser.signin.load` requests waiting for the API's answer (19). */
+  private readonly signins: SignInLoads;
 
   constructor(private readonly opts: BrowserManagerOptions) {
     this.log = opts.log ?? silentLogger;
+    this.signins = new SignInLoads({
+      send: (frame) => opts.link.send(frame),
+      ...(opts.signinLoadTimeoutMs !== undefined ? { timeoutMs: opts.signinLoadTimeoutMs } : {}),
+    });
     this.takeover = new Takeover({
       child: (sessionId) => {
         const child = this.sessions.get(sessionId)?.child ?? null;
@@ -284,6 +321,8 @@ export class BrowserManager {
         const s = this.sessions.get(sessionId);
         if (s) this.armIdle(s);
       },
+      held: (sessionId, leaseId) => this.onHeld(sessionId, leaseId),
+      save: (sessionId, leaseId, uploadId) => this.onSave(sessionId, leaseId, uploadId),
     });
     this.live = new LiveFrames({
       link: opts.link,
@@ -340,14 +379,20 @@ export class BrowserManager {
     const pending = s.pendingGrants.get(promptId);
     s.pendingGrants.delete(promptId);
     s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false };
+    s.lastAskerId = pending?.grant?.askerId ?? null;
+    s.noSignIn.clear();
   }
 
-  /** `prompt.completed`: calls outside a turn are refused, and an approval still waiting ends as `deny`. */
+  /**
+   * `prompt.completed`: calls outside a turn are refused, and an approval still waiting ends as `deny`. A loaded
+   * sign-in is re-sealed and unloaded now (D-32: the transcript keeps what the agent read, so it lives one turn).
+   */
   onTurnEnded(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.turn?.promptId !== promptId) return;
     s.turn = null;
     this.broker.cancelSession(sessionId);
+    if (s.loaded) void this.serial(s, () => this.closePage(s, "closed", promptId)).catch(() => {});
   }
 
   /** The device's opt-in may have changed (`reloadConfig`): `available` re-read; off closes every page now. */
@@ -366,6 +411,7 @@ export class BrowserManager {
     s.turn = null;
     this.live.stop(sessionId);
     this.broker.cancelSession(sessionId);
+    this.signins.cancelSession(sessionId);
     await this.closePage(s, "closed", null);
     if (UUID.test(sessionId)) {
       await rm(sessionRunDir(this.opts.root, sessionId), { recursive: true, force: true }).catch(() => {});
@@ -386,8 +432,9 @@ export class BrowserManager {
    * The six ephemeral `browser.*` server frames (never queued, never acked). Here: `browser.close` closes that
    * session's page (opt-in revoked, policy off, access lost, abandoned takeover), `browser.frames` streams the page
    * while someone watches (15), and `browser.lease`, `browser.input` and `browser.handback` go to the takeover (15:
-   * the agent's calls are paused while a person holds the page, and only that person's input reaches it). Sign-in
-   * states are 07.13-19's; they arrive here without error.
+   * the agent's calls are paused while a person holds the page, and only that person's input reaches it), and
+   * `browser.signin.state` answers one of this device's sign-in loads (19). A `browser.close { reason: "revoked" }`
+   * closes the page without re-sealing its sign-in.
    */
   async onServerFrame(frame: BrowserServerFrame): Promise<void> {
     switch (frame.type) {
@@ -395,9 +442,14 @@ export class BrowserManager {
         const s = this.sessions.get(frame.sessionId);
         if (!s) return;
         const kind = frame.reason === "takeover_abandoned" ? "takeover_abandoned" : "closed";
-        await this.closePage(s, kind, null);
+        // A revoked sign-in is gone at the API: its page closes without re-sealing it (19, PD-17).
+        await this.closePage(s, kind, null, { reseal: frame.reason !== "revoked" });
         return;
       }
+      case "browser.signin.state":
+        // The answer to one of this device's loads (by request id); any other is dropped.
+        this.signins.onState(frame);
+        return;
       case "browser.frames": {
         // Someone watches (re-sent every `watchPingMs`), or nobody does any more.
         if (!this.sessions.has(frame.sessionId)) return;
@@ -440,6 +492,204 @@ export class BrowserManager {
     return s.tools.call(req.tool, req.args);
   }
 
+  // ------------------------------------------------------------------ sign-ins (19: D-22, PD-15)
+
+  /** A person took control: the page's site state is fingerprinted now (hex, in memory), for the hand back's `changed`. */
+  private onHeld(sessionId: string, leaseId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    const child = s.child;
+    const origin = s.origin;
+    // The API lets only the asker of the running (or last) turn take control: what they type is theirs (D-25).
+    if (child && !s.loaded) s.memberPage = s.turn?.grant?.askerId ?? s.lastAskerId;
+    const fingerprint =
+      child?.state === "running" && origin
+        ? child.call("fingerprint", { host: siteHostOfOrigin(origin) }).then(
+            (r) => (r as FingerprintResult).fingerprint,
+            () => null,
+          )
+        : Promise.resolve(null);
+    s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * "Done, save my sign-in" (D-22, PD-15): the page's site state is exported and uploaded once (`signin.ts`). Sealed
+   * (201): the page holds the member's sign-in in a context that is not locked to its site, so it closes now; the next
+   * `open` in one of their turns loads the sealed state into a locked page (D-24, D-26). Too large: never sent, and
+   * reported as `refused too_large`.
+   */
+  private async onSave(sessionId: string, leaseId: string, uploadId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    const child = s?.child;
+    const origin = s?.origin ?? null;
+    if (!s || !child || child.state !== "running" || !origin) return;
+    const fingerprintAtHeld = s.held?.leaseId === leaseId ? await s.held.fingerprint : null;
+    const outcome = await saveHandback({
+      child,
+      api: this.opts.api,
+      sessionId: s.id,
+      uploadId,
+      origin,
+      fingerprintAtHeld,
+    });
+    const promptId = s.turn?.promptId ?? null;
+    if (outcome.kind === "refused" && outcome.refusal === "too_large") {
+      this.event(s, promptId, "refused", origin, { refusal: "too_large" });
+    }
+    if (outcome.kind !== "saved") return;
+    for (const wait of s.signinWaits) if (wait.origin === origin) wait.saved();
+    if (s.child === child) await this.closePage(s, "closed", promptId);
+  }
+
+  /**
+   * D-24, D-32, PD-16: an `open` in a turn whose grant allows sign-ins (a person's own turn in a session only they and
+   * the device owner can see) first asks the API for that person's sealed sign-in for the origin. With one, the page
+   * opens in a NEW in-memory context with that state, locked to its site (`openWithState`), and the API knows it is
+   * loaded (`signin_loaded`); without one (or no answer within 5 s) the caller opens a public page. The state is
+   * handed to the child and dropped: the manager keeps its id and hash only.
+   */
+  private async loadSignIn(
+    s: SessionState,
+    turn: TurnState,
+    child: ManagedChild,
+    url: string,
+    origin: BrowserOrigin,
+  ): Promise<OpenResult | null> {
+    const grant = turn.grant;
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || s.noSignIn.has(origin)) return null;
+    const answer = await this.signins.request(s.id, turn.promptId, origin);
+    if (!answer?.ok) {
+      s.noSignIn.add(origin);
+      return null;
+    }
+    // The turn may have ended, or the opt-in gone off, while the API answered: then nothing is loaded.
+    if (s.turn !== turn || !this.opts.optIn() || s.child !== child) {
+      this.event(s, turn.promptId, "signin_unloaded", origin);
+      return null;
+    }
+    try {
+      const res = (await child.call("openWithState", {
+        url,
+        state: answer.state,
+        siteHost: siteHostOfOrigin(origin),
+      })) as OpenWithStateResult;
+      s.loaded = { signinId: answer.signinId, userId: grant.askerId, origin, fingerprint: res.fingerprint };
+      s.memberPage = null;
+      this.event(s, turn.promptId, "signin_loaded", origin);
+      return res;
+    } catch (err) {
+      // The child closed the context it had opened with the state: the page is gone, and the sign-in is not loaded.
+      s.origin = null;
+      s.pageApproved = null;
+      this.event(s, turn.promptId, "signin_unloaded", origin);
+      throw err;
+    }
+  }
+
+  /**
+   * D-26: on a page with a member's sign-in, the action tried to go to another host. The navigation was stopped (the
+   * page stayed); it goes there only after the member's own yes (`signed_in_host`, 15 minutes, member-only at the API;
+   * Full access never skips it), and then that host stays allowed on this signed-in page. Answers the refusal, or null.
+   */
+  private async askSignedInHost(
+    s: SessionState,
+    loaded: LoadedSignIn,
+    blocked: BrowserOrigin,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserRefusal | null> {
+    const outcome = await this.broker.ask(s.id, {
+      kind: "signed_in_host",
+      origin: blocked,
+      tool: canonicalBrowserTool("act"),
+      summary: `Leave your signed-in page on ${hostPortOf(loaded.origin)} for ${blocked}`,
+      ...(signal ? { signal } : {}),
+    });
+    return refusalOfOutcome(outcome);
+  }
+
+  /**
+   * `ocw_browser_signin { host, reason }` (D-21, D-32): only in a turn whose grant allows sign-ins (a person's turn in a
+   * session only they and the device owner can see), else `signin_not_allowed` at once. The page first opens the site
+   * through the normal `open` path and its gates (so the person who takes control lands on it), then the turn's asker
+   * is asked (`signin`, 15 minutes). Only this call waits: the turn's other calls go on. A sealed save for that origin
+   * answers "Signed in" (and resolves the request); "Not now" `signin_denied`; nothing in 15 minutes `signin_expired`.
+   */
+  private async signin(
+    s: SessionState,
+    turn: TurnState,
+    body: { host: string; reason: string },
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserToolResult> {
+    const grant = turn.grant;
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId) {
+      return this.refuse(s, turn, "signin", "signin_not_allowed");
+    }
+    const site = siteOfHost(body.host);
+    if (!site) return invalidResult("signin", "host: must be a host name such as github.com", s.origin);
+    const { origin, url } = site;
+    if (s.origin !== origin || !s.child) {
+      const opened = await this.serial(s, async () => {
+        this.clearIdle(s);
+        try {
+          return await this.run(s, turn, "open", { url }, signal);
+        } finally {
+          this.armIdle(s);
+        }
+      });
+      if (opened.isError) return opened;
+    }
+    if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, "signin", "not_allowed");
+    if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, "signin", "paused");
+    // Their sealed sign-in for the site is already loaded (the open above loaded it): nobody needs to be asked.
+    if (s.loaded?.origin === origin && s.loaded.userId === grant.askerId) {
+      return textResult(browserToolSummary("signin", body, { origin }), origin, [
+        `Signed in to ${hostPortOf(origin)}: the saved sign-in is loaded in this page.`,
+      ]);
+    }
+
+    const deadline = Date.now() + WORK_BROWSER_LIMITS.signinWaitMinutes * 60_000;
+    const approvalId = randomUUID();
+    let saved = false;
+    let onSaved: () => void = () => {};
+    const savedNow = new Promise<void>((resolve) => {
+      onSaved = resolve;
+    });
+    const wait = {
+      origin,
+      saved: () => {
+        saved = true;
+        onSaved();
+        this.broker.resolve(s.id, approvalId, "once");
+      },
+    };
+    s.signinWaits.add(wait);
+    try {
+      const outcome = await this.broker.ask(s.id, {
+        approvalId,
+        kind: "signin",
+        origin,
+        tool: canonicalBrowserTool("signin"),
+        summary: `Sign in to ${hostPortOf(origin)}: ${body.reason}`,
+        reason: body.reason,
+        ...(signal ? { signal } : {}),
+      });
+      if (!saved) {
+        if (outcome === "deny") return this.refuse(s, turn, "signin", "signin_denied");
+        if (outcome === "expired") return this.refuse(s, turn, "signin", "signin_expired");
+        // A yes on the request ("Open and sign in"): the person is signing in; the save is awaited until the 15 minutes end.
+        const done = await untilSaved(savedNow, deadline - Date.now(), signal, () => s.turn !== turn);
+        if (done === "ended") return this.refuse(s, null, "signin", "not_allowed");
+        if (done === "expired") return this.refuse(s, turn, "signin", "signin_expired");
+      }
+      return textResult(browserToolSummary("signin", body, { origin }), origin, [
+        `Signed in to ${hostPortOf(origin)}.`,
+        "The sign-in is saved for that site only. Open the site again to continue signed in.",
+      ]);
+    } finally {
+      s.signinWaits.delete(wait);
+    }
+  }
+
   // ------------------------------------------------------------------ the call
 
   private async call(
@@ -453,9 +703,10 @@ export class BrowserManager {
       const turn = s.turn;
       if (!this.opts.optIn() || !turn?.grant?.allowed) return this.refuse(s, turn, tool, "not_allowed");
       if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
-      if (tool === "signin") return this.refuse(s, turn, tool, "not_allowed");
       const parsed = WORK_BROWSER_INPUTS[tool].safeParse(args);
       if (!parsed.success) return invalidResult(tool, parseMessage(parsed.error), s.origin);
+      // The sign-in waits for a person outside the session's call chain (its own `open` runs inside it).
+      if (tool === "signin") return await this.signin(s, turn, parsed.data as WorkBrowserSignInInput, signal);
       const body = parsed.data as Record<string, unknown>;
       return await this.serial(s, async () => {
         this.clearIdle(s);
@@ -481,6 +732,12 @@ export class BrowserManager {
     // Re-checked after waiting behind an earlier call of the session.
     if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, tool, "not_allowed");
     if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
+    // 19 (D-25, PD-17): a page holding a member's sign-in (loaded, or one they signed in to by hand) is theirs: before
+    // anyone else's call (another person, a bot) it is re-sealed and closed; the call then finds no page.
+    const owner = s.loaded?.userId ?? (s.child ? s.memberPage : null);
+    if (owner && (turn.grant?.askerIsBot !== false || turn.grant.askerId !== owner)) {
+      await this.closePage(s, "closed", null);
+    }
     if (tool !== "open" && !s.child) {
       return tool === "close" ? this.closeTool(s, turn) : this.refuse(s, turn, tool, "no_context");
     }
@@ -498,7 +755,7 @@ export class BrowserManager {
         case "snapshot":
           return await this.snapshot(s);
         case "act":
-          return await this.act(s, turn, body);
+          return await this.act(s, turn, body, signal);
         case "screenshot":
           return await this.screenshot(s, turn);
         case "wait":
@@ -522,11 +779,14 @@ export class BrowserManager {
   ) {
     const url = String(body.url);
     const target = originOf(url);
+    // A loaded sign-in is for its own site: another site's page opens without it (re-sealed and unloaded first).
+    if (s.loaded && s.loaded.origin !== target) await this.closePage(s, "closed", turn.promptId);
     const child = await this.ensureChild(s, turn);
     s.opening = true;
     let res: OpenResult;
     try {
-      res = (await child.call("open", { url })) as OpenResult;
+      const signedIn = target && !s.loaded ? await this.loadSignIn(s, turn, child, url, target) : null;
+      res = signedIn ?? ((await child.call("open", { url })) as OpenResult);
     } finally {
       s.opening = false;
     }
@@ -644,13 +904,32 @@ export class BrowserManager {
     return textResult(summary, origin, ["", pageContent(origin, text)]);
   }
 
-  private async act(s: SessionState, turn: TurnState, body: Record<string, unknown>) {
+  private async act(
+    s: SessionState,
+    turn: TurnState,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ) {
     const child = s.child as ManagedChild;
     const res = (await child.call("act", body)) as ActResult;
     const origin = s.origin;
     this.event(s, turn.promptId, "acted", origin, { action: actionOf("act", body) });
     const rest: string[] = [];
-    if (res.navigated) rest.push("The page navigated. Take a new snapshot to read it.");
+    let navigated = res.navigated;
+    const loaded = s.loaded;
+    if (res.blocked && loaded) {
+      const refusal = await this.askSignedInHost(s, loaded, res.blocked, signal);
+      if (refusal) return this.refuse(s, turn, "act", refusal, undefined, body);
+      // The member may have taken minutes: the page must still be the same signed-in one.
+      if (s.child !== child || s.loaded !== loaded || s.turn !== turn)
+        return this.refuse(s, null, "act", "no_context");
+      const allowed = (await child.call("allowCrossSite", { host: siteHostOfOrigin(res.blocked) })) as {
+        navigated: boolean;
+      };
+      s.pageApproved = res.blocked;
+      navigated ||= allowed.navigated;
+    }
+    if (navigated) rest.push("The page navigated. Take a new snapshot to read it.");
     if (res.refused) {
       this.event(s, turn.promptId, "refused", origin, { action: "navigate", refusal: res.refused });
       rest.push(
@@ -786,6 +1065,7 @@ export class BrowserManager {
         // The API ends the lease on `crashed` too: the page a person held is gone.
         this.takeover.end(s.id);
         this.event(s, s.turn?.promptId ?? null, "crashed", origin);
+        this.dropLoaded(s);
         return;
       }
       case "focus":
@@ -802,28 +1082,60 @@ export class BrowserManager {
     if (s.child && s.child.state !== "running") {
       s.child = null;
       s.origin = null;
+      this.dropLoaded(s);
     }
   }
 
-  /** Ends the session's page (when one is open) and reports it. */
+  /**
+   * Ends the session's page (when one is open) and reports it. With a member's sign-in loaded (19, PD-17): its state is
+   * re-sealed first (unless `reseal: false`, a revoked sign-in), then the page closes, then `signin_unloaded` tells the
+   * API (after it, a re-seal answers 409). The whole child goes, so nothing of the state stays in the browser's memory.
+   */
   private async closePage(
     s: SessionState,
     kind: Extract<WorkBrowserEventKind, "closed" | "takeover_abandoned">,
     promptId: string | null,
+    opts: { reseal?: boolean } = {},
   ): Promise<void> {
     const starting = s.starting;
     if (starting) await starting.catch(() => null);
     this.clearIdle(s);
     // No page, no takeover: input that arrives later is ignored (the API ends the lease on any close).
     this.takeover.end(s.id);
+    s.held = null;
+    s.memberPage = null;
+    const loaded = s.loaded;
+    s.loaded = null;
     const child = s.child;
-    if (!child) return;
+    if (!child) {
+      if (loaded) this.event(s, promptId, "signin_unloaded", loaded.origin);
+      return;
+    }
     s.child = null;
     const origin = s.origin;
     s.origin = null;
     s.pageApproved = null;
+    if (loaded && opts.reseal !== false) {
+      await reseal({
+        child,
+        api: this.opts.api,
+        sessionId: s.id,
+        signinId: loaded.signinId,
+        origin: loaded.origin,
+        fingerprintAtLoad: loaded.fingerprint,
+      });
+    }
     this.event(s, promptId, kind, origin, kind === "closed" ? { action: "close" } : {});
     await child.close().catch(() => {});
+    if (loaded) this.event(s, promptId, "signin_unloaded", loaded.origin);
+  }
+
+  /** The page died with a member's sign-in in it (19): nothing to re-seal, but the API learns it is unloaded. */
+  private dropLoaded(s: SessionState): void {
+    const loaded = s.loaded;
+    s.loaded = null;
+    s.memberPage = null;
+    if (loaded) this.event(s, s.turn?.promptId ?? null, "signin_unloaded", loaded.origin);
   }
 
   /** The session's screencast on or off in its child (a no-op without a running page). */
@@ -857,6 +1169,12 @@ export class BrowserManager {
       lastAvailable: false,
       chain: Promise.resolve(),
       idle: null,
+      held: null,
+      signinWaits: new Set(),
+      loaded: null,
+      memberPage: null,
+      lastAskerId: null,
+      noSignIn: new Set(),
     };
     const manager = this;
     s.tools = {
@@ -973,6 +1291,52 @@ export class BrowserManager {
     if (!UUID.test(s.id)) return;
     this.opts.link.send({ type: "browser.event", sessionId: s.id, promptId, kind, origin, ...extra });
   }
+}
+
+/**
+ * The site a sign-in names (`github.com`, `127.0.0.1:3000`): its origin and the page the person lands on. A loopback
+ * host is the device's own `http:` server; any other host is `https:`.
+ */
+function siteOfHost(host: string): { origin: BrowserOrigin; url: string } | null {
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${host}/`).hostname;
+  } catch {
+    return null;
+  }
+  const url = `${isLoopbackHost(hostname) ? "http" : "https"}://${host}/`;
+  const origin = originOf(url);
+  return origin ? { origin, url } : null;
+}
+
+/** Waits for a sign-in's save: `saved`, `expired` after `ms`, or `ended` (cancelled, or the turn is over). */
+function untilSaved(
+  saved: Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+  ended: () => boolean,
+): Promise<"saved" | "expired" | "ended"> {
+  if (ms <= 0) return Promise.resolve("expired");
+  return new Promise((resolve) => {
+    let poll: NodeJS.Timeout | undefined;
+    const finish = (r: "saved" | "expired" | "ended") => {
+      clearTimeout(timer);
+      clearTimeout(poll);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(r);
+    };
+    const onAbort = () => finish("ended");
+    const timer = setTimeout(() => finish("expired"), ms);
+    timer.unref?.();
+    const check = () => {
+      if (ended()) return finish("ended");
+      poll = setTimeout(check, 1_000);
+      poll.unref?.();
+    };
+    check();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void saved.then(() => finish("saved"));
+  });
 }
 
 /** The status line of a failed first-use install (D-05): fixed sentences, never a path. */

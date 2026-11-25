@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type BrowserSignInLoadFrame,
+  type BrowserSignInStateFrame,
   type DeviceToServerFrame,
   originOf,
   type SessionBrowserGrant,
@@ -59,13 +61,26 @@ interface Harness {
   optIn: { on: boolean };
 }
 
-function harness(over: Partial<BrowserManagerOptions> = {}): Harness {
+/** 19: what the fake API answers a `browser.signin.load` (null: no answer at all). */
+type LoadReply = (frame: BrowserSignInLoadFrame) => BrowserSignInStateFrame["result"] | null;
+
+function harness(over: Partial<BrowserManagerOptions> = {}, loadReply?: LoadReply): Harness {
   const frames: DeviceToServerFrame[] = [];
   const events: Harness["events"] = [];
   const optIn = { on: true };
+  const holder: { manager: BrowserManager | null } = { manager: null };
+  const send = (f: DeviceToServerFrame) => {
+    frames.push(f);
+    if (f.type !== "browser.signin.load" || !loadReply) return;
+    const result = loadReply(f);
+    if (!result) return;
+    setImmediate(() => {
+      void holder.manager?.onServerFrame({ type: "browser.signin.state", requestId: f.requestId, result });
+    });
+  };
   const manager = new BrowserManager({
     root: newRoot(),
-    link: { send: (f) => frames.push(f), sendBinary: () => false },
+    link: { send, sendBinary: () => false },
     api: { put: async () => 404 },
     optIn: () => optIn.on,
     sandbox: () => testSandbox(),
@@ -80,6 +95,7 @@ function harness(over: Partial<BrowserManagerOptions> = {}): Harness {
     log: silentLogger,
     ...over,
   });
+  holder.manager = manager;
   return { manager, frames, events, optIn };
 }
 
@@ -185,6 +201,92 @@ describe.skipIf(!executable)("BrowserManager with a real Chromium (07.13-12 Task
     expect(pageContentOf(await tools.call("snapshot", {}))).toContain("Not signed in");
   }, 120_000);
 
+  it("signin load: the member's sealed state opens a locked, signed-in page in memory; another asker unloads it (07.13-19)", async () => {
+    const puts: string[] = [];
+    const signinId = randomUUID();
+    const sealed = {
+      cookies: [
+        {
+          name: "fixture_session",
+          value: site.sessionCookie,
+          domain: "127.0.0.1",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: false,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    const root = newRoot();
+    h = harness(
+      {
+        root,
+        api: {
+          put: async (path) => {
+            puts.push(path);
+            return 200;
+          },
+        },
+        fullAccessAllowed: () => true,
+      },
+      () => ({ ok: true, signinId, state: sealed, expiresAt: "2026-12-25T00:00:00.000Z" }),
+    );
+    const sid = randomUUID();
+    const tools = h.manager.forSession(sid);
+    const member: SessionBrowserGrant = { ...ALLOW, signinAllowed: true };
+    h.manager.onPrompt(sid, "p1", member, { fullAccess: true });
+    h.manager.onTurnStarted(sid, "p1");
+    const other = `http://localhost:${new URL(site.origin).port}/`;
+    const opened = await tools.call("open", { url: site.url(`/account?away=${encodeURIComponent(other)}`) });
+    expect(opened.isError).toBe(false);
+    expect(opened.content[0]?.type === "text" ? opened.content[0].text : "").toContain("Signed in: yes");
+    const text = pageContentOf(await tools.call("snapshot", {})) ?? "";
+    expect(text).toContain("Signed in as fixture-user");
+    // In memory only: no file of the browsers root has the cookie.
+    const { execFileSync } = await import("node:child_process");
+    const grep = () => {
+      try {
+        return execFileSync("grep", ["-rl", site.sessionCookie, root], { encoding: "utf8" });
+      } catch {
+        return "";
+      }
+    };
+    expect(grep()).toBe("");
+
+    // A link to another host on the signed-in page asks the member, even in Full access; no keeps the page.
+    const away =
+      text
+        .split("\n")
+        .find((l) => l.includes('link "Away link"'))
+        ?.match(/\[(e\d+)\]/)?.[1] ?? "";
+    const act = tools.call("act", { action: "click", ref: away });
+    let ask: Extract<SessionEvent, { type: "approval.requested" }> | undefined;
+    for (let i = 0; i < 300 && !ask; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      ask = h.events.flatMap(({ event }) => (event.type === "approval.requested" ? [event] : []))[0];
+    }
+    expect(ask?.browser).toMatchObject({ kind: "signed_in_host", origin: originOf(other) });
+    h.manager.resolveApproval(sid, ask?.approvalId ?? "", "deny");
+    expect((await act).summary).toBe("Refused: The person you asked did not allow this.");
+    expect(pageContentOf(await tools.call("snapshot", {}))).toContain("Signed in as fixture-user");
+
+    // Another member's turn: re-sealed, closed, unloaded before its call; the next page is public.
+    h.manager.onPrompt(sid, "p2", { ...member, askerId: "00000000-0000-4000-8000-000000000002" });
+    h.manager.onTurnStarted(sid, "p2");
+    expect((await tools.call("snapshot", {})).summary).toBe("Refused: No page is open. Open one first.");
+    expect(puts).toEqual([`/api/v1/runtime/browser-signins/${signinId}/state`]);
+    expect(h.frames).toContainEqual(
+      expect.objectContaining({ type: "browser.event", kind: "signin_unloaded" }),
+    );
+    h.manager.onPrompt(sid, "p3", ALLOW);
+    h.manager.onTurnStarted(sid, "p3");
+    await tools.call("open", { url: site.url("/account") });
+    expect(pageContentOf(await tools.call("snapshot", {}))).toContain("Not signed in");
+    expect(grep()).toBe("");
+  }, 120_000);
+
   it("a bad body answers an isError result with the parse message and never throws", async () => {
     h = harness();
     const sid = randomUUID();
@@ -212,6 +314,11 @@ class ScriptedChild implements ManagedChild {
   readonly calls: Array<{ op: string; input: Record<string, unknown> }> = [];
   private done: () => void = () => {};
 
+  /** 19: the page was opened with a member's state (`openWithState`). */
+  signedIn = false;
+  /** 19: the next `act` tries to leave the locked site for this origin. */
+  blockNext: string | null = null;
+
   constructor(private readonly o: ChildFactoryOptions) {
     this.closed = new Promise((r) => {
       this.done = r;
@@ -220,15 +327,38 @@ class ScriptedChild implements ManagedChild {
 
   async call(op: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
     this.calls.push({ op, input: { ...input } });
-    if (op === "open") {
+    if (op === "open" || op === "openWithState") {
       const url = new URL(String(input.url));
       const origin = originOf(url.href);
+      if (op === "openWithState") this.signedIn = true;
       if (origin) this.o.onEvent({ event: "navigated", origin });
-      return { host: url.host, secure: url.protocol === "https:", title: "Scripted", signedIn: false };
+      return {
+        host: url.host,
+        secure: url.protocol === "https:",
+        title: "Scripted",
+        signedIn: this.signedIn,
+        ...(op === "openWithState" ? { fingerprint: "fp-loaded" } : {}),
+      };
+    }
+    if (op === "fingerprint") return { fingerprint: "fp-held" };
+    if (op === "exportState") {
+      return {
+        state: { cookies: [{ ...SCRIPTED_COOKIE }], origins: [] },
+        fingerprint: this.signedIn ? "fp-loaded" : "fp-saved",
+      };
+    }
+    if (op === "allowCrossSite") {
+      const origin = originOf(`http://${String(input.host)}/`);
+      if (origin) this.o.onEvent({ event: "navigated", origin });
+      return { host: String(input.host), navigated: true };
     }
     if (op === "snapshot")
       return { host: "h", secure: false, title: "Scripted", text: '- button "Go" [e1]', truncated: false };
-    if (op === "act") return { host: "h", navigated: false, download: null, refused: null };
+    if (op === "act") {
+      const blocked = this.blockNext;
+      this.blockNext = null;
+      return { host: "h", navigated: false, download: null, refused: null, blocked };
+    }
     if (op === "wait") return { ok: true, host: "h" };
     if (op === "screenshot")
       return { mimeType: "image/jpeg", data: "/9j/2w==", width: 1, height: 1, masked: 0 };
@@ -241,21 +371,39 @@ class ScriptedChild implements ManagedChild {
   }
 }
 
-function scripted(over: Partial<BrowserManagerOptions> = {}) {
+/** 19: the cookie a scripted child exports (a canary: it must never reach a frame, an event or a log). */
+const SCRIPTED_COOKIE = {
+  name: "sid",
+  value: "scripted-cookie-canary-3b7e",
+  domain: "127.0.0.1",
+  path: "/",
+  expires: -1,
+  httpOnly: true,
+  secure: false,
+  sameSite: "Lax" as const,
+};
+
+/** The fake API knows no sign-in for anyone (the default answer to a load). */
+const NO_SIGNIN: LoadReply = () => ({ ok: false, reason: "no_context" });
+
+function scripted(over: Partial<BrowserManagerOptions> = {}, loadReply: LoadReply = NO_SIGNIN) {
   const children: ScriptedChild[] = [];
-  const h = harness({
-    browsers: {
-      installed: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
-      install: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+  const h = harness(
+    {
+      browsers: {
+        installed: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+        install: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+      },
+      createChild: (o) => {
+        const c = new ScriptedChild(o);
+        children.push(c);
+        return c;
+      },
+      fullAccessAllowed: () => true,
+      ...over,
     },
-    createChild: (o) => {
-      const c = new ScriptedChild(o);
-      children.push(c);
-      return c;
-    },
-    fullAccessAllowed: () => true,
-    ...over,
-  });
+    loadReply,
+  );
   const sid = randomUUID();
   const tools = h.manager.forSession(sid);
   let n = 0;
@@ -585,8 +733,11 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
     expect(t.children[0]?.state).toBe("running");
     expect(closedFrames(t)).toEqual([]);
     expect(put).not.toHaveBeenCalled();
+    // 19: the fingerprint taken at `held` is a hash only; nothing is exported without a save.
     const ops = t.children[0]?.calls.map((c) => c.op) ?? [];
-    expect(ops.filter((op) => op !== "open" && op !== "snapshot" && op !== "takeover")).toEqual([]);
+    expect(
+      ops.filter((op) => op !== "open" && op !== "snapshot" && op !== "takeover" && op !== "fingerprint"),
+    ).toEqual([]);
   });
 
   it("a hand back with save goes to onSaveHandback (19 exports and uploads) and ends the pause", async () => {
@@ -720,5 +871,305 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
         summary: "Browser ready (156.0.8078.47)",
       },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------- sign-ins (19)
+
+const MEMBER = ALLOW.askerId as string;
+const SIGNIN: SessionBrowserGrant = { ...ALLOW, signinAllowed: true };
+const SITE_HOST = "127.0.0.1:5555";
+const SITE = "http://127.0.0.1:5555";
+const REASON = "to read your orders";
+
+const textOf = (r: { content: Array<{ type: string; text?: string }> }) =>
+  r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+
+/** The fake person's "Done, save my sign-in" on the session's page. */
+async function signInByHand(t: ReturnType<typeof scripted>): Promise<string> {
+  const leaseId = randomUUID();
+  const uploadId = randomUUID();
+  await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+  await t.manager.onServerFrame({
+    type: "browser.handback",
+    sessionId: t.sid,
+    leaseId,
+    save: true,
+    uploadId,
+  });
+  return uploadId;
+}
+
+describe("signin: the agent asks its person to sign in (07.13-19 Task 2: D-21, D-32)", () => {
+  it("signin answers that sign-ins work only in private sessions when the grant does not allow them", async () => {
+    const t = scripted();
+    t.turn();
+    const res = await t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    expect(res.isError).toBe(true);
+    expect(res.summary).toBe("Refused: Sign-ins work only in sessions only you can see.");
+    expect(t.approvals()).toEqual([]);
+    expect(t.children).toEqual([]);
+  });
+
+  it("signin lands the page on the site, asks the asker, and answers once their sign-in for it is sealed", async () => {
+    const put = vi.fn(async (_path: string, _body: unknown) => 201);
+    const t = scripted({ api: { put } });
+    t.turn(SIGNIN);
+    const call = t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    const ask = await nextApproval(t, 1);
+    expect(ask).toMatchObject({
+      tool: "ocw_browser_signin",
+      summary: `Sign in to ${SITE_HOST}: ${REASON}`,
+      browser: { kind: "signin", origin: SITE, tool: "ocw_browser_signin", reason: REASON },
+    });
+    expect(t.children[0]?.calls.find((c) => c.op === "open")?.input.url).toBe(`${SITE}/`);
+    // Only the signin call waits: the turn's other calls answer as usual.
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+
+    const uploadId = await signInByHand(t);
+    const res = await call;
+    expect(res.isError).toBe(false);
+    expect(textOf(res)).toContain(`Signed in to ${SITE_HOST}`);
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/uploads/${uploadId}`);
+    const resolved = t.events.filter(
+      ({ event }) => event.type === "approval.resolved" && event.approvalId === ask.approvalId,
+    );
+    expect(resolved.map((e) => e.event)).toEqual([
+      { type: "approval.resolved", approvalId: ask.approvalId, decision: "once" },
+    ]);
+    expect(JSON.stringify([t.frames, t.events])).not.toContain(SCRIPTED_COOKIE.value);
+  });
+
+  it("signin: Not now answers that the person did not sign in", async () => {
+    const t = scripted();
+    t.turn(SIGNIN);
+    const call = t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    const ask = await nextApproval(t, 1);
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    const res = await call;
+    expect(res).toMatchObject({ isError: true, summary: "Refused: The person chose not to sign in." });
+  });
+
+  it("signin: nobody signing in within 15 minutes answers signin_expired", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = scripted();
+      t.turn(SIGNIN);
+      const call = t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+      await nextApproval(t, 1);
+      await vi.advanceTimersByTimeAsync(15 * 60_000 - 1_000);
+      expect(t.manager.pendingApprovals(t.sid)).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect((await call).summary).toBe("Refused: Nobody signed in within 15 minutes.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("signin: a yes on the request still waits for the saved sign-in", async () => {
+    const t = scripted({ api: { put: async () => 201 } });
+    t.turn(SIGNIN);
+    const call = t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    const ask = await nextApproval(t, 1);
+    t.manager.resolveApproval(t.sid, ask.approvalId, "once");
+    let done = false;
+    void call.then(() => {
+      done = true;
+    });
+    await flush();
+    expect(done).toBe(false);
+    await signInByHand(t);
+    expect(textOf(await call)).toContain(`Signed in to ${SITE_HOST}`);
+  });
+});
+
+const OTHER_MEMBER = "00000000-0000-4000-8000-000000000002";
+const SIGNIN_ID = "00000000-0000-4000-8000-0000000000aa";
+const SEALED = { cookies: [{ ...SCRIPTED_COOKIE }], origins: [] };
+/** The fake API has the member's sign-in for every origin it is asked about. */
+const HAS_SIGNIN: LoadReply = () => ({
+  ok: true,
+  signinId: SIGNIN_ID,
+  state: SEALED,
+  expiresAt: "2026-12-25T00:00:00.000Z",
+});
+
+/** A put spy that also records the order of re-seals and browser events. */
+function sequenced() {
+  const order: string[] = [];
+  const put = vi.fn(async (path: string, _body: unknown) => {
+    order.push(`put ${path}`);
+    return 200;
+  });
+  return { order, put };
+}
+
+describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, PD-17)", () => {
+  const browserEvents = (t: ReturnType<typeof scripted>) =>
+    t.frames.flatMap((f) => (f.type === "browser.event" ? [f] : []));
+
+  it("signin load: a member's open asks for their sign-in and opens it in a locked page", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    const promptId = t.turn(SIGNIN);
+    const res = await t.tools.call("open", { url: `${SITE}/account` });
+    expect(res.isError).toBe(false);
+    expect(textOf(res)).toContain("Signed in: yes");
+    expect(t.frames.find((f) => f.type === "browser.signin.load")).toEqual({
+      type: "browser.signin.load",
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      sessionId: t.sid,
+      promptId,
+      origin: SITE,
+    });
+    const load = t.children[0]?.calls.find((c) => c.op === "openWithState");
+    expect(load?.input).toEqual({ url: `${SITE}/account`, state: SEALED, siteHost: SITE_HOST });
+    expect(t.children[0]?.calls.some((c) => c.op === "open")).toBe(false);
+    expect(browserEvents(t).map((e) => e.kind)).toEqual(["signin_loaded", "opened"]);
+    // The state went to the child only: no frame or event of the device carries it.
+    expect(JSON.stringify([t.frames, t.events])).not.toContain(SCRIPTED_COOKIE.value);
+  });
+
+  it("signin with the member's sign-in already loaded for the site asks nobody", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    const res = await t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    expect(res.isError).toBe(false);
+    expect(textOf(res)).toContain(`Signed in to ${SITE_HOST}`);
+    expect(t.approvals()).toEqual([]);
+    expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(true);
+  });
+
+  it("signin load: no sign-in, no answer in time, or a turn that may not load opens a public page", async () => {
+    for (const [grant, reply] of [
+      [SIGNIN, NO_SIGNIN],
+      [SIGNIN, () => null],
+      [ALLOW, HAS_SIGNIN],
+      [{ ...SIGNIN, askerIsBot: true }, HAS_SIGNIN],
+    ] as const) {
+      const t = scripted({ signinLoadTimeoutMs: 20 }, reply);
+      t.turn(grant);
+      const res = await t.tools.call("open", { url: `${SITE}/account` });
+      expect(textOf(res)).toContain("Signed in: no");
+      expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(false);
+    }
+  });
+
+  it("signed_in_host: leaving the locked site asks the member even in Full access; deny keeps the page", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN, true);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const child = t.children[0] as ScriptedChild;
+    child.blockNext = "http://localhost:6000";
+    const denied = t.tools.call("act", { action: "click", ref: "e1" });
+    const ask = await nextApproval(t, 1);
+    expect(ask).toMatchObject({
+      tool: "ocw_browser_act",
+      browser: { kind: "signed_in_host", origin: "http://localhost:6000", tool: "ocw_browser_act" },
+    });
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await denied).summary).toBe("Refused: The person you asked did not allow this.");
+    expect(child.calls.some((c) => c.op === "allowCrossSite")).toBe(false);
+
+    child.blockNext = "http://localhost:6000";
+    const allowed = t.tools.call("act", { action: "click", ref: "e1" });
+    const ask2 = await nextApproval(t, 2);
+    t.manager.resolveApproval(t.sid, ask2.approvalId, "once");
+    expect((await allowed).isError).toBe(false);
+    expect(child.calls.find((c) => c.op === "allowCrossSite")?.input).toEqual({ host: "localhost:6000" });
+  });
+
+  it("unload: another asker's call re-seals, closes and reports signin_unloaded before it runs", async () => {
+    const { order, put } = sequenced();
+    const t = scripted(
+      {
+        api: { put },
+        link: {
+          send: (f) => {
+            t.frames.push(f);
+            if (f.type === "browser.event") order.push(f.kind);
+            if (f.type === "browser.signin.load") {
+              setImmediate(() => {
+                const result = HAS_SIGNIN(f);
+                if (result) {
+                  void t.manager.onServerFrame({
+                    type: "browser.signin.state",
+                    requestId: f.requestId,
+                    result,
+                  });
+                }
+              });
+            }
+          },
+          sendBinary: () => false,
+        },
+      },
+      HAS_SIGNIN,
+    );
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.turn({ ...SIGNIN, askerId: OTHER_MEMBER });
+    const snap = await t.tools.call("snapshot", {});
+    expect(snap.summary).toBe("Refused: No page is open. Open one first.");
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+    expect(put.mock.calls[0]?.[1]).toEqual({
+      sessionId: t.sid,
+      origin: SITE,
+      state: SEALED,
+      changed: false,
+    });
+    const reseal = order.indexOf(`put /api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+    expect(reseal).toBeGreaterThan(-1);
+    expect(order.indexOf("signin_unloaded")).toBeGreaterThan(reseal);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+  });
+
+  it("unload: the end of the member's turn, the session's end and close each re-seal and unload", async () => {
+    const ends: Array<(t: ReturnType<typeof scripted>, promptId: string) => Promise<unknown>> = [
+      async (t, promptId) => {
+        t.manager.onTurnEnded(t.sid, promptId);
+        for (let i = 0; i < 50 && t.manager.openPages > 0; i++) await flush();
+      },
+      (t) => t.manager.endSession(t.sid),
+      (t) => t.tools.call("close", {}),
+    ];
+    for (const end of ends) {
+      const { put } = sequenced();
+      const t = scripted({ api: { put } }, HAS_SIGNIN);
+      const promptId = t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/account` });
+      await end(t, promptId);
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+      expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+      expect(t.manager.openPages).toBe(0);
+    }
+  });
+
+  it("unload: a revoked sign-in closes the page without re-sealing it", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    await t.manager.onServerFrame({ type: "browser.close", sessionId: t.sid, reason: "revoked" });
+    expect(put).not.toHaveBeenCalled();
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    expect(t.manager.openPages).toBe(0);
+  });
+
+  it("unload: a page the member took control of closes before another asker's call", async () => {
+    const t = scripted();
+    t.turn({ ...ALLOW, askerId: MEMBER });
+    await t.tools.call("open", { url: `${SITE}/` });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "released" });
+    // The same member's next turn keeps the page.
+    t.turn({ ...ALLOW, askerId: MEMBER });
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+    t.turn({ ...ALLOW, askerId: OTHER_MEMBER });
+    expect((await t.tools.call("snapshot", {})).summary).toBe("Refused: No page is open. Open one first.");
   });
 });
