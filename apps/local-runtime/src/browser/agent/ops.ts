@@ -42,15 +42,16 @@ import {
   type WorkBrowserRefusal,
   WorkBrowserWaitInput,
 } from "@ocw/contracts";
-import {
-  type Browser,
-  type BrowserContext,
-  type CDPSession,
-  chromium,
-  type LaunchOptions,
-  type Page,
-  type Request,
-  type Route,
+// Types only: playwright-core is loaded on the first launch, so the daemon bundle never links it at start (it is an
+// external installed beside the bundle, PD-22, and a missing install must name the SDK first, 07.12).
+import type {
+  Browser,
+  BrowserContext,
+  CDPSession,
+  LaunchOptions,
+  Page,
+  Request,
+  Route,
 } from "playwright-core";
 
 // ---------------------------------------------------------------- ops, errors, events
@@ -364,6 +365,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     if (browser) return browser;
     let launched: Browser;
     try {
+      const { chromium } = await import("playwright-core");
       launched = await chromium.launch(launchOptionsFor(opts));
     } catch (err) {
       return fail(launchFailureOf(err));
