@@ -112,8 +112,8 @@ async function connect(env: Record<string, string>): Promise<{ client: Client; e
   return { client, errors };
 }
 
-const textOf = (r: { content?: unknown }): string =>
-  ((r.content ?? []) as Array<{ type: string; text?: string }>)
+const textOf = (r: object): string =>
+  (((r as { content?: unknown }).content ?? []) as Array<{ type: string; text?: string }>)
     .filter((c) => c.type === "text")
     .map((c) => c.text ?? "")
     .join("\n");

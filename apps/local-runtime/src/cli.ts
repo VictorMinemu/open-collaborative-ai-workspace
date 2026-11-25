@@ -708,6 +708,29 @@ async function browserAgentCommand(): Promise<void> {
   runBrowserAgent(process.stdin, process.stdout);
 }
 
+/**
+ * 07.13 (D-08, PD-08): the hidden `browser-mcp` stdio MCP server of a Codex session's browser, started only by that
+ * session's Codex app-server (`-c mcp_servers.ocw_browser.*`), not in the usage text. stdout is the MCP stream, so
+ * nothing else may write there: console output goes to stderr. A missing or foreign token file exits non-zero before
+ * serving. Loaded lazily, so no other command loads the MCP server.
+ */
+async function browserMcpCommand(): Promise<void> {
+  if (process.stdin.isTTY) {
+    process.stderr.write("ocw-runtime: browser-mcp is started by Codex, not from a terminal\n");
+    process.exitCode = 2;
+    return;
+  }
+  console.log = console.error;
+  console.info = console.error;
+  const { runBrowserMcpShim } = await import("./browser/mcp-shim.js");
+  await runBrowserMcpShim({
+    env: process.env,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  });
+}
+
 async function main(argv: string[]): Promise<void> {
   const [cmd = "run", ...rest] = argv;
   switch (cmd) {
@@ -781,6 +804,8 @@ async function main(argv: string[]): Promise<void> {
       return accountCommand(rest);
     case "browser-agent":
       return browserAgentCommand();
+    case "browser-mcp":
+      return browserMcpCommand();
     default:
       throw new Error(`unknown command: ${cmd}`);
   }
