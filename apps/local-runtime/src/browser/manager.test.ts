@@ -256,7 +256,11 @@ describe.skipIf(!executable)("BrowserManager with a real Chromium (07.13-12 Task
     expect(grep()).toBe("");
 
     // A link to another host on the signed-in page asks the member, even in Full access; no keeps the page.
-    const away = text.split("\n").find((l) => l.includes('link "Away link"'))?.match(/\[(e\d+)\]/)?.[1] ?? "";
+    const away =
+      text
+        .split("\n")
+        .find((l) => l.includes('link "Away link"'))
+        ?.match(/\[(e\d+)\]/)?.[1] ?? "";
     const act = tools.call("act", { action: "click", ref: away });
     let ask: Extract<SessionEvent, { type: "approval.requested" }> | undefined;
     for (let i = 0; i < 300 && !ask; i++) {
@@ -273,7 +277,9 @@ describe.skipIf(!executable)("BrowserManager with a real Chromium (07.13-12 Task
     h.manager.onTurnStarted(sid, "p2");
     expect((await tools.call("snapshot", {})).summary).toBe("Refused: No page is open. Open one first.");
     expect(puts).toEqual([`/api/v1/runtime/browser-signins/${signinId}/state`]);
-    expect(h.frames).toContainEqual(expect.objectContaining({ type: "browser.event", kind: "signin_unloaded" }));
+    expect(h.frames).toContainEqual(
+      expect.objectContaining({ type: "browser.event", kind: "signin_unloaded" }),
+    );
     h.manager.onPrompt(sid, "p3", ALLOW);
     h.manager.onTurnStarted(sid, "p3");
     await tools.call("open", { url: site.url("/account") });
@@ -1076,7 +1082,11 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
               setImmediate(() => {
                 const result = HAS_SIGNIN(f);
                 if (result) {
-                  void t.manager.onServerFrame({ type: "browser.signin.state", requestId: f.requestId, result });
+                  void t.manager.onServerFrame({
+                    type: "browser.signin.state",
+                    requestId: f.requestId,
+                    result,
+                  });
                 }
               });
             }
