@@ -705,85 +705,168 @@ class ReplayAppServer extends EventEmitter implements AppServerProcess {
   }
 }
 
-describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-only + untrusted)", () => {
-  const lines = loadFixture("codex-0.160.0.supervised-write.rpc.jsonl");
-  const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+/** The recorded prompt text of a fixture's first `turn/start` (an offline recording carries the fake's directive). */
+function recordedPrompt(lines: RpcLine[]): string {
+  const params = lines.find((l) => l.dir === "out" && l.msg.method === "turn/start")?.msg.params as
+    | { input?: Array<{ text?: string }> }
+    | undefined;
+  return params?.input?.[0]?.text ?? "";
+}
 
-  it("the recording asked for a read-only sandbox with untrusted approvals reviewed by the user", () => {
-    expect(out("thread/start")[0]?.msg.params).toMatchObject({
-      cwd: FIXTURE_ROOT,
-      sandbox: "read-only",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-    });
-    expect(out("turn/start")[0]?.msg.params).toMatchObject({
-      effort: "low",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-      sandboxPolicy: { type: "readOnly" },
-    });
-    expect(lines.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+/** Runs one prompt through CodexRuntime over a replay of `lines`; every approval is declined. */
+async function replayTurn(
+  lines: RpcLine[],
+  permissionMode: "plan" | "default",
+  configure?: { effort: string },
+): Promise<{ events: SessionEvent[]; replay: ReplayAppServer }> {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
+  let server: ReplayAppServer | null = null;
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({
+    spawnAppServer: () => {
+      server = new ReplayAppServer(lines);
+      return server;
+    },
   });
-
-  it("no file change completed with a write", () => {
-    const writes = lines.filter(
-      (l) =>
-        l.msg.method === "item/completed" &&
-        (l.msg.params as { item?: { type?: string; status?: string } }).item?.type === "fileChange" &&
-        (l.msg.params as { item?: { status?: string } }).item?.status === "completed",
-    );
-    expect(writes).toEqual([]);
+  const completed = new Promise<void>((resolve) => {
+    void runtime
+      .start({ sessionId: "fixture-session", cwd, permissionMode }, (ev) => {
+        events.push(ev);
+        if (ev.type === "approval.requested")
+          runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
+        if (ev.type === "prompt.completed") resolve();
+      })
+      .then(() => (configure ? runtime.configure("fixture-session", configure) : undefined))
+      .then(() => runtime.prompt("fixture-session", { promptId: "prompt-1", text: recordedPrompt(lines) }));
   });
+  await completed;
+  return { events, replay: server as unknown as ReplayAppServer };
+}
 
-  it("replays through the adapter: the same requests, an approval before any write, declined", async () => {
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
-    let server: ReplayAppServer | null = null;
-    const events: SessionEvent[] = [];
-    const runtime = new CodexRuntime({
-      spawnAppServer: () => {
-        server = new ReplayAppServer(lines);
-        return server;
-      },
-    });
-    const completed = new Promise<void>((resolve) => {
-      void runtime
-        .start({ sessionId: "fixture-session", cwd, permissionMode: "default" }, (ev) => {
-          events.push(ev);
-          if (ev.type === "approval.requested")
-            runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
-          if (ev.type === "prompt.completed") resolve();
-        })
-        .then(() => runtime.configure("fixture-session", { effort: "low" }))
-        .then(() =>
-          runtime.prompt("fixture-session", {
-            promptId: "prompt-1",
-            text: "Create a file named note.txt containing the word hi.",
-          }),
-        );
-    });
-    await completed;
-    const replay = server as unknown as ReplayAppServer;
-    // The adapter sends the same client requests, in the same order, as the recording.
-    const recordedMethods = lines.filter((l) => l.dir === "out" && l.msg.method).map((l) => l.msg.method);
-    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(
-      recordedMethods.filter((m) => m !== "turn/interrupt"),
-    );
-    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
-      ...out("turn/start")[0]?.msg.params,
-      sandboxPolicy: expect.any(Object),
-    });
+/** The client methods of a recording, in order (an interrupt the recorder sent is not part of the turn). */
+const recordedMethods = (lines: RpcLine[]) =>
+  lines
+    .filter((l) => l.dir === "out" && l.msg.method)
+    .map((l) => l.msg.method)
+    .filter((m) => m !== "turn/interrupt");
 
-    const types = events.map((e) => e.type);
-    const firstApproval = types.indexOf("approval.requested");
-    expect(firstApproval).toBeGreaterThan(-1);
-    expect(events.find((e) => e.type === "approval.resolved")).toMatchObject({ decision: "deny" });
-    const approvedWrites = events.filter(
-      (e) => e.type === "tool.completed" && e.ok && e.summary.startsWith("Edited"),
-    );
-    expect(approvedWrites).toEqual([]);
-    expect(events.at(-1)?.type === "prompt.completed" || types.includes("prompt.completed")).toBe(true);
+// 0.160.0 is the compatibility floor (a ChatGPT-login recording); 0.172.0 is the pin, recorded offline against the
+// fake model (`record-codex-fixture.ts --offline`, 07.13-25): the fake calls `exec_command` through `[[call]]`.
+describe.each([
+  { version: "0.160.0", file: "codex-0.160.0.plan-read.rpc.jsonl" },
+  { version: "0.172.0", file: "codex-0.172.0.plan-read.rpc.jsonl" },
+])("CodexRuntime — recorded plan-read replay (codex-cli $version, read-only)", ({ file }) => {
+  const lines = loadFixture(file);
+
+  it("replays through the adapter: the same requests, one command, the reply and a completed prompt", async () => {
+    const { events, replay } = await replayTurn(lines, "plan");
+    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(recordedMethods(lines));
+    const kinds = events
+      .map((e) => e.type)
+      .filter((t) =>
+        ["session.started", "prompt.started", "tool.started", "tool.completed", "assistant.message"].includes(
+          t,
+        ),
+      );
+    expect(kinds).toEqual([
+      "session.started",
+      "prompt.started",
+      "tool.started",
+      "tool.completed",
+      "assistant.message",
+    ]);
+    expect(events.find((e) => e.type === "tool.started")).toMatchObject({
+      name: "Bash",
+      summary: expect.stringContaining("cat hello.txt"),
+    });
+    expect(events.find((e) => e.type === "tool.completed")).toMatchObject({ ok: true });
+    expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-1" });
   });
 });
+
+describe.each([
+  {
+    version: "0.160.0",
+    file: "codex-0.160.0.supervised-write.rpc.jsonl",
+    approval: "item/fileChange/requestApproval",
+  },
+  {
+    version: "0.172.0",
+    file: "codex-0.172.0.supervised-write.rpc.jsonl",
+    approval: "item/commandExecution/requestApproval",
+  },
+])(
+  "CodexRuntime — recorded Supervised write (codex-cli $version, read-only + untrusted)",
+  ({ file, approval }) => {
+    const lines = loadFixture(file);
+    const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+
+    it("the recording asked for a read-only sandbox with untrusted approvals reviewed by the user", () => {
+      expect(out("thread/start")[0]?.msg.params).toMatchObject({
+        cwd: FIXTURE_ROOT,
+        sandbox: "read-only",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+      });
+      expect(out("turn/start")[0]?.msg.params).toMatchObject({
+        effort: "low",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "readOnly" },
+      });
+      expect(lines.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+    });
+
+    it("the write was asked for through an approval request, which the recorder declined", () => {
+      const requests = lines.filter((l) => l.dir === "in" && l.msg.method && l.msg.id !== undefined);
+      expect(requests.map((l) => l.msg.method)).toEqual([approval]);
+      const id = requests[0]?.msg.id;
+      expect(
+        lines.find((l) => l.dir === "out" && l.msg.id === id && !l.msg.method)?.msg.result,
+      ).toMatchObject({
+        decision: "decline",
+      });
+    });
+
+    it("no file change and no command completed with a write", () => {
+      const writes = lines.filter((l) => {
+        const item = (
+          l.msg.params as { item?: { type?: string; status?: string; command?: string } } | undefined
+        )?.item;
+        if (l.msg.method !== "item/completed" || item?.status !== "completed") return false;
+        return (
+          item.type === "fileChange" ||
+          (item.type === "commandExecution" && /note\.txt/.test(item.command ?? ""))
+        );
+      });
+      expect(writes).toEqual([]);
+    });
+
+    it("replays through the adapter: the same requests, an approval before any write, declined", async () => {
+      const { events, replay } = await replayTurn(lines, "default", { effort: "low" });
+      // The adapter sends the same client requests, in the same order, as the recording.
+      expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(recordedMethods(lines));
+      expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
+        ...out("turn/start")[0]?.msg.params,
+        sandboxPolicy: expect.any(Object),
+      });
+
+      const types = events.map((e) => e.type);
+      const firstApproval = types.indexOf("approval.requested");
+      expect(firstApproval).toBeGreaterThan(-1);
+      expect(events.find((e) => e.type === "approval.resolved")).toMatchObject({ decision: "deny" });
+      const approvedWrites = events.filter(
+        (e) =>
+          e.type === "tool.completed" &&
+          e.ok &&
+          (e.summary.startsWith("Edited") || /note\.txt/.test(e.summary)),
+      );
+      expect(approvedWrites).toEqual([]);
+      expect(types).toContain("prompt.completed");
+    });
+  },
+);
 
 // ------------------------------------------------------------------------------------------------
 // Prompt images at codex app-server 0.160.0 (06.1-03, D-05, D-07, P-07). No real Codex runs: the FakeAppServer

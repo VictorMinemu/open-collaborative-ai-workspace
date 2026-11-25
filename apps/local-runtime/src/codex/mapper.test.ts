@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionEvent } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
@@ -14,80 +14,113 @@ interface RpcLine {
   msg: { id?: number | string; method?: string; params?: unknown; result?: unknown };
 }
 
-function load(): RpcLine[] {
-  const file = readdirSync(FIXTURE_DIR).find((f) => f.endsWith(".plan-read.rpc.jsonl"));
-  if (!file) throw new Error("fixture missing; run `npx tsx scripts/record-codex-fixture.ts`");
+function load(file: string): RpcLine[] {
   return readFileSync(join(FIXTURE_DIR, file), "utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as RpcLine);
 }
 
-describe("CodexEventMapper — recorded fixture (real codex app-server, read-only sandbox)", () => {
-  const lines = load();
-  const mapper = new CodexEventMapper();
-  mapper.currentPromptId = "prompt-1";
-  const events: SessionEvent[] = lines
-    .filter((l) => l.dir === "in" && l.msg.method && l.msg.id === undefined)
-    .flatMap((l) => mapper.map(l.msg as JsonRpcNotification));
+/**
+ * The plan-read recordings: 0.160.0 (the compatibility floor, a ChatGPT-login turn) and 0.172.0 (the pin, recorded
+ * offline against the fake model by `record-codex-fixture.ts --offline`: the fake calls `exec_command` through its
+ * `[[call]]` directive and reports the tool's output).
+ */
+const PLAN_READ = [
+  {
+    version: "0.160.0",
+    file: "codex-0.160.0.plan-read.rpc.jsonl",
+    command: "cat hello.txt",
+    output: "Hello from the fixture repo.\n",
+    text: "OK",
+    contextWindow: 258_400,
+  },
+  {
+    version: "0.172.0",
+    file: "codex-0.172.0.plan-read.rpc.jsonl",
+    command: "cat hello.txt",
+    output: "Hello from the fixture repo.\n",
+    text: expect.stringMatching(/^Tool exec_command said: .*Output: Hello from the fixture repo\.$/),
+    contextWindow: 258_400,
+  },
+] as const;
 
-  it("the client asked for on-request approvals and a non-full-access sandbox", () => {
-    const start = lines.find((l) => l.dir === "out" && l.msg.method === "thread/start");
-    expect(start?.msg.params).toMatchObject({
-      approvalPolicy: "on-request",
-      sandbox: "read-only",
-      cwd: FIXTURE_ROOT,
+describe.each(PLAN_READ)(
+  "CodexEventMapper — recorded plan-read at codex-cli $version (read-only sandbox)",
+  (fx) => {
+    const lines = load(fx.file);
+    const mapper = new CodexEventMapper();
+    mapper.currentPromptId = "prompt-1";
+    const events: SessionEvent[] = lines
+      .filter((l) => l.dir === "in" && l.msg.method && l.msg.id === undefined)
+      .flatMap((l) => mapper.map(l.msg as JsonRpcNotification));
+
+    it("the client asked for on-request approvals and a non-full-access sandbox", () => {
+      const start = lines.find((l) => l.dir === "out" && l.msg.method === "thread/start");
+      expect(start?.msg.params).toMatchObject({
+        approvalPolicy: "on-request",
+        sandbox: "read-only",
+        cwd: FIXTURE_ROOT,
+      });
     });
-  });
 
-  it("emits tool and message events in order and completes the prompt", () => {
-    const types = events.map((e) => e.type).filter((t) => t !== "assistant.delta" && t !== "runtime.raw");
-    expect(types).toEqual([
-      "tool.started",
-      "tool.completed",
-      "session.settings",
-      "assistant.message",
-      "prompt.completed",
-    ]);
-  });
-
-  it("reports the recorded model context window once (display only, D-10)", () => {
-    expect(events.filter((e) => e.type === "session.settings")).toEqual([
-      { type: "session.settings", contextWindow: 258_400 },
-    ]);
-  });
-
-  it("maps the command execution", () => {
-    expect(events.find((e) => e.type === "tool.started")).toMatchObject({
-      name: "Bash",
-      summary: expect.stringContaining("cat hello.txt"),
+    it("emits tool and message events in order and completes the prompt", () => {
+      const types = events.map((e) => e.type).filter((t) => t !== "assistant.delta" && t !== "runtime.raw");
+      expect(types).toEqual([
+        "tool.started",
+        "tool.completed",
+        "session.settings",
+        "assistant.message",
+        "prompt.completed",
+      ]);
     });
-    expect(events.find((e) => e.type === "tool.completed")).toMatchObject({
-      ok: true,
-      output: "Hello from the fixture repo.\n",
+
+    it("reports the recorded model context window once (display only, D-10)", () => {
+      expect(events.filter((e) => e.type === "session.settings")).toEqual([
+        { type: "session.settings", contextWindow: fx.contextWindow },
+      ]);
     });
-  });
 
-  it("streams deltas and the final message for the same item", () => {
-    const msg = events.find((e) => e.type === "assistant.message") as { messageId: string; text: string };
-    expect(msg.text).toBe("OK");
-    const deltas = events.filter((e) => e.type === "assistant.delta" && e.messageId === msg.messageId);
-    expect(deltas.map((d) => (d as { text: string }).text).join("")).toBe("OK");
-  });
+    it("maps the command execution", () => {
+      expect(events.find((e) => e.type === "tool.started")).toMatchObject({
+        name: "Bash",
+        summary: expect.stringContaining(fx.command),
+      });
+      expect(events.find((e) => e.type === "tool.completed")).toMatchObject({
+        ok: true,
+        output: fx.output,
+      });
+    });
 
-  it("reports token usage on prompt.completed", () => {
-    const done = events.at(-1) as Extract<SessionEvent, { type: "prompt.completed" }>;
-    expect(done).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
-    expect(done.usage.outputTokens).toBeGreaterThan(0);
-    expect(done.isError).toBeUndefined();
-  });
+    it("streams deltas and the final message for the same item", () => {
+      const msg = events.find((e) => e.type === "assistant.message") as { messageId: string; text: string };
+      expect(msg.text).toEqual(fx.text);
+      const deltas = events.filter((e) => e.type === "assistant.delta" && e.messageId === msg.messageId);
+      expect(deltas.map((d) => (d as { text: string }).text).join("")).toBe(msg.text);
+    });
 
-  it("leaves no absolute path once sanitised", () => {
-    const out = JSON.stringify(events.map((e) => sanitizeEvent(e, [FIXTURE_ROOT], "/Users/fixture-user")));
-    expect(out).not.toContain(FIXTURE_ROOT);
-    expect(out).not.toContain("/Users/");
-  });
-});
+    it("reports token usage on prompt.completed", () => {
+      const done = events.at(-1) as Extract<SessionEvent, { type: "prompt.completed" }>;
+      expect(done).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
+      expect(done.usage.outputTokens).toBeGreaterThan(0);
+      expect(done.isError).toBeUndefined();
+    });
+
+    it("leaves no absolute path once sanitised", () => {
+      const out = JSON.stringify(events.map((e) => sanitizeEvent(e, [FIXTURE_ROOT], "/Users/fixture-user")));
+      expect(out).not.toContain(FIXTURE_ROOT);
+      expect(out).not.toContain("/Users/");
+    });
+
+    it("the recording names no home directory and no account e-mail", () => {
+      const raw = readFileSync(join(FIXTURE_DIR, fx.file), "utf8");
+      expect(raw).not.toMatch(/\/Users\/(?!fixture-user)|\/home\//);
+      expect(raw.replaceAll("fixture@example.com", "")).not.toMatch(
+        /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,
+      );
+    });
+  },
+);
 
 describe("CodexEventMapper — hand-written cases", () => {
   it("maps file changes, failures and interrupted turns", () => {
