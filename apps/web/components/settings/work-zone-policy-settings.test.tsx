@@ -108,6 +108,8 @@ describe("Bot sessions at once (Task 3)", () => {
       maxEffort: { "claude-code": null, codex: null },
       allowFastMode: false,
       runtimeUpdates: "automatic",
+      // 07.13 D-10: the default policy names the browser (off); the draft carries it through.
+      allowBrowser: false,
       botSessionsMax: 0,
     });
     // The form's Save sends exactly that body, and refuses an invalid value first.
@@ -184,6 +186,7 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
       maxEffort: { "claude-code": null, codex: null },
       allowFastMode: false,
       runtimeUpdates: "automatic",
+      allowBrowser: false,
       botSessionsMax: 10,
       botFileMaxBytes: 41943040,
     });
