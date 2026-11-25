@@ -132,6 +132,11 @@ export interface WorkLiveHub {
    * sent to the holder's socket only (here, or on the instance holding it); a stale lease's reaches nobody.
    */
   onFocus(organizationId: string, frame: BrowserFocusFrame): Promise<void>;
+  /**
+   * MD-02 (D-27): a member's sign-in was just recorded on the session's page (the load committed): every viewer here
+   * but that member goes private at once, before the device receives the state; the row is then read again.
+   */
+  onSignInLoaded(organizationId: string, sessionId: string, userId: string): void;
   /** 07.13-18: ends idle leases (10 minutes without input) and warns their holder at 9 (tests pass a clock). */
   sweep(nowMs?: number): Promise<void>;
   /** Sends every open viewer its current state frame again (the client's liveness signal). */
@@ -478,9 +483,11 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         close: null,
       };
     }
-    if (page.leaseId) {
-      const lease = v.entry.lease;
-      if (lease && lease.leaseId === page.leaseId && lease.viewer === v) {
+    // MD-02: a lease taken here is private from the moment it is taken, before the row's next read shows it.
+    const local = v.entry.lease;
+    const leaseId = page.leaseId ?? local?.leaseId ?? null;
+    if (leaseId) {
+      if (local && local.leaseId === leaseId && local.viewer === v) {
         return {
           frame: { ...base, ...hostOf(page.origin), state: "controlling", controller: "self" },
           frames: true,
@@ -679,6 +686,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     const l = newLease(v, taken.lease.leaseId, taken.lease.deviceId, true);
     l.expiresAtMs = Date.parse(taken.lease.expiresAt);
     e.lease = l;
+    // MD-02: every viewer here goes private now, before the device or the holder hears of the lease (the row says so
+    // from the commit on; this instance's copy of it is patched instead of waiting for the next read).
+    if (e.view?.page) {
+      e.view.page = { ...e.view.page, leaseId: l.leaseId, controllerUserId: auth.userId };
+    }
+    for (const viewer of e.viewers) pushState(viewer);
     if (v.closed) {
       await endLease(e, "closed");
       return;
@@ -697,8 +710,9 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       sendJson(v, { type: "refused", op: "take", reason: "expired" });
       return;
     }
-    sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
+    // The other instances re-read the row before the holder may type (MD-02; the poll stays the backstop).
     await announceLease(core.bus, e.orgId, e.sessionId);
+    sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
     refresh(e);
   }
 
@@ -1124,6 +1138,20 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           JSON.stringify({ o: organizationId, s: frame.sessionId, l: frame.leaseId, f: frame.sensitive }),
         )
         .catch(() => {});
+    },
+    onSignInLoaded(organizationId, sessionId, userId) {
+      const e = entries.get(keyOf(organizationId, sessionId));
+      if (!e?.view) return;
+      const page: PageRow = e.view.page ?? {
+        state: "open",
+        origin: null,
+        leaseId: null,
+        controllerUserId: null,
+        signinUserId: null,
+      };
+      e.view.page = { ...page, signinUserId: userId };
+      for (const v of e.viewers) pushState(v);
+      refresh(e);
     },
     sweep,
     heartbeat,

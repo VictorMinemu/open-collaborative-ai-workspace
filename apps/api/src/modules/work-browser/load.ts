@@ -11,6 +11,7 @@ import type { Core } from "../../core";
 import type { DeviceRef } from "../device";
 import type { PermissionService } from "../organization";
 import { browserGrantFor } from "../work-session";
+import { announceLease } from "./lease";
 import { type OpenedSignIn, openWorkSignIn, siteKeyOfOrigin } from "./signins";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -97,7 +98,12 @@ export async function decideSignInLoad(
  * The state is held only by the reply frame: it is never assigned to anything that is logged, and every failure is
  * logged by its error name only.
  */
-export function onSignInLoad(core: Core, perms: PermissionService) {
+export function onSignInLoad(
+  core: Core,
+  perms: PermissionService,
+  /** MD-02: this instance's live view learns of the load at once (the other instances through the announcement). */
+  loaded: (organizationId: string, sessionId: string, userId: string) => void = () => {},
+) {
   return async (
     device: DeviceRef,
     frame: BrowserSignInLoadFrame,
@@ -169,6 +175,10 @@ export function onSignInLoad(core: Core, perms: PermissionService) {
       answer({ ok: false, reason: "signin_expired" });
       return;
     }
+    // MD-02 (D-27): the page is private for everyone but the member BEFORE the device has the state: this instance's
+    // viewers at once, every other instance on the announcement (ids only; the 1 s poll stays the backstop).
+    loaded(device.organizationId, frame.sessionId, member.userId);
+    await announceLease(core.bus, device.organizationId, frame.sessionId);
     try {
       answer({ ok: true, signinId: opened.signinId, state: opened.state, expiresAt: opened.expiresAt });
     } catch (err) {

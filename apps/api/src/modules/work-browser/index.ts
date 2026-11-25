@@ -61,7 +61,9 @@ export function createWorkBrowserModule(
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
     // 07.13-17 (D-24, D-32, PD-16, P7): decided by the API, answered on the requesting socket only.
-    onSignInLoad: onSignInLoad(core, perms),
+    onSignInLoad: onSignInLoad(core, perms, (organizationId, sessionId, userId) =>
+      live?.onSignInLoaded(organizationId, sessionId, userId),
+    ),
     // Per frame, not awaited, after hello (07.13-08): cheap until the session is known. A frame naming a session
     // that does not run on the sending device reaches nobody (T-07.13-10-03).
     async onBinary(device, bytes) {

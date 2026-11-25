@@ -291,6 +291,8 @@ describe("07.13-10 Task 2: the privacy gate, states and live re-authorization", 
       [sessionId, leaseId, miaId],
     );
     expect(await waitState(m1, "controlling", 3000)).toMatchObject({ controller: "self" });
+    // Private from the moment the lease is held here (MD-02); the holder's name follows with the row's next read.
+    await waitFor(() => lastState(m2)?.memberName);
     expect(await waitState(m2, "private", 3000)).toMatchObject({
       privateReason: "takeover",
       controller: "other_device",

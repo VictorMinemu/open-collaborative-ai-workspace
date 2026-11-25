@@ -37,7 +37,10 @@ export { TAKEOVER_MS, TAKEOVER_WARN_MS };
  * ids only.
  */
 
-/** Redis channel of a session page's lease changes: `{"o":<organizationId>,"s":<sessionId>}`, ids only. */
+/**
+ * Redis channel of a session page's lease changes, and of a member's sign-in recorded on it (MD-02):
+ * `{"o":<organizationId>,"s":<sessionId>}`, ids only. Every instance re-reads the page's row at once.
+ */
 export const WORK_LEASE_CHANNEL = "ocw:wb:lease";
 
 /** The hand-back upload is usable this long (PD-15). */

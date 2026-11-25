@@ -4,7 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, sleep } from "../../testing-device";
-import { invite, pairDevice, shareDevice, startSession } from "../../testing-workzone";
+import { invite, pairDevice, setAudience, shareDevice, startSession } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
 import { takeWorkLease } from "./lease";
 import {
@@ -16,6 +16,7 @@ import {
   waitState,
   workLiveSocket,
 } from "./live-testing";
+import { sealWorkSignIn } from "./signins";
 
 /**
  * The fixes of the Phase 07.13 code review (07.13-REVIEW.md, API side) on a real PostgreSQL + Redis and the full API:
@@ -226,5 +227,109 @@ describe("HI-03: a page with another member's sign-in loaded is never taken, and
     expect(miaLive.binary.slice(seen).map((b) => b[3])).not.toContain(52);
     expect(lastState(miaLive)?.state).toBe("private");
     miaLive.close();
+  });
+});
+
+/** Whether the server lets binary frames pass to `userId`'s viewers of `sid` now (the gate's pushed answer). */
+const framesFor = (sid: string, userId: string) =>
+  hub()
+    .stats()
+    .sessions.find((s) => s.sessionId === sid)
+    ?.viewers.filter((v) => v.userId === userId)
+    .map((v) => v.frames);
+
+/** Seals `userId`'s Work Zone sign-in for ORIGIN through the module's own seal (as that member). */
+async function sealFor(userId: string, sid: string): Promise<string> {
+  const sealed = await core().db.withTenant({ organizationId: orgId, userId }, (tx) =>
+    sealWorkSignIn(tx, core(), {
+      userId,
+      origin: ORIGIN,
+      rawState: JSON.stringify({
+        cookies: [
+          {
+            name: "sid",
+            value: `v-${randomUUID()}`,
+            domain: "localhost",
+            path: "/",
+            expires: 2_000_000_000,
+            httpOnly: true,
+            secure: false,
+            sameSite: "Lax",
+          },
+        ],
+        origins: [],
+      }),
+      device: { deviceId: dId, sessionId: sid },
+    }),
+  );
+  if (!sealed) throw new Error("nothing sealed");
+  return sealed.signinId;
+}
+
+/** Mia's personal session on Owen's device (seen by her and the device owner), her turn in flight, a page open. */
+async function miasSignInSession(): Promise<{ sid: string; promptId: string }> {
+  const sid = await startSession(mia, d, projectId);
+  await setAudience(mia, sid, { kind: "owner" });
+  const promptId = await ask(mia, sid);
+  d.browserEvent(sid, { kind: "opened", origin: ORIGIN, promptId });
+  await eventually(async () => (await browserRow(sid))?.state === "open" || undefined);
+  return { sid, promptId };
+}
+
+/** The device asks for the turn asker's sign-in of ORIGIN; resolves with the answer's result. */
+async function load(sid: string, promptId: string, onReply?: () => void): Promise<Json> {
+  const requestId = randomUUID();
+  let seen = false;
+  const listener = (data: unknown, isBinary: boolean) => {
+    if (isBinary || seen) return;
+    const f = JSON.parse(String(data)) as Json;
+    if (f.type === "browser.signin.state" && f.requestId === requestId) {
+      seen = true;
+      onReply?.();
+    }
+  };
+  d.ws.on("message", listener);
+  try {
+    d.send({ type: "browser.signin.load", requestId, sessionId: sid, promptId, origin: ORIGIN });
+    const reply = await d.next((f) => f.type === "browser.signin.state" && f.requestId === requestId);
+    return reply.result as Json;
+  } finally {
+    d.ws.off("message", listener);
+  }
+}
+
+describe("MD-02: the gate closes at once on a new lease or a new sign-in, not one refresh later", () => {
+  it("when the holder learns it holds the lease, every other viewer here already gets no frame", async () => {
+    const { sid } = await askedSessionWithPage(mia);
+    const owenLive = await open(owen, sid);
+    const miaLive = await open(mia, sid);
+    await waitState(owenLive, "live");
+    await waitState(miaLive, "live");
+    let atLease: boolean[] | undefined;
+    miaLive.socket.on("message", (data, isBinary) => {
+      if (isBinary || atLease) return;
+      if ((JSON.parse(String(data)) as Json).type === "lease") atLease = framesFor(sid, owenId);
+    });
+    await take(miaLive, sid);
+    expect(atLease).toEqual([false]);
+    send(miaLive, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    owenLive.close();
+    miaLive.close();
+  });
+
+  it("when the device gets the member's state, every other viewer here already gets no frame", async () => {
+    const { sid, promptId } = await miasSignInSession();
+    await sealFor(miaId, sid);
+    const owenLive = await open(owen, sid);
+    await waitState(owenLive, "live");
+    let atReply: boolean[] | undefined;
+    const result = await load(sid, promptId, () => {
+      atReply = framesFor(sid, owenId);
+    });
+    expect(result.ok).toBe(true);
+    expect(atReply).toEqual([false]);
+    expect(await waitState(owenLive, "private", 3000)).toMatchObject({ privateReason: "member_session" });
+    owenLive.close();
   });
 });
