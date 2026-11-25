@@ -613,6 +613,15 @@ importers:
         specifier: 1.4.0
         version: 1.4.0
 
+  packages/browser-engine:
+    devDependencies:
+      '@ocw/config':
+        specifier: workspace:*
+        version: link:../config
+      playwright-core:
+        specifier: 1.64.1
+        version: 1.64.1
+
   packages/config: {}
 
   packages/contracts:

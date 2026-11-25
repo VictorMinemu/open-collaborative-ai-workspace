@@ -1,0 +1,40 @@
+{
+  "name": "@ocw/browser-engine",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "The shared browser engine of the bots' brw image and the Work Zone Local Runtime (07.13, D-04): the redacting snapshot serializer, the isolated world, screencast and masked screenshots, safe zip extraction and the P-09 site filter of storage states. Plain ESM with hand-written types; playwright-core is a peer (capture and unzip load its bundled PNG, JPEG and zip readers).",
+  "exports": {
+    "./redact": {
+      "types": "./src/redact.d.mts",
+      "default": "./src/redact.mjs"
+    },
+    "./world": {
+      "types": "./src/world.d.mts",
+      "default": "./src/world.mjs"
+    },
+    "./capture": {
+      "types": "./src/capture.d.mts",
+      "default": "./src/capture.mjs"
+    },
+    "./unzip": {
+      "types": "./src/unzip.d.mts",
+      "default": "./src/unzip.mjs"
+    },
+    "./site": {
+      "types": "./src/site.d.mts",
+      "default": "./src/site.mjs"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "playwright-core": "1.64.1"
+  },
+  "devDependencies": {
+    "@ocw/config": "workspace:*",
+    "playwright-core": "1.64.1"
+  }
+}
