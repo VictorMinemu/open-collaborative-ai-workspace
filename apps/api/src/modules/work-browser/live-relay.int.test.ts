@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { inspect } from "node:util";
 import { encodeWorkBrowserFrame } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -213,7 +214,8 @@ describe("07.13-10 Task 3: a viewer on another API instance", () => {
     });
     for (const arg of args) {
       expect(arg instanceof Uint8Array).toBe(false);
-      expect(JSON.stringify(arg) ?? "").not.toContain(b64.slice(0, 40));
+      // Fastify's own lines carry circular request objects: inspected, not stringified.
+      expect(inspect(arg, { depth: 6, maxStringLength: null })).not.toContain(b64.slice(0, 40));
     }
   });
 });

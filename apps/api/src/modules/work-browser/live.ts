@@ -19,6 +19,7 @@ import type { DeviceHub } from "../device";
 import type { PermissionService } from "../organization";
 import { authenticateUpgrade, SESSION_RECHECK_MS } from "../realtime";
 import { sessionFacts } from "../work-session";
+import type { LiveRelay } from "./live-relay";
 
 /**
  * The live view of a Work Zone session's browser (07.13-10; D-15, D-20, D-27, D-33, PD-12, PD-13; WZB-05, WZB-08).
@@ -36,6 +37,10 @@ import { sessionFacts } from "../work-session";
  * Device Link of the instance holding the device (`onFrame`, after the module checked the session runs on that
  * device) and are fanned out through the bots' `FrameSlot` (latest wins: a slow viewer never buffers more than the
  * frame being written plus one waiting).
+ *
+ * Viewers on another instance (D-33, `live-relay.ts`): every instance with viewers announces its watch with each ping
+ * and subscribes to the session's frames channel; the instance holding the link publishes a frame there only while
+ * another instance announced within `watchLapseMs`, and never sends `on: false` while one does.
  *
  * The privacy gate (D-20, D-27, PD-13) decides per viewer from the session's `work_browsers` row, polled every second
  * while watched, and is asked again by `FrameSlot` at the moment a frame is written (a frame that waited while the page
@@ -61,6 +66,8 @@ export interface WorkLiveDeps {
   perms: PermissionService;
   hub: DeviceHub;
   allowedOrigins: Set<string>;
+  /** Frames to and from the other API instances (D-33); closed with the hub. */
+  relay: LiveRelay;
   /** The session's row poll while watched (default 1 s). */
   pollMs?: number;
   /** Session and membership recheck of an open socket (default `SESSION_RECHECK_MS`). */
@@ -154,7 +161,18 @@ interface Entry {
   pinged: string | null;
   /** The socket here holding the page's lease (07.13-18), with the lease id it holds. */
   lease: { leaseId: string; viewerId: string } | null;
+  /** A frame of the session reached this entry (directly or through the relay): the fast pings stop. */
+  framesSeen: boolean;
+  fastPings: number;
+  /** Ends this instance's follow of the session's watch channel. */
+  release: () => void;
+  /** This instance's subscription to the frames other instances publish for the session. */
+  remote: Promise<(() => Promise<void>) | null>;
 }
+
+/** Pings before the first frame, one a second (see `ping`). */
+const FAST_PINGS = 10;
+const FAST_PING_MS = 1_000;
 
 const name = (err: unknown) => (err as Error | undefined)?.name ?? "Error";
 
@@ -172,7 +190,7 @@ function hostOf(origin: string | null): { host: string | null; secure: boolean |
 
 /** Registers `GET /live/work-browser/:sessionId` (mounted under `/api/v1`) and returns this instance's hub. */
 export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub {
-  const { core, perms, hub } = deps;
+  const { core, perms, hub, relay } = deps;
   const log = core.log;
   const pollMs = deps.pollMs ?? 1_000;
   const recheckMs = deps.sessionRecheckMs ?? SESSION_RECHECK_MS;
@@ -428,27 +446,45 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       );
   }
 
+  /**
+   * One ping: the device is asked for frames (wherever its link is) and the other instances learn this one watches.
+   * Until the first frame arrived the ping repeats every second (at most `FAST_PINGS` times): the instance holding the
+   * link follows the watch channel only once the session's frames reach it, so it misses the very first announcement.
+   */
+  function ping(e: Entry, deviceId: string): void {
+    sendFrames(e, deviceId, true);
+    void relay
+      .announceWatch(e.sessionId)
+      .catch((err: unknown) =>
+        log.warn({ sessionId: e.sessionId, error: name(err) }, "work live view watch announce failed"),
+      );
+    const fast = !e.framesSeen && e.fastPings < FAST_PINGS;
+    if (fast) e.fastPings++;
+    e.ping = setTimeout(() => ping(e, deviceId), fast ? FAST_PING_MS : pingMs);
+    e.ping.unref();
+  }
+
   function syncPing(e: Entry): void {
     const deviceId = wantsFrames(e);
     if (deviceId && !e.ping) {
       e.pinged = deviceId;
-      const ping = () => sendFrames(e, deviceId, true);
-      ping();
-      e.ping = setInterval(ping, pingMs);
-      e.ping.unref();
+      ping(e, deviceId);
     } else if (!deviceId && e.ping) {
       stopPing(e);
     }
   }
 
+  /** The device stops streaming, unless another instance still watches (its pings keep it on). */
   function stopPing(e: Entry): void {
-    if (e.ping) clearInterval(e.ping);
+    if (e.ping) clearTimeout(e.ping);
     e.ping = null;
-    if (e.pinged) sendFrames(e, e.pinged, false);
+    if (e.pinged && !relay.remoteWatching(e.sessionId)) sendFrames(e, e.pinged, false);
     e.pinged = null;
+    e.fastPings = 0;
   }
 
   function deliver(e: Entry, jpeg: Uint8Array): void {
+    e.framesSeen = true;
     for (const v of e.viewers) if (mayReceive(v)) v.slot.offer(jpeg);
   }
 
@@ -511,12 +547,31 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         ping: null,
         pinged: null,
         lease: null,
+        framesSeen: false,
+        fastPings: 0,
+        // While this instance has viewers: it learns of watches elsewhere (an `on: false` would stop them) and
+        // receives the frames the instance holding the link publishes.
+        release: relay.hold(sessionId),
+        remote: relay
+          .subscribeFrames(sessionId, (f) => deliver(created, f.jpeg))
+          .catch((err: unknown) => {
+            log.warn({ sessionId, error: name(err) }, "work live view frames subscribe failed");
+            return null;
+          }),
       };
       created.poll.unref();
       entries.set(key, created);
       e = created;
     }
     return e;
+  }
+
+  function dropEntry(e: Entry): void {
+    clearInterval(e.poll);
+    stopPing(e);
+    e.release();
+    void e.remote.then((stop) => stop?.()).catch(() => {});
+    entries.delete(keyOf(e.orgId, e.sessionId));
   }
 
   function leave(v: Viewer): void {
@@ -527,9 +582,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     e.viewers.delete(v);
     if (e.lease?.viewerId === v.id) e.lease = null;
     if (e.viewers.size === 0) {
-      clearInterval(e.poll);
-      stopPing(e);
-      entries.delete(keyOf(e.orgId, e.sessionId));
+      dropEntry(e);
     } else {
       syncPing(e);
     }
@@ -623,6 +676,14 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     onFrame(organizationId, frame) {
       const e = entries.get(keyOf(organizationId, frame.sessionId));
       if (e) deliver(e, frame.jpeg);
+      // This instance holds the link: it follows the session's watch channel while its frames arrive, and publishes
+      // each frame only while another instance watches (the relay decides; nothing goes out otherwise).
+      relay.touch(frame.sessionId);
+      void relay
+        .publishFrame(frame.sessionId, frame)
+        .catch((err: unknown) =>
+          log.warn({ sessionId: frame.sessionId, error: name(err) }, "work live view frame publish failed"),
+        );
     },
     registerLeaseSocket(sessionId, leaseId, viewerId) {
       for (const e of entries.values()) {
@@ -658,12 +719,11 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     },
     async close() {
       clearInterval(beat);
-      for (const e of entries.values()) {
-        clearInterval(e.poll);
-        if (e.ping) clearInterval(e.ping);
+      for (const e of [...entries.values()]) {
         for (const v of e.viewers) if (v.recheck) clearInterval(v.recheck);
+        dropEntry(e);
       }
-      entries.clear();
+      await relay.close();
       const stops = await shared?.catch(() => []);
       for (const stop of stops ?? []) await stop().catch(() => {});
     },

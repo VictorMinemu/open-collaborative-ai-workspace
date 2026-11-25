@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { decodeWorkBrowserFrame } from "@ocw/contracts";
 import { workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
@@ -6,6 +7,7 @@ import type { DeviceBrowserHandler, DeviceHub, DeviceRef } from "../device";
 import { createPermissionService } from "../organization";
 import { onBrowserEvent } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
+import { createLiveRelay } from "./live-relay";
 
 export { onBrowserEvent } from "./events";
 export type { WorkLiveHub, WorkLiveStats } from "./live";
@@ -19,7 +21,8 @@ export type { WorkLiveHub, WorkLiveStats } from "./live";
  *   keeps the session's `work_browsers` row and audits `work_browser.*` (`events.ts`, 07.13-08); binary live frames
  *   (`onBinary`, 07.13-10) go to the live view once the session is known to run on the sending device; later plans add
  *   the takeover focus hint (`onFocus`, 18) and the sign-in load (`onSignInLoad`, 17) by assigning the handler's methods.
- * - The live view (`live.ts`, 07.13-10): `GET /api/v1/live/work-browser/:sessionId` for the session's audience.
+ * - The live view (`live.ts`, 07.13-10): `GET /api/v1/live/work-browser/:sessionId` for the session's audience; frames
+ *   reach viewers on other API instances through `live-relay.ts` (Redis transit only while watched, D-33).
  * - Server → device browser frames go through `hub.sendBrowserFrame` (ephemeral: never queued, never logged), and only
  *   to a device whose hello carried `browser` (PD-20).
  */
@@ -64,6 +67,8 @@ export function createWorkBrowserModule(
           perms: createPermissionService(core),
           hub: deps.hub,
           allowedOrigins: deps.allowedOrigins ?? new Set(),
+          // D-33: this instance's frames transit (one per instance; its id only tells its own messages apart).
+          relay: createLiveRelay({ bus: core.bus, instanceId: randomUUID(), log: core.log }),
         });
       },
       async close() {
