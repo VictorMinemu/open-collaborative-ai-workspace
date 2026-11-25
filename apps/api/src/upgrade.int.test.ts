@@ -148,6 +148,7 @@ const HEAD_ONLY = [
   "20261113175346_projects_git",
   "20261113182003_bot_policy_conversations",
   "20261124150907_account_pool",
+  "20261125164903_work_zone_browser",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -1024,6 +1025,57 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             [ORG_A, secret.rows[0].id],
           );
           expect(account.rowCount).toBe(1);
+        } finally {
+          await c.query("rollback");
+        }
+      } finally {
+        await c.end();
+      }
+    });
+
+    it("keeps every existing device and policy with the browser off and no version, opens no session browser or sign-in and accepts one (Phase 07.13, D-10, D-16, D-23, PD-04, PD-20)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const devices = await c.query(
+          "select id, name, browser_opt_in, browser_version, account_pool_version from app.devices order by id",
+        );
+        expect(devices.rows).toEqual([
+          {
+            id: N1_DEVICE,
+            name: "laptop",
+            browser_opt_in: false,
+            browser_version: null,
+            account_pool_version: null,
+          },
+        ]);
+        const policies = await c.query(
+          "select organization_id, allow_full_access, allow_browser from app.work_zone_policies order by organization_id",
+        );
+        expect(policies.rows).toEqual([
+          { organization_id: ORG_A, allow_full_access: true, allow_browser: false },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.work_browsers) as browsers, (select count(*)::int from app.work_browser_signins) as signins",
+        );
+        expect(empty.rows).toEqual([{ browsers: 0, signins: 0 }]);
+        // The new tables take the existing session's browser and a member's sealed sign-in (rolled back: the row counts
+        // the other cases read stay the dump's).
+        await c.query("begin");
+        try {
+          const secret = await c.query(
+            "insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag) values ($1, 'work zone sign-in', 'browser_session', 'c', 'i', 't') returning id",
+            [ORG_A],
+          );
+          const signin = await c.query(
+            "insert into app.work_browser_signins (organization_id, user_id, site_key, secret_id, expires_at) values ($1, $2, 'github.com', $3, now() + interval '30 days') returning id",
+            [ORG_A, ADA_ADMIN, secret.rows[0].id],
+          );
+          const browser = await c.query(
+            "insert into app.work_browsers (work_session_id, organization_id, signin_id, signin_user_id) values ($1, $2, $3, $4)",
+            [N1_SESSION, ORG_A, signin.rows[0].id, ADA_ADMIN],
+          );
+          expect(browser.rowCount).toBe(1);
         } finally {
           await c.query("rollback");
         }

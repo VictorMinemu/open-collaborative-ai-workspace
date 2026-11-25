@@ -366,3 +366,246 @@ describe("policies and privileges (07.13 PD-03, PD-04)", () => {
     }
   });
 });
+
+describe("the session browser (07.13 PD-04, PD-14)", () => {
+  it("stores one row per session with the defaults; a second row is refused; deleting the session deletes it", async () => {
+    const session = await workSession(A.id, A.project, A.device, A.user);
+    await as(A.id, A.user, async (q) => {
+      await q("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [
+        session,
+        A.id,
+      ]);
+      const row = await q(
+        `select state, origin, controller_user_id, lease_id, lease_expires_at, lease_input, signin_id, signin_user_id,
+                upload_id, upload_user_id, upload_origin, upload_expires_at, closed_at,
+                opened_at is not null as opened, updated_at is not null as stamped
+           from app.work_browsers where work_session_id = $1`,
+        [session],
+      );
+      expect(row.rows).toEqual([
+        {
+          state: "open",
+          origin: null,
+          controller_user_id: null,
+          lease_id: null,
+          lease_expires_at: null,
+          lease_input: false,
+          signin_id: null,
+          signin_user_id: null,
+          upload_id: null,
+          upload_user_id: null,
+          upload_origin: null,
+          upload_expires_at: null,
+          closed_at: null,
+          opened: true,
+          stamped: true,
+        },
+      ]);
+    });
+    await db.query("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [
+      session,
+      A.id,
+    ]);
+    await refused(
+      db.query("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [
+        session,
+        A.id,
+      ]),
+      { constraint: "work_browsers_pkey" },
+    );
+    // A session of another organization is never a parent (composite FK).
+    await refused(
+      db.query("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [
+        B.session,
+        A.id,
+      ]),
+      { constraint: "work_browsers_session_fk" },
+    );
+    await db.query("delete from app.work_sessions where id = $1", [session]);
+    expect(await count("app.work_browsers where work_session_id = $1", [session])).toBe(0);
+  });
+
+  it("unlinks a deleted sign-in; refuses a partial lease, a partial upload and an origin with a path", async () => {
+    const session = await workSession(A.id, A.project, A.device, A.user);
+    const s = await signin(A, A.user, "loaded.test");
+    await db.query(
+      "insert into app.work_browsers (work_session_id, organization_id, origin, signin_id, signin_user_id) values ($1, $2, 'https://loaded.test:443', $3, $4)",
+      [session, A.id, s.id, A.user],
+    );
+    await db.query("delete from app.work_browser_signins where id = $1", [s.id]);
+    const after = await db.query(
+      "select organization_id, signin_id, origin from app.work_browsers where work_session_id = $1",
+      [session],
+    );
+    expect(after.rows).toEqual([
+      { organization_id: A.id, signin_id: null, origin: "https://loaded.test:443" },
+    ]);
+
+    const set = (cols: string, values: unknown[]) =>
+      db.query(`update app.work_browsers set ${cols} where work_session_id = $1`, [session, ...values]);
+    await refused(set("lease_id = $2", [randomUUID()]), { constraint: "work_browsers_lease_ck" });
+    await refused(set("lease_id = $2, controller_user_id = $3", [randomUUID(), A.user]), {
+      constraint: "work_browsers_lease_ck",
+    });
+    const lease = await set(
+      "lease_id = $2, controller_user_id = $3, lease_expires_at = now() + interval '1 minute'",
+      [randomUUID(), A.user],
+    );
+    expect(lease.rowCount).toBe(1);
+    await refused(set("upload_id = $2", [randomUUID()]), { constraint: "work_browsers_upload_ck" });
+    const upload = await set(
+      "upload_id = $2, upload_user_id = $3, upload_origin = 'http://localhost:3000', upload_expires_at = now() + interval '5 minutes'",
+      [randomUUID(), A.user],
+    );
+    expect(upload.rowCount).toBe(1);
+    for (const bad of [
+      "http://h:3000/x",
+      "https://h",
+      "https://h:3000?q=1",
+      "ftp://h:21",
+      "https://user@h:443",
+      "HTTPS://H:443",
+    ]) {
+      await refused(set("origin = $2", [bad]), { constraint: "work_browsers_origin_ck" });
+      await refused(set("upload_origin = $2", [bad]), { constraint: "work_browsers_upload_origin_ck" });
+    }
+    for (const ok of ["http://h:3000", "https://[::1]:8443", "http://127.0.0.1:5173"]) {
+      expect((await set("origin = $2", [ok])).rowCount, ok).toBe(1);
+    }
+  });
+
+  it("follows its session's audience: a member outside it reads and writes no row; the creator and a user-less path do", async () => {
+    const session = await workSession(A.id, A.project, A.device, A.user);
+    await db.query("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [
+      session,
+      A.id,
+    ]);
+    const seen = (user: string | null) =>
+      as(
+        A.id,
+        user,
+        async (q) =>
+          (await q("select count(*)::int as n from app.work_browsers where work_session_id = $1", [session]))
+            .rows[0].n,
+      );
+    expect(await seen(A.member), "outside the audience").toBe(0);
+    expect(await seen(A.user), "creator").toBe(1);
+    expect(await seen(null), "user-less (Device Link, sweeps)").toBe(1);
+    await as(A.id, A.member, async (q) => {
+      const up = await q("update app.work_browsers set lease_input = true where work_session_id = $1", [
+        session,
+      ]);
+      expect(up.rowCount).toBe(0);
+      const del = await q("delete from app.work_browsers where work_session_id = $1", [session]);
+      expect(del.rowCount).toBe(0);
+    });
+    const other = await workSession(A.id, A.project, A.device, A.user);
+    await expect(
+      as(A.id, A.member, (q) =>
+        q("insert into app.work_browsers (work_session_id, organization_id) values ($1, $2)", [other, A.id]),
+      ),
+      "insert outside the audience",
+    ).rejects.toThrow(/row-level security/);
+    // Another tenant sees nothing, even without a user.
+    expect(
+      (
+        await as(B.id, null, (q) =>
+          q("select count(*)::int as n from app.work_browsers where organization_id = $1", [A.id]),
+        )
+      ).rows[0].n,
+    ).toBe(0);
+  });
+});
+
+describe("the sweep and the purge (07.13 D-23, PD-14)", () => {
+  it("purges only the caller organization's expired sign-ins and returns ids, owner and site only", async () => {
+    const expiredA = await signin(A, A.user, "expired-a.test", { expires: "now() - interval '1 hour'" });
+    const freshA = await signin(A, A.user, "fresh-a.test");
+    const expiredB = await signin(B, B.user, "expired-b.test", { expires: "now() - interval '1 hour'" });
+    // As a user-less tenant transaction (the sweep's): past the owner-only policy, only through the function.
+    const purged = await as(A.id, null, async (q) => {
+      const r = await q("select * from app.purge_work_browser_signins(now())");
+      // Committed by the function's caller in the sweep; here the outer rollback undoes it, so read inside.
+      expect(
+        (await q("select count(*)::int as n from app.secrets where id = $1", [expiredA.secret])).rows[0].n,
+      ).toBe(0);
+      return r;
+    });
+    expect(purged.fields.map((f) => f.name)).toEqual(["id", "user_id", "site_key"]);
+    expect(purged.rows).toEqual([{ id: expiredA.id, user_id: A.user, site_key: "expired-a.test" }]);
+    // Rolled back with the tenant transaction: now for real, as the sweep commits it.
+    await app.query("begin");
+    await app.query(
+      "select set_config('app.organization_id', $1, true), set_config('app.user_id', '', true)",
+      [A.id],
+    );
+    await app.query("select * from app.purge_work_browser_signins(now())");
+    await app.query("commit");
+    expect(await count("app.work_browser_signins where id = $1", [expiredA.id])).toBe(0);
+    expect(await count("app.secrets where id = $1", [expiredA.secret])).toBe(0);
+    expect(await count("app.work_browser_signins where id = $1", [freshA.id])).toBe(1);
+    expect(await count("app.work_browser_signins where id = $1", [expiredB.id]), "B's row stays").toBe(1);
+    // Without a tenant it deletes nothing.
+    const none = await app.query("select * from app.purge_work_browser_signins(now())");
+    expect(none.rows).toEqual([]);
+    await db.query("delete from app.work_browser_signins where id = $1", [expiredB.id]);
+  });
+
+  it("lists the organizations with an expired sign-in or a lapsed lease, ids only, keyset by id", async () => {
+    const C = await seedOrg();
+    const D = await seedOrg();
+    await signin(A, A.user, "sweep-a.test", { expires: "now() - interval '1 minute'" });
+    // C: a lapsed takeover lease on its session browser; D: a lease still running.
+    for (const [o, at] of [
+      [C, "now() - interval '1 second'"],
+      [D, "now() + interval '1 minute'"],
+    ] as const) {
+      await db.query(
+        `insert into app.work_browsers (work_session_id, organization_id, controller_user_id, lease_id, lease_expires_at)
+         values ($1, $2, $3, $4, ${at})`,
+        [o.session, o.id, o.user, randomUUID()],
+      );
+    }
+    const swept = await as(A.id, null, (q) =>
+      q("select * from app.work_browser_sweep_organizations(now(), now(), null, 100)"),
+    );
+    expect(swept.fields.map((f) => f.name)).toEqual(["organization_id"]);
+    const ids = swept.rows.map((r) => r.organization_id as string);
+    expect(ids).toContain(A.id);
+    expect(ids).toContain(C.id);
+    expect(ids).not.toContain(B.id);
+    expect(ids).not.toContain(D.id);
+    expect(ids).toEqual([...ids].sort());
+    // Keyset: after the first id, the first is gone; the limit is honoured (and clamped to at least 1).
+    const first = ids[0];
+    const after = await as(A.id, null, (q) =>
+      q("select * from app.work_browser_sweep_organizations(now(), now(), $1, 100)", [first]),
+    );
+    expect(after.rows.map((r) => r.organization_id)).toEqual(ids.slice(1));
+    const one = await as(A.id, null, (q) =>
+      q("select * from app.work_browser_sweep_organizations(now(), now(), null, 0)"),
+    );
+    expect(one.rows).toHaveLength(1);
+  });
+
+  it("both functions are SECURITY DEFINER with a fixed search_path, executable by the app role and not by the public", async () => {
+    const fns = await db.query(
+      `select p.proname, p.prosecdef, pg_get_userbyid(p.proowner) as owner, p.proconfig,
+              has_function_privilege('ocw_app', p.oid, 'execute') as app,
+              has_function_privilege('public', p.oid, 'execute') as public
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'app' and p.proname in ('purge_work_browser_signins', 'work_browser_sweep_organizations')
+        order by 1`,
+    );
+    expect(fns.rows).toEqual(
+      ["purge_work_browser_signins", "work_browser_sweep_organizations"].map((proname) => ({
+        proname,
+        prosecdef: true,
+        owner: "ocw_migrator",
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+        app: true,
+        public: false,
+      })),
+    );
+  });
+});
