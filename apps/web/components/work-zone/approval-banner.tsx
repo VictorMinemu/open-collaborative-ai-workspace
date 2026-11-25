@@ -224,10 +224,21 @@ export function ApprovalBanner({
                 data-testid="deny-comment"
               />
               <div className="flex gap-2">
-                <Button type="button" variant="ghost" onClick={() => setDenying(false)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setDenying(false)}
+                  className="max-md:h-11"
+                >
                   Back
                 </Button>
-                <Button type="submit" variant="destructive" disabled={!!busy} data-testid="confirm-deny">
+                <Button
+                  type="submit"
+                  variant="destructive"
+                  disabled={!!busy}
+                  data-testid="confirm-deny"
+                  className="max-md:h-11"
+                >
                   {busy === "deny" ? <Spinner /> : null} Deny
                 </Button>
               </div>
@@ -236,7 +247,7 @@ export function ApprovalBanner({
             <div className="flex flex-col-reverse gap-2 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-end">
               <Button
                 variant="ghost"
-                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive max-md:h-11"
                 onClick={() => setDenying(true)}
                 disabled={!!busy}
                 data-testid="deny"
@@ -248,11 +259,17 @@ export function ApprovalBanner({
                 onClick={() => decide("session")}
                 disabled={!!busy}
                 data-testid="allow-session"
+                className="max-md:h-11"
               >
                 {busy === "session" ? <Spinner /> : null}{" "}
                 {browser ? "For this session" : `Allow ${tool} for session`}
               </Button>
-              <Button onClick={() => decide("once")} disabled={!!busy} data-testid="approve-once">
+              <Button
+                onClick={() => decide("once")}
+                disabled={!!busy}
+                data-testid="approve-once"
+                className="max-md:h-11"
+              >
                 {busy === "once" ? <Spinner /> : null} Approve once
               </Button>
             </div>

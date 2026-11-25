@@ -192,6 +192,7 @@ describe("ApprovalBanner browser approvals (D-11, D-21, D-26, D-34)", () => {
     expect(html).toContain('data-testid="allow-session"');
     expect(t).toContain("For this session");
     expect(html).toContain('data-testid="deny"');
+    for (const [tag] of html.matchAll(/<button[^>]*>/g)) expect(tag).toContain("max-md:h-11");
   });
 
   it("signed_in_host: the member answers; anyone else reads Only {member} can answer this, with no actions", () => {
