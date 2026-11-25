@@ -67,6 +67,19 @@ function handle(req: IncomingMessage, res: ServerResponse) {
       );
     case "/next":
       return send(res, 200, page("Next page", "<h1>The next page</h1>"));
+    case "/animate":
+      // 07.13-15: a page that repaints on every animation frame, so the screencast always has a new frame.
+      return send(
+        res,
+        200,
+        page(
+          "Animated page",
+          `<h1>Animated page</h1><div id="box" style="width:200px;height:200px"></div>
+<script>let n = 0; const box = document.getElementById("box");
+(function tick() { n += 1; box.style.background = "hsl(" + (n % 360) + ", 80%, 50%)"; box.textContent = String(n);
+requestAnimationFrame(tick); })();</script>`,
+        ),
+      );
     case "/login":
       if (req.method === "POST") {
         res.writeHead(302, {
