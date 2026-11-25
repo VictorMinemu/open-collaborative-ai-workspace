@@ -1,5 +1,6 @@
 # OCW bot browser (`brw`, 07.8-07, D-05, D-11, D-14): one Chromium per bot, driven by agent.mjs over a pipe (no
-# debugging port) and spoken to only by sandboxd over the container's stdio. Build from the repository root (the root .dockerignore keeps node_modules, .git and .env files out of the context):
+# debugging port) and spoken to only by sandboxd over the container's stdio. Build from the repository root (the root
+# .dockerignore keeps node_modules, .git and .env files out of the context):
 #   docker build -f infra/sandbox/browser/Dockerfile -t ocw-sandbox-brw:local .
 # The redaction, isolated world, capture, zip extraction and site filter are the shared engine's files, copied from
 # packages/browser-engine/src (07.13 D-04), so bots and Work Zone sessions read pages through the same code.
