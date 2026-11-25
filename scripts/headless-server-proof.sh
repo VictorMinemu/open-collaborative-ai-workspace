@@ -20,6 +20,18 @@
 #   5. the proof's facts (image digest, /bin/sh, installed version and sha, SDK version, doctor) are printed for the
 #      gate (07.12-11), then the proof's ok line as its last line.
 #
+# Phase 07.13-23 (WZB-07, D-05, D-06, PD-18, PD-19): the Work Zone browser on the same server. The container runs
+# under the bots' brw seccomp profile, so Chromium's sandbox stays on (never `browser.sandbox: container` here). Before
+# setup (so the daemon starts with the browser already on and its hello carries it): the doctor's browser line is ok
+# and off; `ocw-runtime browser on`; the pinned zip for the container's architecture, verified on the host and copied
+# in (never mounted), is installed by `ocw-runtime browser install` from that file (which checks the pinned sha256
+# again); the doctor then fails with one apt line, which this script (never the runtime) runs as root; the doctor's
+# browser line is then ok with the version. A `node -e` page on the container's own 127.0.0.1:8099 serves "Proof
+# page"; the spec turns the organization's browser policy on, Sam's next prompt opens and reads that page through the
+# fake runtime's `browser <tool> <json>` lines (PD-28), and no Chromium process of the container runs --no-sandbox.
+#   PROOF_BROWSER_ZIP=<zip>   use this zip (it must have the pinned sha256) instead of the host cache
+#   the host cache is ${XDG_CACHE_HOME:-~/.cache}/ocw-proof-browsers/<version>/ (one download from Chrome for Testing)
+#
 # PD-19, no real tools: the daemon runs the fake runtime (OCW_RUNTIME_FAKE=1, OCW_RUNTIME_UPDATES=off), no Claude Code
 # or Codex is installed, and no registry is contacted for the SDK. install.sh's `npm ci` meets an offline fake npm
 # (first on PATH for that one command only) that checks the lockfile install.sh wrote (in sync, exact pins with an
@@ -166,7 +178,9 @@ FAKE_NPM
 
 # ---------------------------------------------------------------- a clean Linux server
 step "container $NAME from the pinned image"
-docker run -d --init --name "$NAME" --add-host host.docker.internal:host-gateway "$IMAGE" sleep infinity >/dev/null
+# 07.13-23 (PD-18): the bots' brw seccomp profile (Docker's default plus what Chromium's own sandbox needs).
+docker run -d --init --name "$NAME" --add-host host.docker.internal:host-gateway \
+  --security-opt seccomp=infra/sandbox/browser/seccomp.json "$IMAGE" sleep infinity >/dev/null
 step "as root: apt-get install curl git ca-certificates (D-11)"
 as_root sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null &&
   apt-get install -y --no-install-recommends curl git ca-certificates >/dev/null' || fail "apt-get failed"
@@ -203,6 +217,115 @@ NPM_CALL="$(as_node cat /tmp/ocw-proof-npm.log)"
 [[ "$(wc -l <<<"$NPM_CALL" | tr -d ' ')" == "1" && "$NPM_CALL" == "npm ci "*"--omit=optional --ignore-scripts" ]] ||
   fail "unexpected npm calls: $NPM_CALL"
 echo "   npm (offline fake): ${NPM_CALL} (from the embedded npm-shrinkwrap.json)"
+
+# ---------------------------------------------------------------- the Work Zone browser (07.13-23, before setup)
+RUNTIME_BIN="$HOME_IN/.local/bin/ocw-runtime"
+# The doctor's `browser` line as `status<TAB>summary<TAB>fix`. The doctor exits 1 while any check fails (the pairing
+# does until setup), so only its JSON is read.
+doctor_browser() {
+  local out
+  out="$(as_node "$RUNTIME_BIN" doctor --json)" || true
+  # shellcheck disable=SC2016 # a JavaScript template literal, not a shell expansion
+  node -e '
+let s = "";
+process.stdin.on("data", (d) => (s += d)).on("end", () => {
+  const c = JSON.parse(s).checks.find((x) => x.id === "browser");
+  if (!c) throw new Error("the doctor has no browser line");
+  console.log(`${c.status}\t${c.summary}\t${c.fix ?? ""}`);
+});' <<<"$out"
+}
+
+step "browser: the doctor says off, then ocw-runtime browser on"
+BROWSER_LINE="$(doctor_browser)"
+[[ "$BROWSER_LINE" == $'ok\tBrowser: off on this device\t'* ]] || fail "doctor browser line before the opt-in: $BROWSER_LINE"
+echo "   doctor: ok · $(cut -f2 <<<"$BROWSER_LINE")"
+as_node "$RUNTIME_BIN" browser on
+BROWSER_LINE="$(doctor_browser)"
+[[ "$BROWSER_LINE" == $'warn\t'*"installs on first use"* ]] || fail "doctor browser line after the opt-in: $BROWSER_LINE"
+echo "   doctor: warn · $(cut -f2 <<<"$BROWSER_LINE")"
+
+# The pinned build for the container's architecture, read from the runtime's own pins (their only source).
+CONTAINER_ARCH="$(as_node uname -m)"
+case "$CONTAINER_ARCH" in
+  x86_64) CFT_PLAT=linux64 ;;
+  aarch64 | arm64) CFT_PLAT=linux-arm64 ;;
+  *) fail "no pinned Chrome for Testing build for $CONTAINER_ARCH" ;;
+esac
+# shellcheck disable=SC2016 # JavaScript template literals, not shell expansions
+PIN="$(node -e '
+const src = require("node:fs").readFileSync("apps/local-runtime/src/browser/pins.ts", "utf8");
+const plat = process.argv[1];
+const version = src.match(/CFT_VERSION = "([0-9.]+)"/)?.[1];
+const sha = new RegExp(`"?${plat}"?:\\s*\\{\\s*sha256:\\s*"([0-9a-f]{64})"`).exec(src)?.[1];
+if (!version || !sha) throw new Error(`no pin for ${plat}`);
+console.log(`${version} ${sha}`);
+' "$CFT_PLAT")" || fail "could not read the pinned build for $CFT_PLAT from pins.ts"
+CFT_VERSION="${PIN%% *}"
+CFT_SHA256="${PIN##* }"
+ZIP_NAME="chrome-headless-shell-$CFT_PLAT.zip"
+if [[ -n "${PROOF_BROWSER_ZIP:-}" ]]; then
+  ZIP="$PROOF_BROWSER_ZIP"
+  [[ -f "$ZIP" ]] || fail "PROOF_BROWSER_ZIP ($ZIP) is not a file"
+else
+  ZIP_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ocw-proof-browsers/$CFT_VERSION"
+  ZIP="$ZIP_DIR/$ZIP_NAME"
+  if [[ ! -f "$ZIP" ]]; then
+    echo "   downloading $ZIP_NAME $CFT_VERSION once into the host cache"
+    mkdir -p "$ZIP_DIR"
+    curl -fsSL --retry 3 -o "$ZIP.part" \
+      "https://storage.googleapis.com/chrome-for-testing-public/$CFT_VERSION/$CFT_PLAT/$ZIP_NAME" ||
+      fail "the download of $ZIP_NAME failed"
+    mv "$ZIP.part" "$ZIP"
+  fi
+fi
+ZIP_SHA="$(node -e '
+const h = require("node:crypto").createHash("sha256");
+require("node:fs").createReadStream(process.argv[1]).on("data", (d) => h.update(d)).on("end", () => console.log(h.digest("hex")));
+' "$ZIP")"
+[[ "$ZIP_SHA" == "$CFT_SHA256" ]] ||
+  fail "$ZIP has sha256 ${ZIP_SHA:0:12}, the runtime pins ${CFT_SHA256:0:12} for $CFT_PLAT"
+echo "   $ZIP_NAME $CFT_VERSION, sha256 ${ZIP_SHA:0:12} as pinned"
+
+step "browser: copy the pinned zip in (never mounted), then install it as node"
+as_root mkdir -p /opt/ocw-proof/browser
+docker cp "$ZIP" "$NAME:/opt/ocw-proof/browser/$ZIP_NAME" >/dev/null
+as_root sh -c 'chown -R root:root /opt/ocw-proof/browser && chmod -R a+rX,go-w /opt/ocw-proof/browser'
+as_node "$RUNTIME_BIN" browser install --from-zip "/opt/ocw-proof/browser/$ZIP_NAME"
+
+# The doctor names the missing Linux libraries with one apt line. This script runs exactly that line as root, without
+# the leading `sudo` the doctor prints (the image has no sudo and this step already runs as root); the runtime never
+# runs it (P5). Only package names may follow `apt-get install -y`.
+BROWSER_LINE="$(doctor_browser)"
+APT_LINE=""
+if [[ "$BROWSER_LINE" == fail$'\t'*"Linux librar"* ]]; then
+  APT_LINE="$(cut -f3 <<<"$BROWSER_LINE")"
+  APT_LINE="${APT_LINE#sudo }"
+  [[ "$APT_LINE" =~ ^apt-get\ install\ -y(\ [a-z0-9][a-z0-9.+-]*)+$ ]] || fail "unexpected apt line from the doctor: $APT_LINE"
+  step "browser: as root, the doctor's line: $APT_LINE"
+  as_root env DEBIAN_FRONTEND=noninteractive sh -c "$APT_LINE >/dev/null" || fail "the doctor's apt line failed"
+  BROWSER_LINE="$(doctor_browser)"
+fi
+[[ "$BROWSER_LINE" == $'ok\tBrowser: on · Chrome for Testing '"$CFT_VERSION"* ]] ||
+  fail "doctor browser line after the install: $BROWSER_LINE"
+echo "   doctor: ok · $(cut -f2 <<<"$BROWSER_LINE")"
+
+step "browser: a page on the container's own 127.0.0.1:8099"
+docker exec -d -u node "$NAME" node -e '
+require("node:http")
+  .createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end("<!doctype html><title>Proof page</title><h1>Proof page</h1><p>Served by the server itself.</p>");
+  })
+  .listen(8099, "127.0.0.1");
+'
+page=""
+for _ in $(seq 1 20); do
+  page="$(as_node node -e 'fetch("http://127.0.0.1:8099/").then((r) => r.text()).then((t) => console.log(t.includes("Proof page") ? "up" : "wrong"), () => console.log("down"))')"
+  [[ "$page" == "up" ]] && break
+  sleep 0.5
+done
+[[ "$page" == "up" ]] || fail "the proof page did not come up on the container's 127.0.0.1:8099"
+echo "   GET http://127.0.0.1:8099/ serves the proof page (inside the container only)"
 
 # ---------------------------------------------------------------- setup, as a server admin would run it
 # The API answers 503 setup_required until the workspace exists: run the first-run setup before pairing.
@@ -247,6 +370,8 @@ echo "proof: image ${IMAGE#*@}"
 echo "proof: /bin/sh -> $SH_TARGET"
 echo "proof: installed ocw-runtime ${INSTALLED}"
 echo "proof: claude-agent-sdk ${SDK_VERSION} in current/node_modules (offline fake npm ci, lockfile pins)"
+echo "proof: browser_version Chrome for Testing ${CFT_VERSION} ${CFT_PLAT} (sha256 ${CFT_SHA256:0:12}, installed from the copied zip)"
+echo "proof: browser apt line ${APT_LINE:-none (no library was missing)}"
 [[ -f "$FACTS" ]] || fail "the proof spec wrote no facts"
 sed 's/^/proof: /' "$FACTS"
 
