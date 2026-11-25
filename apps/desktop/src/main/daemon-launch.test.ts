@@ -79,6 +79,27 @@ describe("buildDaemonEnv host kind (07.16, PD-18, A-02)", () => {
   });
 });
 
+describe("buildDaemonEnv app version (07.13, D-18, PD-21)", () => {
+  const base = { token: null, apiUrl: null, electronAsNode: false };
+
+  it("passes the desktop app's version as OCW_APP_VERSION", () => {
+    expect(buildDaemonEnv({}, { ...base, appVersion: "0.5.0" }).OCW_APP_VERSION).toBe("0.5.0");
+    expect(buildDaemonEnv({}, { ...base, appVersion: "0.5.0-rc.1" }).OCW_APP_VERSION).toBe("0.5.0-rc.1");
+  });
+
+  it.each([[""], ["  "], ["latest"], ["0.5"], ["v0.5.0"], ["0.5.0\nX=1"], [`1.2.3-${"a".repeat(80)}`]])(
+    "never passes an empty or non-semver version (%j), nor an inherited one",
+    (appVersion) => {
+      const env = buildDaemonEnv({ OCW_APP_VERSION: "9.9.9" }, { ...base, appVersion });
+      expect(env.OCW_APP_VERSION).toBeUndefined();
+    },
+  );
+
+  it("drops an inherited OCW_APP_VERSION when the app gives none", () => {
+    expect(buildDaemonEnv({ OCW_APP_VERSION: "9.9.9" }, base).OCW_APP_VERSION).toBeUndefined();
+  });
+});
+
 describe("augmentPath", () => {
   it("does not duplicate entries", () => {
     expect(augmentPath("/opt/homebrew/bin:/usr/bin", "/h")).toBe(

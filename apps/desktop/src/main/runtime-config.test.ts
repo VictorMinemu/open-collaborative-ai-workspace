@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  readDaemonBrowser,
   readDaemonFullAccess,
   readDaemonRuntimeUpdates,
+  writeDaemonBrowser,
   writeDaemonFullAccess,
   writeDaemonRuntimeUpdates,
 } from "./runtime-config";
@@ -110,6 +112,58 @@ describe("daemon runtime.json runtime updates level (07.11, D-02)", () => {
     const broken = home();
     writeFileSync(join(broken, "runtime.json"), "{ broken");
     await expect(writeDaemonRuntimeUpdates(broken, "off")).rejects.toThrow(/runtime\.json/);
+    expect(readFileSync(join(broken, "runtime.json"), "utf8")).toBe("{ broken");
+  });
+});
+
+describe("daemon runtime.json browser opt-in (07.13, D-10, PD-27)", () => {
+  it("is off when the file or the key is missing, or the value is not true", async () => {
+    const h = home();
+    expect(await readDaemonBrowser(h)).toBe(false);
+    writeFileSync(join(h, "runtime.json"), JSON.stringify({ fullAccess: { optIn: true } }));
+    expect(await readDaemonBrowser(h)).toBe(false);
+    writeFileSync(join(h, "runtime.json"), JSON.stringify({ browser: { optIn: "yes" } }));
+    expect(await readDaemonBrowser(h)).toBe(false);
+  });
+
+  it("writes browser.optIn atomically (0600), keeping fullAccess, the sandbox mode and every other key", async () => {
+    const h = home();
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        fullAccess: { optIn: true },
+        runtimeUpdates: { level: "notify" },
+        browser: { sandbox: "container" },
+      }),
+      { mode: 0o644 },
+    );
+    await writeDaemonBrowser(h, true);
+    const file = join(h, "runtime.json");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      serverUrl: "https://ocw.example.com",
+      fullAccess: { optIn: true },
+      runtimeUpdates: { level: "notify" },
+      browser: { sandbox: "container", optIn: true },
+    });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(await readDaemonBrowser(h)).toBe(true);
+    expect(await readDaemonFullAccess(h)).toBe(true);
+    await writeDaemonBrowser(h, false);
+    expect(await readDaemonBrowser(h)).toBe(false);
+    // The Full access writer keeps the browser section.
+    await writeDaemonFullAccess(h, false);
+    expect(JSON.parse(readFileSync(file, "utf8")).browser).toEqual({ sandbox: "container", optIn: false });
+  });
+
+  it("creates the file when missing; never overwrites a malformed one", async () => {
+    const h = join(home(), "nested-ocw-home");
+    await writeDaemonBrowser(h, true);
+    expect(JSON.parse(readFileSync(join(h, "runtime.json"), "utf8"))).toEqual({ browser: { optIn: true } });
+    const broken = home();
+    writeFileSync(join(broken, "runtime.json"), "{ broken");
+    await expect(writeDaemonBrowser(broken, true)).rejects.toThrow(/runtime\.json/);
+    await expect(readDaemonBrowser(broken)).rejects.toThrow(/runtime\.json/);
     expect(readFileSync(join(broken, "runtime.json"), "utf8")).toBe("{ broken");
   });
 });
