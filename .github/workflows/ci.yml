@@ -76,6 +76,8 @@ jobs:
       OCW_SANDBOX_URL: http://127.0.0.1:4291/__sandboxd
       OCW_SANDBOX_TOKEN: e2e-sandbox-token-0123456789abcdef0123456789
       OCW_E2E_SANDBOX: fake
+      # 07.13-22 (PD-19): the Work Zone browser journey's pinned headless shell (cached below, keyed on the pins).
+      OCW_E2E_BROWSERS_DIR: /home/runner/.cache/ocw-e2e-browsers
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -83,6 +85,17 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - name: Cache the pinned Work Zone browser
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ocw-e2e-browsers
+          key: ocw-e2e-browsers-${{ runner.os }}-${{ hashFiles('apps/local-runtime/src/browser/pins.ts') }}
+      # Downloaded (on a cache miss) and verified against the sha256 in pins.ts; never a hash skip.
+      - name: Pre-seed the pinned Work Zone browser
+        run: OCW_BROWSERS_DIR="$OCW_E2E_BROWSERS_DIR" apps/local-runtime/bin/ocw-runtime browser install
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Garage (attachments, ADR-0015) comes from compose with the keys setup:env generated; the API runs on the host
       # and reaches it on 127.0.0.1:3900 (OCW_S3_ENDPOINT in .env), browsers on localhost:3900 (OCW_S3_PUBLIC_URL).
       - name: Environment, database and object storage

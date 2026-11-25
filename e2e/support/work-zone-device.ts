@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type APIRequestContext, expect } from "@playwright/test";
 import { API_URL } from "../tests/env";
+import { browserEnv, deviceBrowsersRoot } from "./work-zone-browser";
 
 /**
  * A REAL local-runtime daemon (apps/local-runtime) in fake-runtime mode (OCW_RUNTIME_FAKE=1: no model, no
@@ -16,6 +17,8 @@ import { API_URL } from "../tests/env";
  * 07.16-21: `extraProjects` registers more scratch repositories on the same device (their ids in `extraProjectIds`),
  * and `startIsolatedServer` runs the daemon as a headless service (`OCW_RUNTIME_HOST=service`) and turns the
  * isolated-server mark on with the device's own CLI (`ocw-runtime isolated-server on`, D-19).
+ * 07.13-22: `browser: true` turns the Work Zone browser on for the daemon (the owner's opt-in, `OCW_ALLOW_BROWSER`)
+ * with a browsers root of its own that links the pinned build pre-seeded in the shared cache (`work-zone-browser.ts`).
  */
 
 const RUNTIME_BIN = join(import.meta.dirname, "..", "..", "apps", "local-runtime", "bin", "ocw-runtime");
@@ -52,7 +55,14 @@ export interface FakeDeviceHandle {
 
 export async function startFakeDevice(
   adminApi: APIRequestContext,
-  opts: { name: string; projectName: string; extraProjects?: string[]; env?: Record<string, string> },
+  opts: {
+    name: string;
+    projectName: string;
+    extraProjects?: string[];
+    env?: Record<string, string>;
+    /** 07.13-22: the real local browser (the pinned headless shell) for this device's sessions. */
+    browser?: boolean;
+  },
 ): Promise<FakeDeviceHandle> {
   const enrollment = await adminApi.post("/api/v1/devices/enrollments", { data: {} });
   expect(enrollment.ok(), "create a pairing code").toBe(true);
@@ -80,6 +90,8 @@ export async function startFakeDevice(
     OCW_RUNTIME_FAKE_DELAY_MS: "120",
     // 07.11 (PD-19): runtime CLI updates off unless the spec overrides it (before `...opts.env`).
     OCW_RUNTIME_UPDATES: "off",
+    // 07.13-22: the owner's browser opt-in and a browsers root of the device's own (before `...opts.env`).
+    ...(opts.browser ? browserEnv(deviceBrowsersRoot(home)) : {}),
     ...opts.env,
   };
   let daemon: ChildProcess | null = null;
