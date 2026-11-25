@@ -1,6 +1,8 @@
 import type { RuntimeControlRow } from "./index";
 
-/** Inventory A: Claude Code through the Claude Agent SDK 0.3.282 / CLI 2.1.289 (03.2-RESEARCH.md). */
+/**
+ * Inventory A: Claude Code through the Claude Agent SDK 0.3.282 / CLI 2.1.332 (03.2-RESEARCH.md; pins moved by 07.13-25).
+ */
 const row = (
   control: string,
   status: RuntimeControlRow["status"],
@@ -9,8 +11,12 @@ const row = (
   evidence: string,
 ): RuntimeControlRow => ({ area: "claude-code", control, status, reason, evidence, uiKey });
 
-/** Fixtures recorded at CLI 2.1.289 / SDK 0.3.282 (apps/local-runtime/src/claude/__fixtures__/). */
-const SETTINGS_FIXTURE = "fixture claude-code-2.1.289.settings.sdk.jsonl";
+/**
+ * Fixtures in apps/local-runtime/src/claude/__fixtures__/. Settings and title: CLI 2.1.332, recorded offline against
+ * the fake model (07.13-25; same readbacks as 2.1.289). Catalog: 2.1.289 on a claude.ai login, since the offline
+ * 2.1.332 catalog is the API-key list (aliases only, every probed window already 1M) and does not show the same rows.
+ */
+const SETTINGS_FIXTURE = "fixture claude-code-2.1.332.settings.sdk.jsonl";
 const CATALOG_FIXTURE = "fixture claude-code-2.1.289.catalog.json";
 
 export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
@@ -146,7 +152,7 @@ export const CLAUDE_CODE_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "session.title",
     "Automatic session titles (D-18): a separate one-shot query with `haiku` on the device owner's login, isolated from the session: no tools (deny-all canUseTool), default mode (plan swaps Haiku for Sonnet), bypass disabled, no filesystem settings or MCP servers, not persisted, empty temp directory, thinking off",
-    "Options.tools ~1637, persistSession ~1814, thinking ~1903, maxTurns ~1930, settingSources ~2249, strictMcpConfig ~2298, systemPrompt ~2400 (sdk.d.ts); fixture claude-code-2.1.289.title.sdk.jsonl",
+    "Options.tools ~1637, persistSession ~1814, thinking ~1903, maxTurns ~1930, settingSources ~2249, strictMcpConfig ~2298, systemPrompt ~2400 (sdk.d.ts); fixture claude-code-2.1.332.title.sdk.jsonl",
   ),
   row(
     "Rewind files",

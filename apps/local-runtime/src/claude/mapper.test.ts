@@ -103,66 +103,75 @@ describe("ClaudeEventMapper — recorded fixture (real Claude Code session, plan
   });
 });
 
-describe("ClaudeEventMapper — recorded fixture at 2.1.289 (setModel + applyFlagSettings + setPermissionMode)", () => {
-  const FILE = "claude-code-2.1.289.settings.sdk.jsonl";
-  const messages = loadFixture(FILE);
-  const init = messages.find((m) => m.type === "system" && m.subtype === "init") as unknown as Record<
-    string,
-    unknown
-  >;
+// 2.1.289 was recorded with the local login; 2.1.332 (the pin) offline against the fake model with a throwaway
+// CLAUDE_CONFIG_DIR (`record-fixture.ts --offline --scenario settings`, 07.13-25), so its key source is the fake key.
+describe.each([
+  { version: "2.1.289", apiKeySource: "none" },
+  { version: "2.1.332", apiKeySource: "ANTHROPIC_API_KEY" },
+])(
+  "ClaudeEventMapper — recorded fixture at $version (setModel + applyFlagSettings + setPermissionMode)",
+  ({ version, apiKeySource }) => {
+    const FILE = `claude-code-${version}.settings.sdk.jsonl`;
+    const messages = loadFixture(FILE);
+    const init = messages.find((m) => m.type === "system" && m.subtype === "init") as unknown as Record<
+      string,
+      unknown
+    >;
 
-  it("is a pinned, single-turn, scrubbed recording", () => {
-    expect(init.claude_code_version).toBe("2.1.289");
-    expect(messages.filter((m) => m.type === "result")).toHaveLength(1);
-    const text = readFileSync(join(FIXTURE_DIR, FILE), "utf8");
-    expect(text).not.toMatch(/\/Users\/(?!fixture-user\/)[A-Za-z0-9._]+\//);
-    expect(text).not.toMatch(/@(gmail|autofylabs)\./);
-  });
+    it("is a pinned, single-turn, scrubbed recording", () => {
+      expect(init.claude_code_version).toBe(version);
+      expect(init.apiKeySource).toBe(apiKeySource);
+      expect(messages.filter((m) => m.type === "result")).toHaveLength(1);
+      const text = readFileSync(join(FIXTURE_DIR, FILE), "utf8");
+      expect(text).not.toMatch(/\/Users\/(?!fixture-user\/)[A-Za-z0-9._]+\//);
+      expect(text).not.toMatch(/@(gmail|autofylabs)\./);
+    });
 
-  it("the init after the changes reports the requested model and the auto mode", () => {
-    const events = run(messages);
-    const started = events.findIndex((e) => e.type === "session.started");
-    expect(events[started]).toMatchObject({
-      type: "session.started",
-      runtimeVersion: "2.1.289",
-      model: "claude-sonnet-5-5",
-      permissionMode: "auto",
-    });
-    expect(events[started + 1]).toEqual({
-      type: "session.settings",
-      model: "claude-sonnet-5-5",
-      permissionMode: "auto",
-      fastModeState: "off",
-      fastModeReason: "sdk_opt_in_required",
-    });
-    // setPermissionMode answers with a status frame before the turn's init: forwarded as the mode readback.
-    expect(events[0]).toEqual({ type: "session.settings", permissionMode: "auto" });
-    expect(events.at(-1)).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
-    expect(events.filter((e) => e.type === "session.error")).toEqual([]);
-  });
-
-  it("a later init (runtime-side change) becomes one session.settings, no second session.started", () => {
-    const mapper = new ClaudeEventMapper();
-    mapper.currentPromptId = "prompt-1";
-    for (const m of messages) mapper.map(m);
-    const later = sdk({
-      ...init,
-      model: "claude-opus-5-5",
-      permissionMode: "acceptEdits",
-      fast_mode_state: "off",
-      fast_mode_disabled_reason: "extra_usage_disabled",
-    });
-    expect(mapper.map(later)).toEqual([
-      {
+    it("the init after the changes reports the requested model and the auto mode", () => {
+      const events = run(messages);
+      const started = events.findIndex((e) => e.type === "session.started");
+      expect(events[started]).toMatchObject({
+        type: "session.started",
+        runtimeVersion: version,
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+      });
+      expect(events[started + 1]).toEqual({
         type: "session.settings",
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+        fastModeState: "off",
+        fastModeReason: "sdk_opt_in_required",
+      });
+      // setPermissionMode answers with a status frame before the turn's init: forwarded as the mode readback.
+      expect(events[0]).toEqual({ type: "session.settings", permissionMode: "auto" });
+      expect(events.at(-1)).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
+      expect(events.filter((e) => e.type === "session.error")).toEqual([]);
+    });
+
+    it("a later init (runtime-side change) becomes one session.settings, no second session.started", () => {
+      const mapper = new ClaudeEventMapper();
+      mapper.currentPromptId = "prompt-1";
+      for (const m of messages) mapper.map(m);
+      const later = sdk({
+        ...init,
         model: "claude-opus-5-5",
         permissionMode: "acceptEdits",
-        fastModeState: "off",
-        fastModeReason: "extra_usage_disabled",
-      },
-    ]);
-  });
-});
+        fast_mode_state: "off",
+        fast_mode_disabled_reason: "extra_usage_disabled",
+      });
+      expect(mapper.map(later)).toEqual([
+        {
+          type: "session.settings",
+          model: "claude-opus-5-5",
+          permissionMode: "acceptEdits",
+          fastModeState: "off",
+          fastModeReason: "extra_usage_disabled",
+        },
+      ]);
+    });
+  },
+);
 
 describe("ClaudeEventMapper — hand-written cases", () => {
   it("forwards every system/init as session.settings, session.started only once (D-15)", () => {

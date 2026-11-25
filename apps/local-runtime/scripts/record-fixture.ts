@@ -14,9 +14,17 @@
 //       createSdkMcpServer and exercised through an in-memory MCP client; the fixture's SDK messages are derived from
 //       the installed SDK's types. `--print-env` prints the offline env a Claude child would get (PATH omitted); a
 //       non-loopback `--fake-url` exits non-zero.
+//   npx tsx scripts/record-fixture.ts --offline --scenario catalog|settings|title [--fake-url <loopback>] [--print-env]
+//       07.13-25, OFFLINE (PD-29): how the pinned 2.1.332 fixtures are recorded. The real CLI runs with HOME,
+//       CLAUDE_CONFIG_DIR, XDG dirs and TMPDIR in a fresh temp dir (offlineRecorderEnv), ANTHROPIC_BASE_URL on the
+//       repo's fake model (infra/fake-model, started in-process on loopback unless --fake-url names one), the fake key
+//       and non-essential traffic off. The cost guard accepts `apiKeySource: "ANTHROPIC_API_KEY"` only for that fake
+//       key on a loopback base URL; the caller's login, keys and home are never read. `plan-read` is not recorded
+//       offline (the fake has no Anthropic tool use; 2.1.287's plan-read stays the lifecycle floor).
 
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,17 +46,30 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { normalizeSessionTitle, type SessionEvent } from "@ocw/contracts";
 import { z } from "zod";
+import { createFakeModelServer } from "../../../infra/fake-model/server.mjs";
 import { probeClaudeModels } from "../src/claude/catalog.js";
 import { ClaudeCodeRuntime, childEnv, type QueryFn, type QueryHandle } from "../src/claude/claude-runtime.js";
 import { generateClaudeTitle } from "../src/claude/title.js";
 import { findExecutable } from "../src/exec-path.js";
-import { offlineRecorderEnv, printableOfflineEnv } from "../src/fixtures/offline-env.js";
+import {
+  isLoopbackUrl,
+  makeOfflineDirs,
+  type OfflineEnv,
+  offlineAnthropicKey,
+  offlineRecorderEnv,
+  printableOfflineEnv,
+} from "../src/fixtures/offline-env.js";
 import { sanitizeEvent } from "../src/sanitize.js";
 
 const FIXTURE_ROOT = "/tmp/ocw-fixture-repo";
 const FIXTURE_HOME = "/Users/fixture-user";
-/** The CLI version the 03.2 fixtures are pinned to (packages/contracts PINNED_RUNTIME_VERSIONS). */
+/** The CLI version the 03.2 fixtures were recorded at with the local login (the compatibility floor's recordings). */
 const PINNED_CLI = "2.1.289";
+/** The CLI version the offline fixtures are recorded at (packages/contracts PINNED_RUNTIME_VERSIONS, 07.13-25). */
+const OFFLINE_CLI = "2.1.332";
+const OFFLINE = process.argv.includes("--offline");
+/** The version this run records at. */
+const CLI = OFFLINE ? OFFLINE_CLI : PINNED_CLI;
 const INIT_KEEP = new Set([
   "type",
   "subtype",
@@ -69,6 +90,8 @@ type Scenario = "plan-read" | "settings" | "catalog" | "title" | "browser-mcp";
 /** Title scenario (03.2-12): a Spanish prompt, so the fixture also proves the title keeps the prompt's language. */
 const TITLE_PROMPT =
   "Arregla el error de redirección del login cuando caduca la sesión en la página de ajustes";
+/** The offline title prompt: the fake answers a title request with the forced text (its `[[title:…]]` rule). */
+const OFFLINE_TITLE_PROMPT = `${TITLE_PROMPT} [[title:Redirección de login al expirar]]`;
 
 function scenarioArg(argv: string[]): Scenario {
   const i = argv.indexOf("--scenario");
@@ -79,17 +102,83 @@ function scenarioArg(argv: string[]): Scenario {
   process.exit(1);
 }
 
-// browser-mcp never spawns the CLI and drops every caller key from the env it builds (offlineRecorderEnv).
-if (scenarioArg(process.argv.slice(2)) !== "browser-mcp" && process.env.ANTHROPIC_API_KEY) {
+// browser-mcp never spawns the CLI; an offline run drops every caller key from the env it builds (offlineRecorderEnv).
+if (scenarioArg(process.argv.slice(2)) !== "browser-mcp" && !OFFLINE && process.env.ANTHROPIC_API_KEY) {
   console.error(
     "ANTHROPIC_API_KEY is set; refusing to record (would be metered). Unset it to use the local login.",
   );
   process.exit(1);
 }
 
+/** An offline run: the fake model, the temp dir and the env every CLI child gets (07.13-25). */
+interface OfflineRun {
+  env: OfflineEnv;
+  tmp: string;
+  realTmp: string;
+  close(): Promise<void>;
+}
+let offline: OfflineRun | null = null;
+
+/**
+ * Starts the fake model (in-process on a random loopback port unless `--fake-url` names one) and builds the offline
+ * env. `--print-env` prints it and returns null; a non-loopback `--fake-url` throws before anything starts.
+ */
+async function openOffline(): Promise<OfflineRun | null> {
+  const at = process.argv.indexOf("--fake-url");
+  const fakeArg = at > 0 ? process.argv[at + 1] : undefined;
+  if (fakeArg !== undefined && !isLoopbackUrl(fakeArg)) {
+    throw new Error("--fake-url must be http(s) on a loopback host (the fake model server)");
+  }
+  const fake = fakeArg ? null : createFakeModelServer();
+  if (fake) await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+  const fakeOrigin = fake
+    ? `http://127.0.0.1:${(fake.address() as AddressInfo).port}`
+    : new URL(fakeArg ?? "").origin;
+  const tmp = await mkdtemp(join(tmpdir(), "ocw-offline-claude-"));
+  const close = async () => {
+    await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    await new Promise<void>((ok) => (fake ? fake.close(() => ok()) : ok()));
+  };
+  let env: OfflineEnv;
+  try {
+    env = offlineRecorderEnv({ env: process.env, tmp, fakeUrl: fakeOrigin });
+  } catch (err) {
+    await close();
+    throw err;
+  }
+  if (process.argv.includes("--print-env")) {
+    process.stdout.write(`${JSON.stringify(printableOfflineEnv(env), null, 2)}\n`);
+    await close();
+    return null;
+  }
+  makeOfflineDirs(env);
+  return { env, tmp, realTmp: await realpath(tmp), close };
+}
+
+/** The env a recorded CLI child gets: the offline one, else the adapter's filtered env (local login). */
+function recordingEnv(): Record<string, string | undefined> {
+  return offline ? offline.env : childEnv(process.env, false);
+}
+
+/** `sdkQuery` with the offline env forced on the child (the adapter builds its env from the caller's). */
+function recorderQuery(params: Parameters<typeof sdkQuery>[0]): ReturnType<typeof sdkQuery> {
+  if (!offline) return sdkQuery(params);
+  return sdkQuery({ ...params, options: { ...params.options, env: offline.env } });
+}
+
+/**
+ * The cost guard on an init's key source: the local login (`none`), or, offline only, the fake key on a loopback
+ * base URL (offlineAnthropicKey).
+ */
+function keySourceAllowed(source: string): boolean {
+  if (source === "none") return true;
+  return offline !== null && source === "ANTHROPIC_API_KEY" && offlineAnthropicKey(offline.env);
+}
+
 function scrubString(s: string, roots: string[]): string {
   let out = s;
   for (const r of roots) out = out.split(r).join(FIXTURE_ROOT);
+  if (offline) for (const t of [offline.realTmp, offline.tmp]) out = out.split(t).join("<tmp>");
   out = out.split(homedir()).join(FIXTURE_HOME);
   return out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "fixture@example.com");
 }
@@ -108,17 +197,20 @@ function scrub(v: unknown, roots: string[]): unknown {
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, "..", "src", "claude", "__fixtures__");
 
-/** The CLI the adapter runs (PATH `claude`) must be the pinned version, else nothing is recorded. */
+/** The CLI the adapter runs (PATH `claude`) must be this run's version, else nothing is recorded. */
 function requirePinnedCli(): string {
   const claude = findExecutable("claude");
   if (!claude) {
     console.error("claude CLI not found on PATH");
     process.exit(1);
   }
-  const out = execFileSync(claude, ["--version"], { encoding: "utf8" });
-  if (!out.includes(PINNED_CLI)) {
+  const out = execFileSync(claude, ["--version"], {
+    encoding: "utf8",
+    ...(offline ? { env: offline.env } : {}),
+  });
+  if (!out.includes(CLI)) {
     console.error(
-      `claude --version printed ${out.trim()}; the fixtures are pinned to ${PINNED_CLI}. Not recording.`,
+      `claude --version printed ${out.trim()}; the fixtures are pinned to ${CLI}. Not recording.`,
     );
     process.exit(1);
   }
@@ -126,11 +218,12 @@ function requirePinnedCli(): string {
 }
 
 async function tempRepo(gitInit: boolean): Promise<{ real: string; roots: string[] }> {
-  const tmp = await mkdtemp(join(tmpdir(), "ocw-fixture-"));
+  // Offline: inside the run's temp dir, so the CLI's temp files and the repo share the one cleanup.
+  const tmp = await mkdtemp(join(offline ? offline.realTmp : tmpdir(), "ocw-fixture-"));
   const real = await realpath(tmp);
   const roots = [...new Set([real, tmp])].sort((a, b) => b.length - a.length);
   await writeFile(join(real, "hello.txt"), "Hello from the fixture repo.\n");
-  if (gitInit) execFileSync("git", ["init", "-q"], { cwd: real });
+  if (gitInit) execFileSync("git", ["init", "-q"], { cwd: real, ...(offline ? { env: offline.env } : {}) });
   return { real, roots };
 }
 
@@ -138,7 +231,7 @@ async function tempRepo(gitInit: boolean): Promise<{ real: string; roots: string
 function teeRuntime(raw: SDKMessage[], state: { aborted: boolean }, calls: string[]): ClaudeCodeRuntime {
   return new ClaudeCodeRuntime({
     queryFn: (params) => {
-      const q = sdkQuery(params);
+      const q = recorderQuery(params);
       const tee: QueryHandle = {
         interrupt: () => q.interrupt(),
         close: () => q.close(),
@@ -159,9 +252,11 @@ function teeRuntime(raw: SDKMessage[], state: { aborted: boolean }, calls: strin
         async *[Symbol.asyncIterator]() {
           for await (const m of q) {
             if (m.type === "system" && m.subtype === "init") {
-              if (m.apiKeySource !== "none") {
+              if (!keySourceAllowed(m.apiKeySource)) {
                 state.aborted = true;
-                console.error(`apiKeySource=${m.apiKeySource}: not the local login; aborting.`);
+                console.error(
+                  `apiKeySource=${m.apiKeySource}: not the local login or the fake key; aborting.`,
+                );
                 q.close();
                 return;
               }
@@ -250,7 +345,7 @@ async function recordCatalog(): Promise<void> {
   const { real, roots } = await tempRepo(false);
   const calls: string[] = [];
   const queryFn: QueryFn = (params) => {
-    const q = sdkQuery(params);
+    const q = recorderQuery(params);
     return {
       interrupt: () => q.interrupt(),
       close: () => q.close(),
@@ -267,13 +362,13 @@ async function recordCatalog(): Promise<void> {
   };
   const { models, contextWindows } = await probeClaudeModels(queryFn, {
     claudePath: claude,
-    env: childEnv(process.env, false),
+    env: recordingEnv(),
     cwd: real,
   });
   await rm(real, { recursive: true, force: true });
-  const fixture = scrub({ cliVersion: PINNED_CLI, models, contextWindows }, roots);
+  const fixture = scrub({ cliVersion: CLI, models, contextWindows }, roots);
   await mkdir(outDir, { recursive: true });
-  const file = join(outDir, `claude-code-${PINNED_CLI}.catalog.json`);
+  const file = join(outDir, `claude-code-${CLI}.catalog.json`);
   await writeFile(file, `${JSON.stringify(fixture, null, 2)}\n`);
   console.log(`wrote ${models.length} models -> ${file.replace(homedir(), "~")}`);
   console.log(`control requests: ${calls.length} setModel probes (no user message)`);
@@ -287,17 +382,17 @@ async function recordCatalog(): Promise<void> {
  */
 async function recordTitle(): Promise<void> {
   const claude = requirePinnedCli();
-  const parent = await mkdtemp(join(tmpdir(), "ocw-fixture-"));
+  const parent = await mkdtemp(join(offline ? offline.realTmp : tmpdir(), "ocw-fixture-"));
   const real = await realpath(parent);
   const roots = [...new Set([real, parent])].sort((a, b) => b.length - a.length);
-  const catalog = JSON.parse(
-    await readFile(join(outDir, `claude-code-${PINNED_CLI}.catalog.json`), "utf8"),
-  ) as { models: Array<{ value: string; resolvedModel?: string }> };
+  const catalog = JSON.parse(await readFile(join(outDir, `claude-code-${CLI}.catalog.json`), "utf8")) as {
+    models: Array<{ value: string; resolvedModel?: string }>;
+  };
   const resolvedModel = catalog.models.find((m) => m.value === "haiku")?.resolvedModel ?? null;
   const raw: SDKMessage[] = [];
   const state = { aborted: false };
   const queryFn: QueryFn = (params) => {
-    const q = sdkQuery(params);
+    const q = recorderQuery(params);
     return {
       interrupt: () => q.interrupt(),
       close: () => q.close(),
@@ -309,9 +404,9 @@ async function recordTitle(): Promise<void> {
       async *[Symbol.asyncIterator]() {
         for await (const m of q) {
           if (m.type === "system" && m.subtype === "init") {
-            if (m.apiKeySource !== "none") {
+            if (!keySourceAllowed(m.apiKeySource)) {
               state.aborted = true;
-              console.error(`apiKeySource=${m.apiKeySource}: not the local login; aborting.`);
+              console.error(`apiKeySource=${m.apiKeySource}: not the local login or the fake key; aborting.`);
               q.close();
               return;
             }
@@ -332,8 +427,8 @@ async function recordTitle(): Promise<void> {
   try {
     answer = await generateClaudeTitle(queryFn, {
       claudePath: claude,
-      env: childEnv(process.env, false),
-      prompt: TITLE_PROMPT,
+      env: recordingEnv(),
+      prompt: OFFLINE ? OFFLINE_TITLE_PROMPT : TITLE_PROMPT,
       model: "haiku",
       resolvedModel,
       signal: AbortSignal.timeout(60_000),
@@ -532,10 +627,21 @@ async function recordBrowserMcp(): Promise<void> {
 
 async function main(): Promise<void> {
   const scenario = scenarioArg(process.argv.slice(2));
-  if (scenario === "browser-mcp") await recordBrowserMcp();
-  else if (scenario === "catalog") await recordCatalog();
-  else if (scenario === "title") await recordTitle();
-  else await recordTurn(scenario);
+  if (scenario === "browser-mcp") return recordBrowserMcp();
+  if (OFFLINE) {
+    if (scenario === "plan-read") {
+      throw new Error("plan-read is not recorded offline: the fake model has no Anthropic tool use");
+    }
+    offline = await openOffline();
+    if (!offline) return; // --print-env
+  }
+  try {
+    if (scenario === "catalog") await recordCatalog();
+    else if (scenario === "title") await recordTitle();
+    else await recordTurn(scenario);
+  } finally {
+    await offline?.close();
+  }
 }
 
 main().catch((err: unknown) => {

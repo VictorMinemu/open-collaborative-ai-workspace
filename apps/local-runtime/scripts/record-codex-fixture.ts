@@ -6,6 +6,16 @@
 // git repo, never in a full-access sandbox.
 //
 //   npx tsx scripts/record-codex-fixture.ts [--scenario plan-read|supervised-write|model-list|title] [--codex /path/to/codex]
+//   npx tsx scripts/record-codex-fixture.ts --offline [--scenario …] [--fake-url http://127.0.0.1:<port>] [--print-env]
+//
+// `--offline` (07.13-25, PD-29) is valid for every scenario and is how the pinned fixtures are recorded: no login, no
+// subscription, no key. The real codex-cli 0.172.0 app-server runs with HOME / CODEX_HOME / CLAUDE_CONFIG_DIR / XDG
+// dirs in a fresh temp dir (offlineRecorderEnv) and the repo's fake model (infra/fake-model, Responses API, loopback)
+// as its only provider (`model_provider = "ocw_fake"`, `model = "fake-model"`, plugins / remote plugins / apps off).
+// The turn prompts carry the fake's `[[call <tool> <json>]]` directive so the model calls the offered shell tool; the
+// title prompt forces the fake's title with `[[title:…]]`. The login check and the key guard are skipped (the child
+// env drops every caller key) and the caller's home is never read. Without `--offline` the scenarios use the local
+// ChatGPT login (a manual refresh only).
 //
 // Scenarios:
 //   plan-read         plan mode (read-only sandbox), "cat hello.txt", reply OK            (default)
@@ -43,7 +53,9 @@ import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
   CodexRuntime,
+  type CodexRuntimeOptions,
   codexChildEnv,
+  type SpawnAppServer,
 } from "../src/codex/codex-runtime.js";
 import { detectCodex, parseCodexVersion } from "../src/codex/detect.js";
 import {
@@ -96,9 +108,11 @@ if (!picked) {
 }
 const scenario = picked;
 const codexPath = arg("codex");
+/** browser-mcp is always offline; every other scenario with `--offline` (07.13-25). */
+const offline = scenario === "browser-mcp" || process.argv.includes("--offline");
 
-// browser-mcp drops every caller key from its child env instead (offlineRecorderEnv) and never reaches a real provider.
-if (scenario !== "browser-mcp" && (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY)) {
+// An offline child env drops every caller key (offlineRecorderEnv) and never reaches a real provider.
+if (!offline && (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY)) {
   console.error("OPENAI_API_KEY / CODEX_API_KEY is set; refusing to record (would be metered).");
   process.exit(1);
 }
@@ -207,8 +221,11 @@ async function recordTitle(version: string | null): Promise<void> {
   console.log("normalized:", JSON.stringify(answer === null ? null : normalizeSessionTitle(answer)));
 }
 
-/** The codex-cli version the browser-mcp fixture is pinned to (07.13 moves PINNED_RUNTIME_VERSIONS to it, plan 25). */
-const PINNED_BROWSER_CODEX = "0.172.0";
+/**
+ * The codex-cli version every offline fixture is recorded at (browser-mcp in 07.13-04; the pinned fixtures in 07.13-25,
+ * `PINNED_RUNTIME_VERSIONS.codex.cli`).
+ */
+const OFFLINE_CODEX = "0.172.0";
 /** The browser-mcp turn: the fake model calls `open`, then `screenshot`, then reports what each tool said. */
 const BROWSER_MCP_PROMPT = '[[call open {"url":"http://localhost:1/"}]] [[call screenshot {}]]';
 const BROWSER_MCP_TURN_TIMEOUT_MS = 180_000;
@@ -216,27 +233,132 @@ const BROWSER_MCP_TURN_TIMEOUT_MS = 180_000;
 /** A TOML basic string (`-c` values are parsed as TOML; JSON string escapes are valid TOML ones). */
 const toml = (s: string): string => JSON.stringify(s);
 
-/** The `-c` overrides of the browser-mcp app-server: the fake provider and the `ocw_browser` server (PD-08). */
-function browserMcpArgs(fakeOrigin: string, node: string, spike: string, approvalMode: string): string[] {
-  const overrides = [
+/** The `-c` overrides of every offline app-server: the fake provider and model, and nothing that leaves the device. */
+function offlineCodexOverrides(fakeOrigin: string): string[] {
+  return [
     `model_provider=${toml("ocw_fake")}`,
     `model_providers.ocw_fake.name=${toml("OCW fake")}`,
     `model_providers.ocw_fake.base_url=${toml(`${fakeOrigin}/v1`)}`,
     `model_providers.ocw_fake.wire_api=${toml("responses")}`,
     `model_providers.ocw_fake.env_key=${toml("OCW_FAKE_MODEL_KEY")}`,
     `model=${toml("fake-model")}`,
-    `mcp_servers.ocw_browser.command=${toml(node)}`,
-    `mcp_servers.ocw_browser.args=[${toml(spike)}]`,
-    `mcp_servers.ocw_browser.default_tools_approval_mode=${toml(approvalMode)}`,
-    "mcp_servers.ocw_browser.tool_timeout_sec=960",
     // Offline: no curated-plugin clone from GitHub, no remote plugins, no ChatGPT apps connectors (a first run
     // without these cloned the plugin catalogue into the temp CODEX_HOME). The MCP tool path is unaffected.
     "features.plugins=false",
     "features.remote_plugin=false",
     "features.apps=false",
   ];
-  return [...CODEX_APP_SERVER_ARGS, ...overrides.flatMap((o) => ["-c", o])];
 }
+
+const asArgs = (overrides: string[]): string[] => overrides.flatMap((o) => ["-c", o]);
+
+/** The `-c` overrides of the browser-mcp app-server: the fake provider and the `ocw_browser` server (PD-08). */
+function browserMcpArgs(fakeOrigin: string, node: string, spike: string, approvalMode: string): string[] {
+  const overrides = [
+    ...offlineCodexOverrides(fakeOrigin),
+    `mcp_servers.ocw_browser.command=${toml(node)}`,
+    `mcp_servers.ocw_browser.args=[${toml(spike)}]`,
+    `mcp_servers.ocw_browser.default_tools_approval_mode=${toml(approvalMode)}`,
+    "mcp_servers.ocw_browser.tool_timeout_sec=960",
+  ];
+  return [...CODEX_APP_SERVER_ARGS, ...asArgs(overrides)];
+}
+
+/** An offline recording's fake model, temp dir and child env (PD-29). */
+interface OfflineRun {
+  env: OfflineEnv;
+  tmp: string;
+  realTmp: string;
+  fakeOrigin: string;
+  /** The fake's view of each model request (console notes only, never written into a fixture). */
+  requests: FakeModelRequest[];
+  bin: string;
+  version: string;
+  /** Removes the temp dir and stops the in-process fake. */
+  close(): Promise<void>;
+}
+
+/**
+ * Starts the fake model (in-process on a random loopback port unless `--fake-url` names one), builds the offline env
+ * and checks the binary is the pinned `OFFLINE_CODEX`. `--print-env` prints the env and returns null; a non-loopback
+ * `--fake-url` throws before anything starts.
+ */
+async function openOffline(): Promise<OfflineRun | null> {
+  const fakeArg = arg("fake-url");
+  if (fakeArg !== undefined && !isLoopbackUrl(fakeArg)) {
+    throw new Error("--fake-url must be http(s) on a loopback host (the fake model server)");
+  }
+  const requests: FakeModelRequest[] = [];
+  const fake = fakeArg ? null : createFakeModelServer({ onRequest: (r) => requests.push(r) });
+  if (fake) await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+  const fakeOrigin = fake
+    ? `http://127.0.0.1:${(fake.address() as AddressInfo).port}`
+    : new URL(fakeArg ?? "").origin;
+  const closeFake = () => new Promise<void>((ok) => (fake ? fake.close(() => ok()) : ok()));
+  const tmp = await mkdtemp(join(tmpdir(), "ocw-offline-codex-"));
+  const close = async () => {
+    await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    await closeFake();
+  };
+  let env: OfflineEnv;
+  try {
+    env = offlineRecorderEnv({ env: process.env, tmp, fakeUrl: fakeOrigin });
+  } catch (err) {
+    await close();
+    throw err;
+  }
+  if (process.argv.includes("--print-env")) {
+    process.stdout.write(`${JSON.stringify(printableOfflineEnv(env), null, 2)}\n`);
+    await close();
+    return null;
+  }
+  const bin = codexPath ?? "codex";
+  makeOfflineDirs(env);
+  const version = parseCodexVersion(execFileSync(bin, ["--version"], { env, encoding: "utf8" }));
+  if (version !== OFFLINE_CODEX) {
+    await close();
+    throw new Error(`codex ${version} is not the pinned ${OFFLINE_CODEX}; pass --codex <pinned binary>.`);
+  }
+  return { env, tmp, realTmp: await realpath(tmp), fakeOrigin, requests, bin, version, close };
+}
+
+/**
+ * The adapter's `SpawnAppServer` for an offline run: the adapter's arguments (or the default) plus the offline
+ * overrides, and the offline env instead of the one the adapter filtered from the caller's.
+ */
+function offlineSpawn(run: OfflineRun): SpawnAppServer {
+  return ({ cwd, args }) =>
+    spawn(run.bin, [...(args ?? CODEX_APP_SERVER_ARGS), ...asArgs(offlineCodexOverrides(run.fakeOrigin))], {
+      cwd,
+      env: run.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as unknown as AppServerProcess;
+}
+
+/** The placeholder pairs of an offline fixture: the repo is FIXTURE_ROOT, the rest of the temp dir `<tmp>`. */
+function offlineRoots(run: OfflineRun, repo: string, realRepo: string): Array<[string, string]> {
+  const roots: Array<[string, string]> = [
+    [realRepo, FIXTURE_ROOT],
+    [repo, FIXTURE_ROOT],
+    [run.realTmp, "<tmp>"],
+    [run.tmp, "<tmp>"],
+    [process.execPath, "<node>"],
+  ];
+  if (process.env.HOME) roots.push([process.env.HOME, FIXTURE_HOME]);
+  return roots.sort((a, b) => b[0].length - a[0].length);
+}
+
+/** The shell tool codex-cli 0.172.0 offers the model (unified exec: `{ cmd, workdir?, … }`), recorded in the console. */
+const OFFLINE_SHELL_TOOL = "exec_command";
+/** The offline turn prompts: the fake model calls the offered shell tool through `[[call]]` (07.13-25). */
+const OFFLINE_PROMPTS: Record<string, string> = {
+  "plan-read": `Run \`cat hello.txt\`. [[call ${OFFLINE_SHELL_TOOL} {"cmd":"cat hello.txt"}]]`,
+  "supervised-write":
+    "Create a file named note.txt containing the word hi. " +
+    `[[call ${OFFLINE_SHELL_TOOL} {"cmd":"printf hi > note.txt"}]]`,
+};
+/** The offline title: the fake answers a title request with the forced text (its `[[title:…]]` rule). */
+const OFFLINE_TITLE_PROMPT = `${TITLE_PROMPT} [[title:Fix settings page login redirect]]`;
 
 /** Replaces every absolute root with its placeholder (longest first) and masks e-mail addresses. */
 function placeholders(v: unknown, roots: Array<[string, string]>): unknown {
@@ -296,47 +418,12 @@ function browserMcpAnswer(r: JsonRpcRequest, browserItems: Set<string>): unknown
 
 /** The browser-mcp scenario (07.13-04): offline, the real codex binary, the fake model, the spike MCP server. */
 async function recordBrowserMcp(): Promise<void> {
-  const printEnv = process.argv.includes("--print-env");
   const approvalMode = arg("approval-mode") ?? "approve";
   if (approvalMode !== "approve" && approvalMode !== "prompt")
     throw new Error("--approval-mode is approve or prompt");
-  const fakeArg = arg("fake-url");
-  if (fakeArg !== undefined && !isLoopbackUrl(fakeArg)) {
-    throw new Error("--fake-url must be http(s) on a loopback host (the fake model server)");
-  }
-  // The fake model, in-process on a random loopback port, unless the caller runs one.
-  const requests: FakeModelRequest[] = [];
-  const fake = fakeArg ? null : createFakeModelServer({ onRequest: (r) => requests.push(r) });
-  if (fake) await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
-  const fakeOrigin = fake
-    ? `http://127.0.0.1:${(fake.address() as AddressInfo).port}`
-    : new URL(fakeArg ?? "").origin;
-  const closeFake = () => new Promise<void>((ok) => (fake ? fake.close(() => ok()) : ok()));
-  const tmp = await mkdtemp(join(tmpdir(), "ocw-offline-codex-"));
-  let env: OfflineEnv;
-  try {
-    env = offlineRecorderEnv({ env: process.env, tmp, fakeUrl: fakeOrigin });
-  } catch (err) {
-    await rm(tmp, { recursive: true, force: true });
-    await closeFake();
-    throw err;
-  }
-  if (printEnv) {
-    process.stdout.write(`${JSON.stringify(printableOfflineEnv(env), null, 2)}\n`);
-    await rm(tmp, { recursive: true, force: true });
-    return closeFake();
-  }
-
-  const bin = codexPath ?? "codex";
-  makeOfflineDirs(env);
-  const version = parseCodexVersion(execFileSync(bin, ["--version"], { env, encoding: "utf8" }));
-  if (version !== PINNED_BROWSER_CODEX) {
-    await rm(tmp, { recursive: true, force: true });
-    await closeFake();
-    throw new Error(
-      `codex ${version} is not the pinned ${PINNED_BROWSER_CODEX}; pass --codex <pinned binary>.`,
-    );
-  }
+  const run = await openOffline();
+  if (!run) return;
+  const { env, tmp, realTmp, fakeOrigin, requests, bin, version } = run;
   const repo = join(tmp, "repo");
   await mkdir(repo, { recursive: true });
   await writeFile(join(repo, "hello.txt"), "Hello from the fixture repo.\n");
@@ -344,7 +431,6 @@ async function recordBrowserMcp(): Promise<void> {
   const here = dirname(fileURLToPath(import.meta.url));
   const spike = resolve(here, "spike-browser-mcp.mjs");
   const repoRoot = resolve(here, "..", "..", "..");
-  const realTmp = await realpath(tmp);
   // Placeholders for every absolute path that could appear (the caller's HOME is only a scrub string here).
   const roots: Array<[string, string]> = [
     [realTmp, "<tmp>"],
@@ -438,7 +524,6 @@ async function recordBrowserMcp(): Promise<void> {
     await exited;
   }
   peer.close();
-  await closeFake();
 
   const suffix = approvalMode === "prompt" ? "browser-mcp.prompt-mode" : "browser-mcp";
   const file = join(fixtureDir(), `codex-${version}.${suffix}.rpc.jsonl`);
@@ -446,7 +531,7 @@ async function recordBrowserMcp(): Promise<void> {
     await mkdir(fixtureDir(), { recursive: true });
     await writeFile(file, `${rpc.map((r) => JSON.stringify(placeholders(r, roots))).join("\n")}\n`);
   }
-  await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  await run.close();
 
   // What the SPIKES notes need, never written into the fixture: the fake's view of each model request.
   const responses = requests.filter((r) => r.kind === "responses");
@@ -468,8 +553,142 @@ async function recordBrowserMcp(): Promise<void> {
   console.log(`wrote ${rpc.length} JSON-RPC messages -> ${String(placeholders(file, roots))}`);
 }
 
+/** Drops the notifications that only describe a personal Codex config (see PERSONAL). */
+const notPersonal = (r: { msg: unknown }) =>
+  !PERSONAL.test(String((r.msg as { method?: unknown }).method ?? ""));
+
+/**
+ * One turn through CodexRuntime: start in the scenario's mode, configure, prompt, decline every approval, stop.
+ * Writes `codex-<version>.<scenario>.rpc.jsonl` with `clean` applied to every line; returns the adapter's events.
+ */
+async function recordTurn(o: {
+  scenario: Scenario;
+  version: string | null;
+  cwd: string;
+  prompt: string;
+  runtime: CodexRuntimeOptions;
+  clean: (v: unknown) => unknown;
+}): Promise<SessionEvent[]> {
+  const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({ ...o.runtime, onRpcMessage: (dir, msg) => rpc.push({ dir, msg }) });
+  const { mode, configure } = o.scenario;
+  const done = new Promise<void>((resolve) => {
+    void runtime
+      .start({ sessionId: "fixture-session", cwd: o.cwd, permissionMode: mode }, (ev) => {
+        events.push(ev);
+        if (ev.type === "approval.requested")
+          runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
+        if (ev.type === "prompt.completed" || (ev.type === "session.state" && ev.status === "failed"))
+          resolve();
+      })
+      .then(() => (configure ? runtime.configure("fixture-session", configure) : undefined))
+      .then(() => runtime.prompt("fixture-session", { promptId: "prompt-1", text: o.prompt }))
+      .catch((err: unknown) => {
+        console.error(err);
+        resolve();
+      });
+  });
+  await done;
+  await runtime.stop("fixture-session");
+
+  const outDir = fixtureDir();
+  await mkdir(outDir, { recursive: true });
+  const file = join(outDir, `codex-${o.version ?? "unknown"}.${scenarioName}.rpc.jsonl`);
+  // Drop notifications that only describe the owner's personal Codex config (MCP servers, hooks,
+  // plugins, account): ignored by the mapper anyway and not fit for an open-source fixture.
+  const kept = rpc.filter(notPersonal);
+  await writeFile(file, `${kept.map((r) => JSON.stringify(o.clean(r))).join("\n")}\n`);
+  console.log(`wrote ${kept.length} of ${rpc.length} JSON-RPC messages -> ${String(o.clean(file))}`);
+  return events;
+}
+
+/** The offline recordings (07.13-25, PD-29): the same scenarios against the fake model, under temp homes only. */
+async function recordOffline(): Promise<void> {
+  const run = await openOffline();
+  if (!run) return;
+  const repo = join(run.tmp, "repo");
+  await mkdir(repo, { recursive: true });
+  const realRepo = await realpath(repo);
+  const roots = offlineRoots(run, repo, realRepo);
+  const clean = (v: unknown) => placeholders(v, roots);
+  const spawnFn = offlineSpawn(run);
+  try {
+    if (scenario === "no-turn") {
+      const models = await listCodexModels(spawnFn, { cwd: realRepo, env: run.env });
+      await mkdir(fixtureDir(), { recursive: true });
+      const file = join(fixtureDir(), `codex-${run.version}.model-list.json`);
+      await writeFile(file, `${JSON.stringify(clean({ data: models, nextCursor: null }), null, 2)}\n`);
+      console.log(`wrote ${models.length} models -> ${String(clean(file))}`);
+      for (const m of models)
+        console.log(`${m.id}${m.isDefault ? " (default)" : ""}${m.hidden ? " hidden" : ""}`);
+      return;
+    }
+    if (scenario === "title") {
+      const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
+      let answer: string | null = null;
+      try {
+        answer = await generateCodexTitle(spawnFn, {
+          env: run.env,
+          prompt: OFFLINE_TITLE_PROMPT,
+          model: "gpt-6-luna",
+          effort: "low",
+          signal: AbortSignal.timeout(90_000),
+          tmpRoot: realRepo,
+          onRpcMessage: (dir, msg) => rpc.push({ dir, msg }),
+        });
+      } catch (err) {
+        console.error("title call refused (recorded as observed):", err);
+      }
+      const kept = rpc.filter(notPersonal);
+      await mkdir(fixtureDir(), { recursive: true });
+      const file = join(fixtureDir(), `codex-${run.version}.title.rpc.jsonl`);
+      await writeFile(file, `${kept.map((r) => JSON.stringify(clean(r))).join("\n")}\n`);
+      console.log(`wrote ${kept.length} of ${rpc.length} JSON-RPC messages -> ${String(clean(file))}`);
+      console.log("raw answer:", JSON.stringify(answer));
+      console.log("normalized:", JSON.stringify(answer === null ? null : normalizeSessionTitle(answer)));
+      return;
+    }
+    if (scenario === "browser-mcp") throw new Error("browser-mcp is recorded by recordBrowserMcp");
+    const prompt = OFFLINE_PROMPTS[scenarioName];
+    if (!prompt) throw new Error(`no offline prompt for ${scenarioName}`);
+    await writeFile(join(realRepo, "hello.txt"), "Hello from the fixture repo.\n");
+    execFileSync("git", ["init", "-q"], { cwd: realRepo, env: run.env });
+    const events = await recordTurn({
+      scenario,
+      version: run.version,
+      cwd: realRepo,
+      prompt,
+      runtime: { codexPath: run.bin, spawnAppServer: spawnFn },
+      clean,
+    });
+    for (const ev of events) console.log(JSON.stringify(clean(ev)).slice(0, 300));
+    // The fake's view (console only): the tools Codex offered and each tool output it got back.
+    const responses = run.requests.filter((r) => r.kind === "responses");
+    const offered = (responses[0]?.body?.tools ?? []) as Array<{
+      type?: string;
+      name?: string;
+      parameters?: { properties?: Record<string, unknown> };
+    }>;
+    console.log(`tools offered: ${JSON.stringify(offered.map((t) => `${t.type}:${t.name ?? ""}`))}`);
+    const shell = offered.find((t) => t.name === OFFLINE_SHELL_TOOL);
+    console.log(
+      `${OFFLINE_SHELL_TOOL} parameters: ${JSON.stringify(Object.keys(shell?.parameters?.properties ?? {}))}`,
+    );
+    for (const [i, r] of responses.entries()) {
+      const outputs = ((r.body?.input ?? []) as Array<{ type?: string; output?: unknown }>)
+        .filter((x) => x.type === "function_call_output")
+        .map((x) => JSON.stringify(clean(x.output)).slice(0, 300));
+      console.log(`responses #${i + 1}: function_call_output=${JSON.stringify(outputs)}`);
+    }
+  } finally {
+    await run.close();
+  }
+}
+
 async function main(): Promise<void> {
   if (scenario === "browser-mcp") return recordBrowserMcp();
+  if (offline) return recordOffline();
   const info = await detectCodex(codexPath ? { codexPath } : {});
   if (!info.installed || !info.loggedIn) {
     console.error("codex is not installed or not logged in with ChatGPT; aborting.");
@@ -482,43 +701,15 @@ async function main(): Promise<void> {
   const roots = [...new Set([real, tmp])].sort((a, b) => b.length - a.length);
   await writeFile(join(real, "hello.txt"), "Hello from the fixture repo.\n");
   execFileSync("git", ["init", "-q"], { cwd: real });
-
-  const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
-  const events: SessionEvent[] = [];
-  const runtime = new CodexRuntime({
-    ...(codexPath ? { codexPath } : {}),
-    onRpcMessage: (dir, msg) => rpc.push({ dir, msg }),
+  const events = await recordTurn({
+    scenario,
+    version: info.version,
+    cwd: real,
+    prompt: scenario.prompt,
+    runtime: codexPath ? { codexPath } : {},
+    clean: (v) => scrub(v, roots),
   });
-
-  const done = new Promise<void>((resolve) => {
-    void runtime
-      .start({ sessionId: "fixture-session", cwd: real, permissionMode: scenario.mode }, (ev) => {
-        events.push(ev);
-        if (ev.type === "approval.requested")
-          runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
-        if (ev.type === "prompt.completed" || (ev.type === "session.state" && ev.status === "failed"))
-          resolve();
-      })
-      .then(() => (scenario.configure ? runtime.configure("fixture-session", scenario.configure) : undefined))
-      .then(() => runtime.prompt("fixture-session", { promptId: "prompt-1", text: scenario.prompt }))
-      .catch((err: unknown) => {
-        console.error(err);
-        resolve();
-      });
-  });
-  await done;
-  await runtime.stop("fixture-session");
-
-  const outDir = fixtureDir();
-  await mkdir(outDir, { recursive: true });
-  const file = join(outDir, `codex-${info.version ?? "unknown"}.${scenarioName}.rpc.jsonl`);
-  // Drop notifications that only describe the owner's personal Codex config (MCP servers, hooks,
-  // plugins, account): ignored by the mapper anyway and not fit for an open-source fixture.
-  const kept = rpc.filter((r) => !PERSONAL.test(String((r.msg as { method?: unknown }).method ?? "")));
-  await writeFile(file, `${kept.map((r) => JSON.stringify(scrub(r, roots))).join("\n")}\n`);
   await rm(real, { recursive: true, force: true });
-
-  console.log(`wrote ${rpc.length} JSON-RPC messages -> ${file.replace(homedir(), "~")}`);
   for (const ev of events) console.log(JSON.stringify(sanitizeEvent(ev, roots)).slice(0, 300));
 }
 

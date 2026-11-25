@@ -1,9 +1,11 @@
 import type { RuntimeControlRow } from "./index";
 
 /**
- * Inventory B: Codex through `codex app-server` 0.160.0 (stable API only, experimentalApi false). Statuses confirmed
- * by the fixtures in apps/local-runtime/src/codex/__fixtures__/ (codex-cli 0.160.0): `plan-read`, `supervised-write`
- * (one subscription turn) and `model-list` (no turn).
+ * Inventory B: Codex through `codex app-server` 0.172.0 (stable API only, experimentalApi false; types in
+ * apps/local-runtime/src/codex/generated/ from codex-cli 0.172.0). Statuses confirmed by the fixtures in
+ * apps/local-runtime/src/codex/__fixtures__/: codex-cli 0.160.0 `plan-read`, `supervised-write` (one subscription
+ * turn) and `model-list` (no turn), and codex-cli 0.172.0 `plan-read`, `supervised-write`, `title` and `model-list`
+ * recorded offline against the fake model (07.13-25).
  */
 const row = (
   control: string,
@@ -19,7 +21,7 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "model.list",
     "Works without a thread or turn for the ChatGPT account; the picker renders only this catalog (D-08)",
-    "model/list → Model: v2/Model.ts, v2/ModelListResponse.ts; fixture codex-0.160.0.model-list.json (8 models); codex/catalog.ts",
+    "model/list → Model: v2/Model.ts, v2/ModelListResponse.ts; fixture codex-0.160.0.model-list.json (8 models, a ChatGPT account); codex-0.172.0.model-list.json (11 models, the binary's bundled list, offline); codex/catalog.ts",
   ),
   row(
     "Switch model (turn/start.model)",
@@ -33,7 +35,7 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "effort",
     "Per model from supportedReasoningEfforts; an open set validated against the catalog (Pitfall 7)",
-    "turn/start.effort: ReasoningEffort.ts; Model.supportedReasoningEfforts in fixture codex-0.160.0.model-list.json; effort 'low' sent in codex-0.160.0.supervised-write.rpc.jsonl",
+    "turn/start.effort: ReasoningEffort.ts; Model.supportedReasoningEfforts in fixture codex-0.160.0.model-list.json; effort 'low' sent in codex-0.172.0.supervised-write.rpc.jsonl",
   ),
   row(
     "Ultra effort",
@@ -54,7 +56,7 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "fast.mode",
     "Only where the model lists the priority tier; uses ChatGPT plan limits at about 2.5x; org policy default off (D-11)",
-    "turn/start.serviceTier (sticky; never serviceTierForTurn): v2/TurnStartParams.ts; Model.serviceTiers 'priority' in fixture codex-0.160.0.model-list.json",
+    "turn/start.serviceTier (sticky; never serviceTierForTurn): v2/TurnStartParams.ts; Model.serviceTiers 'priority' in fixtures codex-0.160.0.model-list.json, codex-0.172.0.model-list.json",
   ),
   row(
     "Ultrafast service tier",
@@ -68,14 +70,14 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "context.window",
     "Display only: not selectable on Codex; reported after a turn as session.settings.contextWindow (D-10)",
-    "thread/tokenUsage/updated → ThreadTokenUsage.modelContextWindow (258400 in fixture codex-0.160.0.plan-read.rpc.jsonl): v2/ThreadTokenUsage.ts",
+    "thread/tokenUsage/updated → ThreadTokenUsage.modelContextWindow (258400 in fixture codex-0.172.0.plan-read.rpc.jsonl): v2/ThreadTokenUsage.ts",
   ),
   row(
     "Effective settings readback",
     "exposed",
     null,
-    "thread/settings/updated is mapped to session.settings; at 0.160.0 turn/start overrides emit none, so the adapter synthesizes the readback from what it sent (A5)",
-    "v2/ThreadSettingsUpdatedNotification.ts, v2/ThreadStartResponse.ts; no thread/settings/updated in codex-0.160.0.supervised-write.rpc.jsonl",
+    "thread/settings/updated is mapped to session.settings; at 0.160.0 and 0.172.0 turn/start overrides emit none, so the adapter synthesizes the readback from what it sent (A5)",
+    "v2/ThreadSettingsUpdatedNotification.ts, v2/ThreadStartResponse.ts; no thread/settings/updated in codex-0.160.0.supervised-write.rpc.jsonl or codex-0.172.0.supervised-write.rpc.jsonl",
   ),
   row(
     "Approval policy",
@@ -96,14 +98,14 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "mode.plan",
     "Read-only sandbox, approvals on request, reviewed by the user",
-    "thread/start.sandbox 'read-only': v2/SandboxMode.ts; fixture codex-0.160.0.plan-read.rpc.jsonl; codex/mode-policy.ts",
+    "thread/start.sandbox 'read-only': v2/SandboxMode.ts; fixture codex-0.172.0.plan-read.rpc.jsonl; codex/mode-policy.ts",
   ),
   row(
     "Supervised (read-only sandbox + untrusted approvals)",
     "exposed",
     "mode.default",
     "Read-only sandbox + untrusted approvals + user reviewer: Codex asked for approval before the write and the decline left no file (D-12)",
-    "fixture codex-0.160.0.supervised-write.rpc.jsonl: item/fileChange/requestApproval before any write, declined, fileChange 'declined'; AskForApproval 'untrusted': v2/AskForApproval.ts; codex/mode-policy.ts",
+    "fixture codex-0.160.0.supervised-write.rpc.jsonl: item/fileChange/requestApproval before any write, declined, fileChange 'declined'; codex-0.172.0.supervised-write.rpc.jsonl: item/commandExecution/requestApproval before the shell write, declined; AskForApproval 'untrusted': v2/AskForApproval.ts; codex/mode-policy.ts",
   ),
   row(
     "Auto-accept edits (workspace-write + on-request)",
@@ -159,7 +161,7 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "slash.passthrough",
     "/compact maps to the native thread/compact/start (a non-steerable compaction turn); everything else is refused",
-    "thread/compact/start: v2/ThreadCompactStartParams.ts, NonSteerableTurnKind 'compact' (0.160.0 schema); codex-runtime.test.ts",
+    "thread/compact/start: v2/ThreadCompactStartParams.ts, NonSteerableTurnKind 'compact' (0.172.0 schema); codex-runtime.test.ts",
   ),
   row("Interrupt", "exposed", "interrupt", "Already shipped", "turn/interrupt: ClientRequest.ts"),
   row(
@@ -167,6 +169,6 @@ export const CODEX_CONTROLS: readonly RuntimeControlRow[] = [
     "exposed",
     "session.title",
     "Automatic session titles (D-18): an ephemeral `gpt-6-luna` thread on its own short-lived app-server on the device owner's ChatGPT login, isolated from the session: read-only sandbox, untrusted approvals (every request declined), any tool item interrupts, effort low, empty temp directory",
-    "thread/start.ephemeral + baseInstructions: v2/ThreadStartParams.ts; turn/start.effort + summary: v2/TurnStartParams.ts; fixture codex-0.160.0.title.rpc.jsonl",
+    "thread/start.ephemeral + baseInstructions: v2/ThreadStartParams.ts; turn/start.effort + summary: v2/TurnStartParams.ts; fixture codex-0.172.0.title.rpc.jsonl",
   ),
 ];
