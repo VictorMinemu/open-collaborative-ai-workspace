@@ -245,6 +245,9 @@ rules:
         # 07.13-18: the Work Zone browser: the API's live socket and lease, and the device's browser (takeover input).
         - /apps/api/src/modules/work-browser/
         - /apps/local-runtime/src/browser/
+        # 07.13-21: the web's Work Zone takeover (the panel's frame and keyboard input, and its socket).
+        - /apps/web/components/work-zone/browser/
+        - /apps/web/lib/use-work-live.ts
       exclude:
         - "*.test.ts"
         - "*.test.tsx"
