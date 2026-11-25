@@ -49,6 +49,11 @@ export const WorkZonePolicy = z.object({
     .min(BOT_FILE_LIMITS.minMaxBytes)
     .max(BOT_FILE_LIMITS.ceilingMaxBytes)
     .optional(),
+  /**
+   * 07.13 D-10: whether Work Zone sessions may use a browser on their device. Effective only as org ∩ the device's local
+   * opt-in ∩ its `browser` capability, decided per turn by the API. Absent = false.
+   */
+  allowBrowser: z.boolean().optional(),
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -62,6 +67,7 @@ export const DEFAULT_WORK_ZONE_POLICY: Omit<WorkZonePolicy, "updatedAt"> = {
   maxEffort: { "claude-code": null, codex: null },
   allowFastMode: false,
   runtimeUpdates: "automatic",
+  allowBrowser: false,
 };
 
 /** `PUT /api/v1/work-zone-policy`: any subset. */

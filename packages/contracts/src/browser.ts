@@ -79,6 +79,8 @@ export const BROWSER_TIMEOUTS_MS = {
 
 const TITLE_MAX = 200;
 const SNAPSHOT_TEXT_MAX = 32_000;
+/** The redacted snapshot's text bound, shared with the Work Zone browser (07.13 `WORK_BROWSER_LIMITS`). */
+export const BROWSER_SNAPSHOT_TEXT_MAX = SNAPSHOT_TEXT_MAX;
 const ACTIVITY_MAX = 80;
 const NAME_MAX = 200;
 /** A masked JPEG at 1280×800 is far below this; base64 characters. */
@@ -247,34 +249,44 @@ export type BrowserActAction = z.infer<typeof BrowserActAction>;
 export const BrowserScrollDirection = z.enum(["up", "down", "left", "right"]);
 export type BrowserScrollDirection = z.infer<typeof BrowserScrollDirection>;
 
+/**
+ * The fields of one browser action, shared by the bots' `ocw_browser_act` and the Work Zone's (07.13 D-07): each body
+ * spreads them into its own strict object and applies `refineBrowserAct`, so both refuse the same bodies.
+ */
+export const BROWSER_ACT_FIELDS = {
+  action: BrowserActAction,
+  ref: BrowserRef.optional(),
+  text: z.string().max(BROWSER_LIMITS.typeMaxChars).optional(),
+  /** A key name such as `Enter`, `Tab` or `a` (no chords beyond what the agent maps). */
+  key: z
+    .string()
+    .min(1)
+    .max(32)
+    .refine((k) => !hasControlCharacter(k), { message: "no control characters" })
+    .optional(),
+  option: z.string().min(1).max(NAME_MAX).optional(),
+  direction: BrowserScrollDirection.optional(),
+};
+
+type BrowserActFields = z.infer<z.ZodObject<typeof BROWSER_ACT_FIELDS>>;
+
+/** Each action carries what it needs (a ref to click, type or select; text; an option; a key; a direction). */
+export function refineBrowserAct<T extends BrowserActFields>(v: T, ctx: z.RefinementCtx<T>): void {
+  const need = (field: "ref" | "text" | "key" | "option" | "direction") => {
+    if (v[field] === undefined)
+      ctx.addIssue({ code: "custom", path: [field], message: `${v.action} needs ${field}` });
+  };
+  if (v.action === "click" || v.action === "type" || v.action === "select") need("ref");
+  if (v.action === "type") need("text");
+  if (v.action === "select") need("option");
+  if (v.action === "press") need("key");
+  if (v.action === "scroll") need("direction");
+}
+
 /** `POST /agent-channel/v1/browser/act` (`ocw_browser_act`): one action on a snapshot ref. */
 export const AgentChannelBrowserAct = z
-  .strictObject({
-    ...turnFields,
-    action: BrowserActAction,
-    ref: BrowserRef.optional(),
-    text: z.string().max(BROWSER_LIMITS.typeMaxChars).optional(),
-    /** A key name such as `Enter`, `Tab` or `a` (no chords beyond what the agent maps). */
-    key: z
-      .string()
-      .min(1)
-      .max(32)
-      .refine((k) => !hasControlCharacter(k), { message: "no control characters" })
-      .optional(),
-    option: z.string().min(1).max(NAME_MAX).optional(),
-    direction: BrowserScrollDirection.optional(),
-  })
-  .superRefine((v, ctx) => {
-    const need = (field: "ref" | "text" | "key" | "option" | "direction") => {
-      if (v[field] === undefined)
-        ctx.addIssue({ code: "custom", path: [field], message: `${v.action} needs ${field}` });
-    };
-    if (v.action === "click" || v.action === "type" || v.action === "select") need("ref");
-    if (v.action === "type") need("text");
-    if (v.action === "select") need("option");
-    if (v.action === "press") need("key");
-    if (v.action === "scroll") need("direction");
-  });
+  .strictObject({ ...turnFields, ...BROWSER_ACT_FIELDS })
+  .superRefine(refineBrowserAct);
 export type AgentChannelBrowserAct = z.infer<typeof AgentChannelBrowserAct>;
 
 /** Where a download landed (P-11): the bot's workspace, or the conversation when a member session was loaded. */
@@ -323,21 +335,27 @@ export const AgentChannelBrowserScreenshotResponse = z.strictObject({
 export type AgentChannelBrowserScreenshotResponse = z.infer<typeof AgentChannelBrowserScreenshotResponse>;
 
 /** `POST /agent-channel/v1/browser/wait` (`ocw_browser_wait`). */
+export const BROWSER_WAIT_FIELDS = {
+  for: z.enum(["load", "text", "time"]),
+  text: z.string().min(1).max(NAME_MAX).optional(),
+  ms: z.number().int().positive().max(30_000).optional(),
+};
+
+type BrowserWaitFields = z.infer<z.ZodObject<typeof BROWSER_WAIT_FIELDS>>;
+
+/** A wait for text names the text; a wait for time names the milliseconds (shared with the Work Zone, 07.13 D-07). */
+export function refineBrowserWait<T extends BrowserWaitFields>(v: T, ctx: z.RefinementCtx<T>): void {
+  if (v.for === "text" && v.text === undefined) {
+    ctx.addIssue({ code: "custom", path: ["text"], message: "wait for text needs text" });
+  }
+  if (v.for === "time" && v.ms === undefined) {
+    ctx.addIssue({ code: "custom", path: ["ms"], message: "wait for time needs ms" });
+  }
+}
+
 export const AgentChannelBrowserWait = z
-  .strictObject({
-    ...turnFields,
-    for: z.enum(["load", "text", "time"]),
-    text: z.string().min(1).max(NAME_MAX).optional(),
-    ms: z.number().int().positive().max(30_000).optional(),
-  })
-  .superRefine((v, ctx) => {
-    if (v.for === "text" && v.text === undefined) {
-      ctx.addIssue({ code: "custom", path: ["text"], message: "wait for text needs text" });
-    }
-    if (v.for === "time" && v.ms === undefined) {
-      ctx.addIssue({ code: "custom", path: ["ms"], message: "wait for time needs ms" });
-    }
-  });
+  .strictObject({ ...turnFields, ...BROWSER_WAIT_FIELDS })
+  .superRefine(refineBrowserWait);
 export type AgentChannelBrowserWait = z.infer<typeof AgentChannelBrowserWait>;
 
 export const AgentChannelBrowserWaitResponse = z.strictObject({

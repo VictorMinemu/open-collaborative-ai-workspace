@@ -457,6 +457,20 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [ ] **BTASK-10**: The bot is proactive: its persona paragraph and "Your task" block tell it to start a task and keep going instead of asking whether to continue, silent task turns are accepted and every task turn reports done
 - [ ] **BTASK-11**: Every task turn is re-decided as the requester, the taint stays sticky across its turns, continuations get no browser tools, access loss, a disabled bot or the policy turned off stop the task, and AI chats never get tasks
 
+### Work Zone Local Browser (WZB) — added 2026-11-06 by the owner, widened 2026-11-25
+
+- [ ] **WZB-01**: Claude Code and Codex sessions on a desktop or headless device open pages (the device's `localhost` included), read a redacted snapshot, act (click, type, select, press, scroll), wait, close and screenshot when the model accepts images, through one tool set (`ocw_browser_*`) normalized at the adapter edge
+- [ ] **WZB-02**: Off unless org `allowBrowser` ∩ the device's local opt-in ∩ the device's `browser` capability; intersected per session by the server, re-checked by the device per call; only `http(s)`; cloud metadata hosts refused; a non-loopback host asks once per session (Full access skips it); admin per-tool rules on `ocw_browser_*` apply (mode)
+- [ ] **WZB-03**: A fresh 0700 profile directory per session browser, deleted on close and swept at daemon start; pages in an in-memory context; never the user's browser profile or the system Chrome; downloads refused
+- [ ] **WZB-04**: Every open, navigation, action, close and refusal audited `work_browser.*` with ids and `scheme://host:port` only; page text, typed text, cookies and absolute paths never reach audit, events, logs, `device_commands` or the timeline; snapshots reach the model as untrusted page content
+- [ ] **WZB-05**: The session's audience (`work_session.read`) watches live in the session view; frames only while someone watches (≤ 4 fps, 960×600), Device Link binary frames under 256 KiB, latest wins, with takeover and member-session privacy states; 1440 and 390, light and dark
+- [ ] **WZB-06**: Delivered by the upgrade: `ocw upgrade` on the server; runtimes ≥ v0.3.1 update themselves (version 0.5.0); the pinned Chrome for Testing headless shell (sha256 per platform) is fetched on first use; missing Linux libraries reported with one `apt-get` line (never sudo); the desktop app reports its version and shows "Update available"; an older device shows "Update this device to use the browser"
+- [ ] **WZB-07**: Proven by an e2e spec (fake runtime + real local browser + local page) and a headless container proof; documented in `docs/SERVER.md`, the README and ADR-0035
+- [ ] **WZB-08**: Only a person who can prompt the session and asked its current or last turn takes control of the page (lease: one holder, 10 min after the latest input, warning at 9); while held the agent's browser tools answer `paused` and only the holder's socket gets frames; an abandoned lease after input closes the page
+- [ ] **WZB-09**: `ocw_browser_signin { host, reason }` asks the turn's asker only and waits up to 15 minutes ("Not now" denies); "Done, save my sign-in" exports only the host's cookies (RFC 6265 domain-match) and origin storage, filtered again at the API, sealed only when changed, per member × site in the Work Zone scope (AAD `${org}:${user}:browser:workzone:${siteKey}`), expiry = min(cookie expiry, org maximum), owner-only (restrictive RLS), revocable in Settings › Keychain
+- [ ] **WZB-10**: A sealed sign-in loads only into a new site-locked in-memory page of that member's own turn in a human session whose audience is the member plus at most the device owner, on the device running it, with the browser still allowed; another host needs the member's approval; frames go only to that member; it is re-sealed and closed before anyone else's browser call, at the end of each of the member's turns, at session end and on close
+- [ ] **WZB-11**: Leak sweep: cookie and typed-text canaries never appear in any column, event, audit row, log line, Redis payload or device command across the D-31 journey
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -729,6 +743,17 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BTASK-09 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
 | BTASK-10 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
 | BTASK-11 | Phase 07.17.1.1.2 | Pending | New (owner, 2026-11-12) |
+| WZB-01 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 02, 04, 05, 09, 12, 13, 14, 22, 24, 25) |
+| WZB-02 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 03, 06, 07, 11, 12) |
+| WZB-03 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 09, 12) |
+| WZB-04 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 08, 12, 13, 14, 22) |
+| WZB-05 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 10, 15, 16) |
+| WZB-06 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 02, 06, 11, 20, 23) |
+| WZB-07 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 04, 22, 23) |
+| WZB-08 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 15, 18, 21) |
+| WZB-09 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 03, 17, 18, 19, 21) |
+| WZB-10 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 01, 17, 19) |
+| WZB-11 | Phase 07.13 | Pending | New (owner, 2026-11-06; widened 2026-11-25; plans 17, 18, 22) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
@@ -810,4 +835,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-11-02 after Phase 07.6 was built (AUTO-01…06 complete; owner checks human_needed). Previously: 2026-10-29 after Phases 07.11 and 07.12 were built (RTU-01…07, HSR-01…07 complete; owner checks human_needed). Previously: 2026-10-29 when Phase 07.12 was planned (HSR-01…07 added, owner request). Previously: 2026-10-28 when Phase 07.11 was planned (RTU-01…07 added, owner request). Previously: 2026-10-27 when Phase 07.10 was planned (WZS-01…11 added, owner request). Previously: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-11-25 when Phase 07.13 was planned (WZB-01…11 added, owner request). Previously: 2026-11-02 after Phase 07.6 was built (AUTO-01…06 complete; owner checks human_needed). Previously: 2026-10-29 after Phases 07.11 and 07.12 were built (RTU-01…07, HSR-01…07 complete; owner checks human_needed). Previously: 2026-10-29 when Phase 07.12 was planned (HSR-01…07 added, owner request). Previously: 2026-10-28 when Phase 07.11 was planned (RTU-01…07 added, owner request). Previously: 2026-10-27 when Phase 07.10 was planned (WZS-01…11 added, owner request). Previously: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
