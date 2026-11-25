@@ -29,6 +29,7 @@ import { basename, join } from "node:path";
 import { chromium } from "playwright-core";
 import { maskedScreenshot, startScreencast } from "./capture.mjs";
 import { backendIdFromRef, isSensitive, isSensitiveField, serializeSnapshot } from "./redact.mjs";
+import { domainMatch, parseStorageState } from "./site.mjs";
 import { createWorld, replaceWorldScript } from "./world.mjs";
 
 // ---------------------------------------------------------------- limits (mirror BROWSER_LIMITS / SANDBOX_LIMITS)
@@ -317,21 +318,13 @@ async function onPopup(ctx, popup) {
   }
 }
 
-function parseStorageState(blob) {
-  if (blob === undefined) return undefined;
-  let state;
+/** site.mjs's `parseStorageState`, its plain `invalid_request` Error answered as the agent's own OpError. */
+function storageStateOf(blob) {
   try {
-    state = JSON.parse(blob);
-  } catch {
-    fail("invalid_request", "storage state is not JSON");
+    return parseStorageState(blob);
+  } catch (err) {
+    fail("invalid_request", String(err?.message ?? "storage state is not valid"));
   }
-  if (typeof state !== "object" || state === null || Array.isArray(state)) {
-    fail("invalid_request", "storage state is not an object");
-  }
-  return {
-    cookies: Array.isArray(state.cookies) ? state.cookies : [],
-    origins: Array.isArray(state.origins) ? state.origins : [],
-  };
 }
 
 async function contextOpen(input) {
@@ -341,7 +334,7 @@ async function contextOpen(input) {
   if (contexts.size >= LIMITS.maxContexts) fail("limit_reached", "too many browser contexts");
   const siteLock = input.siteLock ? String(input.siteLock).toLowerCase() : null;
   const viewport = viewportOf(input.viewport);
-  const storageState = parseStorageState(input.storageState);
+  const storageState = storageStateOf(input.storageState);
   const phase = (name, since) => diag("open_phase", { ctx: id, phase: name, ms: Date.now() - since });
   let since = Date.now();
   const context = await browser.newContext({
@@ -1016,18 +1009,6 @@ async function contextHold(input) {
 }
 
 // ---------------------------------------------------------------- storage state (D-08, P-09)
-
-/** RFC 6265 §5.1.3 domain-match of a request host against a cookie's domain. */
-function domainMatch(host, cookieDomain) {
-  const d = String(cookieDomain ?? "")
-    .replace(/^\./, "")
-    .toLowerCase();
-  const h = String(host).toLowerCase();
-  if (d === "" || h === "") return false;
-  if (h === d) return true;
-  if (/^[0-9.]+$/.test(h) || h.includes(":")) return false;
-  return h.endsWith(`.${d}`);
-}
 
 async function contextExportState(input) {
   const ctx = getContext(input);
