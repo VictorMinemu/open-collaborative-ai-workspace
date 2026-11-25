@@ -307,12 +307,18 @@ describe("Allow the browser in Work Zone sessions (07.13-11 Task 1)", () => {
   });
 
   it("shows a saved allowBrowser as on", () => {
-    expect(tagsOf(render(policy({ allowBrowser: true })), "allow-browser")[0]).toContain('aria-checked="true"');
+    expect(tagsOf(render(policy({ allowBrowser: true })), "allow-browser")[0]).toContain(
+      'aria-checked="true"',
+    );
   });
 
   it("saving after switching it on sends allowBrowser: true", () => {
     const saved = toDraft(policy());
-    const body = toPolicyBody({ ...saved, allowBrowser: true }, { "claude-code": false, codex: false }, saved);
+    const body = toPolicyBody(
+      { ...saved, allowBrowser: true },
+      { "claude-code": false, codex: false },
+      saved,
+    );
     expect(body.allowBrowser).toBe(true);
     const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
     expect(source).toContain("checked={draft.allowBrowser ?? false}");

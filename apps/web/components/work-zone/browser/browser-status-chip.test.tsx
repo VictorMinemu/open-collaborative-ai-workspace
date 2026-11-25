@@ -52,7 +52,9 @@ describe("BrowserStatusChip (D-19)", () => {
       const html = chip({ status, live: false });
       // A tap target: a button with the tooltip text as its accessible description.
       expect(html).toMatch(/^<button[^>]*type="button"/);
-      expect(html).toContain(`aria-label="${BROWSER_CHIP_COPY[status].label}. ${BROWSER_CHIP_COPY[status].tip}"`);
+      expect(html.replace(/&#x27;/g, "'")).toContain(
+        `aria-label="${BROWSER_CHIP_COPY[status].label}. ${BROWSER_CHIP_COPY[status].tip}"`,
+      );
     }
   });
 
@@ -60,12 +62,19 @@ describe("BrowserStatusChip (D-19)", () => {
     expect(chip(undefined)).toBe("");
   });
 
-  it("truncates on a phone and keeps a 44 px hit area there", () => {
+  it("is a 44 × 44 icon on a phone (the label stays its accessible name) and truncates from 640 px", () => {
     const html = chip({ status: "update_device", live: false });
     const button = html.match(/^<button[^>]*>/)?.[0] ?? "";
-    expect(button).toContain("min-w-0");
+    expect(button).toContain("sm:min-w-0");
     expect(button).toContain("max-sm:min-h-11");
-    expect(html).toContain("truncate");
+    expect(button).toContain("max-sm:min-w-11");
+    expect(html).toMatch(/<span class="[^"]*\btruncate\b[^"]*\bmax-sm:sr-only\b[^"]*">Update this device/);
+  });
+
+  it("an off state shows the crossed-out globe", () => {
+    expect(chip({ status: "off_policy", live: false })).toContain("lucide-globe-off");
+    expect(chip({ status: "off_device", live: false })).toContain("lucide-globe-off");
+    expect(chip({ status: "available", live: false })).not.toContain("lucide-globe-off");
   });
 
   it("uses only tokens the footer and the Full access badge already use", () => {
@@ -89,7 +98,9 @@ function session(browser?: WorkSessionBrowserState): WorkSession {
 
 describe("SessionFooter browser chip (D-19)", () => {
   it("shows the chip next to the device details", () => {
-    const html = renderToStaticMarkup(<SessionFooter session={session({ status: "off_device", live: false })} />);
+    const html = renderToStaticMarkup(
+      <SessionFooter session={session({ status: "off_device", live: false })} />,
+    );
     expect(text(html)).toContain("Browser off on this device");
     const device = html.indexOf("Victor&#x27;s Mac");
     const chipAt = html.indexOf('data-testid="browser-status-chip"');
