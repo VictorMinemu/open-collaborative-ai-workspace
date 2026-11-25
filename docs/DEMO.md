@@ -113,8 +113,9 @@ Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options 
    until every upload has finished. Every controller sees the images and file chips on the prompt in the stream and
    in the queue. If a file cannot be copied on the device, the prompt is not run and the session says which file and
    why. Files come from the session composer, not from the New session dialog's first prompt.
-   Scope: the daemon never writes images that go inline to disk; files copied into the tree stay there like any
-   file you add (they show in the session's changes). The runtime's own transcript persistence (Claude
+   Scope: the daemon never writes images that go inline to disk; files copied into the tree stay there, kept out of
+   git by the repository's own `.git/info/exclude` (`/.ocw/uploads/`; the tracked `.gitignore` is never changed), so
+   a commit the runtime makes never picks them up by accident. The runtime's own transcript persistence (Claude
    `~/.claude/projects/*.jsonl`, Codex rollouts) is out of scope.
 
 **Owner check before relying on Full access** (never run by an agent): on an opted-in device, start a Claude Code

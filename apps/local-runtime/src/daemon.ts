@@ -68,6 +68,7 @@ import {
   stripImageData,
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
+  WORK_PROMPT_UPLOADS_DIR,
   withPromptFilesNote,
 } from "@ocw/contracts";
 import {
@@ -101,7 +102,14 @@ import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { boundDiffFrame } from "./diff-frame.js";
 import { findExecutable } from "./exec-path.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
-import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
+import {
+  changedFiles,
+  ensureSessionWorktree,
+  excludePromptUploads,
+  isGitRepo,
+  repoInfo,
+  unifiedPatch,
+} from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
 import { RuntimeGate } from "./maintenance/gate.js";
 import {
@@ -1635,6 +1643,15 @@ export class Daemon {
    * Returns the repo-relative paths they landed at.
    */
   private async landPromptFiles(sessionId: string, s: ActiveSession, files: PromptFile[]): Promise<string[]> {
+    // Uploads never reach a commit the runtime makes: the repository's own `info/exclude`, never `.gitignore`.
+    try {
+      await excludePromptUploads(s.cwd, WORK_PROMPT_UPLOADS_DIR);
+    } catch (err) {
+      this.log.warn("could not exclude prompt uploads from git", {
+        sessionId,
+        error: sanitizeString(errorMessage(err), this.rootsBySession.get(sessionId) ?? []),
+      });
+    }
     const landed: string[] = [];
     for (const file of files) {
       try {

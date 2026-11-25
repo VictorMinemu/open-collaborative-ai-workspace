@@ -68,8 +68,11 @@ would duplicate all of that.
 
 ## Consequences
 
-- People attach anything; the runtime finds non-image files at `.ocw/uploads/` and is told so. Uploaded files show in
-  the session's changes like any file the person adds; nothing keeps them out of a commit the runtime makes.
+- People attach anything; the runtime finds non-image files at `.ocw/uploads/` and is told so.
+- Uploads never reach a commit by accident: before landing a prompt's files in a git work tree, the device ensures
+  once that the repository's own exclude file (`git rev-parse --git-path info/exclude`, the common git dir for a
+  linked worktree) holds `/<prefix>.ocw/uploads/`. The tracked `.gitignore` is never touched; a project without git
+  needs nothing. A runtime can still add an upload on purpose (`git add -f`, or by moving it).
 - The minimum runtime that receives prompt files is the first release with this record (the next one after v0.4.0).
   Older devices keep working for text and inline images and are told to update for files.
 - The organization's "Largest file a bot moves" now also bounds people's prompt files; the name stays as it is.

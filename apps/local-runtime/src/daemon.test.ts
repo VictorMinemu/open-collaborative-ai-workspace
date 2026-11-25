@@ -4067,6 +4067,9 @@ describe("ADR-0045 prompt files: copied into the tree before the turn, listed in
     );
     expect(got.files).toBeUndefined();
     expect(readdirSync(join(project, ".ocw", "uploads"))).toEqual(["spec.pdf"]);
+    // Kept out of the runtime's commits by the repository's own exclude file (never the tracked .gitignore).
+    expect(readFileSync(join(project, ".git", "info", "exclude"), "utf8")).toContain("\n/.ocw/uploads/\n");
+    expect(existsSync(join(project, ".gitignore"))).toBe(false);
   });
 
   it("never overwrites: a taken name, and the same name twice in one prompt, get name-N.ext", async () => {
