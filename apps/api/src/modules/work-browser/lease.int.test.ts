@@ -34,7 +34,6 @@ let stack: TestStack;
 let su: pg.Client;
 let ada: TestClient;
 let owen: TestClient;
-let owenId: string;
 /** Mia may use Owen's device: she asks the turns of these tests. */
 let mia: TestClient;
 let miaId: string;
@@ -166,7 +165,7 @@ beforeAll(async () => {
     orgName: "Autofy Labs",
   });
   expect(setup.status, JSON.stringify(setup.body)).toBe(200);
-  ({ client: owen, userId: owenId } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
+  ({ client: owen } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
   ({ client: mia, userId: miaId } = await invite(stack, ada, "mia@example.test", "Mia Lopez", "developer"));
   ({ client: pia, userId: piaId } = await invite(stack, ada, "pia@example.test", "Pia", "developer"));
 
@@ -552,5 +551,118 @@ describe("07.13-18 Task 2: lease rules, expiry, abandonment and dead instances",
     const lease = published.filter((p) => p.channel === "ocw:wb:lease");
     expect(lease.length).toBeGreaterThan(0);
     for (const p of lease) expect(Object.keys(JSON.parse(p.message) as Json).sort()).toEqual(["o", "s"]);
+  });
+});
+
+describe("07.13-18 Task 3: the hand back that saves, and the focus hint", () => {
+  it("`release { save: true }` ends the lease and mints the one-use upload in one step; the device's PUT with it seals the sign-in", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    const leaseId = await take(miaLive, sid);
+    send(miaLive, { type: "text", text: "secret-password" });
+    await deviceFrame("browser.input", sid);
+    send(miaLive, { type: "release", save: true });
+    const handback = await deviceFrame("browser.handback", sid);
+    expect(handback).toEqual({
+      type: "browser.handback",
+      sessionId: sid,
+      leaseId,
+      save: true,
+      uploadId: expect.any(String),
+    });
+    // The hand back is no abandonment: the page stays open, the device is not told `released` on top.
+    const row = await browserRow(sid);
+    expect(row).toMatchObject({
+      lease_id: null,
+      controller_user_id: null,
+      state: "open",
+      upload_id: handback.uploadId,
+      upload_user_id: miaId,
+      upload_origin: ORIGIN,
+    });
+    const expires = new Date(String(row.upload_expires_at)).getTime();
+    expect(Math.abs(expires - (Date.now() + 5 * 60_000))).toBeLessThan(30_000);
+    expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, reason: "released", saved: true, abandoned: false },
+    ]);
+    await sleep(200);
+    expect(d.frames.some((f) => f.type === "browser.lease" && f.sessionId === sid)).toBe(false);
+
+    const cookie = {
+      name: "sid",
+      value: `sealed-${randomUUID()}`,
+      domain: "localhost",
+      path: "/",
+      expires: Math.floor(Date.now() / 1000) + 86_400,
+      httpOnly: true,
+      secure: false,
+      sameSite: "Lax",
+    };
+    const put = await fetch(
+      `${stack.baseUrl}/api/v1/runtime/browser-signins/uploads/${handback.uploadId as string}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${d.jwt}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sid,
+          origin: ORIGIN,
+          state: { cookies: [cookie], origins: [] },
+          changed: true,
+        }),
+      },
+    );
+    expect(put.status).toBe(201);
+    expect(await put.json()).toEqual({ saved: true });
+    expect(await browserRow(sid)).toMatchObject({ upload_id: null, upload_user_id: null });
+    const signins = await su.query("select site_key from app.work_browser_signins where user_id = $1", [
+      miaId,
+    ]);
+    expect(signins.rows).toEqual([{ site_key: "localhost:3000" }]);
+    miaLive.close();
+  });
+
+  it("`release { save: true }` from a socket that does not hold the lease changes nothing", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const m1 = await open(mia, sid);
+    const owenLive = await open(owen, sid);
+    await waitState(m1, "live");
+    await waitState(owenLive, "live");
+    await take(m1, sid);
+    send(owenLive, { type: "release", save: true });
+    await sleep(400);
+    expect(await browserRow(sid)).toMatchObject({ controller_user_id: miaId, upload_id: null });
+    send(m1, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    m1.close();
+    owenLive.close();
+  });
+
+  it("the device's focus hint reaches the holder's socket only; one for a stale lease reaches nobody", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const owenLive = await open(owen, sid);
+    const m1 = await open(mia, sid);
+    const m2 = await open(mia, sid);
+    for (const s of [owenLive, m1, m2]) await waitState(s, "live");
+    const leaseId = await take(m1, sid);
+    const focus = (s: WorkLiveSocket) => s.json.filter((f) => f.type === "focus");
+
+    d.send({ type: "browser.focus", sessionId: sid, leaseId: randomUUID(), sensitive: true });
+    await sleep(400);
+    expect([focus(m1), focus(m2), focus(owenLive)]).toEqual([[], [], []]);
+
+    d.send({ type: "browser.focus", sessionId: sid, leaseId, sensitive: true });
+    await waitFor(() => focus(m1).length >= 1);
+    expect(focus(m1)).toEqual([{ type: "focus", sensitive: true }]);
+    expect(LiveServerFrame.safeParse(focus(m1)[0]).success).toBe(true);
+    await sleep(200);
+    expect([focus(m2), focus(owenLive)]).toEqual([[], []]);
+
+    send(m1, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    d.send({ type: "browser.focus", sessionId: sid, leaseId, sensitive: false });
+    await sleep(400);
+    expect(focus(m1)).toHaveLength(1);
+    for (const s of [owenLive, m1, m2]) s.close();
   });
 });
