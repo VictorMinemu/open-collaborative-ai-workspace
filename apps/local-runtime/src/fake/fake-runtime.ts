@@ -23,7 +23,7 @@
 // subscription does, so the browser journey sees the platform switch accounts on the real daemon.
 
 import { execFile } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   ApprovalDecision,
@@ -37,6 +37,7 @@ import type {
 import {
   minMode,
   parseRuntimeVersion,
+  promptFilesNotePaths,
   type RuntimeCatalog,
   type RuntimeModel,
   SESSION_TITLE_MAX_CHARS,
@@ -492,6 +493,22 @@ export class FakeRuntime implements AgentRuntime {
     return r;
   }
 
+  /**
+   * ADR-0045: the footer's `Files: <path> (<n> bytes), …` for the note the daemon appended, each size read from the
+   * working tree (`missing` when the file is not there), so end-to-end tests see the files landed before the turn.
+   */
+  private async filesLine(s: FakeSession, text: string): Promise<string> {
+    const paths = promptFilesNotePaths(text);
+    if (paths.length === 0) return "";
+    const sizes = await Promise.all(
+      paths.map(async (p) => {
+        const st = await lstat(join(s.cwd, p)).catch(() => null);
+        return st?.isFile() ? `${p} (${st.size} bytes)` : `${p} (missing)`;
+      }),
+    );
+    return `\nFiles: ${sizes.join(", ")}`;
+  }
+
   private async run(s: FakeSession, prompt: PromptPayload): Promise<void> {
     s.running = prompt;
     s.aborted = false;
@@ -512,9 +529,12 @@ export class FakeRuntime implements AgentRuntime {
       : "";
     const label = s.accountLabel;
     const accountLine = label !== null ? `\n(account: ${label})` : "";
-    const footer = `${echo}\n\nModel: ${s.settings.model}\nMode: ${mode}${images}${accountLine}`;
+    const model = s.settings.model;
     this.emit(s, { type: "prompt.started", promptId: pid });
     this.emit(s, { type: "session.state", status: "running" });
+    // After the turn started, so its events keep their order; the daemon landed the files before the prompt came.
+    const files = await this.filesLine(s, prompt.text);
+    const footer = `${echo}\n\nModel: ${model}\nMode: ${mode}${images}${files}${accountLine}`;
     let isError = false;
     try {
       // 07.18: a limited fake account reports the limit before the turn ends, as the Claude adapter does (PD-05).

@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type Attachment,
-  INLINE_IMAGE_TYPES,
   MAX_ATTACHMENTS_PER_MESSAGE,
   sanitizeFilename,
-  WORK_PROMPT_MAX_IMAGES,
+  WORK_PROMPT_MAX_ATTACHMENTS,
 } from "@ocw/contracts";
 import { attachments, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, count, eq, inArray, isNull, sql } from "drizzle-orm";
@@ -156,11 +155,11 @@ export async function linkAttachments(
 }
 
 /**
- * Links images to a new Work Zone prompt in the prompt's transaction (06.1, P-05): the Phase 4 rule (every id the
- * uploader's, in the session's conversation, `ready`, not linked to a message or a prompt yet, no duplicates) plus a
- * sniffed inline image with renditions, at most WORK_PROMPT_MAX_IMAGES. Anything else, including another tenant's id
- * (invisible under RLS), is the one 409 `attachment_not_linkable` and the caller's transaction rolls back. Returns
- * the rows in request order.
+ * Links files to a new Work Zone prompt in the prompt's transaction (06.1, P-05): the Phase 4 rule (every id the
+ * uploader's, in the session's conversation, `ready`, not linked to a message or a prompt yet, no duplicates), at most
+ * WORK_PROMPT_MAX_ATTACHMENTS. ADR-0045: any type (the work-session module decides which go inline and which into the
+ * working tree). Anything else, including another tenant's id (invisible under RLS), is the one 409
+ * `attachment_not_linkable` and the caller's transaction rolls back. Returns the rows in request order.
  */
 export async function linkWorkPromptAttachments(
   tx: Tx,
@@ -168,7 +167,7 @@ export async function linkWorkPromptAttachments(
 ): Promise<AttachmentRow[]> {
   const ids = [...new Set(input.ids)];
   if (ids.length === 0) return [];
-  if (input.ids.length > WORK_PROMPT_MAX_IMAGES || ids.length !== input.ids.length)
+  if (input.ids.length > WORK_PROMPT_MAX_ATTACHMENTS || ids.length !== input.ids.length)
     throw notLinkable("prompt");
   const linked = await tx
     .update(attachments)
@@ -188,8 +187,6 @@ export async function linkWorkPromptAttachments(
         eq(attachments.status, "ready"),
         isNull(attachments.messageId),
         isNull(attachments.workPromptId),
-        eq(attachments.hasRenditions, true),
-        inArray(attachments.contentType, [...INLINE_IMAGE_TYPES]),
       ),
     )
     .returning();

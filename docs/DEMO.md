@@ -100,18 +100,22 @@ Phase 03.2 (ADR-0012, ADR-0013). What each runtime offers, and why some options 
    device owner's login: Claude Code uses Haiku, Codex uses GPT-6-Luna. A title you type is never replaced. When
    the Work Zone policy leaves the small model out, or the call fails or takes longer than 20 s, the first line
    stays and the session is not affected.
-5. **Images in prompts** (Phase 06.1). In a session, paste a screenshot (Ctrl/Cmd+V), drop images on the session or
-   use the paperclip. Only PNG, JPEG, GIF and WebP are accepted (other files are refused in place and never
-   uploaded; the runtime reads the repo itself). Up to 4 images per prompt, each at most 2 MB as sent: a small PNG
-   screenshot (up to 1 MB and 2000 px) goes as it is, everything else as an EXIF-free copy of at most 2000 px.
-   A text is required with the images, and Send waits until every upload has finished. Every controller sees the
-   images on the prompt in the stream and in the queue, and opens them full size. A model that can't read images
-   is refused before anything is sent: Codex reports it per model, so the paperclip is disabled with the reason;
-   Claude Code reports nothing, so if it ever happens the turn fails with "Claude Code could not read an attached
-   image". Images come from the session composer, not from the New session dialog's first prompt.
-   Scope: the daemon never writes images to disk, a worktree or tmp; the runtime's own transcript persistence
-   (Claude `~/.claude/projects/*.jsonl`, Codex rollouts) is out of scope. That history stays on the device
-   owner's machine, like the prompt text.
+5. **Files in prompts** (Phase 06.1, ADR-0045). In a session, paste a screenshot (Ctrl/Cmd+V), drop files on the
+   session or use the paperclip: any file goes, up to 10 per prompt. Images the session's model reads (the first 4)
+   go to it inline, each at most 2 MB as sent: a small PNG screenshot (up to 1 MB and 2000 px) goes as it is,
+   everything else as an EXIF-free copy of at most 2000 px. Every other file (a PDF, Markdown, a Word document, an
+   archive, and an image the model can't read) is copied into the session's working tree at `.ocw/uploads/<name>`
+   before the turn starts (a taken name becomes `name-1.ext`; nothing is overwritten), and the runtime gets a short
+   note listing those paths after your text. Files are refused in place only for a real limit: over the per-file
+   limit ("Over the 25 MB limit": the organization's "Largest file a bot moves", at most the server's
+   `OCW_ATTACHMENT_MAX_BYTES`), a key or credentials file name, or a device whose runtime is too old ("Update this
+   device to attach files": update it in Settings › Devices). A text is required with the files, and Send waits
+   until every upload has finished. Every controller sees the images and file chips on the prompt in the stream and
+   in the queue. If a file cannot be copied on the device, the prompt is not run and the session says which file and
+   why. Files come from the session composer, not from the New session dialog's first prompt.
+   Scope: the daemon never writes images that go inline to disk; files copied into the tree stay there like any
+   file you add (they show in the session's changes). The runtime's own transcript persistence (Claude
+   `~/.claude/projects/*.jsonl`, Codex rollouts) is out of scope.
 
 **Owner check before relying on Full access** (never run by an agent): on an opted-in device, start a Claude Code
 session in Supervised, switch to Full access, ask for a file edit and a shell command: no approval prompt, the
@@ -126,12 +130,15 @@ synthetic fixtures). On a stack running this branch, with your desktop app conne
 1. Open a Claude Code session, paste a screenshot (Cmd/Ctrl+V), type "Describe this image in one sentence" and
    send. The thumbnail shows in the composer, then on the prompt in the stream, and the answer describes the
    screenshot.
-2. Repeat in a Codex session. If the model chip offers a model that can't read images, the paperclip is disabled
-   with the reason.
-3. Open the session as a second controller (a member the device is shared with): the image is on the prompt and
+2. Repeat in a Codex session. On a model that can't read images, the image goes into the working tree instead
+   (`.ocw/uploads/`), and the answer refers to that file.
+3. Attach a PDF and a Markdown file with "Summarise these files" and send: both appear in `.ocw/uploads/` on the
+   device before the answer starts, and the answer uses their content.
+4. Open the session as a second controller (a member the device is shared with): the image is on the prompt and
    opens full size.
-4. In `app.audit_events`, the `work_prompt.queued` row has `imageCount: 1` and the attachment ids, and no image
-   data:
+5. In `app.audit_events`, the `work_prompt.queued` row has `imageCount`, `fileCount` and the attachment ids, each
+   copied file has a `work_session.file_upload` row with ids, size, sha256 and path length, and nothing carries
+   image data, a file name or a path:
    `select action, metadata from app.audit_events where action = 'work_prompt.queued' order by occurred_at desc limit 2;`
 
 If a runtime fails, note the runtime, the model and the message shown in the session.

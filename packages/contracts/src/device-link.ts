@@ -26,6 +26,8 @@ import {
 import { PermissionMode, RuntimeId, SessionEvent } from "./session-events";
 import { ContextWindow, EffortLevel, RuntimeCatalog, SessionSettingsPatch } from "./session-settings";
 import { TITLE_PROMPT_MAX_CHARS } from "./session-title";
+import { WORK_PROMPT_MAX_ATTACHMENTS } from "./work-prompt-files";
+import { BOT_FILE_LIMITS, WorkSessionFilePath } from "./work-session-files";
 
 /**
  * Device Link protocol: JSON frames on `GET /runtime/ws` (Authorization: Bearer <device token>).
@@ -46,6 +48,13 @@ export const DEVICE_LINK_PROTOCOL_VERSION = 1;
  * account only for a device that sent it; an older daemon keeps running on its own login.
  */
 export const DEVICE_ACCOUNT_POOL_VERSION = 1;
+
+/**
+ * ADR-0045: the prompt-files version a daemon announces in `hello.promptFiles`. The API sends a prompt with `files`
+ * only to a device that sent it: an older daemon would drop the key and run the turn without the files, so the prompt
+ * is refused up front with "Update this device to attach files" (409 `runtime_too_old`).
+ */
+export const DEVICE_PROMPT_FILES_VERSION = 1;
 
 /** 07.18 (PD-10): a Codex account slot on a device (`<ocw home>/accounts/codex/<slotId>/`). */
 export const SlotId = z.uuid();
@@ -169,6 +178,11 @@ export const HelloFrame = z.object({
    * pre-07.18 hello still parses (absent = no pool support: the API never sends that device an account).
    */
   accountPool: z.literal(DEVICE_ACCOUNT_POOL_VERSION).optional(),
+  /**
+   * ADR-0045: `DEVICE_PROMPT_FILES_VERSION` when the daemon copies a prompt's `files` into the working tree before the
+   * turn. Optional so every older hello still parses (absent = the API never sends that device a prompt file).
+   */
+  promptFiles: z.literal(DEVICE_PROMPT_FILES_VERSION).optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 
@@ -483,10 +497,32 @@ export function stripImageData(text: string): string {
   return text.replace(DATA_URL, IMAGE_DATA_REMOVED).replace(BASE64_RUN, IMAGE_DATA_REMOVED);
 }
 
+/**
+ * ADR-0045: one file of a prompt, copied into the session's working tree before the turn. `transferId` names a
+ * `to_device` transfer of ADR-0041 (the daemon fetches `GET <serverUrl>/api/v1/runtime/files/<transferId>` with its
+ * device JWT); `path` is where the API offers it (`promptFilePath`); the device takes the first free name from there
+ * (`promptFileCollisionPath`) and never overwrites. No bytes, no URL.
+ */
+export const PromptFile = z.object({
+  transferId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  path: WorkSessionFilePath,
+  sizeBytes: z.number().int().nonnegative().max(BOT_FILE_LIMITS.ceilingMaxBytes),
+  sha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+});
+export type PromptFile = z.infer<typeof PromptFile>;
+
 export const PromptPayload = z.object({
   promptId: z.string().min(1).max(128),
   text: z.string(),
   images: z.array(PromptImage).max(WORK_PROMPT_MAX_IMAGES).optional(),
+  /**
+   * ADR-0045: files copied into the working tree before the turn, in the author's order. Sent only to a device that
+   * announced `hello.promptFiles`, and never with `delivery: "steer"` (a running turn owns the tree, principle 4).
+   */
+  files: z.array(PromptFile).max(WORK_PROMPT_MAX_ATTACHMENTS).optional(),
   /** `steer` adds the input to the running turn when the runtime supports it (Codex); otherwise queued. */
   delivery: z.enum(["queue", "steer"]).optional(),
   /**

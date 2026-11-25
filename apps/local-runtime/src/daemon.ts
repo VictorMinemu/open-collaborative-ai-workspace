@@ -33,6 +33,7 @@ import {
   DEVICE_ACCOUNT_POOL_VERSION,
   DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
+  DEVICE_PROMPT_FILES_VERSION,
   DeviceAccessToken,
   type DeviceHostKind,
   type DeviceToServerFrame,
@@ -40,7 +41,10 @@ import {
   type DiffResultFrame,
   OCW_RUNTIME_TARGET,
   type PermissionMode,
+  PROMPT_FILE_FAILURE_PREFIX,
+  type PromptFile,
   PromptPayload,
+  promptFileCollisionPath,
   RUNTIME_BYPASS_LITERALS,
   RUNTIME_FILE_LAND_WITHIN_HEADER,
   RUNTIME_FILE_ROUTE,
@@ -56,6 +60,7 @@ import {
   type SessionAccount,
   SessionConfigurePayload,
   type SessionEvent,
+  type SessionFileFailure,
   SessionFileReadPayload,
   SessionFileWritePayload,
   SessionStartPayload,
@@ -63,6 +68,7 @@ import {
   stripImageData,
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
+  withPromptFilesNote,
 } from "@ocw/contracts";
 import {
   CodexLoginError,
@@ -116,7 +122,12 @@ import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-jo
 import { isSupervised, runningBuild } from "./maintenance/supervision.js";
 import type { AccountSignal, AgentRuntime, RuntimeAccount } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
-import { openSessionFileForRead, SessionFileError, writeSessionFile } from "./session-files.js";
+import {
+  openSessionFileForRead,
+  removeLandedSessionFile,
+  SessionFileError,
+  writeSessionFile,
+} from "./session-files.js";
 import { runTitle } from "./title.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -169,6 +180,31 @@ export class DeviceTokenRejectedError extends Error {
 
 /** The refusal a prompt with images gets on a runtime that cannot take them (P-10): never silently dropped. */
 export const IMAGES_NOT_SUPPORTED_MESSAGE = "This runtime can't receive images";
+
+/** ADR-0045: names tried for one prompt file (`spec.pdf`, then `spec-1.pdf` … `spec-99.pdf`) before it fails. */
+export const PROMPT_FILE_MAX_NAMES = 100;
+
+const PROMPT_FILE_FAILURE_TEXT: Partial<Record<SessionFileFailure, string>> = {
+  busy: "a turn is running",
+  exists: "no free name is left",
+  expired: "the transfer expired",
+  mismatch: "the bytes did not match",
+  no_space: "the disk is full",
+  path_not_allowed: "the name is not allowed",
+  invalid_path: "the name is not allowed",
+  not_a_file: "a folder is in the way",
+  too_large: "it is too large",
+};
+
+/**
+ * ADR-0045: the one sentence a prompt fails with when one of its files did not land (the ack error, the session's
+ * `lastError`). It names the file by its base name and says why in plain words; never an absolute path.
+ */
+export function promptFileFailedMessage(path: string, code: SessionFileFailure): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const why = PROMPT_FILE_FAILURE_TEXT[code] ?? "the transfer failed";
+  return `${PROMPT_FILE_FAILURE_PREFIX}${name} into the working tree (${why}). The prompt was not run.`;
+}
 
 /** The refusal every fullAccess request gets while the device's own opt-in is off. */
 export const FULL_ACCESS_OFF_MESSAGE =
@@ -918,6 +954,8 @@ export class Daemon {
       isolatedServer: this.reportedIsolated,
       // 07.18 (PD-04): this daemon can run a session on a pool account.
       accountPool: DEVICE_ACCOUNT_POOL_VERSION,
+      // ADR-0045: this daemon copies a prompt's files into the working tree before the turn.
+      promptFiles: DEVICE_PROMPT_FILES_VERSION,
     };
     await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [
@@ -1572,11 +1610,68 @@ export class Daemon {
         s.accountRef = ref;
       }
     }
+    // ADR-0045: the prompt's files land in the working tree before the turn, and the runtime reads the note listing
+    // them (written here, never by the person). Any file that does not land fails the prompt: nothing runs.
+    const { files, ...turn } = prompt;
+    if (files?.length) {
+      const paths = await this.landPromptFiles(cmd.sessionId, s, files);
+      turn.text = withPromptFilesNote(turn.text, paths);
+      await s.runtime.prompt(cmd.sessionId, turn);
+      return;
+    }
     if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
     } else {
       await s.runtime.prompt(cmd.sessionId, prompt);
     }
+  }
+
+  /**
+   * ADR-0045: copies a prompt's files into the session's tree, in order, through ADR-0041's transfer (each fetched once
+   * from `toRuntimeFileUrl` with the device JWT, size and sha256 checked, landed without overwriting by
+   * `writeSessionFile`, which re-decides the deny list on the real path). A taken name moves to the next free one
+   * (`promptFileCollisionPath`: `spec-1.pdf`, `spec-2.pdf` …). Only between turns (principle 4). On a failure the files
+   * this prompt already landed are removed and the prompt fails with one sentence naming the file (repo-relative).
+   * Returns the repo-relative paths they landed at.
+   */
+  private async landPromptFiles(sessionId: string, s: ActiveSession, files: PromptFile[]): Promise<string[]> {
+    const landed: string[] = [];
+    for (const file of files) {
+      try {
+        if (this.turnsRunning.has(sessionId)) throw new SessionFileError("busy");
+        landed.push(await this.landPromptFile(s.cwd, file));
+      } catch (err) {
+        const code = err instanceof SessionFileError ? err.code : "transfer_failed";
+        this.log.warn("prompt file failed", { sessionId, transferId: file.transferId, code });
+        for (const path of landed) await removeLandedSessionFile(s.cwd, path).catch(() => undefined);
+        throw new Error(promptFileFailedMessage(file.path, code));
+      }
+    }
+    return landed;
+  }
+
+  /** One prompt file at the first free name from its offered path (`PROMPT_FILE_MAX_NAMES` candidates at most). */
+  private async landPromptFile(cwd: string, file: PromptFile): Promise<string> {
+    for (let n = 0; n < PROMPT_FILE_MAX_NAMES; n++) {
+      const path = n === 0 ? file.path : promptFileCollisionPath(file.path, n);
+      const fetched = this.transferBody(file.transferId, file.sizeBytes);
+      try {
+        await writeSessionFile(cwd, path, {
+          transferId: file.transferId,
+          sizeBytes: file.sizeBytes,
+          sha256: file.sha256,
+          overwrite: false,
+          body: fetched.body,
+          landBy: fetched.landBy,
+        });
+        return path;
+      } catch (err) {
+        // A taken name is found before any byte is fetched (the transfer is still unused): try the next one.
+        if (err instanceof SessionFileError && err.code === "exists" && !fetched.started()) continue;
+        throw err;
+      }
+    }
+    throw new SessionFileError("exists");
   }
 
   private requireSession(sessionId: string): ActiveSession {
@@ -1837,10 +1932,31 @@ export class Daemon {
     if (!active) throw new SessionFileError("not_running");
     if (this.turnsRunning.has(cmd.sessionId)) throw new SessionFileError("busy");
     const p = payload.data;
-    // Review WR-01: the server names how long the file may still land; past that it has told the bot the move timed out.
+    const fetched = this.transferBody(cmd.id, p.sizeBytes);
+    await writeSessionFile(active.cwd, p.path, {
+      transferId: cmd.id,
+      sizeBytes: p.sizeBytes,
+      sha256: p.sha256,
+      overwrite: p.overwrite,
+      body: fetched.body,
+      landBy: fetched.landBy,
+    });
+  }
+
+  /**
+   * The bytes of a `to_device` transfer, fetched lazily (`GET`, on the first read of `body`, so every path check runs
+   * first). Review WR-01: `landBy` is the moment the server names (once the GET answered) after which nothing may land.
+   * `started` tells whether the GET was made (the transfer is single use).
+   */
+  private transferBody(
+    transferId: string,
+    sizeBytes: number,
+  ): { body: AsyncIterable<Uint8Array>; landBy: () => number | null; started: () => boolean } {
     let landBy: number | null = null;
+    let started = false;
     const fetchBody = async function* (this: Daemon): AsyncGenerator<Uint8Array> {
-      const res = await this.transfer(cmd.id, p.sizeBytes, () => ({
+      started = true;
+      const res = await this.transfer(transferId, sizeBytes, () => ({
         method: "GET",
         headers: { accept: "application/octet-stream" },
       }));
@@ -1849,14 +1965,7 @@ export class Daemon {
       if (!res.body) return;
       for await (const chunk of res.body) yield chunk;
     };
-    await writeSessionFile(active.cwd, p.path, {
-      transferId: cmd.id,
-      sizeBytes: p.sizeBytes,
-      sha256: p.sha256,
-      overwrite: p.overwrite,
-      body: fetchBody.call(this),
-      landBy: () => landBy,
-    });
+    return { body: fetchBody.call(this), landBy: () => landBy, started: () => started };
   }
 
   /**

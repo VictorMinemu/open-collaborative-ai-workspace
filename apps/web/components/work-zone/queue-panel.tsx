@@ -4,6 +4,8 @@ import type { WorkPrompt } from "@ocw/contracts";
 import { ArrowDown, ArrowUp, GripVertical, ListOrdered, Pencil, Trash2 } from "lucide-react";
 import { type DragEvent, useState } from "react";
 import { toast } from "sonner";
+import { FileIcon } from "@/components/chat/attachments/file-card";
+import { formatBytes } from "@/components/chat/attachments/files";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -136,13 +138,41 @@ function PromptMeta({ p }: { p: WorkPrompt }) {
 }
 
 /**
- * A prompt's images in the queue (06.1, WZ-IMG-04): small square previews (the API's webp preview, never the original),
- * in send order, for every controller.
+ * A prompt's attachments in the queue (06.1, WZ-IMG-04; ADR-0045): images as small square previews (the API's webp
+ * preview, never the original), other files as name chips, in send order, for every controller.
  */
 function PromptThumbs({ p }: { p: WorkPrompt }) {
   const { apiUrl } = useRuntimeConfig();
   const images = p.attachments.filter((a) => a.isImage && a.previewUrl);
-  if (images.length === 0) return null;
+  // ADR-0045: every other file of the prompt, as a small chip with its name (it goes into the working tree).
+  const files = p.attachments.filter((a) => !(a.isImage && a.previewUrl));
+  if (images.length === 0 && files.length === 0) return null;
+  return (
+    <>
+      {images.length > 0 ? <ImageThumbs images={images} apiUrl={apiUrl} /> : null}
+      {files.length > 0 ? (
+        <ul
+          className="mt-2 flex flex-wrap gap-1.5"
+          aria-label={`${files.length} attached file${files.length === 1 ? "" : "s"}`}
+        >
+          {files.map((a) => (
+            <li
+              key={a.id}
+              data-testid="prompt-file"
+              title={`${a.filename} · ${formatBytes(a.size)}`}
+              className="flex h-7 max-w-[12rem] items-center gap-1.5 rounded-md border bg-muted/60 px-2 text-[12px]"
+            >
+              <FileIcon contentType={a.contentType} name={a.filename} className="size-4 [&_svg]:size-3.5" />
+              <span className="truncate">{a.filename}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </>
+  );
+}
+
+function ImageThumbs({ images, apiUrl }: { images: WorkPrompt["attachments"]; apiUrl: string }) {
   return (
     <ul
       className="mt-2 flex flex-wrap gap-1.5"

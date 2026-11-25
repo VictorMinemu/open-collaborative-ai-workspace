@@ -1,6 +1,6 @@
 "use client";
 
-import { INLINE_IMAGE_TYPES, WORK_PROMPT_MAX_IMAGES, type WorkSession } from "@ocw/contracts";
+import { WORK_PROMPT_MAX_ATTACHMENTS, type WorkSession } from "@ocw/contracts";
 import { ArrowUp, ListPlus, Paperclip } from "lucide-react";
 import {
   type ClipboardEvent,
@@ -22,12 +22,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
-import { errorMessage } from "@/lib/api";
+import { ApiRequestError, errorMessage } from "@/lib/api";
 import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { cn } from "@/lib/utils";
 import { useQueuePrompt, useSessionCommand, useSessionControls } from "@/lib/workzone-queries";
 import { useSheetSurface } from "./control-surface";
-import { imageGate, SLASH_REASON } from "./image-gate";
+import { attachmentGate, SLASH_REASON, TOO_MANY_REASON } from "./image-gate";
 import { RUNTIMES } from "./meta";
 import { currentModelControl, ModelPicker } from "./model-picker";
 import { PermissionMenu } from "./permission-menu";
@@ -36,12 +36,20 @@ import { ReasoningMenu } from "./reasoning-menu";
 /** Thin divider between the composer chips (ref-1). */
 const ChipDivider = () => <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />;
 
-/** What the paperclip's picker offers (06.1): the four image types a runtime reads. */
-const IMAGE_ACCEPT = INLINE_IMAGE_TYPES.join(",");
-const ATTACH_HINT = `Attach images · PNG, JPEG, GIF or WebP, up to ${WORK_PROMPT_MAX_IMAGES}`;
-const TOO_MANY = `Up to ${WORK_PROMPT_MAX_IMAGES} images per prompt`;
-/** How many files the tray shows at once: four images plus room to show what was refused, and why. */
-const TRAY_MAX = WORK_PROMPT_MAX_IMAGES * 2;
+/**
+ * ADR-0045: the paperclip takes any file. Images the model reads go to it inline; every other file is copied into the
+ * session's working tree (`.ocw/uploads/`) before the turn, and the runtime is told where.
+ */
+const ATTACH_HINT = `Attach files · up to ${WORK_PROMPT_MAX_ATTACHMENTS}`;
+/** How many files the tray holds at once: what one prompt may carry. */
+const TRAY_MAX = WORK_PROMPT_MAX_ATTACHMENTS;
+
+/** The attachment a refusal of the API names (`details.attachmentId`), so its chip says why. */
+function refusedAttachment(err: unknown): string | null {
+  if (!(err instanceof ApiRequestError)) return null;
+  const id = (err.details as { attachmentId?: unknown } | null | undefined)?.attachmentId;
+  return typeof id === "string" ? id : null;
+}
 
 /** What the session pane can hand the composer (a drop on it, 06.1). */
 export interface ComposerApi {
@@ -59,10 +67,10 @@ function pastedFiles(data: DataTransfer | null): File[] {
 }
 
 /**
- * Adds prompts to the session's SHARED queue; they run one at a time on the host device. Images (06.1, D-06): a paste
- * (Ctrl/Cmd+V), a drop on the session pane or the paperclip put them in the tray above the text, where they upload at
- * once through the Phase 4 pipeline into the session's conversation; Send waits until every upload is ready and posts
- * their ids with the prompt.
+ * Adds prompts to the session's SHARED queue; they run one at a time on the host device. Files (06.1 D-06, ADR-0045):
+ * a paste (Ctrl/Cmd+V), a drop on the session pane or the paperclip put them in the tray above the text, where they
+ * upload at once through the Phase 4 pipeline into the session's conversation; Send waits until every upload is ready
+ * and posts their ids with the prompt.
  */
 export function Composer({
   session,
@@ -79,7 +87,7 @@ export function Composer({
   queued: number;
   /** The viewer may change the session's settings (`work_session.configure`). */
   canConfigure?: boolean;
-  /** The viewer may prompt the session (`work_session.prompt`): attaching images needs it too. */
+  /** The viewer may prompt the session (`work_session.prompt`): attaching files needs it too. */
   canPrompt?: boolean;
   /** Attached on top of the card (ref-4 agent bar). */
   above?: ReactNode;
@@ -106,38 +114,58 @@ export function Composer({
     () => (canAttach && maxBytes ? { maxBytes, maxPerMessage: TRAY_MAX } : null),
     [canAttach, maxBytes],
   );
-  // The API refuses the same cases (images_only, images_not_supported, the slash guard); this only says why early.
+  // The API refuses the same cases (the device, the deny list, the size, the slash guard); this only says why early.
   const model = currentModelControl(session, controls.data);
-  const sessionGate = imageGate({ model });
+  const filesControl = controls.data?.files;
+  /** Refusals the API gave for files already uploaded (by attachment id), until the file is removed or sent. */
+  const [serverRefusals, setServerRefusals] = useState<Record<string, string>>({});
   const tray = useAttachmentQueue(session.conversationId, limits, {
-    tooManyText: TOO_MANY,
+    tooManyText: TOO_MANY_REASON,
+    // Before any upload: what never changes with the file's place in the tray (an image counts as inline here; its
+    // place decides in `refusalOf`).
     precheck: (file, accepted) => {
-      const gate = imageGate({ model, file: { contentType: file.type } });
-      if (!gate.ok) return gate.reason;
-      return accepted >= WORK_PROMPT_MAX_IMAGES ? TOO_MANY : null;
+      if (accepted >= TRAY_MAX) return TOO_MANY_REASON;
+      const gate = attachmentGate({
+        model,
+        files: filesControl,
+        file: { contentType: file.type, name: file.name, size: file.size },
+      });
+      return gate.ok ? null : gate.reason;
     },
   });
-  // Re-run on every render: an image in the tray is marked refused when the model changes to one that can't read it.
-  const refusalOf = (item: QueueItem): string | null => {
-    const gate = imageGate({ model, file: { contentType: item.contentType } });
-    return gate.ok ? null : gate.reason;
-  };
+  // Re-run on every render: a file is marked refused when the model or the device changes, and an image past the
+  // inline cap is decided as a file. The first `WORK_PROMPT_MAX_IMAGES` images the model reads go inline.
+  const refusals = new Map<string, string | null>();
+  let inlineBefore = 0;
+  for (const item of tray.items) {
+    if (item.status === "error") continue;
+    const fromServer = item.attachment ? serverRefusals[item.attachment.id] : undefined;
+    const gate = attachmentGate({
+      model,
+      files: filesControl,
+      inlineBefore,
+      file: { contentType: item.contentType, name: item.name, size: item.size },
+    });
+    if (gate.ok && gate.route === "inline") inlineBefore++;
+    refusals.set(item.localId, fromServer ?? (gate.ok ? null : gate.reason));
+  }
+  const refusalOf = (item: QueueItem): string | null => refusals.get(item.localId) ?? null;
   const refused = tray.items.some((i) => i.status !== "error" && refusalOf(i) !== null);
   const fileInput = useRef<HTMLInputElement>(null);
   const uploading = tray.busy || tray.blocked || refused;
-  // D-13 / P-06: a `/command` goes to the session controls and never carries images.
-  const slashWithImages = text.trimStart().startsWith("/") && tray.items.length > 0;
+  // D-13 / P-06: a `/command` goes to the session controls and never carries files.
+  const slashWithFiles = text.trimStart().startsWith("/") && tray.items.length > 0;
   // The tray's chips clamp their reason; the hint under the card says it in full (390 included).
   const firstRefusal = tray.items
     .map((i) => ({ name: i.name, reason: i.status === "error" ? i.error : refusalOf(i) }))
     .find((r) => r.reason);
   const trayProblem = firstRefusal ? `${firstRefusal.name}: ${firstRefusal.reason}` : null;
-  const sendBlockedReason = slashWithImages
+  const sendBlockedReason = slashWithFiles
     ? SLASH_REASON
     : tray.busy
-      ? "Waiting for the images to upload"
+      ? "Waiting for the files to upload"
       : tray.blocked || refused
-        ? "Remove the images that can't be sent"
+        ? "Remove the files that can't be sent"
         : undefined;
   // A `/command` never joins the queue (D-13): the button says Queue only for a prompt that will wait.
   const queueLabel = willQueue && !text.trimStart().startsWith("/");
@@ -152,7 +180,7 @@ export function Composer({
   async function submit(e?: FormEvent) {
     e?.preventDefault();
     const body = text.trim();
-    if (!body || sending || uploading || slashWithImages) return;
+    if (!body || sending || uploading || slashWithFiles) return;
     try {
       // D-13: a leading `/command` goes to the session controls on the server, never to the queue raw.
       if (body.startsWith("/")) {
@@ -165,24 +193,27 @@ export function Composer({
       await queue.mutateAsync({ body, attachmentIds: tray.readyIds });
       setText("");
       tray.reset();
+      setServerRefusals({});
       if (willQueue) toast.success(`Queued #${queued + 1}`, { description: "Runs after the current turn" });
     } catch (err) {
-      toast.error(errorMessage(err));
+      // ADR-0045: a refusal that names one file (too large, a reserved name) marks that file's chip with the reason.
+      const attachmentId = refusedAttachment(err);
+      const reason = errorMessage(err);
+      if (attachmentId) {
+        setServerRefusals((prev) => ({ ...prev, [attachmentId]: reason.replace(/^[^:]*: /, "") }));
+      }
+      toast.error(reason);
     }
   }
 
   function addFiles(files: File[]) {
     if (!canAttach || files.length === 0) return;
-    if (!sessionGate.ok) {
-      toast.error(sessionGate.reason);
-      return;
-    }
     tray.add(files);
     ref.current?.focus({ preventScroll: true });
   }
   if (apiRef) apiRef.current = { addFiles };
 
-  /** Pasted images (a screenshot) join the tray; the text of the paste still goes into the prompt. */
+  /** Pasted files (a screenshot) join the tray; the text of the paste still goes into the prompt. */
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
     if (!canAttach) return;
     const files = pastedFiles(e.clipboardData);
@@ -200,7 +231,7 @@ export function Composer({
   }
 
   // Where the prompt runs is in the footer strip (ref-4); the hint line only appears when something is notable.
-  const problem = slashWithImages ? SLASH_REASON : trayProblem;
+  const problem = slashWithFiles ? SLASH_REASON : trayProblem;
   const hint = problem
     ? problem
     : session.status === "host_offline"
@@ -287,7 +318,6 @@ export function Composer({
                 <input
                   ref={fileInput}
                   type="file"
-                  accept={IMAGE_ACCEPT}
                   multiple
                   hidden
                   tabIndex={-1}
@@ -297,17 +327,17 @@ export function Composer({
                     e.target.value = "";
                   }}
                 />
-                <Tooltip content={sessionGate.ok ? ATTACH_HINT : sessionGate.reason}>
+                <Tooltip content={ATTACH_HINT}>
                   <span className="inline-flex">
                     <Button
                       type="button"
                       size="icon"
                       variant="ghost"
-                      disabled={!canAttach || !sessionGate.ok}
+                      disabled={!canAttach}
                       data-testid="attach"
-                      aria-label={sessionGate.ok ? ATTACH_HINT : `Attach images (${sessionGate.reason})`}
+                      aria-label={ATTACH_HINT}
                       onClick={() => fileInput.current?.click()}
-                      className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-45"
+                      className="relative rounded-full text-muted-foreground hover:text-foreground disabled:opacity-45 max-md:after:absolute max-md:after:-inset-1"
                     >
                       <Paperclip className="size-[18px]" />
                     </Button>
@@ -319,7 +349,7 @@ export function Composer({
             <Button
               type="submit"
               size={queueLabel ? "default" : "icon"}
-              disabled={!text.trim() || sending || archived || uploading || slashWithImages}
+              disabled={!text.trim() || sending || archived || uploading || slashWithFiles}
               title={sendBlockedReason}
               aria-label={queueLabel ? "Add to queue" : "Send"}
               data-testid="send-prompt"

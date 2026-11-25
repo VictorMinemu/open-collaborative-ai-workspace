@@ -2,7 +2,7 @@ import { z } from "zod";
 import { SessionPoolAccountRef } from "./account-pool";
 import { Attachment } from "./attachments";
 import { Id, IsoDateTime } from "./common";
-import { DiffFile, WORK_PROMPT_MAX_IMAGES } from "./device-link";
+import { DiffFile } from "./device-link";
 import { Permission } from "./permissions";
 import {
   ApprovalOutcome,
@@ -20,6 +20,7 @@ import {
   WORK_PROJECT_LIMITS,
   WorkProjectPerson,
 } from "./work-projects";
+import { WORK_PROMPT_MAX_ATTACHMENTS } from "./work-prompt-files";
 
 /** Working-tree change totals of a session (from the device's last `diff.result`). */
 export const DiffStat = z.object({
@@ -251,10 +252,11 @@ export const CreatePromptRequest = z.object({
   /** Required even with images (P-06): titles, slash detection, the queue and the audit key off the text. */
   body: z.string().trim().min(1).max(50_000),
   /**
-   * Phase 06.1 (D-02): images the sender uploaded into the session's conversation through the attachment routes,
-   * in the order they go to the runtime.
+   * Phase 06.1 (D-02): files the sender uploaded into the session's conversation through the attachment routes, in
+   * the order they go to the runtime. ADR-0045: any type; images the model reads go inline (at most
+   * `WORK_PROMPT_MAX_IMAGES`), every other file is copied into the working tree before the turn.
    */
-  attachmentIds: z.array(Id).max(WORK_PROMPT_MAX_IMAGES).optional(),
+  attachmentIds: z.array(Id).max(WORK_PROMPT_MAX_ATTACHMENTS).optional(),
 });
 export type CreatePromptRequest = z.infer<typeof CreatePromptRequest>;
 

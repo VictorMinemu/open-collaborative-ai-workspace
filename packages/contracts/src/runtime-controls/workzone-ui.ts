@@ -126,9 +126,9 @@ export const WORKZONE_UI_CONTROLS: readonly RuntimeControlRow[] = [
     status: "exposed",
     uiKey: "ui.composer.attach",
     reason:
-      "Images only (PNG, JPEG, GIF, WebP) by paste, drop or the paperclip, through the Phase 4 upload pipeline; other files are not sent (the runtime reads the repo itself) (Phase 06.1)",
+      "Any file by paste, drop or the paperclip, through the Phase 4 upload pipeline (Phase 06.1, ADR-0045): images the model reads go inline (up to 4); every other file is copied into the working tree at `.ocw/uploads/` before the turn and listed in a note the runtime reads",
     evidence:
-      'apps/web/components/work-zone/composer.tsx data-testid="attach"; e2e/tests/work-zone-images.spec.ts; PromptPayload.images',
+      'apps/web/components/work-zone/composer.tsx data-testid="attach"; e2e/tests/work-zone-images.spec.ts; PromptPayload.images, PromptPayload.files',
   }),
   row({
     control: "Footer strip (worktree, diff stat, branch)",

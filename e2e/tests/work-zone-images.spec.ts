@@ -6,6 +6,7 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { bothThemes, dropFiles, type FileSpec, mockup, pasteFiles } from "../support/files";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
@@ -15,7 +16,9 @@ import { ADMIN } from "./env";
  * Work Zone image attachments (06.1, WZ-IMG-01/03/04) with the REAL daemon in fake-runtime mode. Víctor pastes a
  * screenshot into a session's composer (a real Ctrl/Cmd+V of an `image/png` clipboard item), sends it, and Sam, a
  * second controller on the shared device, sees it on the prompt bubble live and opens it; the fake runtime's reply
- * lists the images it received (`Images: N (types)`, 06.1-03), which proves they reached the device.
+ * lists the images it received (`Images: N (types)`, 06.1-03), which proves they reached the device. ADR-0045: any
+ * other file (a PDF here) is copied into the session's working tree before the turn; the fake runtime lists what the
+ * note names and the size it finds in its tree (`Files: .ocw/uploads/notes.pdf (N bytes)`).
  */
 
 test.describe.configure({ mode: "serial" });
@@ -119,7 +122,7 @@ test("Work Zone images: a pasted screenshot reaches the device and every control
     // ---- the paperclip is a real picker now; a pasted screenshot joins the tray inside the card, above the text
     const attach = page.getByTestId("attach");
     await expect(attach).toBeEnabled();
-    await expect(attach).toHaveAttribute("aria-label", /Attach images/);
+    await expect(attach).toHaveAttribute("aria-label", /Attach files/);
     const composer = page.getByTestId("composer");
     await pasteScreenshot(page, composer, mockup(1200, 800, [79, 70, 229]));
     const form = page.getByTestId("composer-form");
@@ -188,7 +191,7 @@ test("Work Zone images: a pasted screenshot reaches the device and every control
   }
 });
 
-/** A minimal one-page PDF (the server sniffs the %PDF magic; the composer must refuse it before any upload). */
+/** A minimal one-page PDF (the server sniffs the %PDF magic); ADR-0045: it goes into the session's working tree. */
 const PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
 );
@@ -216,7 +219,7 @@ async function openQueue(page: Page, mobile: boolean) {
   await expect(page.getByTestId("queue-panel")).toBeVisible();
 }
 
-test("Work Zone images: drop or pick, refusals in place, the fifth image, queued thumbnails for everyone, no images with a / command", async ({
+test("Work Zone files: drop or pick any file, a key refused in place, queued thumbnails and files for everyone, the device lists both, no files with a / command", async ({
   page,
   browser,
 }, info) => {
@@ -250,7 +253,7 @@ test("Work Zone images: drop or pick, refusals in place, the fifth image, queued
     const banner = page.getByTestId("approval-banner");
     await expect(banner).toBeVisible({ timeout: 30_000 });
 
-    // ---- two images and a PDF: the images upload, the PDF is refused in the tray with the reason
+    // ---- ADR-0045: two images and a PDF all upload; the PDF is a file chip with its icon, name and size
     await addFiles(
       page,
       [
@@ -261,56 +264,47 @@ test("Work Zone images: drop or pick, refusals in place, the fifth image, queued
       mobile,
     );
     await expect(items).toHaveCount(3);
+    await expect(items.and(page.locator('[data-status="ready"]'))).toHaveCount(3, { timeout: 20_000 });
     const pdf = items.filter({ hasText: "notes.pdf" });
-    await expect(pdf).toHaveAttribute("data-status", "error");
-    await expect(pdf.getByTestId("attachment-error")).toHaveText(
-      "Only images (PNG, JPEG, GIF, WebP) can be sent to a session",
-    );
-    await expect(items.and(page.locator('[data-status="ready"]'))).toHaveCount(2, { timeout: 20_000 });
-    expect(presigned.some((body) => body.includes("notes.pdf"))).toBe(false);
-    // The chip clamps its reason; the line under the card says it in full.
-    await expect(page.getByTestId("composer-hint")).toContainText(
-      "notes.pdf: Only images (PNG, JPEG, GIF, WebP) can be sent to a session",
-    );
-    expect(presigned).toHaveLength(2);
-    await composer.fill("Match the spacing of these two mockups");
-    await expect(send).toBeDisabled();
-    await bothThemes(page, `wz-images-refused-${tag}`);
-
-    // ---- removing the PDF enables Send
-    await pdf.getByTestId("attachment-remove").click();
-    await expect(items).toHaveCount(2);
+    await expect(pdf.getByTestId("attachment-error")).toHaveCount(0);
+    await expect(pdf).toContainText(`${PDF.length} B`);
+    expect(presigned.some((body) => body.includes("notes.pdf"))).toBe(true);
+    await composer.fill("Match the spacing of these two mockups and follow the notes");
     await expect(send).toBeEnabled();
+    await expectNoSeriousA11y(page, '[data-testid="composer-form"]');
+    if (mobile) {
+      // Phones: the chip's remove button and the paperclip are 44 px touch targets.
+      const remove = (await pdf.getByTestId("attachment-remove").boundingBox())!;
+      expect(Math.min(remove.width, remove.height)).toBeGreaterThanOrEqual(44);
+    }
+    await bothThemes(page, `wz-images-files-${tag}`);
 
-    // ---- a fifth image is refused in place ("Up to 4 images per prompt"); removing the extras keeps the first two
+    // ---- a key file is refused in place before any upload (the shared deny list), and says why
     await addFiles(
       page,
-      [
-        image("third.png", [245, 158, 11]),
-        image("fourth.png", [14, 165, 233]),
-        image("fifth.png", [244, 63, 94]),
-      ],
+      [{ name: "server.key", type: "application/octet-stream", bytes: Buffer.from("k") }],
       mobile,
     );
-    await expect(items).toHaveCount(5);
-    const fifth = items.filter({ hasText: "fifth.png" });
-    await expect(fifth.getByTestId("attachment-error")).toHaveText("Up to 4 images per prompt");
+    await expect(items).toHaveCount(4);
+    const key = items.filter({ hasText: "server.key" });
+    await expect(key).toHaveAttribute("data-status", "error");
+    await expect(key.getByTestId("attachment-error")).toHaveText(
+      "Keys and credential files can't be attached; keep them in the secret store",
+    );
+    expect(presigned.some((body) => body.includes("server.key"))).toBe(false);
+    // The chip clamps its reason; the line under the card says it in full.
+    await expect(page.getByTestId("composer-hint")).toContainText("server.key: Keys and credential files");
     await expect(send).toBeDisabled();
-    expect(presigned.some((body) => body.includes("fifth.png"))).toBe(false);
-    await expect(page.getByTestId("composer-hint")).toContainText("fifth.png: Up to 4 images per prompt");
-    await expect(items.and(page.locator('[data-status="ready"]'))).toHaveCount(4, { timeout: 20_000 });
-    for (const name of ["fifth.png", "fourth.png", "third.png"]) {
-      await items
-        .filter({ has: page.locator(`[alt="${name}"], [title="${name}"]`) })
-        .first()
-        .getByTestId("attachment-remove")
-        .click();
-    }
-    await expect(items).toHaveCount(2);
+    await expectNoSeriousA11y(page, '[data-testid="composer-form"]');
+    await bothThemes(page, `wz-images-refused-${tag}`);
+
+    // ---- removing it enables Send
+    await key.getByTestId("attachment-remove").click();
+    await expect(items).toHaveCount(3);
     await expect(send).toBeEnabled();
     await bothThemes(page, `wz-images-composer-${tag}`);
 
-    // ---- queued while the turn runs: the queue shows both thumbnails, for Víctor and for Sam
+    // ---- queued while the turn runs: the queue shows both thumbnails and the file, for Víctor and for Sam
     await send.click();
     await expect(items).toHaveCount(0);
     await openQueue(page, mobile);
@@ -320,6 +314,7 @@ test("Work Zone images: drop or pick, refusals in place, the fifth image, queued
     await expect(thumbs.nth(0)).toHaveAttribute("alt", "header.png");
     await expect(thumbs.nth(1)).toHaveAttribute("alt", "footer.png");
     for (const i of [0, 1]) await expectLoaded(thumbs.nth(i));
+    await expect(queued.getByTestId("prompt-file")).toHaveText(["notes.pdf"]);
     // The "Queued #1" toast sits over the panel for a few seconds (and waits while hovered: on a phone the pointer
     // rests on the header's Queue button under it): shoot the queue once it has gone.
     await page.mouse.move(8, page.viewportSize()!.height - 8);
@@ -349,6 +344,10 @@ test("Work Zone images: drop or pick, refusals in place, the fifth image, queued
         timeout: 30_000,
       },
     );
+    // ADR-0045: the PDF was in the working tree before the turn, and the runtime read the note naming it.
+    await expect(page.getByTestId("assistant-message").last()).toContainText(
+      `Files: .ocw/uploads/notes.pdf (${PDF.length} bytes)`,
+    );
     await expect(
       page
         .getByTestId("prompt-bubble")
@@ -359,14 +358,14 @@ test("Work Zone images: drop or pick, refusals in place, the fifth image, queued
       timeout: 30_000,
     });
 
-    // ---- a / command never takes images: Send waits and says why
+    // ---- a / command never takes files: Send waits and says why
     await pasteFiles(composer, [image("palette.png", [99, 102, 241])]);
     await expect(items).toHaveCount(1);
     await expect(items.first()).toHaveAttribute("data-status", "ready", { timeout: 20_000 });
     await composer.fill("/model sonnet");
     await expect(send).toBeDisabled();
-    await expect(page.getByTestId("composer-hint")).toContainText("Images can't be sent with a / command");
-    await expect(send).toHaveAttribute("title", "Images can't be sent with a / command");
+    await expect(page.getByTestId("composer-hint")).toContainText("Files can't be sent with a / command");
+    await expect(send).toHaveAttribute("title", "Files can't be sent with a / command");
     await bothThemes(page, `wz-images-slash-${tag}`);
     await composer.fill("Use this palette for the guide");
     await expect(send).toBeEnabled();

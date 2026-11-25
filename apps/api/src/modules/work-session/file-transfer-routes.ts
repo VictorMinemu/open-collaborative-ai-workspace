@@ -425,6 +425,9 @@ export function registerFileTransferRoutes(
                 );
                 return false;
               }
+              // ADR-0045: a download is always a bot's (`bot_work_session_files_owner_ck`); a prompt's row never lands.
+              const { agentId, eventId } = row;
+              if (agentId === null || eventId === null) return false;
               // Only from `streaming`: a row the deadline sweep already failed is never revived.
               const moved = await markTransfer(
                 tx,
@@ -436,8 +439,8 @@ export function registerFileTransferRoutes(
               await recordServerAttachment(tx, {
                 id: row.attachmentId,
                 conversationId: row.conversationId,
-                uploaderAgentId: row.agentId,
-                eventId: row.eventId,
+                uploaderAgentId: agentId,
+                eventId,
                 name: posix.basename(path),
                 sizeBytes: stored.sizeBytes,
                 sha256: stored.sha256,
