@@ -151,7 +151,7 @@ export function WorkLiveBody({
       aria-label="Session browser"
       className="grid gap-2"
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div data-testid="work-live-bar" className="flex min-h-7 min-w-0 items-center gap-2 max-md:min-h-11">
         {host ? (
           <HostChip
             host={host}

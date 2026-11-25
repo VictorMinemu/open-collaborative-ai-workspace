@@ -652,6 +652,7 @@ function SessionHeader({
   // Below 768 (the 44 px touch rule) the header has two rows: the project and the controls, then the title on its
   // own line, so the 44 px controls never squeeze the title (07.9 polish).
   const md = useMediaQuery("(min-width: 768px)", true);
+  const browserOn = session.browser?.status === "available";
 
   useEffect(() => {
     document.title = `${session.title} · Work Zone`;
@@ -763,7 +764,8 @@ function SessionHeader({
           <div className="flex items-center">
             {panelButton("queue", "Queue", <ListOrdered />, queued)}
             {panelButton("changes", "Changes", <FileDiff />, changesCount)}
-            {session.browser?.status === "available" ? panelButton("browser", "Browser", <Globe />, 0) : null}
+            {/* Below 768 a fourth 44 px button would push the row off a 390 px screen: Browser is in the menu there. */}
+            {md && browserOn ? panelButton("browser", "Browser", <Globe />, 0) : null}
           </div>
           <Menu.Root>
             <Menu.Trigger
@@ -779,6 +781,15 @@ function SessionHeader({
               <MoreHorizontal />
             </Menu.Trigger>
             <DropdownMenuContent align="end">
+              {!md && browserOn ? (
+                <DropdownMenuItem
+                  data-testid="open-browser"
+                  className="max-md:min-h-11"
+                  onClick={() => onPanel("browser")}
+                >
+                  <Globe /> Browser
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem
                 disabled={session.status === "archived" || !canArchive}
                 onClick={() =>

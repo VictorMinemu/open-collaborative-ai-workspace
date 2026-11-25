@@ -178,3 +178,47 @@ describe("WorkLivePanel accessibility", () => {
     expect(html).toContain('aria-label="Session browser"');
   });
 });
+
+/** UX bar (Task 3): phones get 44 px targets, the frame keeps 960×600 and only design tokens colour the panel. */
+describe("WorkLivePanel on phones and in both themes", () => {
+  const all = [
+    view(),
+    view({ conn: "connecting", server: null, hasFrame: false }),
+    view({ server: state({ state: "connecting", host: null }), hasFrame: false }),
+    view({ conn: "reconnecting" }),
+    view({ conn: "error", server: null, hasFrame: false }),
+    view({ server: PRIVATE_TAKEOVER, hasFrame: false }),
+    view({ server: PRIVATE_MEMBER, hasFrame: false }),
+    view({ server: ENDED_IDLE, hasFrame: false }),
+    view({ server: NO_PERMISSION, hasFrame: false }),
+  ];
+
+  it("every button is a 44 px target below 768 (Try again)", () => {
+    let buttons = 0;
+    for (const v of all) {
+      for (const [tag] of render(v).matchAll(/<button[^>]*>/g)) {
+        buttons++;
+        expect(tag).toMatch(/max-md:h-11|max-md:min-h-11/);
+      }
+    }
+    expect(buttons).toBeGreaterThan(0);
+  });
+
+  it("the header row is 44 px tall on phones, so the host's tooltip trigger and the chip are easy to reach", () => {
+    expect(render(view())).toMatch(/data-testid="work-live-bar"[^>]*max-md:min-h-11/);
+  });
+
+  it("keeps the 960×600 aspect ratio and scales to the panel's width", () => {
+    const html = render(view());
+    expect(html).toContain("aspect-[8/5]");
+    expect(html).toContain("w-full");
+  });
+
+  it("uses only theme tokens (no hex colours, no fixed white or black text)", () => {
+    for (const v of all) {
+      const html = render(v);
+      expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+      expect(html).not.toMatch(/\b(bg-white|text-black|text-white)\b/);
+    }
+  });
+});
