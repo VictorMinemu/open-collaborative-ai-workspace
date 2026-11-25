@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { freshChannel, messageRow, openMessageActions, postAs } from "../support/chat";
 import { ADMIN, shot } from "./env";
@@ -13,6 +13,28 @@ async function bothThemes(page: Page, name: string) {
   await page.emulateMedia({ colorScheme: "dark" });
   await shot(page, `${name}-dark`);
   await page.emulateMedia({ colorScheme: "light" });
+}
+
+/**
+ * Removes every save of the caller (`GET /api/v1/saved`, page after page, then `DELETE /messages/:id/save`), so a
+ * retried attempt starts with an empty Saved list.
+ */
+async function clearSaves(api: APIRequestContext) {
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page++) {
+    const res = await api.get(`/api/v1/saved${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+    expect(res.ok(), await res.text()).toBe(true);
+    const list = (await res.json()) as {
+      items: Array<{ message: { id: string } }>;
+      nextCursor: string | null;
+    };
+    for (const item of list.items) {
+      const del = await api.delete(`/api/v1/messages/${item.message.id}/save`);
+      expect([200, 204, 404], await del.text()).toContain(del.status());
+    }
+    cursor = list.nextCursor;
+    if (!cursor) return;
+  }
 }
 
 /** The chip of `emoji` under a message. */
@@ -205,6 +227,8 @@ test("saves: a member saves a message, finds it in Saved, jumps to it and remove
   const admin = await apiAs(ADMIN);
   await ensureMember(admin, SAM, "developer");
   const sam = await apiAs(SAM);
+  // Retry-safe: a save left by an earlier attempt of this test would make Saved show two items.
+  await clearSaves(sam);
   const channel = await freshChannel(admin, [sam], "saves");
   const msg = await postAs(
     admin,
