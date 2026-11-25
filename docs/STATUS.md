@@ -117,6 +117,23 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   repositories, installs a systemd user or system unit or a macOS LaunchAgent (never as root, one runtime per
   `~/.ocw`, `~/.ocw/service.env` read by the daemon) and runs `ocw-runtime doctor` (13 checks with headless sign-in
   lines, safe to paste); sharing stays in the web (ADR-0033, docs/SERVER.md).
+- **07.13 Work Zone local browser (v0.5.0):** Claude Code and Codex sessions drive a browser on the session's own
+  device, its `localhost` included: open, read the bots' redacted snapshot, click/type/select/press/scroll, wait,
+  screenshot (image models only) and close, one page per session, through one tool set (`ocw_browser_*`; Claude's
+  in-process SDK MCP server, Codex's `ocw-runtime browser-mcp` stdio shim with a per-session token file). The daemon
+  runs it in a supervised child on the pinned Chrome for Testing headless shell over Playwright's pipe (fetched on
+  first use, sha256 pinned per platform, `ocw-runtime browser install [--from-zip]`, a throwaway 0700 profile, the
+  redaction shared with the bots' `brw` image in `@ocw/browser-engine`). Off unless the organization's policy, the
+  device's opt-in (desktop toggle, `ocw-runtime browser on`) and the device's capability all allow it, decided per turn
+  and re-checked per call; only http(s), cloud metadata hosts refused, a new host asks once per session (loopback
+  never), admins' per-tool rule modes honoured; audit `work_browser.*` with `scheme://host:port` only. The session's
+  Browser tab shows it live only while watched (Redis only in transit across API instances). The asker takes control
+  to sign in; "Done, save my sign-in" seals only that site's state per member × site (Settings › Keychain › Work Zone,
+  revocable), loaded only in that member's own turns of a session only they and the device's owner can see, and
+  re-sealed and closed before anyone else's call and at the end of each of their turns. The doctor reports the browser
+  with one apt line and the AppArmor line; runtimes from v0.3.1 update themselves to 0.5.0; the desktop app shows
+  "Update available". Proven by the D-31 e2e journey with a leak sweep and the headless container proof under the
+  `brw` seccomp profile (ADR-0035, docs/SERVER.md, docs/releases/v0.5.0.md).
 - **07.14 Organization connector auth:** MCP servers take five auth modes. Besides Organization headers and the two
   member modes, **Organization sign-in** (an admin with `mcp.manage` signs in once with the 07.4 OAuth client: PKCE
   S256, `resource`, `iss`, pre-registered → CIMD → DCR; only that admin completes the flow and `mcp.manage` is
