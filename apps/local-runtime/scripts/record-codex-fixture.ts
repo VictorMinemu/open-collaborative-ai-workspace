@@ -730,6 +730,10 @@ async function recordBrowserShim(): Promise<void> {
     console.log(`check: ${line}`);
   }
   if (failure) throw failure;
+  // PD-11: the timeline shows summaries only; a browser result never rides an event.
+  if (events.some((e) => e.type === "tool.completed" && e.output !== undefined)) {
+    throw new Error("a browser tool event carried the tool's output");
+  }
 }
 
 /** Drops the notifications that only describe a personal Codex config (see PERSONAL). */
