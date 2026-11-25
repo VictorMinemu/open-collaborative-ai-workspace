@@ -1546,6 +1546,24 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect(t.manager.openPages).toBe(0);
   });
 
+  it("MD-03: browser.close policy or access_lost re-seals the sign-in, then closes the page and unloads it", async () => {
+    for (const reason of ["policy", "access_lost"] as const) {
+      const { order, put } = sequenced();
+      const t = scripted({ api: { put } }, HAS_SIGNIN);
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/account` });
+      await t.manager.onServerFrame({ type: "browser.close", sessionId: t.sid, reason });
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+      expect(order).toContain(`put /api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+      expect(t.children[0]?.state).toBe("closed");
+      const kinds = browserEvents(t).map((e) => e.kind);
+      expect(kinds).toContain("signin_unloaded");
+      expect(kinds).toContain("closed");
+      expect(t.manager.openPages).toBe(0);
+    }
+  });
+
   it("unload: a page the member took control of closes before another asker's call", async () => {
     const t = scripted();
     t.turn({ ...ALLOW, askerId: MEMBER });
