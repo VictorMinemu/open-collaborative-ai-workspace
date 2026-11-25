@@ -4,6 +4,9 @@
 // it is complete. There is no switch that skips the hash: `--from-zip` (CI, the proof pre-seed) is verified the same way.
 // One install at a time per root (`.install.lock`, exclusive create, stale after 15 minutes untouched), so two sessions
 // never download twice. Errors carry a `WorkBrowserLaunchFailure` code and a message without any path.
+//
+// The doctor helpers at the end (D-06, Pitfall 4) only read: `ldd` on the executable, `/etc/os-release` and the AppArmor
+// sysctl. They print the `sudo` line for the owner to run; the runtime itself never runs sudo or installs a package (P5).
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -21,6 +24,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { Readable, Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -386,4 +390,218 @@ function stripMacQuarantine(dir: string): Promise<void> {
       resolveDone(),
     );
   });
+}
+
+// ---------------------------------------------------------------- doctor helpers (D-06, Pitfall 4, SPIKES A-6)
+
+/** `ldd <exe>`'s stdout (ldd itself never runs the executable's code beyond the loader's listing). */
+function runLdd(exe: string): Promise<string> {
+  return new Promise((resolveOut, reject) => {
+    execFile("ldd", [exe], { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      // ldd may exit non-zero and still list what it found.
+      if (err && !stdout) reject(err);
+      else resolveOut(String(stdout));
+    });
+  });
+}
+
+/**
+ * The sonames `ldd` reports `=> not found` for the headless shell (Linux), sorted and unique; empty when ldd cannot
+ * run (the launch then reports what it finds). `run` is a test seam returning ldd's output.
+ */
+export async function missingLinuxLibraries(
+  exe: string,
+  run: (exe: string) => Promise<string> = runLdd,
+): Promise<string[]> {
+  let out: string;
+  try {
+    out = await run(exe);
+  } catch {
+    return [];
+  }
+  const found = new Set<string>();
+  for (const line of out.split("\n")) {
+    const m = /^\s*(\S+)\s+=>\s+not found/.exec(line);
+    if (m?.[1]) found.add(m[1]);
+  }
+  return [...found].sort();
+}
+
+/** A soname's Debian package (the brw Dockerfile's names, SPIKES A-6's probe map). */
+const SONAME_PACKAGES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^libasound\.so\./, "libasound2"],
+  [/^libatk-bridge-2\.0\.so\./, "libatk-bridge2.0-0"],
+  [/^libatk-1\.0\.so\./, "libatk1.0-0"],
+  [/^libatspi\.so\./, "libatspi2.0-0"],
+  [/^libcairo\.so\./, "libcairo2"],
+  [/^libcups\.so\./, "libcups2"],
+  [/^libdbus-1\.so\./, "libdbus-1-3"],
+  [/^libdrm\.so\./, "libdrm2"],
+  [/^libgbm\.so\./, "libgbm1"],
+  [/^lib(glib|gobject|gio|gmodule)-2\.0\.so\./, "libglib2.0-0"],
+  [/^lib(nspr4|plc4|plds4)\.so$/, "libnspr4"],
+  [/^lib(nss3|nssutil3|smime3|ssl3)\.so$/, "libnss3"],
+  [/^libpango-1\.0\.so\./, "libpango-1.0-0"],
+  [/^libX11\.so\./, "libx11-6"],
+  [/^libxcb\.so\./, "libxcb1"],
+  [/^libXcomposite\.so\./, "libxcomposite1"],
+  [/^libXdamage\.so\./, "libxdamage1"],
+  [/^libXext\.so\./, "libxext6"],
+  [/^libXfixes\.so\./, "libxfixes3"],
+  [/^libxkbcommon\.so\./, "libxkbcommon0"],
+  [/^libXrandr\.so\./, "libxrandr2"],
+  [/^libexpat\.so\./, "libexpat1"],
+  [/^libudev\.so\./, "libudev1"],
+];
+
+/** The packages the 64-bit time_t transition renamed (`<name>t64`), measured on Ubuntu 24.04 (SPIKES A-6). */
+const T64_RENAMED: ReadonlySet<string> = new Set([
+  "libasound2",
+  "libatk-bridge2.0-0",
+  "libatk1.0-0",
+  "libatspi2.0-0",
+  "libglib2.0-0",
+]);
+
+/** Ubuntu releases before the t64 transition (24.04 "noble"). */
+const PRE_T64_UBUNTU = new Set([
+  "trusty",
+  "xenial",
+  "bionic",
+  "focal",
+  "jammy",
+  "kinetic",
+  "lunar",
+  "mantic",
+]);
+
+export interface OsRelease {
+  /** `ID` (lowercase). */
+  id: string;
+  versionId?: string;
+  /** `ID_LIKE`, split. */
+  idLike?: string[];
+  ubuntuCodename?: string;
+}
+
+/** `/etc/os-release` (KEY=value, values optionally quoted); null without an `ID`. */
+export function parseOsRelease(text: string): OsRelease | null {
+  const kv = new Map<string, string>();
+  for (const line of text.split("\n")) {
+    const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+    if (!m?.[1]) continue;
+    kv.set(m[1], (m[2] ?? "").replace(/^(["'])(.*)\1$/, "$2"));
+  }
+  const id = kv.get("ID")?.toLowerCase();
+  if (!id) return null;
+  const versionId = kv.get("VERSION_ID");
+  const ubuntuCodename = kv.get("UBUNTU_CODENAME");
+  return {
+    id,
+    ...(versionId ? { versionId } : {}),
+    idLike: (kv.get("ID_LIKE") ?? "").toLowerCase().split(/\s+/).filter(Boolean),
+    ...(ubuntuCodename ? { ubuntuCodename } : {}),
+  };
+}
+
+/** This machine's `/etc/os-release`, or null (not Linux, unreadable). */
+export async function readOsRelease(
+  read: (path: string) => Promise<string | null> = readTextOrNull,
+): Promise<OsRelease | null> {
+  const text = (await read("/etc/os-release")) ?? (await read("/usr/lib/os-release"));
+  return text === null ? null : parseOsRelease(text);
+}
+
+async function readTextOrNull(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+const versionAtLeast = (version: string | undefined, min: number[]): boolean => {
+  if (!version) return false;
+  const parts = version.split(".").map((n) => Number.parseInt(n, 10));
+  for (let i = 0; i < min.length; i++) {
+    const a = parts[i] ?? 0;
+    const b = min[i] ?? 0;
+    if (!Number.isFinite(a)) return false;
+    if (a !== b) return a > b;
+  }
+  return true;
+};
+
+/**
+ * Whether apt names the t64 packages here: Ubuntu 24.04 and later (measured), an Ubuntu derivative whose
+ * `UBUNTU_CODENAME` is noble or later, and Debian 13 and later or testing/sid (no `VERSION_ID`), which carry the same
+ * transition. Null when this is no Debian or Ubuntu system.
+ */
+function usesT64(os: OsRelease): boolean | null {
+  const like = os.idLike ?? [];
+  if (os.id === "ubuntu") return versionAtLeast(os.versionId, [24, 4]);
+  if (os.ubuntuCodename || like.includes("ubuntu")) {
+    return os.ubuntuCodename ? !PRE_T64_UBUNTU.has(os.ubuntuCodename) : null;
+  }
+  if (os.id === "debian") return os.versionId ? versionAtLeast(os.versionId, [13]) : true;
+  // Other Debian derivatives: their release does not say which names apt has; the doctor names the libraries instead.
+  return null;
+}
+
+/**
+ * The one apt line installing what provides `sonames` on this Debian or Ubuntu system (SPIKES A-6: sonames → Debian
+ * names, `t64` where the release renamed them), packages sorted and unique; null when this is no Debian/Ubuntu system
+ * or no soname is known. Printed by the doctor for the owner; never run by the runtime.
+ */
+export function aptInstallLine(sonames: readonly string[], os: OsRelease | null): string | null {
+  if (!os) return null;
+  const t64 = usesT64(os);
+  if (t64 === null) return null;
+  const packages = new Set<string>();
+  for (const so of sonames) {
+    const pkg = SONAME_PACKAGES.find(([re]) => re.test(so))?.[1];
+    if (pkg) packages.add(t64 && T64_RENAMED.has(pkg) ? `${pkg}t64` : pkg);
+  }
+  if (packages.size === 0) return null;
+  return `sudo apt-get install -y ${[...packages].sort().join(" ")}`;
+}
+
+/** The AppArmor profile file the doctor's fix line writes (a fixed system path, safe to print). */
+export const APPARMOR_PROFILE_PATH = "/etc/apparmor.d/ocw-chrome-headless-shell";
+const APPARMOR_RESTRICT_SYSCTL = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+
+/** The executable as an AppArmor path: `@{HOME}/…` under the home (never the home itself), else as it is. */
+function appArmorPath(exe: string, home: string): string {
+  const h = home.replace(/\/+$/, "");
+  return h && h !== "/" && exe.startsWith(`${h}/`) ? `@{HOME}/${exe.slice(h.length + 1)}` : exe;
+}
+
+/**
+ * Pitfall 4: when Ubuntu restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`),
+ * Chromium's sandbox cannot start unless an AppArmor profile grants `userns` to this executable (the way the desktop
+ * `.deb` does for Electron). Returns the one line that writes and loads that profile, or null when there is no
+ * restriction or the profile file already names this executable. Never retried with `--no-sandbox`.
+ */
+export async function appArmorFixLine(
+  exe: string,
+  read: (path: string) => Promise<string | null> = readTextOrNull,
+  home: string = homedir(),
+): Promise<string | null> {
+  const restricted = (await read(APPARMOR_RESTRICT_SYSCTL))?.trim();
+  if (restricted !== "1") return null;
+  const attach = `"${appArmorPath(exe, home)}"`;
+  const existing = await read(APPARMOR_PROFILE_PATH);
+  if (existing?.includes(attach)) return null;
+  const profile = [
+    "abi <abi/4.0>,",
+    "include <tunables/global>",
+    `profile ocw-chrome-headless-shell ${attach} flags=(unconfined) {`,
+    "  userns,",
+    "}",
+    "",
+  ].join("\\n");
+  return (
+    `printf '${profile}' | sudo tee ${APPARMOR_PROFILE_PATH} >/dev/null && ` +
+    `sudo apparmor_parser -r ${APPARMOR_PROFILE_PATH}`
+  );
 }

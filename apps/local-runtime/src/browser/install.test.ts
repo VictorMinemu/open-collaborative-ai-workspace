@@ -17,7 +17,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { BrowserInstallError, browsersRoot, installBrowser, installedBrowser } from "./install.js";
+import {
+  APPARMOR_PROFILE_PATH,
+  appArmorFixLine,
+  aptInstallLine,
+  BrowserInstallError,
+  browsersRoot,
+  installBrowser,
+  installedBrowser,
+  missingLinuxLibraries,
+  parseOsRelease,
+} from "./install.js";
 import { CFT_PINS, CFT_VERSION, type CftPin, type CftPlatform, cftZipUrl } from "./pins.js";
 
 interface Entry {
@@ -337,5 +347,174 @@ describe("browsersRoot (07.13 PD-19)", () => {
     expect(browsersRoot({ OCW_HOME: "/x/ocw" })).toBe(join("/x/ocw", "browsers"));
     expect(browsersRoot({ OCW_HOME: "/x/ocw", OCW_BROWSERS_DIR: "/cache/browsers" })).toBe("/cache/browsers");
     expect(() => browsersRoot({ OCW_BROWSERS_DIR: "relative/browsers" })).toThrow(/absolute/);
+  });
+});
+
+// ---------------------------------------------------------------- doctor helpers (07.13 D-06, Pitfall 4, SPIKES A-6)
+
+const LDD = [
+  "\tlinux-vdso.so.1 (0x0000ffff9b4f1000)",
+  "\tlibdl.so.2 => /lib/aarch64-linux-gnu/libdl.so.2 (0x0000ffff9b4a0000)",
+  "\tlibnss3.so => not found",
+  "\tlibnssutil3.so => not found",
+  "\tlibasound.so.2 => not found",
+  "\tlibglib-2.0.so.0 => not found",
+  "\tlibgobject-2.0.so.0 => not found",
+  "\tlibatk-bridge-2.0.so.0 => not found",
+  "\tlibnss3.so => not found",
+  "\tlibm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffff9b3f0000)",
+].join("\n");
+
+describe("missingLinuxLibraries (07.13 D-06)", () => {
+  it("reads the `=> not found` sonames of ldd's output, once each, in order", async () => {
+    const calls: string[] = [];
+    const missing = await missingLinuxLibraries("/x/chrome-headless-shell", async (exe) => {
+      calls.push(exe);
+      return LDD;
+    });
+    expect(calls).toEqual(["/x/chrome-headless-shell"]);
+    expect(missing).toEqual([
+      "libasound.so.2",
+      "libatk-bridge-2.0.so.0",
+      "libglib-2.0.so.0",
+      "libgobject-2.0.so.0",
+      "libnss3.so",
+      "libnssutil3.so",
+    ]);
+    expect(await missingLinuxLibraries("/x", async () => "\tlibc.so.6 => /lib/libc.so.6 (0x1)\n")).toEqual(
+      [],
+    );
+    // ldd cannot run: nothing is known to be missing (the launch reports what it finds).
+    expect(
+      await missingLinuxLibraries("/x", async () => {
+        throw new Error("spawn ldd ENOENT");
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("aptInstallLine (07.13 D-06, SPIKES A-6)", () => {
+  const ubuntu2404 = { id: "ubuntu", versionId: "24.04" };
+  const debian12 = { id: "debian", versionId: "12" };
+
+  it("maps sonames to packages, with the t64 names on Ubuntu 24.04 and later", () => {
+    expect(aptInstallLine(["libasound.so.2", "libnss3.so"], ubuntu2404)).toBe(
+      "sudo apt-get install -y libasound2t64 libnss3",
+    );
+    expect(aptInstallLine(["libasound.so.2", "libnss3.so"], debian12)).toBe(
+      "sudo apt-get install -y libasound2 libnss3",
+    );
+    expect(aptInstallLine(["libasound.so.2"], { id: "ubuntu", versionId: "22.04" })).toBe(
+      "sudo apt-get install -y libasound2",
+    );
+    expect(aptInstallLine(["libasound.so.2"], { id: "ubuntu", versionId: "25.10" })).toBe(
+      "sudo apt-get install -y libasound2t64",
+    );
+  });
+
+  it("prints SPIKES A-6's measured lines from the linux64 sonames", () => {
+    const linux64 = [
+      "libasound.so.2",
+      "libatk-1.0.so.0",
+      "libatk-bridge-2.0.so.0",
+      "libatspi.so.0",
+      "libdbus-1.so.3",
+      "libexpat.so.1",
+      "libgbm.so.1",
+      "libgio-2.0.so.0",
+      "libglib-2.0.so.0",
+      "libgobject-2.0.so.0",
+      "libnspr4.so",
+      "libnss3.so",
+      "libnssutil3.so",
+      "libsmime3.so",
+      "libX11.so.6",
+      "libxcb.so.1",
+      "libXcomposite.so.1",
+      "libXdamage.so.1",
+      "libXext.so.6",
+      "libXfixes.so.3",
+      "libxkbcommon.so.0",
+      "libXrandr.so.2",
+    ];
+    expect(aptInstallLine(linux64, debian12)).toBe(
+      "sudo apt-get install -y libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libdbus-1-3 libexpat1 libgbm1 libglib2.0-0 libnspr4 libnss3 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2",
+    );
+    expect(aptInstallLine(linux64, ubuntu2404)).toBe(
+      "sudo apt-get install -y libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libdbus-1-3 libexpat1 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2",
+    );
+  });
+
+  it("follows an Ubuntu derivative by its Ubuntu codename; no line off Debian/Ubuntu or without a known soname", () => {
+    expect(
+      aptInstallLine(["libasound.so.2"], {
+        id: "linuxmint",
+        versionId: "22",
+        idLike: ["ubuntu", "debian"],
+        ubuntuCodename: "noble",
+      }),
+    ).toBe("sudo apt-get install -y libasound2t64");
+    expect(
+      aptInstallLine(["libasound.so.2"], {
+        id: "linuxmint",
+        versionId: "21.3",
+        idLike: ["ubuntu", "debian"],
+        ubuntuCodename: "jammy",
+      }),
+    ).toBe("sudo apt-get install -y libasound2");
+    expect(aptInstallLine(["libnss3.so"], { id: "fedora", versionId: "41" })).toBeNull();
+    expect(aptInstallLine(["libnss3.so"], null)).toBeNull();
+    expect(aptInstallLine(["libunknown.so.7"], debian12)).toBeNull();
+    expect(aptInstallLine([], debian12)).toBeNull();
+  });
+
+  it("parses /etc/os-release", () => {
+    expect(
+      parseOsRelease(
+        'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nID=ubuntu\nID_LIKE=debian\nUBUNTU_CODENAME=noble\n# comment\n',
+      ),
+    ).toEqual({ id: "ubuntu", versionId: "24.04", idLike: ["debian"], ubuntuCodename: "noble" });
+    expect(parseOsRelease("ID=debian\nVERSION_ID='12'\n")).toEqual({
+      id: "debian",
+      versionId: "12",
+      idLike: [],
+    });
+    expect(parseOsRelease("NAME=nothing\n")).toBeNull();
+  });
+});
+
+describe("appArmorFixLine (07.13 Pitfall 4)", () => {
+  const HOME = "/home/dana";
+  const EXE = `${HOME}/.ocw/browsers/${CFT_VERSION}/chrome-headless-shell`;
+  const reader =
+    (files: Record<string, string>) =>
+    async (path: string): Promise<string | null> =>
+      files[path] ?? null;
+  const RESTRICT = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+
+  it("is a line only when Ubuntu restricts unprivileged user namespaces, naming a profile for the home-relative executable", async () => {
+    expect(await appArmorFixLine(EXE, reader({}), HOME)).toBeNull();
+    expect(await appArmorFixLine(EXE, reader({ [RESTRICT]: "0\n" }), HOME)).toBeNull();
+    const line = await appArmorFixLine(EXE, reader({ [RESTRICT]: "1\n" }), HOME);
+    expect(line).toContain(`"@{HOME}/.ocw/browsers/${CFT_VERSION}/chrome-headless-shell"`);
+    expect(line).toContain("userns,");
+    expect(line).toContain(`sudo tee ${APPARMOR_PROFILE_PATH}`);
+    expect(line).toContain(`sudo apparmor_parser -r ${APPARMOR_PROFILE_PATH}`);
+    expect(line).not.toContain(HOME);
+    expect(line?.split("\n")).toHaveLength(1);
+  });
+
+  it("is null once the profile for this executable is loaded from its file", async () => {
+    const line = (await appArmorFixLine(EXE, reader({ [RESTRICT]: "1" }), HOME)) ?? "";
+    const profile = /printf '([^']*)'/.exec(line)?.[1]?.replaceAll("\\n", "\n") ?? "";
+    expect(profile).toContain("profile ocw-chrome-headless-shell");
+    expect(
+      await appArmorFixLine(EXE, reader({ [RESTRICT]: "1", [APPARMOR_PROFILE_PATH]: profile }), HOME),
+    ).toBeNull();
+    // A profile for an older build does not cover this one.
+    const older = profile.replace(CFT_VERSION, "155.0.0.1");
+    expect(
+      await appArmorFixLine(EXE, reader({ [RESTRICT]: "1", [APPARMOR_PROFILE_PATH]: older }), HOME),
+    ).not.toBeNull();
   });
 });
