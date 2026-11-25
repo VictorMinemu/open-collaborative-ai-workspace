@@ -1411,6 +1411,8 @@ export class Daemon {
           break;
         case "approval.resolve": {
           const p = ApprovalResolvePayload.parse(cmd.payload);
+          // 07.13 (PD-10, Pitfall 7): a browser approval is the manager's, never the adapter's.
+          if (this.browser.resolveApproval(cmd.sessionId, p.approvalId, p.decision)) break;
           const ok = this.requireSession(cmd.sessionId).runtime.resolveApproval(
             cmd.sessionId,
             p.approvalId,

@@ -221,6 +221,7 @@ function scripted(over: Partial<BrowserManagerOptions> = {}) {
       children.push(c);
       return c;
     },
+    fullAccessAllowed: () => true,
     ...over,
   });
   const sid = randomUUID();
@@ -262,7 +263,10 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
     expect((await t.tools.call("open", { url: "http://localhost:3000/" })).isError).toBe(false);
     t.optIn.on = false;
     const off = await t.tools.call("snapshot", {});
-    expect(off).toMatchObject({ isError: true, summary: "Refused: The browser is not available in this session." });
+    expect(off).toMatchObject({
+      isError: true,
+      summary: "Refused: The browser is not available in this session.",
+    });
     t.optIn.on = true;
     t.turn({ ...ALLOW, allowed: false, reason: "off_policy" });
     expect((await t.tools.call("snapshot", {})).isError).toBe(true);
@@ -284,7 +288,10 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
       paths: [],
       browser: { kind: "host", origin: "https://github.com:443", tool: "ocw_browser_open" },
     });
-    expect(t.events.map((e) => e.event)).toContainEqual({ type: "session.state", status: "waiting_approval" });
+    expect(t.events.map((e) => e.event)).toContainEqual({
+      type: "session.state",
+      status: "waiting_approval",
+    });
     expect(t.manager.resolveApproval(t.sid, ask.approvalId, "once")).toBe(true);
     expect((await first).summary).toBe("Opened github.com:443");
     expect(t.events.map((e) => e.event)).toContainEqual({
@@ -311,7 +318,10 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
     const ask = await nextApproval(t, 1);
     t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
     const res = await call;
-    expect(res).toMatchObject({ isError: true, summary: "Refused: The person you asked did not allow this." });
+    expect(res).toMatchObject({
+      isError: true,
+      summary: "Refused: The person you asked did not allow this.",
+    });
     expect(t.children.flatMap((c) => c.calls).filter((c) => c.op === "open")).toEqual([]);
   });
 
@@ -345,7 +355,9 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
     expect((await t.tools.call("open", { url: "http://127.0.0.1:8080/" })).isError).toBe(false);
     expect(t.approvals()).toEqual([]);
     t.turn(ALLOW, true);
-    expect((await t.tools.call("open", { url: "https://github.com/" })).summary).toBe("Opened github.com:443");
+    expect((await t.tools.call("open", { url: "https://github.com/" })).summary).toBe(
+      "Opened github.com:443",
+    );
     expect(t.approvals()).toEqual([]);
   });
 
@@ -378,7 +390,9 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
     const t = scripted();
     t.turn({ ...ALLOW, whenTainted: ["act"] });
     await t.tools.call("open", { url: "http://localhost:3000/" });
-    expect((await t.tools.call("act", { action: "click", ref: "e1" })).summary).toBe("Clicked on localhost:3000");
+    expect((await t.tools.call("act", { action: "click", ref: "e1" })).summary).toBe(
+      "Clicked on localhost:3000",
+    );
     expect(t.approvals()).toEqual([]);
     const open = t.tools.call("open", { url: "https://github.com/" });
     const host = await nextApproval(t, 1);

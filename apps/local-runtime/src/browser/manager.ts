@@ -15,8 +15,12 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
+  type ApprovalDecision,
+  type ApprovalOutcome,
   type BrowserOrigin,
+  canonicalBrowserTool,
   type DeviceToServerFrame,
+  isLoopbackHost,
   originOf,
   type SessionBrowserGrant,
   type SessionEvent,
@@ -36,6 +40,7 @@ import type {
   SnapshotResult,
   WaitResult,
 } from "./agent/ops.js";
+import { BrowserApprovalBroker } from "./approvals.js";
 import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
 import {
@@ -138,6 +143,12 @@ interface SessionState {
   origin: BrowserOrigin | null;
   /** An `open` runs: its own navigations are reported as `opened`, not `navigated`. */
   opening: boolean;
+  /** Origins a person allowed for the rest of the session ("Allow for session", PD-10). */
+  allowedOrigins: Set<BrowserOrigin>;
+  /** The origin the page was approved on (once): later calls on the same page do not ask again. */
+  pageApproved: BrowserOrigin | null;
+  /** A non-loopback page was open in this session (`whenTainted` rules, D-34). */
+  tainted: boolean;
   /** A person holds the page (`browser.lease held`, 15): every call answers `paused`. */
   leaseId: string | null;
   unavailable: "shadowed" | "runtime" | null;
@@ -196,13 +207,59 @@ function parseMessage(error: {
     .slice(0, 500);
 }
 
+/** `scheme://host:port` names the device itself (`localhost`, `127.0.0.1`, `[::1]`): never a host approval (D-11). */
+function isLoopbackOrigin(origin: BrowserOrigin): boolean {
+  try {
+    return isLoopbackHost(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function refusalOfOutcome(outcome: ApprovalOutcome): WorkBrowserRefusal | null {
+  if (outcome === "once" || outcome === "session") return null;
+  return outcome === "expired" ? "approval_expired" : "approval_denied";
+}
+
+const APPROVAL_ACT: Readonly<Record<string, string>> = {
+  click: "Click on",
+  type: "Type on",
+  select: "Select on",
+  press: "Press a key on",
+  scroll: "Scroll",
+};
+
+/** What a person reads in the approval (an action and the origin; never an element, a value or page text). */
+function approvalSummary(tool: WorkBrowserTool, body: unknown, origin: BrowserOrigin): string {
+  switch (tool) {
+    case "open":
+      return `Open ${origin}`;
+    case "snapshot":
+      return `Read ${origin}`;
+    case "act": {
+      const action = (body as { action?: unknown } | null)?.action;
+      return `${(typeof action === "string" && APPROVAL_ACT[action]) || "Act on"} ${origin}`;
+    }
+    case "screenshot":
+      return `Take a screenshot of ${origin}`;
+    case "wait":
+      return `Wait on ${origin}`;
+    case "close":
+      return `Close the browser on ${origin}`;
+    case "signin":
+      return `Sign in to ${origin}`;
+  }
+}
+
 export class BrowserManager {
   private readonly sessions = new Map<string, SessionState>();
   private readonly log: Logger;
   private readonly browsers: NonNullable<BrowserManagerOptions["browsers"]>;
+  private readonly broker: BrowserApprovalBroker;
 
   constructor(private readonly opts: BrowserManagerOptions) {
     this.log = opts.log ?? silentLogger;
+    this.broker = new BrowserApprovalBroker({ emit: opts.emit });
     this.browsers = opts.browsers ?? {
       installed: () => installedBrowser(opts.root),
       install: () => installBrowser({ root: opts.root }),
@@ -254,11 +311,12 @@ export class BrowserManager {
     s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false };
   }
 
-  /** `prompt.completed`: calls outside a turn are refused. */
+  /** `prompt.completed`: calls outside a turn are refused, and an approval still waiting ends as `deny`. */
   onTurnEnded(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.turn?.promptId !== promptId) return;
     s.turn = null;
+    this.broker.cancelSession(sessionId);
   }
 
   /** The device's opt-in may have changed (`reloadConfig`): `available` re-read; off closes every page now. */
@@ -275,6 +333,7 @@ export class BrowserManager {
     if (!s) return;
     this.sessions.delete(sessionId);
     s.turn = null;
+    this.broker.cancelSession(sessionId);
     await this.closePage(s, "closed", null);
     if (UUID.test(sessionId)) {
       await rm(sessionRunDir(this.opts.root, sessionId), { recursive: true, force: true }).catch(() => {});
@@ -315,17 +374,25 @@ export class BrowserManager {
     turn: TurnState,
     tool: WorkBrowserTool,
     body: Record<string, unknown>,
-    _signal: AbortSignal | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<WorkBrowserToolResult> {
     // Re-checked after waiting behind an earlier call of the session.
     if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, tool, "not_allowed");
     if (s.leaseId) return this.refuse(s, turn, tool, "paused");
-    if (tool === "close") return this.closeTool(s, turn);
-    if (tool !== "open" && !s.child) return this.refuse(s, turn, tool, "no_context");
+    if (tool !== "open" && !s.child) {
+      return tool === "close" ? this.closeTool(s, turn) : this.refuse(s, turn, tool, "no_context");
+    }
+    const gate = await this.approve(s, turn, tool, body, signal);
+    if (gate) return this.refuse(s, turn, tool, gate, undefined, body);
+    // A person may have taken minutes to answer: the opt-in, the turn and the lease are read again.
+    if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, tool, "not_allowed");
+    if (s.leaseId) return this.refuse(s, turn, tool, "paused");
     try {
       switch (tool) {
+        case "close":
+          return await this.closeTool(s, turn);
         case "open":
-          return await this.open(s, turn, body);
+          return await this.open(s, turn, body, signal);
         case "snapshot":
           return await this.snapshot(s);
         case "act":
@@ -345,8 +412,14 @@ export class BrowserManager {
     }
   }
 
-  private async open(s: SessionState, turn: TurnState, body: Record<string, unknown>) {
+  private async open(
+    s: SessionState,
+    turn: TurnState,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ) {
     const url = String(body.url);
+    const target = originOf(url);
     const child = await this.ensureChild(s, turn);
     s.opening = true;
     let res: OpenResult;
@@ -356,8 +429,18 @@ export class BrowserManager {
       s.opening = false;
     }
     // The child reported the committed origin (redirects included) before its answer; the URL is the fallback.
-    const origin = s.origin ?? originOf(url);
+    const origin = s.origin ?? target;
     s.origin = origin;
+    this.markTainted(s, origin);
+    // A redirect landed on another origin: it needs its own yes before anything of it reaches the model.
+    if (origin && origin !== target && this.needsHost(s, turn, "open", origin)) {
+      const refusal = await this.askHost(s, turn, "open", body, origin, signal);
+      if (refusal) {
+        await this.closePage(s, "closed", turn.promptId);
+        return this.refuse(s, turn, "open", refusal, undefined, body);
+      }
+    }
+    s.pageApproved = origin;
     this.event(s, turn.promptId, "opened", origin, { action: "open" });
     const summary = browserToolSummary("open", body, { origin });
     return textResult(summary, origin, [
@@ -365,6 +448,89 @@ export class BrowserManager {
       "",
       pageContent(origin, `Title: ${res.title}`),
     ]);
+  }
+
+  // ------------------------------------------------------------------ approvals (D-11, D-34, PD-10)
+
+  /**
+   * The admin's rule first (`alwaysAsk`, or `whenTainted` once a non-loopback page was open in the session: every call,
+   * loopback and Full access included, kind `admin_rule`), then the host gate (a non-loopback origin the session did not
+   * allow, outside Full access: kind `host`). A yes to the rule also covers the host for that call. For tools other
+   * than `open` the origin is the page's own: a page an action navigated to an origin nobody allowed asks before the
+   * next call reads or acts on it. Answers the refusal, or null to go on.
+   */
+  private async approve(
+    s: SessionState,
+    turn: TurnState,
+    tool: WorkBrowserTool,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserRefusal | null> {
+    const grant = turn.grant;
+    const origin = tool === "open" ? originOf(String(body.url)) : s.origin;
+    if (!grant || !origin) return null;
+    const rule = grant.alwaysAsk.includes(tool) || (s.tainted && grant.whenTainted.includes(tool));
+    if (rule) {
+      const outcome = await this.broker.ask(s.id, {
+        kind: "admin_rule",
+        origin,
+        tool: canonicalBrowserTool(tool),
+        summary: approvalSummary(tool, body, origin),
+        ...(signal ? { signal } : {}),
+      });
+      const refusal = refusalOfOutcome(outcome);
+      if (refusal) return refusal;
+      if (outcome === "session" && !isLoopbackOrigin(origin)) s.allowedOrigins.add(origin);
+      if (tool !== "open") s.pageApproved = origin;
+      return null;
+    }
+    if (!this.needsHost(s, turn, tool, origin)) return null;
+    return this.askHost(s, turn, tool, body, origin, signal);
+  }
+
+  /** The host gate: loopback, an origin allowed for the session, the page's own approved origin or Full access pass. */
+  private needsHost(s: SessionState, turn: TurnState, tool: WorkBrowserTool, origin: BrowserOrigin): boolean {
+    if (isLoopbackOrigin(origin) || s.allowedOrigins.has(origin)) return false;
+    if (tool !== "open" && s.pageApproved === origin) return false;
+    const fullAccess = turn.fullAccess && (this.opts.fullAccessAllowed?.() ?? false);
+    return !fullAccess;
+  }
+
+  private async askHost(
+    s: SessionState,
+    _turn: TurnState,
+    tool: WorkBrowserTool,
+    body: Record<string, unknown>,
+    origin: BrowserOrigin,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserRefusal | null> {
+    const outcome = await this.broker.ask(s.id, {
+      kind: "host",
+      origin,
+      tool: canonicalBrowserTool(tool),
+      summary: approvalSummary(tool, body, origin),
+      ...(signal ? { signal } : {}),
+    });
+    const refusal = refusalOfOutcome(outcome);
+    if (refusal) return refusal;
+    if (outcome === "session") s.allowedOrigins.add(origin);
+    if (tool !== "open") s.pageApproved = origin;
+    return null;
+  }
+
+  /** A person's answer to a browser approval (the daemon asks here before the adapter). */
+  resolveApproval(sessionId: string, approvalId: string, decision: ApprovalDecision): boolean {
+    return this.broker.resolve(sessionId, approvalId, decision);
+  }
+
+  /** Browser approvals of the session waiting now. */
+  pendingApprovals(sessionId: string): number {
+    return this.broker.pending(sessionId);
+  }
+
+  /** Any non-loopback page in the session taints it for `whenTainted` rules (D-34). */
+  private markTainted(s: SessionState, origin: BrowserOrigin | null): void {
+    if (origin && !isLoopbackOrigin(origin)) s.tainted = true;
   }
 
   private async snapshot(s: SessionState) {
@@ -500,6 +666,7 @@ export class BrowserManager {
       case "navigated": {
         const changed = s.origin !== e.origin;
         s.origin = e.origin;
+        this.markTainted(s, e.origin);
         if (!s.opening && changed) this.event(s, s.turn?.promptId ?? null, "navigated", e.origin);
         return;
       }
@@ -537,6 +704,7 @@ export class BrowserManager {
     s.child = null;
     const origin = s.origin;
     s.origin = null;
+    s.pageApproved = null;
     s.leaseId = null;
     this.event(s, promptId, kind, origin, kind === "closed" ? { action: "close" } : {});
     await child.close().catch(() => {});
@@ -557,6 +725,9 @@ export class BrowserManager {
       starting: null,
       origin: null,
       opening: false,
+      allowedOrigins: new Set(),
+      pageApproved: null,
+      tainted: false,
       leaseId: null,
       unavailable: null,
       imageInput: false,
