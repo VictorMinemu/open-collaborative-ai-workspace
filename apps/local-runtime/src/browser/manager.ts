@@ -146,6 +146,12 @@ interface TurnState {
    * per-turn token: a call that awaited something checks `s.turn === turn && !turn.ended` before it keeps a result.
    */
   ended: boolean;
+  /**
+   * HI-04 (D-13, the bots' sticky member data): set when a member's sign-in loads in this turn and kept for the rest of
+   * it (cleared only by the next turn's start): their id and the origins they allowed for this turn (the signed-in
+   * site first). Any other origin needs their `signed_in_host` yes.
+   */
+  memberData: { userId: string; sites: Set<BrowserOrigin> } | null;
 }
 
 interface SessionState {
@@ -384,7 +390,13 @@ export class BrowserManager {
     const pending = s.pendingGrants.get(promptId);
     s.pendingGrants.delete(promptId);
     if (s.turn) s.turn.ended = true;
-    s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false, ended: false };
+    s.turn = {
+      promptId,
+      grant: pending?.grant,
+      fullAccess: pending?.fullAccess ?? false,
+      ended: false,
+      memberData: null,
+    };
     s.lastAskerId = pending?.grant?.askerId ?? null;
     s.noSignIn.clear();
   }
@@ -626,8 +638,15 @@ export class BrowserManager {
     }
     s.loaded = loaded;
     s.memberPage = null;
+    this.markMemberData(turn, grant.askerId, origin);
     this.event(s, turn.promptId, "signin_loaded", origin);
     return res;
+  }
+
+  /** HI-04: the turn now carries `userId`'s member data; `origin` is one of their sites for the rest of it. */
+  private markMemberData(turn: TurnState, userId: string, origin: BrowserOrigin): void {
+    turn.memberData ??= { userId, sites: new Set() };
+    turn.memberData.sites.add(origin);
   }
 
   /**
@@ -863,8 +882,16 @@ export class BrowserManager {
     const origin = s.origin ?? target;
     s.origin = origin;
     this.markTainted(s, origin);
+    // HI-04: a redirect that left the member's sites in a turn with their data needs the member's yes first.
+    if (origin && origin !== target && turn.memberData && !turn.memberData.sites.has(origin)) {
+      const refusal = await this.askMemberData(s, turn, "open", body, origin, signal);
+      if (refusal) {
+        await this.closePage(s, "closed", turn.promptId);
+        return this.refuse(s, turn, "open", refusal, undefined, body);
+      }
+    }
     // A redirect landed on another origin: it needs its own yes before anything of it reaches the model.
-    if (origin && origin !== target && this.needsHost(s, turn, "open", origin)) {
+    else if (origin && origin !== target && this.needsHost(s, turn, "open", origin)) {
       const refusal = await this.askHost(s, turn, "open", body, origin, signal);
       if (refusal) {
         await this.closePage(s, "closed", turn.promptId);
@@ -900,6 +927,15 @@ export class BrowserManager {
     const grant = turn.grant;
     const origin = tool === "open" ? originOf(String(body.url)) : s.origin;
     if (!grant || !origin) return null;
+    // HI-04 (D-13, D-26, the bots' sticky member data): once a member's sign-in was loaded in this turn, what the agent
+    // read from it may ride any address. Going to (or acting on) a host outside the member's sites needs the member's
+    // own yes first: loopback included, never skipped by Full access. Their yes covers the host for this call.
+    let memberAllowed = false;
+    if (turn.memberData && !turn.memberData.sites.has(origin)) {
+      const refusal = await this.askMemberData(s, turn, tool, body, origin, signal);
+      if (refusal) return refusal;
+      memberAllowed = true;
+    }
     const rule = grant.alwaysAsk.includes(tool) || (s.tainted && grant.whenTainted.includes(tool));
     if (rule) {
       const outcome = await this.broker.ask(s.id, {
@@ -915,8 +951,43 @@ export class BrowserManager {
       if (tool !== "open") s.pageApproved = origin;
       return null;
     }
+    if (memberAllowed) {
+      if (tool !== "open") s.pageApproved = origin;
+      return null;
+    }
     if (!this.needsHost(s, turn, tool, origin)) return null;
     return this.askHost(s, turn, tool, body, origin, signal);
+  }
+
+  /**
+   * HI-04: the member's approval (`signed_in_host`, 15 minutes, member-only at the API) for `origin` in a turn that
+   * loaded their sign-in. A yes adds the origin to the turn's member sites. The summary names the origin and whether the
+   * address carries a path or query, never the path or query itself (P1).
+   */
+  private async askMemberData(
+    s: SessionState,
+    turn: TurnState,
+    tool: WorkBrowserTool,
+    body: Record<string, unknown>,
+    origin: BrowserOrigin,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserRefusal | null> {
+    const memberData = turn.memberData;
+    if (!memberData) return null;
+    const site = memberData.sites.values().next().value;
+    const from = site ? hostPortOf(site) : "your signed-in site";
+    const carries = tool === "open" && addressCarriesData(String(body.url));
+    const outcome = await this.broker.ask(s.id, {
+      kind: "signed_in_host",
+      origin,
+      tool: canonicalBrowserTool(tool),
+      summary: `${approvalSummary(tool, body, origin)} after reading your signed-in page on ${from}${carries ? " (the address has a path or query)" : ""}`,
+      ...(signal ? { signal } : {}),
+    });
+    const refusal = refusalOfOutcome(outcome);
+    if (refusal) return refusal;
+    memberData.sites.add(origin);
+    return null;
   }
 
   /** The host gate: loopback, an origin allowed for the session, the page's own approved origin or Full access pass. */
@@ -996,6 +1067,8 @@ export class BrowserManager {
         navigated: boolean;
       };
       s.pageApproved = res.blocked;
+      // HI-04: the member allowed that host for this turn.
+      turn.memberData?.sites.add(res.blocked);
       navigated ||= allowed.navigated;
     }
     if (navigated) rest.push("The page navigated. Take a new snapshot to read it.");
@@ -1376,6 +1449,16 @@ function siteOfHost(host: string): { origin: BrowserOrigin; url: string } | null
   const url = `${isLoopbackHost(hostname) ? "http" : "https"}://${host}/`;
   const origin = originOf(url);
   return origin ? { origin, url } : null;
+}
+
+/** HI-04: the address names more than its site (a path, a query or a fragment) that could carry data. */
+function addressCarriesData(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.pathname !== "/" || u.search !== "" || u.hash !== "";
+  } catch {
+    return true;
+  }
 }
 
 /** Waits for a sign-in's save: `saved`, `expired` after `ms`, or `ended` (cancelled, or the turn is over). */
