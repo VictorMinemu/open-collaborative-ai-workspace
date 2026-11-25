@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, type FakeDevice } from "../../testing-device";
 import { connectWithProject, invite, pairDevice, shareDevice, startSession } from "../../testing-workzone";
+import { pendingApprovers } from "./browser-grant";
 import type { WorkSessionService } from "./service";
 
 /**
@@ -199,6 +200,61 @@ describe("browser approvals (D-11, D-21, D-26, PD-10)", () => {
     expect(codeOf(await resolve(victor, sid, approvalId))).toBe("approval_not_yours");
     const r = await resolve(mia, sid, approvalId);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
+    device.ack((await device.command("approval.resolve", sid)).id);
+  });
+
+  it("HI-04: once a sign-in loaded in the member's turn, every browser approval of that turn is theirs, even after the page unloaded it", async () => {
+    const sid = await startSession(mia, device, projectId);
+    await ok(mia.request("POST", `/api/v1/work-sessions/${sid}/prompts`, { body: "Check my account" }));
+    const frame = await device.command("prompt", sid);
+    device.ack(frame.id);
+    const promptId = frame.payload.promptId as string;
+    device.event(sid, { type: "prompt.started", promptId });
+    await eventually(async () => {
+      const r = await su.query("select status from app.work_prompts where id = $1", [promptId]);
+      return ["dispatched", "running"].includes(r.rows[0]?.status as string) || undefined;
+    });
+    const host = { kind: "host", origin: "https://one.example:443", tool: "ocw_browser_open" };
+    // Before any sign-in in this turn: the session's approvers decide (the admin here).
+    const before = await askBrowser(sid, host);
+    expect((await resolve(victor, sid, before)).status).toBe(200);
+    device.ack((await device.command("approval.resolve", sid)).id);
+
+    // Mia's sign-in loaded in this turn (the API's own record of the load), then the page left the site: the row no
+    // longer names her, but what the agent read stays in the turn (the bots' sticky member-data rule).
+    await su.query(
+      `insert into app.audit_events (organization_id, actor_kind, actor_id, user_id, device_id, session_id, resource_type,
+         resource_id, action, result, metadata)
+       values ($1, 'device', $2, $3, $2, $4, 'work_browser_signin', $5, 'work_browser.signin_loaded', 'success',
+         '{"origin": "https://bank.example:443"}'::jsonb)`,
+      [orgId, deviceId, miaId, sid, randomUUID()],
+    );
+    await setSignedIn(sid, null);
+    for (const browser of [
+      { ...host, origin: "https://two.example:443" },
+      { kind: "signed_in_host", origin: "https://evil.example:443", tool: "ocw_browser_open" },
+      { kind: "admin_rule", origin: "https://three.example:443", tool: "ocw_browser_open" },
+    ]) {
+      const approvalId = await askBrowser(sid, browser);
+      // "Needs you" reads the same rule: only Mia is asked.
+      const rules = await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        pendingApprovers(tx, [sid]),
+      );
+      expect(rules.get(sid), browser.kind).toEqual({ open: false, only: new Set([miaId]) });
+      expect(codeOf(await resolve(victor, sid, approvalId)), browser.kind).toBe("approval_not_yours");
+      const r = await resolve(mia, sid, approvalId);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      device.ack((await device.command("approval.resolve", sid)).id);
+    }
+
+    // The turn ends: the next turn is no member-data turn until a sign-in loads in it.
+    device.emitTurn(sid, { promptId, text: "Done" });
+    await eventually(async () => {
+      const r = await su.query("select status from app.work_prompts where id = $1", [promptId]);
+      return !["dispatched", "running"].includes(r.rows[0]?.status as string) || undefined;
+    });
+    const after = await askBrowser(sid, { ...host, origin: "https://four.example:443" });
+    expect((await resolve(victor, sid, after)).status).toBe(200);
     device.ack((await device.command("approval.resolve", sid)).id);
   });
 
