@@ -17,6 +17,7 @@ import {
   ClipboardList,
   FilePen,
   FileUp,
+  Globe,
   Hand,
   type LucideIcon,
   RefreshCw,
@@ -53,6 +54,8 @@ type GovernedMode = Draft["allowedPermissionModes"][number];
 type Restrict = Record<RuntimeId, boolean>;
 
 const RUNTIME_IDS: readonly RuntimeId[] = ["claude-code", "codex"];
+/** 07.13 (D-10): the organization's browser switch, one of the three the browser needs (org ∩ device ∩ capability). */
+const ALLOW_BROWSER = "Allow the browser in Work Zone sessions";
 const RUNTIME_LABELS: Record<RuntimeId, string> = { "claude-code": "Claude Code", codex: "Codex" };
 
 /** D-12: the menu a controller sees, in ladder order. Full access has its own switch (ADR-0012). */
@@ -448,6 +451,37 @@ export function PolicyForm({
               </li>
             ))}
           </ol>
+        </div>
+      </Section>
+
+      <Section
+        title="Browser"
+        description="Agents in Work Zone sessions open web pages in a separate browser on the session's device."
+      >
+        <div
+          className={cn(
+            "rounded-2xl border bg-card p-4 shadow-xs transition-colors",
+            draft.allowBrowser && "border-warning/50 bg-warning/5",
+          )}
+        >
+          {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
+          <label className="flex cursor-pointer items-start gap-3">
+            <IconTile icon={Globe} warn={draft.allowBrowser ?? false} />
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium text-sm">{ALLOW_BROWSER}</span>
+              <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+                Agents open pages on the device that runs the session, its localhost included. Each device's
+                owner must allow it too.
+              </span>
+            </span>
+            <Switch
+              checked={draft.allowBrowser ?? false}
+              onCheckedChange={(allowBrowser) => setDraft((d) => ({ ...d, allowBrowser }))}
+              aria-label={ALLOW_BROWSER}
+              data-testid="allow-browser"
+              className="mt-1"
+            />
+          </label>
         </div>
       </Section>
 

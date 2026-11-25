@@ -46,6 +46,7 @@ const DROP = [
   /^OCW_DEVICE_TOKEN/,
   /^OCW_DAEMON_/,
   /^OCW_DESKTOP_/,
+  /^OCW_APP_VERSION$/,
   /^CHROME_/,
   /^GOOGLE_API_KEY$/,
 ];
@@ -59,9 +60,19 @@ export function augmentPath(path: string | undefined, home = homedir()): string 
   return parts.join(delimiter);
 }
 
+/** A plain semver (`0.5.0`, `0.5.0-rc.1`), bounded like `DeviceInfo.appVersion`; anything else is not reported. */
+const APP_VERSION = /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
 export function buildDaemonEnv(
   base: NodeJS.ProcessEnv,
-  opts: { token: string | null; apiUrl: string | null; electronAsNode: boolean; home?: string },
+  opts: {
+    token: string | null;
+    apiUrl: string | null;
+    electronAsNode: boolean;
+    home?: string;
+    /** `app.getVersion()`: the daemon reports it as `DeviceInfo.appVersion` (07.13, D-18, PD-21). */
+    appVersion?: string;
+  },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(base)) {
@@ -75,6 +86,10 @@ export function buildDaemonEnv(
   // 07.16 PD-18: tells the daemon it runs under the desktop app (an inherited value is replaced); the server honours
   // the isolated-server mark only for headless services.
   env.OCW_RUNTIME_HOST = "desktop";
+  // An inherited value is always dropped above: only this app's own version is reported.
+  if (opts.appVersion && opts.appVersion.length <= 64 && APP_VERSION.test(opts.appVersion)) {
+    env.OCW_APP_VERSION = opts.appVersion;
+  }
   return env;
 }
 

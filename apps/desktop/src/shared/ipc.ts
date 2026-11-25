@@ -174,6 +174,13 @@ export interface DesktopStatus {
   fullAccessOptIn: boolean;
 }
 
+/**
+ * What the bundled onboarding page receives (07.13, D-18): the status plus, when GitHub's latest release is newer than
+ * this app, its version and release page (already checked against the repository's releases in the main process).
+ * The web app gets `DesktopStatus` only.
+ */
+export type OnboardingStatus = DesktopStatus & { update?: { version: string; url: string } };
+
 export interface ChatgptLoopbackPrepared {
   flowToken: string;
   port: number;

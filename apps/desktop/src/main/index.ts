@@ -10,6 +10,10 @@
 // - Runtime CLI updates (07.11, D-02, D-09): the Runtime menu / tray shows each runtime's update status from the
 //   daemon and switches the device's own level (Automatic / Notify only / Off) the same way as Full access, without a
 //   confirmation. Web content never sees or sets it.
+// - Browser opt-in (07.13, D-10, PD-27): "Allow the browser on this computer" in the Runtime menu / tray, after a
+//   native confirmation, written to runtime.json like Full access. Web content never sees or sets it.
+// - "Update available" (07.13, D-18, PD-21): a daily look at GitHub's public releases/latest (packaged builds); a
+//   newer release is linked from the tray and the onboarding window. Nothing is ever downloaded or installed.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
@@ -43,6 +47,7 @@ import {
   FinishArgs,
   LocalProject,
   NoArgs,
+  type OnboardingStatus,
   type PublicProject,
   parseArgs,
   SetBadgeCountArgs,
@@ -51,7 +56,7 @@ import {
 import { ProjectPathError, validateProjectDir } from "../shared/project-path";
 import { runtimeUpdateLines, runtimeUpdatesMenuModel } from "../shared/runtime-updates";
 import { type DaemonProcessState, deriveStatus, sameStatus } from "../shared/status";
-import { deriveApiUrl, normalizeServerUrl, UrlError } from "../shared/urls";
+import { deriveApiUrl, isSafeExternalUrl, normalizeServerUrl, UrlError } from "../shared/urls";
 import {
   awaitChatgptCallback,
   cancelAllChatgptLoopbacks,
@@ -64,13 +69,22 @@ import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launc
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
 import {
+  readDaemonBrowser,
   readDaemonFullAccess,
   readDaemonRuntimeUpdates,
+  writeDaemonBrowser,
   writeDaemonFullAccess,
   writeDaemonRuntimeUpdates,
 } from "./runtime-config";
 import { hardenedPreferences, installGlobalGuards, isTrustedSender, restrictNavigation } from "./security";
 import { DaemonSupervisor } from "./supervisor";
+import {
+  checkForUpdate,
+  fileUpdateStore,
+  isReleasePageUrl,
+  UPDATE_CHECK_INTERVAL_MS,
+  type UpdateCheckResult,
+} from "./update-check";
 
 const DEFAULT_WEB_URL = "http://localhost:3000";
 const STATUS_POLL_MS = 2500;
@@ -97,11 +111,15 @@ let externalDaemon = false;
 let lastReport: DaemonStatusPayload | null = null;
 /** runtime.json's Full access opt-in as last read here (shown while the daemon is unreachable). */
 let localFullAccess = false;
+/** runtime.json's browser opt-in as last read here (07.13, D-10); the menu shows it, web content never sees it. */
+let localBrowser = false;
 /** runtime.json's runtime updates level as last read here (shown while the daemon is unreachable). */
 let localUpdatesLevel: DesktopRuntimeUpdatesLevel = "automatic";
 /** What the menu last showed about runtime updates: they are not part of DesktopStatus (web content never sees them). */
 let updatesChromeKey = "";
 let status: DesktopStatus | null = null;
+/** The last "Update available" answer (07.13, D-18): tray and onboarding window only, never the web app. */
+let updateNotice: UpdateCheckResult = { available: false };
 let polling = false;
 let quitting = false;
 let cleanedUp = false;
@@ -149,6 +167,7 @@ function spawnDaemon(): ChildProcess {
     token: store.token(),
     apiUrl: store.config.apiUrl,
     electronAsNode: cmd.electronAsNode,
+    appVersion: app.getVersion(),
   });
   const out = openDaemonLog();
   try {
@@ -226,11 +245,60 @@ function publishStatus(): void {
   status = next;
   updatesChromeKey = updatesKey;
   if (statusChanged) {
-    for (const w of [mainWindow, onboardingWindow]) {
-      if (w && !w.isDestroyed()) w.webContents.send(Channels.statusChanged, next);
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.statusChanged, next);
+    sendOnboardingStatus();
   }
   refreshChrome();
+}
+
+/** What the onboarding window shows: the status plus the update notice (the web app never gets the notice). */
+function onboardingStatus(): OnboardingStatus {
+  const s = status ?? computeStatus();
+  return updateNotice.available
+    ? { ...s, update: { version: updateNotice.version, url: updateNotice.url } }
+    : s;
+}
+
+function sendOnboardingStatus(): void {
+  if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+    onboardingWindow.webContents.send(Channels.statusChanged, onboardingStatus());
+  }
+}
+
+// ---- update notice (07.13, D-18, PD-21) -----------------------------------------------------
+
+/** Opens a release page in the default browser, only after both URL checks (T-07.13-11-01). */
+function openReleasePage(url: string): void {
+  if (isSafeExternalUrl(url) && isReleasePageUrl(url)) void shell.openExternal(url);
+}
+
+/**
+ * Asks GitHub's public releases/latest at most once a day (the stored answer covers restarts) and refreshes the tray
+ * and the onboarding window when the answer changes. Packaged builds only (a dev build's 0.1.0 is not a release);
+ * `OCW_DESKTOP_UPDATE_CHECK=1` turns it on in dev. Never throws, never downloads.
+ */
+async function runUpdateCheck(): Promise<void> {
+  if (!app.isPackaged && process.env.OCW_DESKTOP_UPDATE_CHECK !== "1") return;
+  const next = await checkForUpdate({
+    current: app.getVersion(),
+    fetchImpl: fetch,
+    now: Date.now,
+    store: fileUpdateStore(app.getPath("userData")),
+  }).catch((): UpdateCheckResult => updateNotice);
+  if (JSON.stringify(next) === JSON.stringify(updateNotice)) return;
+  updateNotice = next;
+  if (next.available) log(`update available: v${next.version}`);
+  refreshChrome();
+  sendOnboardingStatus();
+}
+
+function updateItems(): MenuItemConstructorOptions[] {
+  if (!updateNotice.available) return [];
+  const { version, url } = updateNotice;
+  return [
+    { label: `Update available (v${version})`, click: () => openReleasePage(url) },
+    { type: "separator" },
+  ];
 }
 
 async function pollStatus(): Promise<void> {
@@ -458,7 +526,7 @@ function registerIpc(): void {
   });
   handle(Channels.onboardingStatus, fromOnboarding, (arg) => {
     parseArgs(NoArgs, arg);
-    return status ?? computeStatus();
+    return onboardingStatus();
   });
   handle(Channels.onboardingCheckServer, fromOnboarding, async (arg) => {
     const input = parseArgs(CheckServerArgs, arg);
@@ -593,6 +661,80 @@ async function setFullAccess(on: boolean): Promise<void> {
   refreshChrome();
 }
 
+// 07.13 (D-10, PD-27): what the owner allows, in plain words, before the browser is turned on.
+const BROWSER_WARNING =
+  "Agents in Work Zone sessions on this computer can open web pages, your localhost included, in a separate browser " +
+  "with its own empty profile. Your own browser and its cookies are never used.";
+
+/** `OCW_ALLOW_BROWSER` in this app's environment reaches the daemon it starts and wins over runtime.json (PD-27). */
+function browserEnv(): boolean | null {
+  if (externalDaemon) return null;
+  const raw = process.env.OCW_ALLOW_BROWSER;
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return null;
+}
+
+async function readLocalBrowser(): Promise<void> {
+  try {
+    localBrowser = await readDaemonBrowser(ocwHome);
+  } catch {
+    localBrowser = false; // a malformed runtime.json is reported when the owner tries to change it
+  }
+}
+
+/**
+ * The device owner's browser opt-in (07.13, D-10, PD-27), one of the three switches the browser needs (the
+ * organization's policy and a capable device are the others). Turning it on needs the native confirmation (Cancel is
+ * the default); turning it off is immediate. Written to runtime.json; the daemon reloads it at once. Main-process menu
+ * only: never reachable from web content or the preload API.
+ */
+async function setBrowser(on: boolean): Promise<void> {
+  if (on) {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Allow the browser", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: "Allow the browser on this computer?",
+      detail: BROWSER_WARNING,
+    });
+    if (response !== 0) {
+      refreshChrome(); // the checkbox flipped itself on click; put it back
+      return;
+    }
+  }
+  try {
+    await writeDaemonBrowser(ocwHome, on);
+    localBrowser = on;
+  } catch (err) {
+    dialog.showErrorBox(
+      "The browser setting was not changed",
+      err instanceof Error ? err.message : "The runtime configuration could not be written.",
+    );
+    refreshChrome();
+    return;
+  }
+  await controlRequest(socketPath, { cmd: "reloadConfig" }).catch(() => undefined); // daemon down: read at start
+  log(`browser ${on ? "allowed" : "turned off"} on this computer`);
+  await pollStatus();
+  refreshChrome();
+}
+
+function browserItem(): MenuItemConstructorOptions {
+  const fromEnv = browserEnv();
+  return {
+    label:
+      fromEnv === null
+        ? "Allow the browser on this computer…"
+        : "Allow the browser on this computer… (set by OCW_ALLOW_BROWSER)",
+    type: "checkbox",
+    checked: fromEnv ?? localBrowser,
+    enabled: fromEnv === null,
+    click: () => void setBrowser(!localBrowser),
+  };
+}
+
 async function readLocalUpdatesLevel(): Promise<void> {
   try {
     localUpdatesLevel = await readDaemonRuntimeUpdates(ocwHome);
@@ -685,6 +827,7 @@ function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
     },
     { type: "separator" },
     fullAccessItem(s),
+    browserItem(),
     ...runtimeUpdatesItems(),
   ];
 }
@@ -710,6 +853,7 @@ function refreshChrome(): void {
     tray.setToolTip(`OCW · ${s.label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
+        ...updateItems(),
         ...runtimeItems(s),
         { type: "separator" },
         { label: "Quit OCW", role: "quit" },
@@ -798,6 +942,7 @@ async function main(): Promise<void> {
   });
   await store.load();
   await readLocalFullAccess();
+  await readLocalBrowser();
   await readLocalUpdatesLevel();
 
   supervisor = new DaemonSupervisor({
@@ -825,6 +970,8 @@ async function main(): Promise<void> {
   publishStatus();
   setInterval(() => void pollStatus(), STATUS_POLL_MS).unref();
   void pollStatus();
+  void runUpdateCheck();
+  setInterval(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS).unref();
 
   app.on("activate", () => (store.config.onboarded ? openMain() : openOnboarding()));
   // Keep running in the menu bar when windows close (macOS convention; the runtime keeps serving).

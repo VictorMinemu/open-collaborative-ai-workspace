@@ -414,6 +414,41 @@ h1 {
   opacity: 0.45;
 }
 
+/* 07.13 (D-18): a newer release, linked to its page (never installed from here). */
+.update-link {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand-soft-foreground);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  outline: none;
+  transition: background 0.15s ease;
+}
+
+.update-link[hidden] {
+  display: none;
+}
+
+.update-link:hover {
+  background: oklch(0.33 0.08 278);
+}
+
+.update-link:focus-visible {
+  box-shadow: 0 0 0 3px oklch(0.64 0.19 278 / 45%);
+}
+
+.update-hint {
+  font-weight: 400;
+  opacity: 0.85;
+}
+
 .foot {
   margin-top: auto;
   font-size: 12px;
