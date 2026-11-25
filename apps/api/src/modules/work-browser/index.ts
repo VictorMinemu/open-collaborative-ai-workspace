@@ -8,6 +8,7 @@ import { createPermissionService } from "../organization";
 import { onBrowserEvent } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
+import { onSignInLoad } from "./load";
 import { registerSignInRoutes } from "./signin-routes";
 
 export { onBrowserEvent } from "./events";
@@ -45,9 +46,12 @@ export function createWorkBrowserModule(
   deps: { hub: DeviceHub; allowedOrigins?: Set<string> },
 ): WorkBrowserModule {
   let live: WorkLiveHub | null = null;
+  const perms = createPermissionService(core);
   const sessionDevice = sessionDeviceCheck(core);
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
+    // 07.13-17 (D-24, D-32, PD-16, P7): decided by the API, answered on the requesting socket only.
+    onSignInLoad: onSignInLoad(core, perms),
     // Per frame, not awaited, after hello (07.13-08): cheap until the session is known. A frame naming a session
     // that does not run on the sending device reaches nobody (T-07.13-10-03).
     async onBinary(device, bytes) {
@@ -63,8 +67,7 @@ export function createWorkBrowserModule(
     module: {
       name: "work-browser",
       register(app) {
-        const perms = createPermissionService(core);
-        // 07.13-17: the member's own sign-ins (Keychain) and the device's hand-back upload.
+        // 07.13-17: the member's own sign-ins (Keychain), the device's hand-back upload and its re-seal.
         registerSignInRoutes(app, { core, perms });
         live = registerWorkLiveView(app, {
           core,

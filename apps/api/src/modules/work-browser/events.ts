@@ -76,7 +76,8 @@ type EndReason = "crashed" | "takeover_abandoned";
  * | `refused` | unchanged | `.refused { origin, action?, refusal?, failure? }`, result `denied` |
  * | `closed` | closed, lease cleared | `.closed { origin }` |
  * | `crashed`, `takeover_abandoned` | closed, lease cleared | `.closed { origin, endReason }` |
- * | `signin_loaded`, `signin_unloaded` | (07.13-17) | none |
+ * | `signin_loaded` | unchanged (the load already recorded it, 07.13-17) | none |
+ * | `signin_unloaded` | `signin_id` / `signin_user_id` cleared (07.13-17, PD-17) | none |
  *
  * A close without an origin audits the page's last origin.
  */
@@ -119,8 +120,15 @@ async function applyKind(tx: Tx, device: DeviceRef, frame: BrowserEventFrame): P
       };
     }
     case "signin_loaded":
+      // Recorded and audited by the API when it answered the load (`load.ts`, 07.13-17): the device's echo adds nothing.
+      return null;
     case "signin_unloaded":
-      // Applied by the sign-in load (07.13-17); nothing here.
+      // PD-17: the device re-sealed (or dropped) the member's state and closed that context; the page is public again,
+      // so the live view's privacy gate and the member-only approvals end with it. Not audited (the load was).
+      await tx
+        .update(workBrowsers)
+        .set({ signinId: null, signinUserId: null, updatedAt: sql`now()` })
+        .where(eq(workBrowsers.workSessionId, frame.sessionId));
       return null;
   }
 }

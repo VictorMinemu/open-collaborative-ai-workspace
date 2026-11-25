@@ -14,7 +14,7 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, gone, notFound } from "../../lib/errors";
 import { authenticateDeviceJwt, bearerValue, type DeviceRef, looksLikeJwt } from "../device";
 import type { PermissionService } from "../organization";
-import { listMine, revokeWorkSignIn, sealWorkSignIn } from "./signins";
+import { listMine, resealWorkSignIn, revokeWorkSignIn, sealWorkSignIn } from "./signins";
 
 /**
  * The Work Zone sign-in routes (Phase 07.13; D-22, D-23, D-28, PD-15, P7):
@@ -25,7 +25,10 @@ import { listMine, revokeWorkSignIn, sealWorkSignIn } from "./signins";
  * - `PUT /runtime/browser-signins/uploads/:uploadId` (device JWT only): the hand-back upload (PD-15). The upload row
  *   must name a session that runs on THIS device, be unexpired and unused; it is consumed once, whatever the outcome,
  *   and the seal runs as the upload's member (owner-only policy). Sealed only when `changed` and something of the site
- *   is left after `keepForSite`: 201 `{ saved: true }`, otherwise 200 `{ saved: false }`.
+ *   is left after `keepForSite`: 201 `{ saved: true }`, otherwise 200 `{ saved: false }`;
+ * - `PUT /runtime/browser-signins/:signinId/state` (device JWT only, PD-17): the re-seal before an unload, accepted only
+ *   while the body's session runs on THIS device and has that sign-in loaded now (`work_browsers.signin_id`); run as
+ *   the sign-in's owner. 200 `{ saved }`; another device's session 404; not loaded 409 `not_loaded`.
  *
  * Bodies are parsed with the contracts; no answer, log line or audit row ever echoes a storage state. Logs carry ids
  * and a code only.
@@ -42,6 +45,7 @@ const usedKey = (uploadId: string) => `ocw:wb:upload-used:${uploadId}`;
 
 const IdParams = z.object({ id: Id });
 const UploadParams = z.object({ uploadId: Id });
+const ResealParams = z.object({ signinId: Id });
 
 /** The device JWT check (the file-transfer routes' rule, 07.17.1.1 PD-05): a JWT only, never the device token. */
 function deviceJwtOnly(core: Core, perms: PermissionService) {
@@ -206,6 +210,80 @@ export function registerSignInRoutes(app: App, deps: SignInRouteDeps): void {
         if (outcome === "expired") throw gone("This upload expired", "upload_expired");
         if (outcome === "saved") return reply.code(201).send({ saved: true });
         return reply.code(200).send({ saved: false });
+      },
+    );
+
+    scope.put(
+      routePath(WORK_BROWSER_SIGNIN_ROUTES.reseal),
+      {
+        config: { authz: "device" },
+        bodyLimit: UPLOAD_BODY_LIMIT,
+        schema: { hide: true, params: ResealParams },
+        onRequest: deviceOnly,
+      },
+      async (req, reply) => {
+        const device = req.device as DeviceRef;
+        const { signinId } = ResealParams.parse(req.params);
+        const body = parseUpload(req.body);
+        const log = req.log;
+
+        // The page, read in the device's tenant (no user): a session of THIS device with that sign-in loaded now.
+        const page = await core.db.withTenant(
+          { organizationId: device.organizationId, userId: null },
+          async (tx) => {
+            const [row] = await tx
+              .select({
+                signinId: workBrowsers.signinId,
+                userId: workBrowsers.signinUserId,
+                deviceId: workSessions.deviceId,
+              })
+              .from(workBrowsers)
+              .innerJoin(workSessions, eq(workSessions.id, workBrowsers.workSessionId))
+              .where(eq(workBrowsers.workSessionId, body.sessionId))
+              .limit(1);
+            return row ?? null;
+          },
+        );
+        if (!page || page.deviceId !== device.deviceId) {
+          log.info({ signinId, deviceId: device.deviceId, code: "not_found" }, "sign-in reseal refused");
+          throw notFound("Sign-in not found");
+        }
+        const notLoaded = () => {
+          log.info({ signinId, deviceId: device.deviceId, code: "not_loaded" }, "sign-in reseal refused");
+          return conflict("This sign-in is not loaded in that session", "not_loaded");
+        };
+        if (page.signinId !== signinId || !page.userId) throw notLoaded();
+        const memberId = page.userId;
+
+        // Re-sealed as its owner, while the page still has it loaded (locked).
+        const outcome = await core.db.withTenant(
+          { organizationId: device.organizationId, userId: memberId },
+          async (tx) => {
+            const [still] = await tx
+              .select({ signinId: workBrowsers.signinId })
+              .from(workBrowsers)
+              .where(
+                and(
+                  eq(workBrowsers.workSessionId, body.sessionId),
+                  eq(workBrowsers.signinId, signinId),
+                  eq(workBrowsers.signinUserId, memberId),
+                ),
+              )
+              .limit(1)
+              .for("update");
+            if (!still) return "not_loaded" as const;
+            if (!body.changed) return "unchanged" as const;
+            const sealed = await resealWorkSignIn(tx, core, {
+              userId: memberId,
+              signinId,
+              rawState: JSON.stringify(body.state),
+            });
+            return sealed ? ("saved" as const) : ("unchanged" as const);
+          },
+        );
+        if (outcome === "not_loaded") throw notLoaded();
+        log.info({ signinId, deviceId: device.deviceId, code: outcome }, "sign-in reseal");
+        return reply.code(200).send({ saved: outcome === "saved" });
       },
     );
   });
