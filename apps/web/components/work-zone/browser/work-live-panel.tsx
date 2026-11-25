@@ -65,8 +65,14 @@ export function workPlaceholderOf(
           strong: true,
         };
       }
-      // D-20: a takeover's words are the bots' ("Private sign-in in progress", who signs in).
-      return placeholderOf(v, state);
+      // D-20: during a takeover only the holder sees the page; the body (who signs in, or "on another device") is the
+      // bots' own, which never names a bot.
+      return {
+        icon: "private",
+        title: "Private sign-in in progress",
+        body: placeholderOf(v, state)?.body ?? null,
+        strong: true,
+      };
     case "ended":
       return { icon: "ended", title: workEndedSentence(v.server?.endReason), body: null, strong: false };
     case "no_permission":
