@@ -207,6 +207,8 @@ interface SessionState {
   shimIssued: boolean;
   /** HI-06: the last `open` of this turn did not load a sign-in because the device is shared (said in its result). */
   sharedRefused: boolean;
+  /** HI-06 residual: the page signed in to by hand was closed because the device is shared (said in the next call). */
+  sharedClosed: boolean;
 }
 
 interface LoadedSignIn {
@@ -343,6 +345,7 @@ export class BrowserManager {
         if (s) this.armIdle(s);
       },
       held: (sessionId, leaseId) => this.onHeld(sessionId, leaseId),
+      released: (sessionId) => this.onReleased(sessionId),
       save: (sessionId, leaseId, uploadId) => this.onSave(sessionId, leaseId, uploadId),
     });
     this.live = new LiveFrames({
@@ -587,6 +590,24 @@ export class BrowserManager {
           )
         : Promise.resolve(null);
     s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * HI-06 residual: the person handed the page back with "Done" (or the lease was released) and it is still open. A page
+   * they signed in to by hand in a Codex session (`memberPage`) is closed when another person's session runs on the
+   * device (`sharedWith`): its agent could reach the page through the shim token. Nothing was saved, so nothing is
+   * re-sealed. A loaded sign-in is covered by `unloadShared` and `loadSignIn`.
+   */
+  private async onReleased(sessionId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s?.child || s.loaded || !s.memberPage || !this.sharedWith(s, s.memberPage)) return;
+    await this.closeShared(s);
+  }
+
+  /** HI-06: closes `s`'s page because the device is shared; the agent's next call says why. */
+  private async closeShared(s: SessionState): Promise<void> {
+    s.sharedClosed = true;
+    await this.closePage(s, "closed", s.turn?.promptId ?? null);
   }
 
   /**
@@ -852,6 +873,21 @@ export class BrowserManager {
   // ------------------------------------------------------------------ the call
 
   private async call(
+    s: SessionState,
+    tool: WorkBrowserTool,
+    args: unknown,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserToolResult> {
+    // HI-06 residual: the first call after the page signed in to by hand was closed on a shared device says why.
+    const sharedClosed = s.sharedClosed;
+    s.sharedClosed = false;
+    const res = await this.decide(s, tool, args, signal);
+    return sharedClosed
+      ? { ...res, content: [...res.content, { type: "text", text: SHARED_CLOSED_TEXT }] }
+      : res;
+  }
+
+  private async decide(
     s: SessionState,
     tool: WorkBrowserTool,
     args: unknown,
@@ -1393,6 +1429,7 @@ export class BrowserManager {
       noSignIn: new Set(),
       shimIssued: false,
       sharedRefused: false,
+      sharedClosed: false,
     };
     const manager = this;
     s.tools = {
@@ -1464,13 +1501,21 @@ export class BrowserManager {
     return false;
   }
 
-  /** HI-06: a session got a new grant: every other session's loaded sign-in it now shares the device with is unloaded. */
+  /**
+   * HI-06: a session got a new grant: every other session's loaded sign-in, or page signed in to by hand
+   * (`memberPage`), that it now shares the device with is closed. A page a person still holds stays until they hand it
+   * back (the agent is paused meanwhile, and "Done, save" can still keep their sign-in): `onReleased` closes it then.
+   */
   private unloadShared(changed: SessionState): void {
     for (const s of this.sessions.values()) {
       if (s === changed) continue;
-      const owner = s.loaded?.userId ?? null;
-      if (owner && this.sharedWith(s, owner))
-        void this.closePage(s, "closed", s.turn?.promptId ?? null).catch(() => {});
+      if (s.loaded) {
+        if (this.sharedWith(s, s.loaded.userId))
+          void this.closePage(s, "closed", s.turn?.promptId ?? null).catch(() => {});
+        continue;
+      }
+      if (!s.child || !s.memberPage || this.takeover.isPaused(s.id)) continue;
+      if (this.sharedWith(s, s.memberPage)) void this.closeShared(s).catch(() => {});
     }
   }
 
@@ -1564,6 +1609,10 @@ function privateTo(grant: SessionBrowserGrant | undefined, userId: string): bool
 /** HI-06: what the model reads when a sign-in does not load because the device is shared. */
 const SHARED_DEVICE_TEXT =
   "Saved sign-ins do not load while another person's session runs on this device: an agent of that session could reach this browser.";
+
+/** HI-06 residual: what the model reads after the page signed in to by hand was closed because the device is shared. */
+const SHARED_CLOSED_TEXT =
+  "The page signed in to by hand was closed because another person's session runs on this device: an agent of that session could reach this browser.";
 
 /** HI-04: the address names more than its site (a path, a query or a fragment) that could carry data. */
 function addressCarriesData(url: string): boolean {
