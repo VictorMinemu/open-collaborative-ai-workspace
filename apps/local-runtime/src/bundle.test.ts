@@ -287,7 +287,9 @@ describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
     ocwHome: string;
     root: string;
   } {
-    const root = tempDir("ocwr-");
+    // The real path, as on Linux and in an install: macOS's tmpdir is behind the /var → /private/var symlink, which
+    // once hid a bundled module's "am I the main script?" guard firing for the runtime's own file (07.13-20).
+    const root = realpathSync(tempDir("ocwr-"));
     const app = join(root, "app");
     mkdirSync(app);
     const file = join(app, "ocw-runtime.mjs");
