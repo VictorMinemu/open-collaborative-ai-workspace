@@ -50,8 +50,18 @@ function view(over: Partial<LiveView> = {}): LiveView {
 const render = (v: LiveView) =>
   renderToStaticMarkup(<WorkLiveBody view={v} frames={null} deviceName="build-01" />);
 
-const PRIVATE_TAKEOVER = state({ state: "private", privateReason: "takeover", host: null, memberName: "Sam" });
-const PRIVATE_MEMBER = state({ state: "private", privateReason: "member_session", memberName: "Ana", host: null });
+const PRIVATE_TAKEOVER = state({
+  state: "private",
+  privateReason: "takeover",
+  host: null,
+  memberName: "Sam",
+});
+const PRIVATE_MEMBER = state({
+  state: "private",
+  privateReason: "member_session",
+  memberName: "Ana",
+  host: null,
+});
 const ENDED_IDLE = state({ state: "ended", endReason: "idle", host: null });
 const NO_PERMISSION = state({ state: "no_permission", host: null });
 
@@ -79,9 +89,9 @@ describe("WorkLivePanel states (D-20, D-27)", () => {
   });
 
   it("live with the server's masked activity", () => {
-    expect(workActivityOf(view({ server: state({ activity: "clicking “Orders”" }) }), "live", "build-01")).toBe(
-      "Claude Code is clicking “Orders”",
-    );
+    expect(
+      workActivityOf(view({ server: state({ activity: "clicking “Orders”" }) }), "live", "build-01"),
+    ).toBe("Claude Code is clicking “Orders”");
   });
 
   it("private + takeover: a private sign-in is in progress", () => {
@@ -103,8 +113,17 @@ describe("WorkLivePanel states (D-20, D-27)", () => {
   });
 
   it("ended for every other reason never names a bot", () => {
-    for (const endReason of ["crashed", "takeover_abandoned", "closed_by_bot", "kill_switch", "module_off"] as const) {
-      const p = workPlaceholderOf(view({ server: state({ state: "ended", endReason, host: null }) }), "ended");
+    for (const endReason of [
+      "crashed",
+      "takeover_abandoned",
+      "closed_by_bot",
+      "kill_switch",
+      "module_off",
+    ] as const) {
+      const p = workPlaceholderOf(
+        view({ server: state({ state: "ended", endReason, host: null }) }),
+        "ended",
+      );
       expect(p?.title).toBeTruthy();
       expect(p?.title).not.toMatch(/bot/i);
       expect(p?.title).not.toContain("Claude Code");

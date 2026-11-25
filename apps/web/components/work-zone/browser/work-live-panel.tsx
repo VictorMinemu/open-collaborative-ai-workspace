@@ -1,11 +1,11 @@
 "use client";
 
-import type { WorkSession } from "@ocw/contracts";
+import { type BrowserEndReason, WORK_BROWSER_LIMITS, type WorkSession } from "@ocw/contracts";
 import { type RefObject, useEffect, useRef } from "react";
 import { HostChip } from "@/components/browser/host-chip";
-import { FramePlaceholder, placeholderOf } from "@/components/browser/live-frame";
+import { FramePlaceholder, type Placeholder, placeholderOf } from "@/components/browser/live-frame";
 import { StateChip } from "@/components/browser/live-header";
-import type { LiveUiState, LiveView } from "@/components/browser/live-store";
+import { activityWordsOf, type LiveUiState, type LiveView } from "@/components/browser/live-store";
 import { Spinner } from "@/components/ui/spinner";
 import { type FrameBus, useWorkLive, workShowsFrames, workUiStateOf } from "@/lib/use-work-live";
 import { cn } from "@/lib/utils";
@@ -21,9 +21,111 @@ import { RUNTIMES } from "../meta";
  * file's small `WorkLiveFrame`, fed by the panel's own socket (`useWorkLive`).
  */
 
-export function WorkLivePanel({ session }: { session: Pick<WorkSession, "id" | "runtime" | "deviceName"> }) {
+/** The Work Zone's ended sentences: the bots' reasons, never naming a bot (UI-SPEC "Ended reasons"). */
+export function workEndedSentence(reason: BrowserEndReason | undefined): string {
+  switch (reason) {
+    case "idle":
+      return `The browser closed after ${WORK_BROWSER_LIMITS.idleMinutes} minutes without use.`;
+    case "closed_by_bot":
+      return "The agent closed the browser.";
+    case "kill_switch":
+      return "An admin turned the browser off.";
+    case "module_off":
+      return "The browser was turned off for you.";
+    case "takeover_abandoned":
+      return "Control ended without a hand back, so the browser closed. The agent can open it again.";
+    default:
+      return "The browser stopped unexpectedly. The agent can open it again.";
+  }
+}
+
+/** What the frame area shows instead of the page, in the Work Zone's words, or null when it shows the page. */
+export function workPlaceholderOf(
+  v: Pick<LiveView, "server" | "bot">,
+  state: LiveUiState,
+): Placeholder | null {
+  switch (state) {
+    case "connecting":
+      return { icon: "connecting", title: "Connecting…", body: null, strong: false };
+    case "idle":
+      return {
+        icon: "ended",
+        title: "Nothing to show yet: the agent has not opened a page",
+        body: null,
+        strong: false,
+      };
+    case "private":
+      if (v.server?.privateReason === "member_session") {
+        // D-27: a member's signed-in page is theirs alone; the others learn who, not where.
+        const member = v.server.memberName ?? "a member";
+        return {
+          icon: "private",
+          title: `Private browsing for ${member}`,
+          body: `Only ${member} can watch while the agent uses their sign-in.`,
+          strong: true,
+        };
+      }
+      // D-20: a takeover's words are the bots' ("Private sign-in in progress", who signs in).
+      return placeholderOf(v, state);
+    case "ended":
+      return { icon: "ended", title: workEndedSentence(v.server?.endReason), body: null, strong: false };
+    case "no_permission":
+      return {
+        icon: "no_permission",
+        title: "You can't watch this browser",
+        body: "Only people who can see this session can watch its browser.",
+        strong: true,
+      };
+    case "error":
+      return placeholderOf(v, state);
+    default:
+      return null;
+  }
+}
+
+/** The line under the frame (UI-SPEC §1.4 "Activity line"), or null when the placeholder says it all. */
+export function workActivityOf(
+  v: Pick<LiveView, "server" | "bot" | "viewerCan">,
+  state: LiveUiState,
+  deviceName: string,
+): string | null {
+  switch (state) {
+    case "live":
+      return v.server?.activity
+        ? `${v.bot.name} is ${v.server.activity}`
+        : `${v.bot.name}'s browser on ${deviceName}`;
+    case "reconnecting":
+    case "paused":
+    case "controlling":
+      return activityWordsOf(v, state)?.text ?? null;
+    default:
+      return null;
+  }
+}
+
+export function WorkLivePanel({
+  session,
+}: {
+  session: Pick<WorkSession, "id" | "runtime" | "deviceName" | "browser">;
+}) {
   const agent = RUNTIMES[session.runtime].label;
   const { view, frames, retry } = useWorkLive(session.id, agent);
+  // The page ended and the agent opened a new one (the session stream says so): watch the new page.
+  // Only on the flag's false → true after the end, so a stale `live` never loops reconnects.
+  const ended = view.server?.state === "ended" && view.server.endReason !== "access_lost";
+  const pageOpen = session.browser?.live === true;
+  const sawClosed = useRef(false);
+  useEffect(() => {
+    if (!ended) {
+      sawClosed.current = false;
+      return;
+    }
+    if (!pageOpen) sawClosed.current = true;
+    else if (sawClosed.current) {
+      sawClosed.current = false;
+      retry();
+    }
+  }, [ended, pageOpen, retry]);
   return <WorkLiveBody view={view} frames={frames} onRetry={retry} deviceName={session.deviceName} />;
 }
 
@@ -41,6 +143,7 @@ export function WorkLiveBody({
 }) {
   const state = workUiStateOf(view);
   const host = view.server?.host ?? null;
+  const activity = workActivityOf(view, state, deviceName);
   return (
     <section
       data-testid="work-live-panel"
@@ -67,6 +170,12 @@ export function WorkLiveBody({
         <StateChip state={state} />
       </div>
       <WorkLiveFrame view={view} state={state} frames={frames} onRetry={onRetry} />
+      {activity ? (
+        // The state chip is the polite region; this line changes with every action, so it is not announced.
+        <p data-testid="work-live-activity" className="min-w-0 truncate text-muted-foreground text-xs">
+          {activity}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -119,7 +228,7 @@ function WorkLiveFrame({
 }) {
   const img = useRef<HTMLImageElement | null>(null);
   const framed = workShowsFrames(state);
-  const placeholder = framed ? null : placeholderOf(view, state);
+  const placeholder = framed ? null : workPlaceholderOf(view, state);
   const host = view.server?.host ?? null;
   useFrames(img, frames, framed);
   return (
