@@ -19,6 +19,13 @@
 //                                  content may run Full access sessions here); honoured by the server only for a
 //                                  headless service daemon. Writes runtime.json and asks a running daemon to reload
 //                                  it. OCW_ISOLATED_SERVER overrides it per process.
+//   ocw-runtime browser on|off|status
+//                                  07.13 (D-10, PD-27): the device owner's Work Zone browser opt-in (default off);
+//                                  writes runtime.json and asks a running daemon to reload it. OCW_ALLOW_BROWSER
+//                                  overrides it per process. Prints `Browser: on|off (<source>) · installed <version>`.
+//   ocw-runtime browser install [--from-zip <zip>]
+//                                  07.13 (D-05, PD-19): fetch the pinned Chrome for Testing headless shell (or copy it
+//                                  from a local zip), verify its sha256 and install it under ~/.ocw/browsers.
 //   ocw-runtime updates status|check|now <claude-code|codex>
 //                                  the runtime CLIs' versions and update state (07.11); `check` asks the registry
 //                                  now, `now` updates one runtime when it is idle (local only, never from the server).
@@ -47,6 +54,7 @@
 //                                  owns the OCW home; under a system service, as that service's user.
 
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { type DeviceHostKind, PoolLabel, RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
 import {
   CodexLoginError,
@@ -55,23 +63,34 @@ import {
   runCodexDeviceLogin,
 } from "./accounts/codex-login.js";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
+import { BrowserInstallError, browsersRoot, installBrowser, installedBrowser } from "./browser/install.js";
+import { CFT_VERSION } from "./browser/pins.js";
 import { detectClaudeCode } from "./claude/detect.js";
 import {
   ensureOcwHome,
   loadConfig,
   ocwHome,
   ProjectRegistry,
+  resolveBrowser,
   resolveFullAccess,
   resolveHostKind,
   resolveIsolatedServer,
   resolveRuntimeUpdates,
+  setBrowserOptIn,
   setFullAccessOptIn,
   setIsolatedServer,
   setRuntimeUpdatesLevel,
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
-import { createDoctorDeps, doctorExitCode, formatDoctorJson, formatDoctorText, runDoctor } from "./doctor.js";
+import {
+  createDoctorDeps,
+  displayPath,
+  doctorExitCode,
+  formatDoctorJson,
+  formatDoctorText,
+  runDoctor,
+} from "./doctor.js";
 import { type EnrollResult, enroll } from "./enroll.js";
 import { findExecutable } from "./exec-path.js";
 import { readInstallInfo } from "./install-info.js";
@@ -204,6 +223,77 @@ async function isolatedServer(sub: string | undefined): Promise<void> {
     daemon: mark.daemon,
   };
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+}
+
+const BROWSER_USAGE = "usage: ocw-runtime browser on|off|status|install [--from-zip <zip>]";
+
+/** A usage error of `browser`: stderr, exit 2, nothing written. */
+function browserUsage(): void {
+  process.stderr.write(`${BROWSER_USAGE}\n`);
+  process.exitCode = 2;
+}
+
+/**
+ * 07.13 (D-10, PD-27) `browser on|off|status`: local only, the `full-access` shape (write runtime.json, then the
+ * value-less `reloadConfig` when a daemon answers; a stopped daemon reads the file on start); the server can never
+ * call this. `browser install [--from-zip <zip>]` (D-05, PD-19): the pinned headless shell, verified, under
+ * `browsersRoot()`; progress on stderr, the home-relative path on stdout.
+ */
+async function browserCommand(args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  if (sub === "install") {
+    const fromZip = flag(rest, "from-zip");
+    const known = rest.every(
+      (a, i) => a === "--from-zip" || a.startsWith("--from-zip=") || rest[i - 1] === "--from-zip",
+    );
+    if (!known || (rest.length > 0 && !fromZip)) return browserUsage();
+    return browserInstall(fromZip);
+  }
+  if ((sub !== "on" && sub !== "off" && sub !== "status") || rest.length > 0) return browserUsage();
+  const home = ocwHome();
+  if (sub !== "status") {
+    await setBrowserOptIn(home, sub === "on");
+    try {
+      const res = await controlRequest(controlSocketPath(home), { cmd: "reloadConfig" });
+      if (!res.ok)
+        process.stderr.write(`Note: the running runtime did not reload its settings (${res.error}).\n`);
+    } catch (err) {
+      if (!daemonDown(err)) throw err;
+    }
+  }
+  const state = resolveBrowser(await loadConfig(home));
+  if (sub !== "status" && state.optIn !== (sub === "on")) {
+    process.stderr.write("Note: OCW_ALLOW_BROWSER in the runtime's environment overrides runtime.json.\n");
+  }
+  const installed = await installedBrowser(browsersRoot()).catch(() => null);
+  process.stdout.write(
+    `Browser: ${state.optIn ? "on" : "off"} (${state.source}) · ${installed ? `installed ${installed.version}` : "not installed"}\n`,
+  );
+}
+
+async function browserInstall(fromZip: string | undefined): Promise<void> {
+  const verb = fromZip ? "Verifying" : "Downloading";
+  let shown = -1;
+  try {
+    const installed = await installBrowser({
+      root: browsersRoot(),
+      ...(fromZip ? { fromZip: resolve(fromZip) } : {}),
+      onProgress: ({ receivedBytes, totalBytes }) => {
+        const pct = Math.floor((receivedBytes * 100) / totalBytes);
+        if (pct >= shown + 5 || (pct === 100 && shown !== 100)) {
+          shown = pct;
+          process.stderr.write(`${verb} Chrome for Testing ${CFT_VERSION}: ${pct}%\n`);
+        }
+      },
+    });
+    process.stdout.write(
+      `Chrome for Testing ${installed.version} is installed at ${displayPath(installed.executable, homedir())}\n`,
+    );
+  } catch (err) {
+    if (!(err instanceof BrowserInstallError)) throw err;
+    process.stderr.write(`ocw-runtime browser install: ${err.message} (${err.code})\n`);
+    process.exitCode = 1;
+  }
 }
 
 const UPDATES_USAGE =
@@ -659,6 +749,8 @@ async function main(argv: string[]): Promise<void> {
       return fullAccess(rest[0]);
     case "isolated-server":
       return isolatedServer(rest[0]);
+    case "browser":
+      return browserCommand(rest);
     case "updates":
       return updates(rest[0], rest[1]);
     case "remove-project":
