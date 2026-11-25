@@ -1626,6 +1626,88 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
       expect(textOf(res)).toContain("another person's session runs on this device");
       expect(t.approvals()).toEqual([]);
     });
+
+    /** The member takes control of the open page and hands it back with "Done" (no save). */
+    const doneByHand = async (t: ReturnType<typeof scripted>, between?: () => void) => {
+      const leaseId = randomUUID();
+      await t.manager.onServerFrame({
+        type: "browser.lease",
+        sessionId: t.sid,
+        leaseId,
+        state: "held",
+        holderUserId: MEMBER,
+      });
+      between?.();
+      await t.manager.onServerFrame({
+        type: "browser.handback",
+        sessionId: t.sid,
+        leaseId,
+        save: false,
+        uploadId: null,
+      });
+    };
+
+    it("a page signed in by hand closes on a plain hand back while another person's session runs here", async () => {
+      const put = vi.fn(async () => 204);
+      const t = scripted({ api: { put } });
+      await t.tools.shimTokenFile();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/` });
+      await doneByHand(t);
+      expect(t.children[0]?.state).toBe("closed");
+      expect(t.manager.openPages).toBe(0);
+      // Nothing was saved, so nothing is re-sealed or exported.
+      expect(put).not.toHaveBeenCalled();
+      const next = await t.tools.call("snapshot", {});
+      expect(next.summary).toBe("Refused: No page is open. Open one first.");
+      expect(textOf(next)).toContain("another person's session runs on this device");
+      // The sentence is said once.
+      expect(textOf(await t.tools.call("snapshot", {}))).not.toContain("another person's session");
+    });
+
+    it("another person's session that starts during the takeover closes the page at the hand back, not before", async () => {
+      const t = scripted();
+      await t.tools.shimTokenFile();
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/` });
+      await doneByHand(t, () => {
+        other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+        // The member is still on the page (the agent is paused): it stays until they hand it back.
+        expect(t.children[0]?.state).toBe("running");
+      });
+      expect(t.children[0]?.state).toBe("closed");
+      expect(t.manager.openPages).toBe(0);
+    });
+
+    it("another person's session that starts after the hand back closes the page signed in by hand at once", async () => {
+      const t = scripted();
+      await t.tools.shimTokenFile();
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/` });
+      await doneByHand(t);
+      // The device is not shared: the member's page stays for their agent.
+      expect(t.children[0]?.state).toBe("running");
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      for (let i = 0; i < 50 && t.children[0]?.state !== "closed"; i++) await flush();
+      expect(t.children[0]?.state).toBe("closed");
+      expect(t.manager.openPages).toBe(0);
+      const next = await t.tools.call("snapshot", {});
+      expect(next.summary).toBe("Refused: No page is open. Open one first.");
+      expect(textOf(next)).toContain("another person's session runs on this device");
+    });
+
+    it("a Claude session (no shim token) keeps the page signed in by hand", async () => {
+      const t = scripted();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/` });
+      await doneByHand(t);
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      await flush();
+      expect(t.children[0]?.state).toBe("running");
+      expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+    });
   });
 
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {

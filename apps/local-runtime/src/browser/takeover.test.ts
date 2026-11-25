@@ -386,3 +386,35 @@ describe("Takeover holder (07.13 review HI-03)", () => {
     expect(t.holderOf(sessionId)).toBeUndefined();
   });
 });
+
+describe("Takeover release (07.13 review HI-06 residual)", () => {
+  const sessionId = randomUUID();
+
+  it("released runs before the agent resumes on a release or a plain hand back, never on an abandon", async () => {
+    const order: string[] = [];
+    const t = new Takeover({
+      child: () => null,
+      send: () => {},
+      abandon: async () => {
+        order.push("abandon");
+      },
+      touched: () => {
+        order.push("touched");
+      },
+      released: async (id) => {
+        expect(t.isPaused(id)).toBe(false);
+        order.push(`released ${id === sessionId}`);
+      },
+    });
+    const a = randomUUID();
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: a, state: "held" });
+    await t.onHandback({ type: "browser.handback", sessionId, leaseId: a, save: false, uploadId: null });
+    const b = randomUUID();
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: b, state: "held" });
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: b, state: "released" });
+    const c = randomUUID();
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: c, state: "held" });
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: c, state: "abandoned" });
+    expect(order).toEqual(["released true", "touched", "released true", "touched", "abandon"]);
+  });
+});

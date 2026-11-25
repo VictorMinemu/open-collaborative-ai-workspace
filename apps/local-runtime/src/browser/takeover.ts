@@ -7,7 +7,8 @@
 // - `browser.input`: applied to the page only for the session's current held lease, through the agent's CDP `Input.*`
 //   op. Any other lease id, session or state is ignored. Input frames, their text, keys and events are never logged,
 //   kept or echoed (Semgrep `ocw.live-input-logging`): the only trace is the page itself.
-// - `browser.lease { released }` or `browser.handback { save: false }`: the pause ends; the page stays.
+// - `browser.lease { released }` or `browser.handback { save: false }`: the pause ends; the page stays (HI-06: unless the
+//   manager's `released` closes a page signed in to by hand in a Codex session on a shared device).
 // - `browser.handback { save: true, uploadId }`: `onSaveHandback` exports the page's site state and uploads it (07.13-19,
 //   `signin.ts`: compared with the fingerprint the manager took on `held`), then the pause ends. The API sends no
 //   `released` after a save: the hand back itself ends the pause.
@@ -40,6 +41,11 @@ export interface TakeoverHost {
   held?(sessionId: string, leaseId: string): void | Promise<void>;
   /** 19: "Done, save my sign-in": export and upload (the agent is still paused while this runs). */
   save?(sessionId: string, leaseId: string, uploadId: string): Promise<void>;
+  /**
+   * The pause ended with the page still open (`released`, or a hand back that did not close it): HI-06, the manager may
+   * close a page the person signed in to by hand before the agent can reach it. Awaited before the agent resumes.
+   */
+  released?(sessionId: string): void | Promise<void>;
 }
 
 export class Takeover {
@@ -91,6 +97,7 @@ export class Takeover {
       await this.host.abandon(sessionId);
       return;
     }
+    await this.host.released?.(sessionId);
     this.tellChild(sessionId, false);
     this.host.touched(sessionId);
   }
@@ -109,6 +116,7 @@ export class Takeover {
     // The save may have taken a while: only the same lease ends here.
     if (this.held.get(sessionId) !== leaseId) return;
     this.end(sessionId);
+    await this.host.released?.(sessionId);
     this.tellChild(sessionId, false);
     this.host.touched(sessionId);
   }
