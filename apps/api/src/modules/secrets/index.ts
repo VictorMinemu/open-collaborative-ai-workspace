@@ -37,8 +37,10 @@ export interface SecretsService {
       /**
        * `user_model_credential`: a member's ChatGPT bundle (P-10). `connector_credential`: a member's connector token
        * bundle or key (Phase 07.4, D-01). `vault_item`: a keychain item's value, AAD `<orgId>:vault:<itemId>` (D-04).
-       * `browser_session`: a member's browser storage state for one site and bot (Phase 07.8, D-08, P-09), AAD
-       * `<orgId>:<userId>:browser:<agentId>:<siteKey>`; only `browser/sessions.ts` seals and opens it.
+       * `browser_session`: a member's browser storage state for one site, with two AADs that never open each other's
+       * seal (ADR-0035, D-30): for a bot (Phase 07.8, D-08, P-09) `<orgId>:<userId>:browser:<agentId>:<siteKey>`,
+       * sealed and opened only by `browser/sessions.ts`; for the Work Zone (Phase 07.13, D-23, PD-03)
+       * `<orgId>:<userId>:browser:workzone:<siteKey>`, sealed and opened only by `work-browser/signins.ts`.
        * `webhook_secret`: an inbound webhook endpoint's Standard Webhooks signing secret (Phase 07.6, D-02, D-07), AAD
        * `<orgId>:webhook_endpoint:<endpointId>`; only `automation/webhooks.ts` and `webhook-routes.ts` seal and open it.
        * `pool_token`: a Claude setup-token of the organization's account pool (Phase 07.18, PD-21, ADR-0044), AAD
