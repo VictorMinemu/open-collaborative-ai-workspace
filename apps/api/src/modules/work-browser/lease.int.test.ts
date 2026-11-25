@@ -331,3 +331,226 @@ describe("07.13-18 Task 1: the asker takes control, types into the device's page
     }
   });
 });
+
+const leaseFrames = (s: WorkLiveSocket) => s.json.filter((f) => f.type === "lease");
+const refusals = (s: WorkLiveSocket) => s.json.filter((f) => f.type === "refused");
+
+describe("07.13-18 Task 2: lease rules, expiry, abandonment and dead instances", () => {
+  it("only the asker who may prompt takes it: another member and a reader without work_session.prompt are refused `not_allowed`; the holder's other socket `someone_else`", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const owenLive = await open(owen, sid);
+    await waitState(owenLive, "live");
+    send(owenLive, { type: "take" });
+    await waitFor(() => refusals(owenLive).length >= 1);
+    expect(refusals(owenLive)).toEqual([{ type: "refused", op: "take", reason: "not_allowed" }]);
+    expect((await browserRow(sid)).lease_id).toBeNull();
+
+    const m1 = await open(mia, sid);
+    const m2 = await open(mia, sid);
+    await waitState(m1, "live");
+    await waitState(m2, "live");
+    await take(m1, sid);
+    send(m2, { type: "take" });
+    await waitFor(() => refusals(m2).length >= 1);
+    expect(refusals(m2)).toEqual([{ type: "refused", op: "take", reason: "someone_else" }]);
+    expect(await waitState(m2, "private", 3000)).toMatchObject({
+      privateReason: "takeover",
+      controller: "other_device",
+    });
+    send(m1, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+
+    // Pia asked her own session's turn, then a rule takes work_session.prompt from her: she still reads it, never takes it.
+    const sid2 = await askedSessionWithPage(pia);
+    const rule = await ada.request("POST", "/api/v1/permission-rules", {
+      subjectKind: "user",
+      subjectId: piaId,
+      permission: "work_session.prompt",
+      effect: "deny",
+    });
+    expect([200, 201], JSON.stringify(rule.body)).toContain(rule.status);
+    try {
+      const piaLive = await open(pia, sid2);
+      await waitState(piaLive, "live");
+      expect(piaLive.json.find((f) => f.type === "viewerCan")).toMatchObject({ watch: true, control: false });
+      send(piaLive, { type: "take" });
+      await waitFor(() => refusals(piaLive).length >= 1);
+      expect(refusals(piaLive)).toEqual([{ type: "refused", op: "take", reason: "not_allowed" }]);
+      expect((await browserRow(sid2)).lease_id).toBeNull();
+      piaLive.close();
+    } finally {
+      await ada.request("DELETE", `/api/v1/permission-rules/${rule.body!.id as string}`);
+    }
+    owenLive.close();
+    m1.close();
+    m2.close();
+  });
+
+  it("no input for 10 minutes: warned at 9 (the `lease` frame again), then released (nothing typed: not abandoned)", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    const leaseId = await take(miaLive, sid);
+    const before = leaseFrames(miaLive).length;
+    await hub().sweep(Date.now() + 8 * 60_000);
+    expect(leaseFrames(miaLive)).toHaveLength(before);
+    await hub().sweep(Date.now() + 9 * 60_000 + 30_000);
+    await waitFor(() => leaseFrames(miaLive).length === before + 1);
+    await hub().sweep(Date.now() + 10 * 60_000 + 30_000);
+    expect(await deviceFrame("browser.lease", sid, (f) => f.state === "released")).toMatchObject({ leaseId });
+    expect(await browserRow(sid)).toMatchObject({ lease_id: null, state: "open" });
+    expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, reason: "idle", saved: false, abandoned: false },
+    ]);
+    await waitState(miaLive, "live", 3000);
+    miaLive.close();
+  });
+
+  it("the lease's expiry moves with input; idle after input abandons the page: closed on the row and the device, `ended takeover_abandoned` for everyone", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const owenLive = await open(owen, sid);
+    const miaLive = await open(mia, sid);
+    await waitState(owenLive, "live");
+    await waitState(miaLive, "live");
+    const leaseId = await take(miaLive, sid);
+    const first = Date.parse(String(leaseFrames(miaLive)[0]!.expiresAt));
+    await sleep(50);
+    send(miaLive, { type: "mouse", event: "down", x: 10, y: 10, button: "left" });
+    await deviceFrame("browser.input", sid);
+    await waitFor(() => leaseFrames(miaLive).length >= 2);
+    expect(Date.parse(String(leaseFrames(miaLive).at(-1)!.expiresAt))).toBeGreaterThan(first);
+
+    await hub().sweep(Date.now() + 10 * 60_000 + 30_000);
+    expect(await deviceFrame("browser.lease", sid, (f) => f.state === "abandoned")).toMatchObject({
+      leaseId,
+    });
+    expect(await browserRow(sid)).toMatchObject({ lease_id: null, state: "closed" });
+    for (const s of [owenLive, miaLive]) {
+      expect((await s.closed).code).toBe(1000);
+      expect(lastState(s)).toMatchObject({ state: "ended", endReason: "takeover_abandoned" });
+    }
+    expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, reason: "idle", saved: false, abandoned: true },
+    ]);
+    // The device's own echo of the close audits nothing again.
+    d.browserEvent(sid, { kind: "takeover_abandoned", origin: ORIGIN });
+    await sleep(500);
+    expect((await audits("work_browser.closed", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, endReason: "takeover_abandoned" },
+    ]);
+  });
+
+  it("the holder's socket closing after input abandons the page; closing without input releases it", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const quiet = await open(mia, sid);
+    await waitState(quiet, "live");
+    await take(quiet, sid);
+    quiet.close();
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    await eventually(async () => (await browserRow(sid)).lease_id === null || undefined);
+
+    const typing = await open(mia, sid);
+    await waitState(typing, "live");
+    await take(typing, sid);
+    send(typing, { type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 });
+    await deviceFrame("browser.input", sid);
+    typing.close();
+    await deviceFrame("browser.lease", sid, (f) => f.state === "abandoned");
+    await eventually(async () => (await browserRow(sid)).state === "closed" || undefined);
+    expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, reason: "closed", saved: false, abandoned: false },
+      { origin: ORIGIN, reason: "closed", saved: false, abandoned: true },
+    ]);
+  });
+
+  it("the holder losing access to the session abandons the page (after input) and gets `no_permission`", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    await take(miaLive, sid);
+    send(miaLive, { type: "text", text: "x" });
+    await deviceFrame("browser.input", sid);
+    const res = await owen.request("DELETE", `/api/v1/devices/${dId}/grants/user/${miaId}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    try {
+      expect((await miaLive.closed).code).toBe(4403);
+      expect(lastState(miaLive)).toMatchObject({ state: "no_permission" });
+      await deviceFrame("browser.lease", sid, (f) => f.state === "abandoned");
+      expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+        { origin: ORIGIN, reason: "access_lost", saved: false, abandoned: true },
+      ]);
+    } finally {
+      await shareDevice(owen, dId, miaId);
+    }
+  });
+
+  it("the page closing on the device clears the lease: the holder sees `ended`, the end is audited", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    await take(miaLive, sid);
+    d.browserEvent(sid, { kind: "closed", origin: ORIGIN });
+    expect((await miaLive.closed).code).toBe(1000);
+    expect(lastState(miaLive)).toMatchObject({ state: "ended" });
+    expect(await browserRow(sid)).toMatchObject({
+      lease_id: null,
+      controller_user_id: null,
+      state: "closed",
+    });
+    expect((await audits("work_browser.takeover_ended", sid)).map((a) => a.metadata)).toEqual([
+      { origin: ORIGIN, reason: "page_ended", saved: false, abandoned: false },
+    ]);
+  });
+
+  it("a lease left by a dead instance is cleared by the sweep: abandoned (page closed) after input, released without", async () => {
+    const typed = await askedSessionWithPage(mia);
+    const quiet = await askedSessionWithPage(mia);
+    const typedLease = randomUUID();
+    const quietLease = randomUUID();
+    for (const [sid, leaseId, input] of [
+      [typed, typedLease, true],
+      [quiet, quietLease, false],
+    ] as const) {
+      await su.query(
+        `update app.work_browsers set lease_id = $2, controller_user_id = $3, lease_input = $4,
+           lease_expires_at = now() - interval '2 minutes' where work_session_id = $1`,
+        [sid, leaseId, miaId, input],
+      );
+    }
+    const swept = await stack.built.workBrowser.sweeper.runOnce();
+    expect(swept.leases).toBe(2);
+    expect(await deviceFrame("browser.lease", typed, (f) => f.state === "abandoned")).toMatchObject({
+      leaseId: typedLease,
+    });
+    expect(await deviceFrame("browser.lease", quiet, (f) => f.state === "released")).toMatchObject({
+      leaseId: quietLease,
+    });
+    expect(await browserRow(typed)).toMatchObject({ lease_id: null, state: "closed" });
+    expect(await browserRow(quiet)).toMatchObject({ lease_id: null, state: "open" });
+    expect(await audits("work_browser.takeover_ended", typed)).toEqual([
+      {
+        actor_kind: "system",
+        actor_id: null,
+        user_id: miaId,
+        metadata: { origin: ORIGIN, reason: "idle", saved: false, abandoned: true },
+      },
+    ]);
+    // A lease that lapsed within the grace (its holder's instance may still end it) is left alone.
+    await su.query(
+      `update app.work_browsers set lease_id = $2, controller_user_id = $3, lease_expires_at = now() - interval '10 seconds'
+         where work_session_id = $1`,
+      [quiet, randomUUID(), miaId],
+    );
+    expect((await stack.built.workBrowser.sweeper.runOnce()).leases).toBe(0);
+    await su.query(
+      "update app.work_browsers set lease_id = null, controller_user_id = null, lease_expires_at = null where work_session_id = $1",
+      [quiet],
+    );
+  });
+
+  it("lease announcements between instances carry ids only", () => {
+    const lease = published.filter((p) => p.channel === "ocw:wb:lease");
+    expect(lease.length).toBeGreaterThan(0);
+    for (const p of lease) expect(Object.keys(JSON.parse(p.message) as Json).sort()).toEqual(["o", "s"]);
+  });
+});
