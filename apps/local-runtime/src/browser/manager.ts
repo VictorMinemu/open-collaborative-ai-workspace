@@ -578,12 +578,22 @@ export class BrowserManager {
       this.event(s, turn.promptId, "signin_loaded", origin);
       return res;
     } catch (err) {
-      // The child closed the context it had opened with the state: the page is gone, and the sign-in is not loaded.
-      s.origin = null;
-      s.pageApproved = null;
+      // HI-01: a failed or timed-out load is never trusted to have dropped the state: the child may still open the
+      // signed-in page after its answer. The whole child goes (its Chromium and the state with it) before the API
+      // hears that the sign-in is unloaded; nothing is re-sealed from a page that did not load.
+      await this.killChild(s, child, turn.promptId);
       this.event(s, turn.promptId, "signin_unloaded", origin);
       throw err;
     }
+  }
+
+  /**
+   * Ends `child` for good (HI-01): through `closePage` when it is still the session's page (it reports `closed`), else
+   * directly. Resolves once the process is gone.
+   */
+  private async killChild(s: SessionState, child: ManagedChild, promptId: string | null): Promise<void> {
+    if (s.child === child) await this.closePage(s, "closed", promptId, { reseal: false });
+    await child.close().catch(() => {});
   }
 
   /**

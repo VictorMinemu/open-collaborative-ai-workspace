@@ -17,8 +17,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { chmodSync, mkdirSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES, WORK_BROWSER_TIMEOUTS_MS } from "@ocw/contracts";
-import type { AgentErrorCode, AgentEvent, AgentOp } from "./agent/ops.js";
+import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES } from "@ocw/contracts";
+import { type AgentErrorCode, type AgentEvent, type AgentOp, opDeadlineMs } from "./agent/ops.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,12 +78,12 @@ export class BrowserChildError extends Error {
 const UNAVAILABLE = "The browser stopped. Open the page again.";
 const TIMED_OUT = "The browser did not answer in time.";
 
-/** What the parent waits for one call: the child's own deadline plus a margin for the round trip. */
-function callTimeoutMs(op: AgentOp): number {
-  const margin = 5_000;
-  return op === "open"
-    ? WORK_BROWSER_TIMEOUTS_MS.launch + WORK_BROWSER_TIMEOUTS_MS.op + margin
-    : WORK_BROWSER_TIMEOUTS_MS.op + margin;
+/**
+ * What the parent waits for one call: the child's own deadline (`opDeadlineMs`, the one table both sides read) plus a
+ * margin for the round trip, so the child always answers first (HI-01: `openWithState` launches Chromium like `open`).
+ */
+export function callTimeoutMs(op: AgentOp): number {
+  return opDeadlineMs(op) + 5_000;
 }
 
 const CLOSE_TERM_MS = 3_000;

@@ -9,7 +9,9 @@
 // Env (set only by the parent, `childEnv`): OCW_BROWSER_EXECUTABLE, OCW_BROWSER_SANDBOX (`on` | `off`, from
 // `resolveChromiumSandbox`); TMPDIR/TMP/TEMP are the session's run dir, so Playwright's profile lands there.
 // Exits 0 when stdin ends or on SIGTERM (after closing the browser), 2 on a line over the bound, 3 when Chromium goes
-// away on its own.
+// away on its own, 4 right after answering `timeout` to an `openWithState` (HI-01: the deadline only races the op and
+// cannot cancel it, so a member's state could still open a signed-in page after the answer; leaving ends Chromium and
+// drops the state with this process).
 
 import { encodeFrame, FRAME_MAX_PAYLOAD_BYTES, FRAME_TYPES } from "@ocw/contracts";
 import { encodeChildJpeg } from "../frames.js";
@@ -17,11 +19,16 @@ import {
   AgentError,
   type AgentEvent,
   type AgentOp,
+  type BrowserAgent,
+  type BrowserAgentOptions,
   createBrowserAgent,
   isAgentOp,
   opDeadlineMs,
   runOp,
 } from "./ops.js";
+
+/** HI-01: the exit code after a timed-out `openWithState`. */
+const EXIT_LOAD_TIMEOUT = 4;
 
 /**
  * One stdin line at most: a member's storage state at its cap (`openWithState`, 07.13-19) and its JSON envelope fit
@@ -44,6 +51,8 @@ export interface BrowserAgentIo {
   stderr?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   exit?: (code: number) => void;
+  /** Tests: the agent (default `createBrowserAgent`). */
+  createAgent?: (opts: BrowserAgentOptions) => BrowserAgent;
 }
 
 export function runBrowserAgent(
@@ -76,7 +85,7 @@ export function runBrowserAgent(
   };
 
   const executablePath = env.OCW_BROWSER_EXECUTABLE ?? "";
-  const agent = createBrowserAgent({
+  const agent = (io.createAgent ?? createBrowserAgent)({
     executablePath,
     chromiumSandbox: (env.OCW_BROWSER_SANDBOX ?? "on").trim().toLowerCase() !== "off",
     emit: (event: AgentEvent) => {
@@ -127,6 +136,13 @@ export function runBrowserAgent(
     } catch (err) {
       if (!(err instanceof AgentError)) diag("op_error", op);
       respond({ id, ok: false, error: errorOf(err) });
+      // HI-01: the timed-out load may still open the member's signed-in page; this process leaves once the answer is
+      // out (Playwright's exit handler ends the Chromium it launched), so the state never outlives the answer.
+      if (op === "openWithState" && err instanceof AgentError && err.code === "timeout") {
+        stopping = true;
+        diag("exit", "load_timeout");
+        stdout.write(Buffer.alloc(0), () => exit(EXIT_LOAD_TIMEOUT));
+      }
     }
   }
 

@@ -318,6 +318,10 @@ class ScriptedChild implements ManagedChild {
   signedIn = false;
   /** 19: the next `act` tries to leave the locked site for this origin. */
   blockNext: string | null = null;
+  /** HI-01: `openWithState` rejects with this code (after reporting the page), as a timed-out or failed load does. */
+  failLoad: string | null = null;
+  /** HI-02: `openWithState` answers only once this settles (the member's turn may end meanwhile). */
+  holdLoad: Promise<void> | null = null;
 
   constructor(private readonly o: ChildFactoryOptions) {
     this.closed = new Promise((r) => {
@@ -327,6 +331,14 @@ class ScriptedChild implements ManagedChild {
 
   async call(op: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
     this.calls.push({ op, input: { ...input } });
+    if (op === "openWithState" && this.holdLoad) await this.holdLoad;
+    if (op === "openWithState" && this.failLoad) {
+      // The child may still have opened the signed-in page before its answer: the page is reported.
+      const origin = originOf(new URL(String(input.url)).href);
+      if (origin) this.o.onEvent({ event: "navigated", origin });
+      this.signedIn = true;
+      throw Object.assign(new Error("scripted"), { code: this.failLoad });
+    }
     if (op === "open" || op === "openWithState") {
       const url = new URL(String(input.url));
       const origin = originOf(url.href);
@@ -1145,6 +1157,55 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
       expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
       expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
       expect(t.manager.openPages).toBe(0);
+    }
+  });
+
+  it("HI-01: a load that fails or times out closes the child before it reports signin_unloaded", async () => {
+    for (const code of ["timeout", "navigation_refused", "browser_unavailable"]) {
+      const states: string[] = [];
+      const t = scripted(
+        {
+          link: {
+            send: (f) => {
+              t.frames.push(f);
+              if (f.type === "browser.event" && f.kind === "signin_unloaded") {
+                states.push(t.children[0]?.state ?? "none");
+              }
+              if (f.type === "browser.signin.load") {
+                setImmediate(() => {
+                  const result = HAS_SIGNIN(f);
+                  if (result) {
+                    void t.manager.onServerFrame({
+                      type: "browser.signin.state",
+                      requestId: f.requestId,
+                      result,
+                    });
+                  }
+                });
+              }
+            },
+            sendBinary: () => false,
+          },
+          createChild: (o) => {
+            const c = new ScriptedChild(o);
+            c.failLoad = code;
+            t.children.push(c);
+            return c;
+          },
+        },
+        HAS_SIGNIN,
+      );
+      t.turn(SIGNIN);
+      const res = await t.tools.call("open", { url: `${SITE}/account` });
+      expect(res.isError, code).toBe(true);
+      // The child that may hold the member's state is gone, and only then the API hears it is unloaded.
+      expect(t.children[0]?.state, code).toBe("closed");
+      expect(states, code).toEqual(["closed"]);
+      expect(t.manager.openPages, code).toBe(0);
+      // A later call finds no page (never the signed-in one).
+      expect((await t.tools.call("snapshot", {})).summary, code).toBe(
+        "Refused: No page is open. Open one first.",
+      );
     }
   });
 
