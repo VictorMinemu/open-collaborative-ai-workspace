@@ -1729,10 +1729,13 @@ export class Daemon {
     }
     // 07.13 (PD-09): this turn's browser grant (absent = not allowed) and whether it runs in Full access.
     const mode = prompt.permissionMode ? minMode(s.mode, prompt.permissionMode) : s.mode;
+    const steer = prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && !!s.runtime.steer;
+    // LO-04: a steer that joins the running turn keeps that turn's member data and unloads another member's sign-in.
     this.browser.onPrompt(cmd.sessionId, prompt.promptId, prompt.browser, {
       fullAccess: mode === "fullAccess" && this.gate.optIn,
+      steer,
     });
-    if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
+    if (steer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
     } else {
       await s.runtime.prompt(cmd.sessionId, prompt);

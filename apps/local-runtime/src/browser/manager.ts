@@ -152,13 +152,15 @@ interface TurnState {
    * site first). Any other origin needs their `signed_in_host` yes.
    */
   memberData: { userId: string; sites: Set<BrowserOrigin> } | null;
+  /** LO-04: the turn was steered by more than one asker (or a bot): no sign-in loads in it. */
+  mixed: boolean;
 }
 
 interface SessionState {
   id: string;
   tools: SessionBrowserTools;
   /** Grants of prompts handed to the adapter, by prompt id, until their turn starts. */
-  pendingGrants: Map<string, { grant: SessionBrowserGrant | undefined; fullAccess: boolean }>;
+  pendingGrants: Map<string, { grant: SessionBrowserGrant | undefined; fullAccess: boolean; steer: boolean }>;
   /** The newest grant the session got (start or prompt): decides `available`. */
   latestGrant: SessionBrowserGrant | undefined;
   turn: TurnState | null;
@@ -361,19 +363,24 @@ export class BrowserManager {
 
   /**
    * A grant arrived with `session.start` (`promptId` null) or a `prompt` (PD-09). The turn that prompt starts uses it;
-   * the newest one decides `available`. `fullAccess` = the turn's effective mode is Full access.
+   * the newest one decides `available`. `fullAccess` = the turn's effective mode is Full access. `steer` = the daemon
+   * hands the prompt to the adapter as a steer of the running turn (LO-04).
    */
   onPrompt(
     sessionId: string,
     promptId: string | null,
     grant: SessionBrowserGrant | undefined,
-    opts: { fullAccess?: boolean } = {},
+    opts: { fullAccess?: boolean; steer?: boolean } = {},
   ): void {
     const s = this.state(sessionId);
     s.latestGrant = grant;
     if (promptId !== null) {
       s.pendingGrants.delete(promptId);
-      s.pendingGrants.set(promptId, { grant, fullAccess: opts.fullAccess === true });
+      s.pendingGrants.set(promptId, {
+        grant,
+        fullAccess: opts.fullAccess === true,
+        steer: opts.steer === true,
+      });
       while (s.pendingGrants.size > MAX_PENDING_GRANTS) {
         const first = s.pendingGrants.keys().next().value;
         if (first === undefined) break;
@@ -383,22 +390,37 @@ export class BrowserManager {
     this.notifyAvailable(s);
   }
 
-  /** `prompt.started`: the turn's calls use the grant of that prompt (absent = not allowed). */
+  /**
+   * `prompt.started`: the turn's calls use the grant of that prompt (absent = not allowed).
+   *
+   * LO-04: a steer that starts while a turn still runs joins that turn (Codex emits its `prompt.started` inside it).
+   * The model's context goes on, so the turn's member data stays sticky (HI-04); and when the steer is by anyone but
+   * the member whose sign-in (or hand-signed page) is open, that page is re-sealed and closed now, and no sign-in loads
+   * in the rest of this mixed turn.
+   */
   onTurnStarted(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     const pending = s.pendingGrants.get(promptId);
     s.pendingGrants.delete(promptId);
+    const steered = pending?.steer && s.turn ? s.turn : null;
     if (s.turn) s.turn.ended = true;
+    const grant = pending?.grant;
+    const asker = grant && !grant.askerIsBot ? grant.askerId : null;
+    const previousAsker = steered?.grant && !steered.grant.askerIsBot ? steered.grant.askerId : null;
+    const mixed = steered !== null && (steered.mixed || asker === null || asker !== previousAsker);
     s.turn = {
       promptId,
-      grant: pending?.grant,
+      grant,
       fullAccess: pending?.fullAccess ?? false,
       ended: false,
-      memberData: null,
+      memberData: steered?.memberData ?? null,
+      mixed,
     };
-    s.lastAskerId = pending?.grant?.askerId ?? null;
+    s.lastAskerId = grant?.askerId ?? null;
     s.noSignIn.clear();
+    const owner = s.loaded?.userId ?? (s.child ? s.memberPage : null);
+    if (steered && owner && owner !== asker) void this.closePage(s, "closed", promptId).catch(() => {});
   }
 
   /**
@@ -599,7 +621,9 @@ export class BrowserManager {
     origin: BrowserOrigin,
   ): Promise<OpenResult | null> {
     const grant = turn.grant;
-    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || s.noSignIn.has(origin)) return null;
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed || s.noSignIn.has(origin)) {
+      return null;
+    }
     const answer = await this.signins.request(s.id, turn.promptId, origin);
     if (!answer?.ok) {
       s.noSignIn.add(origin);
@@ -709,7 +733,7 @@ export class BrowserManager {
     signal: AbortSignal | undefined,
   ): Promise<WorkBrowserToolResult> {
     const grant = turn.grant;
-    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId) {
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed) {
       return this.refuse(s, turn, "signin", "signin_not_allowed");
     }
     const site = siteOfHost(body.host);

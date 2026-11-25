@@ -1421,6 +1421,41 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect((await snap).isError).toBe(true);
   });
 
+  it("LO-04: another person's steer into the member's running turn unloads the sign-in before it runs", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    // Codex steers: the steer's prompt starts inside the running turn (no prompt.completed in between).
+    t.manager.onPrompt(t.sid, "steer-1", { ...SIGNIN, askerId: OTHER_MEMBER }, { steer: true });
+    t.manager.onTurnStarted(t.sid, "steer-1");
+    for (let i = 0; i < 50 && !browserEvents(t).some((e) => e.kind === "signin_unloaded"); i++) await flush();
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.manager.openPages).toBe(0);
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    // What the agent already read stays in the model's context: the member data stays sticky in the steered turn.
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    const ask = await nextApproval(t, 1);
+    expect(ask.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await local).isError).toBe(true);
+    // And no sign-in loads in it.
+    expect(t.frames.filter((f) => f.type === "browser.signin.load")).toHaveLength(1);
+  });
+
+  it("LO-04: the member's own steer keeps their sign-in loaded", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.manager.onPrompt(t.sid, "steer-1", SIGNIN, { steer: true });
+    t.manager.onTurnStarted(t.sid, "steer-1");
+    await flush();
+    expect(put).not.toHaveBeenCalled();
+    expect(t.manager.openPages).toBe(1);
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+  });
+
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {
     const { put } = sequenced();
     const t = scripted({ api: { put } }, HAS_SIGNIN);
