@@ -30,6 +30,16 @@ jobs:
       - name: Enable pnpm (packageManager pin)
         run: corepack enable && pnpm --version
       - run: pnpm install --frozen-lockfile
+      # 07.13-09: the local-runtime browser tests drive the pinned headless shell; installed (sha256-verified) once
+      # into this cache by the tests themselves, keyed on the pins.
+      - name: Cache the pinned test browser
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ocw-test-browsers
+          key: ocw-test-browsers-${{ runner.os }}-${{ hashFiles('apps/local-runtime/src/browser/pins.ts') }}
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Integration tests start real PostgreSQL 18 / Redis 8 / Garage containers (testcontainers).
       - run: pnpm verify
       # setup-env (Garage/S3 keys, --add-missing); infra/**/*.test.mjs (incl. infra/garage) run in cell-smoke.
