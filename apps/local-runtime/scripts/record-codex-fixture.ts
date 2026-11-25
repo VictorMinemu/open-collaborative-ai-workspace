@@ -14,11 +14,22 @@
 //   model-list        `initialize` + `model/list` only: no thread, no turn, no cost (03.2-03, D-08)
 //   title             the session-title call (03.2-12): an ephemeral read-only gpt-6-luna thread on its own
 //                     app-server, effort low, one turn; pinned to codex-cli 0.160.0
+//   browser-mcp       07.13-04, OFFLINE (PD-29): no login, no subscription, no key. The real codex-cli 0.172.0
+//                     app-server runs with HOME / CODEX_HOME / CLAUDE_CONFIG_DIR / XDG dirs in a fresh temp dir
+//                     (offlineRecorderEnv), its only model provider the repo's fake model server on loopback
+//                     (`ocw_fake`, Responses API; started in-process on a random port unless --fake-url is given),
+//                     and the stand-in `ocw_browser` stdio MCP server (scripts/spike-browser-mcp.mjs) configured by
+//                     `-c mcp_servers.ocw_browser.*` (PD-08). One turn calls its `open` and `screenshot` tools; every
+//                     server request is recorded and answered as PD-08 plans. `--print-env` prints the child env
+//                     (PATH omitted) and exits; a non-loopback `--fake-url` exits non-zero before anything starts.
+//                     `--approval-mode prompt` (control run) writes `…browser-mcp.prompt-mode.rpc.jsonl` instead: the
+//                     same turn with `default_tools_approval_mode = "prompt"`, so Codex asks through elicitations.
 
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   normalizeSessionTitle,
@@ -26,10 +37,29 @@ import {
   type SessionEvent,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
+import { createFakeModelServer, type FakeModelRequest } from "../../../infra/fake-model/server.mjs";
 import { listCodexModels } from "../src/codex/catalog.js";
-import { type AppServerProcess, CodexRuntime, codexChildEnv } from "../src/codex/codex-runtime.js";
-import { detectCodex } from "../src/codex/detect.js";
+import {
+  type AppServerProcess,
+  CODEX_APP_SERVER_ARGS,
+  CodexRuntime,
+  codexChildEnv,
+} from "../src/codex/codex-runtime.js";
+import { detectCodex, parseCodexVersion } from "../src/codex/detect.js";
+import {
+  JsonRpcError,
+  type JsonRpcNotification,
+  JsonRpcPeer,
+  type JsonRpcRequest,
+} from "../src/codex/jsonrpc.js";
 import { generateCodexTitle } from "../src/codex/title.js";
+import {
+  isLoopbackUrl,
+  makeOfflineDirs,
+  type OfflineEnv,
+  offlineRecorderEnv,
+  printableOfflineEnv,
+} from "../src/fixtures/offline-env.js";
 import { sanitizeEvent } from "../src/sanitize.js";
 
 const FIXTURE_ROOT = "/tmp/ocw-fixture-repo";
@@ -41,9 +71,10 @@ interface Scenario {
   prompt: string;
 }
 
-const SCENARIOS: Record<string, Scenario | "no-turn" | "title"> = {
+const SCENARIOS: Record<string, Scenario | "no-turn" | "title" | "browser-mcp"> = {
   "model-list": "no-turn",
   title: "title",
+  "browser-mcp": "browser-mcp",
   "plan-read": { mode: "plan", prompt: "Run `cat hello.txt`, then reply with exactly: OK" },
   "supervised-write": {
     mode: "default",
@@ -66,7 +97,8 @@ if (!picked) {
 const scenario = picked;
 const codexPath = arg("codex");
 
-if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) {
+// browser-mcp drops every caller key from its child env instead (offlineRecorderEnv) and never reaches a real provider.
+if (scenario !== "browser-mcp" && (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY)) {
   console.error("OPENAI_API_KEY / CODEX_API_KEY is set; refusing to record (would be metered).");
   process.exit(1);
 }
@@ -175,7 +207,269 @@ async function recordTitle(version: string | null): Promise<void> {
   console.log("normalized:", JSON.stringify(answer === null ? null : normalizeSessionTitle(answer)));
 }
 
+/** The codex-cli version the browser-mcp fixture is pinned to (07.13 moves PINNED_RUNTIME_VERSIONS to it, plan 25). */
+const PINNED_BROWSER_CODEX = "0.172.0";
+/** The browser-mcp turn: the fake model calls `open`, then `screenshot`, then reports what each tool said. */
+const BROWSER_MCP_PROMPT = '[[call open {"url":"http://localhost:1/"}]] [[call screenshot {}]]';
+const BROWSER_MCP_TURN_TIMEOUT_MS = 180_000;
+
+/** A TOML basic string (`-c` values are parsed as TOML; JSON string escapes are valid TOML ones). */
+const toml = (s: string): string => JSON.stringify(s);
+
+/** The `-c` overrides of the browser-mcp app-server: the fake provider and the `ocw_browser` server (PD-08). */
+function browserMcpArgs(fakeOrigin: string, node: string, spike: string, approvalMode: string): string[] {
+  const overrides = [
+    `model_provider=${toml("ocw_fake")}`,
+    `model_providers.ocw_fake.name=${toml("OCW fake")}`,
+    `model_providers.ocw_fake.base_url=${toml(`${fakeOrigin}/v1`)}`,
+    `model_providers.ocw_fake.wire_api=${toml("responses")}`,
+    `model_providers.ocw_fake.env_key=${toml("OCW_FAKE_MODEL_KEY")}`,
+    `model=${toml("fake-model")}`,
+    `mcp_servers.ocw_browser.command=${toml(node)}`,
+    `mcp_servers.ocw_browser.args=[${toml(spike)}]`,
+    `mcp_servers.ocw_browser.default_tools_approval_mode=${toml(approvalMode)}`,
+    "mcp_servers.ocw_browser.tool_timeout_sec=960",
+    // Offline: no curated-plugin clone from GitHub, no remote plugins, no ChatGPT apps connectors (a first run
+    // without these cloned the plugin catalogue into the temp CODEX_HOME). The MCP tool path is unaffected.
+    "features.plugins=false",
+    "features.remote_plugin=false",
+    "features.apps=false",
+  ];
+  return [...CODEX_APP_SERVER_ARGS, ...overrides.flatMap((o) => ["-c", o])];
+}
+
+/** Replaces every absolute root with its placeholder (longest first) and masks e-mail addresses. */
+function placeholders(v: unknown, roots: Array<[string, string]>): unknown {
+  if (typeof v === "string") {
+    let out = v;
+    for (const [root, mark] of roots) out = out.split(root).join(mark);
+    return out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "fixture@example.com");
+  }
+  if (Array.isArray(v)) return v.map((x) => placeholders(x, roots));
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) out[k] = placeholders(x, roots);
+    return out;
+  }
+  return v;
+}
+
+/**
+ * PD-08's answers to the app-server's requests: an elicitation of `ocw_browser` is accepted, a user-input question on
+ * an `ocw_browser` tool call gets each question's first option; every other server's elicitation and every approval
+ * is declined; anything else is unsupported.
+ */
+function browserMcpAnswer(r: JsonRpcRequest, browserItems: Set<string>): unknown {
+  const p = (r.params ?? {}) as Record<string, unknown>;
+  switch (r.method) {
+    case "mcpServer/elicitation/request":
+      return p.serverName === "ocw_browser"
+        ? { action: "accept", content: {}, _meta: null }
+        : { action: "decline", content: null, _meta: null };
+    case "item/tool/requestUserInput": {
+      const mine = typeof p.itemId === "string" && browserItems.has(p.itemId);
+      const questions = Array.isArray(p.questions) ? (p.questions as Array<Record<string, unknown>>) : [];
+      const answers: Record<string, { answers: string[] }> = {};
+      if (mine) {
+        for (const q of questions) {
+          const first = Array.isArray(q.options)
+            ? (q.options[0] as { label?: unknown } | undefined)
+            : undefined;
+          if (typeof q.id === "string" && typeof first?.label === "string")
+            answers[q.id] = { answers: [first.label] };
+        }
+      }
+      return { answers };
+    }
+    case "item/commandExecution/requestApproval":
+    case "item/fileChange/requestApproval":
+      return { decision: "decline" };
+    case "item/permissions/requestApproval":
+      return { permissions: {}, scope: "turn" };
+    case "execCommandApproval":
+    case "applyPatchApproval":
+      return { decision: { denied: { rejection: "declined by the browser-mcp recorder" } } };
+    default:
+      throw new JsonRpcError(`${r.method} is not supported by this client`, -32601);
+  }
+}
+
+/** The browser-mcp scenario (07.13-04): offline, the real codex binary, the fake model, the spike MCP server. */
+async function recordBrowserMcp(): Promise<void> {
+  const printEnv = process.argv.includes("--print-env");
+  const approvalMode = arg("approval-mode") ?? "approve";
+  if (approvalMode !== "approve" && approvalMode !== "prompt")
+    throw new Error("--approval-mode is approve or prompt");
+  const fakeArg = arg("fake-url");
+  if (fakeArg !== undefined && !isLoopbackUrl(fakeArg)) {
+    throw new Error("--fake-url must be http(s) on a loopback host (the fake model server)");
+  }
+  // The fake model, in-process on a random loopback port, unless the caller runs one.
+  const requests: FakeModelRequest[] = [];
+  const fake = fakeArg ? null : createFakeModelServer({ onRequest: (r) => requests.push(r) });
+  if (fake) await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+  const fakeOrigin = fake
+    ? `http://127.0.0.1:${(fake.address() as AddressInfo).port}`
+    : new URL(fakeArg ?? "").origin;
+  const closeFake = () => new Promise<void>((ok) => (fake ? fake.close(() => ok()) : ok()));
+  const tmp = await mkdtemp(join(tmpdir(), "ocw-offline-codex-"));
+  let env: OfflineEnv;
+  try {
+    env = offlineRecorderEnv({ env: process.env, tmp, fakeUrl: fakeOrigin });
+  } catch (err) {
+    await rm(tmp, { recursive: true, force: true });
+    await closeFake();
+    throw err;
+  }
+  if (printEnv) {
+    process.stdout.write(`${JSON.stringify(printableOfflineEnv(env), null, 2)}\n`);
+    await rm(tmp, { recursive: true, force: true });
+    return closeFake();
+  }
+
+  const bin = codexPath ?? "codex";
+  makeOfflineDirs(env);
+  const version = parseCodexVersion(execFileSync(bin, ["--version"], { env, encoding: "utf8" }));
+  if (version !== PINNED_BROWSER_CODEX) {
+    await rm(tmp, { recursive: true, force: true });
+    await closeFake();
+    throw new Error(
+      `codex ${version} is not the pinned ${PINNED_BROWSER_CODEX}; pass --codex <pinned binary>.`,
+    );
+  }
+  const repo = join(tmp, "repo");
+  await mkdir(repo, { recursive: true });
+  await writeFile(join(repo, "hello.txt"), "Hello from the fixture repo.\n");
+  execFileSync("git", ["init", "-q"], { cwd: repo, env });
+  const here = dirname(fileURLToPath(import.meta.url));
+  const spike = resolve(here, "spike-browser-mcp.mjs");
+  const repoRoot = resolve(here, "..", "..", "..");
+  const realTmp = await realpath(tmp);
+  // Placeholders for every absolute path that could appear (the caller's HOME is only a scrub string here).
+  const roots: Array<[string, string]> = [
+    [realTmp, "<tmp>"],
+    [tmp, "<tmp>"],
+    [spike, "<spike>"],
+    [process.execPath, "<node>"],
+    [repoRoot, "<repo>"],
+  ];
+  if (process.env.HOME) roots.push([process.env.HOME, "<home>"]);
+  roots.sort((a, b) => b[0].length - a[0].length);
+
+  const rpc: Array<{ dir: "in" | "out"; msg: unknown }> = [];
+  const serverRequests: string[] = [];
+  const browserItems = new Set<string>();
+  let finalText = "";
+  const proc = spawn(bin, browserMcpArgs(fakeOrigin, process.execPath, spike, approvalMode), {
+    cwd: repo,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (d: string) => {
+    stderr += d;
+  });
+  const exited = new Promise<void>((ok) => proc.once("exit", () => ok()));
+  let turnDone: () => void = () => undefined;
+  const turnCompleted = new Promise<void>((ok) => {
+    turnDone = ok;
+  });
+  const peer = new JsonRpcPeer(proc.stdout, proc.stdin, {
+    onNotification: (n: JsonRpcNotification) => {
+      const p = (n.params ?? {}) as { item?: { type?: string; id?: string; server?: string; text?: string } };
+      if (n.method === "item/started" && p.item?.type === "mcpToolCall" && p.item.server === "ocw_browser") {
+        if (p.item.id) browserItems.add(p.item.id);
+      }
+      if (n.method === "item/completed" && p.item?.type === "agentMessage") finalText = p.item.text ?? "";
+      if (n.method === "turn/completed") turnDone();
+    },
+    onRequest: async (r: JsonRpcRequest) => {
+      serverRequests.push(r.method);
+      return browserMcpAnswer(r, browserItems);
+    },
+    onClose: () => turnDone(),
+    onLine: (dir, msg) => rpc.push({ dir, msg }),
+  });
+  let failure: unknown = null;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await peer.request(
+      "initialize",
+      {
+        clientInfo: { name: "ocw_local_runtime", title: "Open Collaborative AI Workspace", version: "0.0.0" },
+        capabilities: { experimentalApi: false, requestAttestation: false },
+      },
+      30_000,
+    );
+    peer.notify("initialized");
+    const started = await peer.request<{ thread: { id: string } }>(
+      "thread/start",
+      { cwd: repo, approvalPolicy: "on-request", sandbox: "read-only" },
+      60_000,
+    );
+    await peer.request(
+      "turn/start",
+      { threadId: started.thread.id, input: [{ type: "text", text: BROWSER_MCP_PROMPT, text_elements: [] }] },
+      60_000,
+    );
+    await Promise.race([
+      turnCompleted,
+      new Promise<void>((_, no) => {
+        timer = setTimeout(
+          () => no(new Error("the browser-mcp turn did not complete in time")),
+          BROWSER_MCP_TURN_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } catch (err) {
+    failure = err;
+  } finally {
+    clearTimeout(timer);
+  }
+  proc.stdin.end();
+  proc.kill("SIGTERM");
+  const gone = await Promise.race([
+    exited.then(() => true),
+    new Promise((ok) => setTimeout(() => ok(false), 3_000)),
+  ]);
+  if (!gone) {
+    proc.kill("SIGKILL");
+    await exited;
+  }
+  peer.close();
+  await closeFake();
+
+  const suffix = approvalMode === "prompt" ? "browser-mcp.prompt-mode" : "browser-mcp";
+  const file = join(fixtureDir(), `codex-${version}.${suffix}.rpc.jsonl`);
+  if (!failure) {
+    await mkdir(fixtureDir(), { recursive: true });
+    await writeFile(file, `${rpc.map((r) => JSON.stringify(placeholders(r, roots))).join("\n")}\n`);
+  }
+  await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+
+  // What the SPIKES notes need, never written into the fixture: the fake's view of each model request.
+  const responses = requests.filter((r) => r.kind === "responses");
+  const offered = (responses[0]?.body?.tools ?? []) as Array<{ type?: string; name?: string }>;
+  console.log(`model requests: ${requests.map((r) => `${r.kind} ${r.path}`).join(", ") || "none"}`);
+  console.log(`tools offered: ${JSON.stringify(offered.map((t) => `${t.type}:${t.name ?? ""}`))}`);
+  for (const [i, r] of responses.entries()) {
+    const outputs = ((r.body?.input ?? []) as Array<{ type?: string; output?: unknown }>)
+      .filter((x) => x.type === "function_call_output")
+      .map((x) => JSON.stringify(placeholders(x.output, roots)).slice(0, 300));
+    console.log(`responses #${i + 1}: function_call_output=${JSON.stringify(outputs)}`);
+  }
+  console.log(`server requests: ${JSON.stringify(serverRequests)}`);
+  console.log(`final agent message: ${JSON.stringify(finalText)}`);
+  if (failure) {
+    console.error(String(placeholders(stderr.slice(-4000), roots)));
+    throw failure;
+  }
+  console.log(`wrote ${rpc.length} JSON-RPC messages -> ${String(placeholders(file, roots))}`);
+}
+
 async function main(): Promise<void> {
+  if (scenario === "browser-mcp") return recordBrowserMcp();
   const info = await detectCodex(codexPath ? { codexPath } : {});
   if (!info.installed || !info.loggedIn) {
     console.error("codex is not installed or not logged in with ChatGPT; aborting.");
