@@ -205,6 +205,27 @@ describe("HI-03: a page with another member's sign-in loaded is never taken, and
     again.close();
   });
 
+  it("the device is told who holds the lease (`held { holderUserId }`), so it can check the loaded sign-in itself", async () => {
+    const { sid } = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    send(miaLive, { type: "take" });
+    const held = await deviceFrame("browser.lease", sid, (f) => f.state === "held");
+    expect(held).toEqual({
+      type: "browser.lease",
+      sessionId: sid,
+      leaseId: expect.any(String),
+      state: "held",
+      holderUserId: miaId,
+    });
+    await waitState(miaLive, "controlling", 4000);
+    send(miaLive, { type: "release", save: false });
+    expect(await deviceFrame("browser.lease", sid, (f) => f.state === "released")).not.toHaveProperty(
+      "holderUserId",
+    );
+    miaLive.close();
+  });
+
   it("a lease holder gets no frame once another member's sign-in is on the page: the sign-in gate comes first", async () => {
     const { sid } = await askedSessionWithPage(mia);
     const miaLive = await open(mia, sid);

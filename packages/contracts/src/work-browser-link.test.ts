@@ -183,6 +183,14 @@ describe("server → device browser control frames (PD-12, PD-14 … PD-17)", ()
   const frames = [
     { type: "browser.frames", sessionId: SESSION_ID, on: true },
     { type: "browser.lease", sessionId: SESSION_ID, leaseId: LEASE_ID, state: "held" },
+    // HI-03: the holder rides `held` (optional, so a frame without it still parses).
+    {
+      type: "browser.lease",
+      sessionId: SESSION_ID,
+      leaseId: LEASE_ID,
+      state: "held",
+      holderUserId: ASKER_ID,
+    },
     {
       type: "browser.input",
       sessionId: SESSION_ID,

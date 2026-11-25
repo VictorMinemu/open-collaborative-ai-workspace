@@ -517,12 +517,17 @@ export type BrowserFramesFrame = z.infer<typeof BrowserFramesFrame>;
 /**
  * 07.13 (D-20, PD-14): a person holds the page (`held`: the agent's browser tools answer `paused`), handed it back
  * (`released`) or left it after input without a hand back (`abandoned`: the device closes the page).
+ *
+ * `holderUserId` (07.13 review HI-03): on `held`, the person the API granted the lease to, so the device can refuse a
+ * lease on a page whose loaded sign-in is someone else's without inferring the holder from its turns. Optional: a
+ * frame without it still parses (older API builds); the API always sends it on `held`.
  */
 export const BrowserLeaseFrame = z.strictObject({
   type: z.literal("browser.lease"),
   sessionId: z.uuid(),
   leaseId: z.uuid(),
   state: z.enum(["held", "released", "abandoned"]),
+  holderUserId: Id.optional(),
 });
 export type BrowserLeaseFrame = z.infer<typeof BrowserLeaseFrame>;
 

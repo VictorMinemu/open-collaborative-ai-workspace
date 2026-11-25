@@ -696,6 +696,8 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         sessionId: e.sessionId,
         leaseId: l.leaseId,
         state: "held",
+        // HI-03: the device checks the holder against a loaded sign-in itself (defence in depth behind the take).
+        holderUserId: auth.userId,
       })
       .catch(() => "closed" as const);
     if (sent === "closed" || sent === "too_large" || sent === "unsupported") {
