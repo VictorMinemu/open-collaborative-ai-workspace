@@ -12,8 +12,19 @@ export interface TestSite {
   /** `127.0.0.1:<port>` as `URL.host` reports it. */
   host: string;
   url(path: string): string;
+  /**
+   * 07.13-15: the fields of the last `POST /login`, as the site received them. Takeover tests read what a person typed
+   * here (through the site, never through the agent).
+   */
+  lastLogin(): Readonly<Record<string, string>> | null;
   close(): Promise<void>;
 }
+
+/** Where the `/takeover` page puts its fields (CSS pixels of the 960×600 viewport): a person's clicks aim here. */
+export const TAKEOVER_LAYOUT = {
+  username: { x: 170, y: 115 },
+  password: { x: 170, y: 175 },
+} as const;
 
 /** The password a test types; it must never appear in a snapshot or a frame the agent returns. */
 export const PASSWORD_CANARY = "fixture-canary-Pa55w0rd-7f3a";
@@ -40,7 +51,11 @@ function signedIn(req: IncomingMessage): boolean {
   return /(?:^|;\s*)fixture_session=signed-in(?:;|$)/.test(req.headers.cookie ?? "");
 }
 
-function handle(req: IncomingMessage, res: ServerResponse) {
+interface SiteState {
+  lastLogin: Record<string, string> | null;
+}
+
+function handle(state: SiteState, req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   switch (url.pathname) {
     case "/":
@@ -67,14 +82,51 @@ function handle(req: IncomingMessage, res: ServerResponse) {
       );
     case "/next":
       return send(res, 200, page("Next page", "<h1>The next page</h1>"));
+    case "/animate":
+      // 07.13-15: a page that repaints on every animation frame, so the screencast always has a new frame.
+      return send(
+        res,
+        200,
+        page(
+          "Animated page",
+          `<h1>Animated page</h1><div id="box" style="width:200px;height:200px"></div>
+<script>let n = 0; const box = document.getElementById("box");
+(function tick() { n += 1; box.style.background = "hsl(" + (n % 360) + ", 80%, 50%)"; box.textContent = String(n);
+requestAnimationFrame(tick); })();</script>`,
+        ),
+      );
+    case "/takeover":
+      // 07.13-15: the login form at fixed positions (`TAKEOVER_LAYOUT`), so a person's mouse input can aim at a field.
+      return send(
+        res,
+        200,
+        page(
+          "Takeover sign in",
+          `<form method="post" action="/login" style="margin:0">
+  <input id="username" name="username" autocomplete="username" aria-label="Username"
+    style="position:absolute;left:20px;top:100px;width:300px;height:30px">
+  <input id="password" name="password" type="password" autocomplete="current-password" aria-label="Password"
+    style="position:absolute;left:20px;top:160px;width:300px;height:30px">
+  <button type="submit" style="position:absolute;left:20px;top:220px">Sign in</button>
+</form>`,
+        ),
+      );
     case "/login":
       if (req.method === "POST") {
-        res.writeHead(302, {
-          location: "/account",
-          "set-cookie": "fixture_session=signed-in; Path=/; HttpOnly; SameSite=Lax",
-          "cache-control": "no-store",
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk: string) => {
+          if (body.length < 64 * 1024) body += chunk;
         });
-        res.end();
+        req.on("end", () => {
+          state.lastLogin = Object.fromEntries(new URLSearchParams(body));
+          res.writeHead(302, {
+            location: "/account",
+            "set-cookie": "fixture_session=signed-in; Path=/; HttpOnly; SameSite=Lax",
+            "cache-control": "no-store",
+          });
+          res.end();
+        });
         return;
       }
       return send(
@@ -159,7 +211,8 @@ function handle(req: IncomingMessage, res: ServerResponse) {
 
 /** Starts the site on 127.0.0.1 and a random port. */
 export async function startTestSite(): Promise<TestSite> {
-  const server = createServer(handle);
+  const state: SiteState = { lastLogin: null };
+  const server = createServer((req, res) => handle(state, req, res));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve());
@@ -170,6 +223,7 @@ export async function startTestSite(): Promise<TestSite> {
     origin,
     host: `127.0.0.1:${port}`,
     url: (path) => `${origin}${path}`,
+    lastLogin: () => state.lastLogin,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

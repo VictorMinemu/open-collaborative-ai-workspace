@@ -21,6 +21,7 @@ import {
   type ChildFactoryOptions,
   type ManagedChild,
 } from "./manager.js";
+import { Takeover } from "./takeover.js";
 import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "./test-browser.js";
 import { startTestSite, type TestSite } from "./test-site.js";
 import { pageContentOf } from "./tools.js";
@@ -151,6 +152,37 @@ describe.skipIf(!executable)("BrowserManager with a real Chromium (07.13-12 Task
     ]);
     expect(JSON.stringify(h.frames)).not.toContain(`${site.origin}/`);
     expect(JSON.stringify(h.events)).not.toContain("Fixture");
+  }, 120_000);
+
+  it("after an abandoned takeover the next open is a fresh context: the page's sign-in is gone (07.13-15)", async () => {
+    h = harness();
+    const sid = randomUUID();
+    const tools = h.manager.forSession(sid);
+    h.manager.onPrompt(sid, "p1", ALLOW);
+    h.manager.onTurnStarted(sid, "p1");
+    await tools.call("open", { url: site.url("/login") });
+    const text = pageContentOf(await tools.call("snapshot", {})) ?? "";
+    const ref = (role: string, name: string) =>
+      text
+        .split("\n")
+        .find((l) => l.includes(`${role} ${JSON.stringify(name)}`))
+        ?.match(/\[(e\d+)\]/)?.[1] ?? "";
+    await tools.call("act", { action: "type", ref: ref("textbox", "Username"), text: "fixture-user" });
+    await tools.call("act", { action: "type", ref: ref("textbox", "Password"), text: "fixture-pw" });
+    await tools.call("act", { action: "click", ref: ref("button", "Sign in") });
+    await tools.call("open", { url: site.url("/account") });
+    expect(pageContentOf(await tools.call("snapshot", {}))).toContain("Signed in as fixture-user");
+
+    const leaseId = randomUUID();
+    await h.manager.onServerFrame({ type: "browser.lease", sessionId: sid, leaseId, state: "held" });
+    await h.manager.onServerFrame({ type: "browser.lease", sessionId: sid, leaseId, state: "abandoned" });
+    expect(h.manager.openPages).toBe(0);
+    expect(h.frames).toContainEqual(
+      expect.objectContaining({ type: "browser.event", kind: "takeover_abandoned", origin: site.origin }),
+    );
+
+    await tools.call("open", { url: site.url("/account") });
+    expect(pageContentOf(await tools.call("snapshot", {}))).toContain("Not signed in");
   }, 120_000);
 
   it("a bad body answers an isError result with the parse message and never throws", async () => {
@@ -499,6 +531,105 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
       }),
     );
     expect(t.manager.openPages).toBe(0);
+  });
+
+  it("an abandoned takeover closes the page; the next open starts a fresh child", async () => {
+    const t = scripted();
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "abandoned" });
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.frames.filter((f) => f.type === "browser.event" && f.kind === "takeover_abandoned")).toEqual([
+      {
+        type: "browser.event",
+        sessionId: t.sid,
+        promptId: null,
+        kind: "takeover_abandoned",
+        origin: "http://localhost:3000",
+      },
+    ]);
+    // Not paused any more, and nothing of the old page is reused.
+    expect((await t.tools.call("open", { url: "http://localhost:3000/" })).isError).toBe(false);
+    expect(t.children).toHaveLength(2);
+  });
+
+  it("a hand back without saving ends the pause; the page stays and nothing is exported", async () => {
+    const put = vi.fn(async () => 204);
+    const t = scripted({ api: { put } });
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    // A hand back of another lease changes nothing.
+    await t.manager.onServerFrame({
+      type: "browser.handback",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      save: false,
+      uploadId: null,
+    });
+    expect((await t.tools.call("snapshot", {})).summary).toBe(
+      "Refused: A person is controlling the page. Try again later.",
+    );
+    await t.manager.onServerFrame({
+      type: "browser.handback",
+      sessionId: t.sid,
+      leaseId,
+      save: false,
+      uploadId: null,
+    });
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+    expect(t.manager.openPages).toBe(1);
+    expect(t.children[0]?.state).toBe("running");
+    expect(closedFrames(t)).toEqual([]);
+    expect(put).not.toHaveBeenCalled();
+    const ops = t.children[0]?.calls.map((c) => c.op) ?? [];
+    expect(ops.filter((op) => op !== "open" && op !== "snapshot" && op !== "takeover")).toEqual([]);
+  });
+
+  it("a hand back with save goes to onSaveHandback (19 exports and uploads) and ends the pause", async () => {
+    const save = vi.spyOn(Takeover.prototype, "onSaveHandback");
+    try {
+      const t = scripted();
+      t.turn();
+      await t.tools.call("open", { url: "http://localhost:3000/" });
+      const leaseId = randomUUID();
+      const uploadId = randomUUID();
+      await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+      await t.manager.onServerFrame({
+        type: "browser.handback",
+        sessionId: t.sid,
+        leaseId,
+        save: true,
+        uploadId,
+      });
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith(t.sid, leaseId, uploadId);
+      expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+      expect(t.manager.openPages).toBe(1);
+    } finally {
+      save.mockRestore();
+    }
+  });
+
+  it("a session that ends while held closes its page; input that arrives afterwards is not applied", async () => {
+    const t = scripted();
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    await t.manager.endSession(t.sid);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(closedFrames(t)).toHaveLength(1);
+    await t.manager.onServerFrame({
+      type: "browser.input",
+      sessionId: t.sid,
+      leaseId,
+      events: [{ type: "text", text: "late" }],
+    });
+    expect(t.children[0]?.calls.filter((c) => c.op === "input")).toEqual([]);
   });
 
   it("the opt-in going off closes every page and the next call is refused", async () => {

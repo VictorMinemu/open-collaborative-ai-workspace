@@ -3,7 +3,8 @@
 //   stdin   JSON lines `{ id, op, ...input }`; `op` must be in `AGENT_OPS` (ops.ts), empty lines are skipped.
 //   stdout  frames of the bots' codec (`encodeFrame`, sandboxd-protocol): `FRAME_TYPES.control` carries one JSON message,
 //           a response `{ id, ok: true, result }` / `{ id, ok: false, error: { code, message } }` or an event
-//           `{ event, ... }` (`ready`, the agent's own events); `FRAME_TYPES.jpeg` carries live frames (15).
+//           `{ event, ... }` (`ready`, the agent's own events); `FRAME_TYPES.jpeg` carries live frames (15): a 4-byte
+//           size header (`encodeChildJpeg`, ../frames.ts) and the JPEG, dropped when stdout is backed up (never queued).
 //   stderr  fixed diagnostic names only (`browser-agent: <name> [<code>]`): never a URL, page text, typed text or path.
 // Env (set only by the parent, `childEnv`): OCW_BROWSER_EXECUTABLE, OCW_BROWSER_SANDBOX (`on` | `off`, from
 // `resolveChromiumSandbox`); TMPDIR/TMP/TEMP are the session's run dir, so Playwright's profile lands there.
@@ -11,6 +12,7 @@
 // away on its own.
 
 import { encodeFrame, FRAME_MAX_PAYLOAD_BYTES, FRAME_TYPES } from "@ocw/contracts";
+import { encodeChildJpeg } from "../frames.js";
 import {
   AgentError,
   type AgentEvent,
@@ -23,6 +25,8 @@ import {
 
 /** One stdin line at most (a typed text and its JSON envelope fit far below). */
 const STDIN_LINE_MAX_BYTES = 1024 * 1024;
+/** A live frame is dropped while this much is still unread on stdout (drop on slow, like brw). */
+const STDOUT_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 
 type Message = {
   id: string | number | null;
@@ -56,6 +60,13 @@ export function runBrowserAgent(
     stdout.write(encodeFrame(FRAME_TYPES.control, payload));
     return true;
   };
+  const writeJpeg = (jpeg: Uint8Array, size: { width: number; height: number }) => {
+    const pending = (stdout as { writableLength?: number }).writableLength ?? 0;
+    if (pending > STDOUT_HIGH_WATER_BYTES) return;
+    const payload = encodeChildJpeg(jpeg, size);
+    if (payload.length > FRAME_MAX_PAYLOAD_BYTES) return;
+    stdout.write(encodeFrame(FRAME_TYPES.jpeg, payload));
+  };
   const respond = (msg: Message) => {
     if (writeJson(msg)) return;
     writeJson({ id: msg.id, ok: false, error: errorOf(new AgentError("too_large")) });
@@ -68,6 +79,7 @@ export function runBrowserAgent(
     emit: (event: AgentEvent) => {
       writeJson(event);
     },
+    onJpeg: writeJpeg,
     onDisconnected: () => {
       diag("chromium_disconnected");
       exit(3);

@@ -4,7 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "../test-browser.js";
-import { PASSWORD_CANARY, startTestSite, type TestSite } from "../test-site.js";
+import { PASSWORD_CANARY, startTestSite, TAKEOVER_LAYOUT, type TestSite } from "../test-site.js";
 import {
   AgentError,
   type AgentEvent,
@@ -337,5 +337,113 @@ describe.skipIf(!executable)("only http(s) pages, one page, no downloads (A-8, P
     const res = await agent.act({ action: "click", ref: refOf(snap.text, "link", "Get the file") });
     expect(res).toMatchObject({ download: null, refused: null });
     expect((await agent.snapshot({})).title).toBe("Download page");
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------- takeover (07.13-15 Task 2)
+
+/** One mouse click at a point, as a person's client sends it. */
+const click = (at: { x: number; y: number }) => [
+  { type: "mouse", event: "down", x: at.x, y: at.y, button: "left" },
+  { type: "mouse", event: "up", x: at.x, y: at.y, button: "left" },
+];
+const key = (name: string, code = name) => [
+  { type: "key", event: "down", key: name, code, modifiers: 0 },
+  { type: "key", event: "up", key: name, code, modifiers: 0 },
+];
+
+/** The snapshot line of the textbox with this name. */
+const fieldLine = (text: string, name: string) =>
+  text.split("\n").find((l) => l.includes(`textbox ${JSON.stringify(name)}`)) ?? "";
+
+describe.skipIf(!executable)("takeover input on a real Chromium (07.13-15 Task 2: D-20, PD-14)", () => {
+  let site: TestSite;
+  let agent: BrowserAgent;
+  const events: AgentEvent[] = [];
+  const focus = () => events.flatMap((e) => (e.event === "focus" ? [e.sensitive] : []));
+
+  beforeAll(async () => {
+    site = await startTestSite();
+    agent = createBrowserAgent({
+      executablePath: executable as string,
+      chromiumSandbox: testSandbox(),
+      emit: (e) => events.push(e),
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await agent?.close({});
+    await site?.close();
+  }, 60_000);
+
+  it("refuses input while no takeover is active, and a batch outside 1 to 64 valid events", async () => {
+    await agent.open({ url: site.url("/takeover") });
+    expect(await refusal(agent.input({ events: click(TAKEOVER_LAYOUT.username) }))).toBe("invalid_request");
+    await agent.takeover({ on: true });
+    expect(await refusal(agent.input({ events: [] }))).toBe("invalid_request");
+    expect(await refusal(agent.input({ events: [{ type: "text", text: "" }] }))).toBe("invalid_request");
+    expect(await refusal(agent.input({ events: [{ type: "eval", code: "1" }] }))).toBe("invalid_request");
+    const many = Array.from({ length: 65 }, () => ({ type: "text", text: "x" }));
+    expect(await refusal(agent.input({ events: many }))).toBe("invalid_request");
+    await agent.takeover({ on: false });
+  }, 90_000);
+
+  it("applies a person's input through CDP, reports focus without the value, and redacts what they typed", async () => {
+    await agent.open({ url: site.url("/takeover") });
+    events.length = 0;
+    expect(await agent.takeover({ on: true })).toEqual({ active: true });
+    // Nothing focused yet: one report that the focus is not sensitive.
+    expect(focus()).toEqual([false]);
+
+    await agent.input({ events: click(TAKEOVER_LAYOUT.password) });
+    expect(focus().at(-1)).toBe(true);
+    await agent.input({ events: click(TAKEOVER_LAYOUT.username) });
+    expect(focus().at(-1)).toBe(false);
+
+    const typed = await agent.input({
+      events: [
+        { type: "text", text: "fixture-user" },
+        ...key("Tab"),
+        { type: "text", text: PASSWORD_CANARY },
+      ],
+    });
+    expect(typed).toEqual({ applied: 4 });
+    expect(focus().at(-1)).toBe(true);
+    // Only a boolean leaves: no event names a value, a label or a field.
+    expect(JSON.stringify(events)).not.toContain("fixture-user");
+    expect(JSON.stringify(events)).not.toContain(PASSWORD_CANARY);
+
+    await agent.takeover({ on: false });
+    const snap = await agent.snapshot({});
+    expect(fieldLine(snap.text, "Username")).toContain("[redacted]");
+    expect(fieldLine(snap.text, "Password")).toContain("[redacted]");
+    expect(snap.text).not.toContain("fixture-user");
+    expect(snap.text).not.toContain(PASSWORD_CANARY);
+    // A text probe is not an oracle for what a person typed either.
+    expect(await agent.wait({ for: "text", text: "fixture-user", ms: 300 })).toMatchObject({ ok: false });
+    const shot = await agent.screenshot({});
+    expect(shot.masked).toBeGreaterThanOrEqual(2);
+
+    // The values did reach the page: the site receives them when the person submits.
+    await agent.takeover({ on: true });
+    await agent.input({ events: key("Enter") });
+    for (let i = 0; i < 40 && !site.lastLogin(); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(site.lastLogin()).toMatchObject({ username: "fixture-user", password: PASSWORD_CANARY });
+    await agent.takeover({ on: false });
+  }, 90_000);
+
+  it("a wheel and a touch reach the page as mouse input", async () => {
+    await agent.open({ url: site.url("/") });
+    await agent.takeover({ on: true });
+    expect(
+      await agent.input({
+        events: [
+          { type: "wheel", x: 100, y: 100, dx: 0, dy: 400 },
+          { type: "touch", event: "start", x: 10, y: 10 },
+          { type: "touch", event: "end", x: 10, y: 10 },
+        ],
+      }),
+    ).toEqual({ applied: 3 });
+    await agent.takeover({ on: false });
   }, 60_000);
 });
