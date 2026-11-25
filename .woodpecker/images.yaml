@@ -57,7 +57,7 @@ steps:
     image: docker:29.8.2-cli
     volumes: [*docker_sock]
     commands:
-      - docker build -t ocw-sandbox-brw:ci infra/sandbox/browser
+      - docker build -f infra/sandbox/browser/Dockerfile -t ocw-sandbox-brw:ci .
 
   - name: sandbox-egress
     image: docker:29.8.2-cli

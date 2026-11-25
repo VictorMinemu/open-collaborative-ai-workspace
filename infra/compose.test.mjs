@@ -311,6 +311,16 @@ describe("compose.yaml: the `sandbox` profile (07.8-24; D-01, D-11, D-12, princi
   });
 
   it(
+    "brw builds from the repository root with its Dockerfile, the shared engine's context (07.13 D-04, PD-02)",
+    needsDocker,
+    () => {
+      const build = withSandbox().services["sandbox-brw-image"].build;
+      assert.equal(path.resolve(build.context), path.resolve(ROOT), "context is the repository root");
+      assert.equal(build.dockerfile, "infra/sandbox/browser/Dockerfile");
+    },
+  );
+
+  it(
     "sandboxd's environment: namespace = project, registries, ClawHub equal to the API's, sweep, seccomp",
     needsDocker,
     () => {

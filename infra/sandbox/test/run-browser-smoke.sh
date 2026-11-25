@@ -34,7 +34,7 @@ cleanup
 trap cleanup EXIT
 
 echo "== build $IMAGE" >&2
-docker build -q --label "ocw.namespace=$NS" -t "$IMAGE" "$ROOT/infra/sandbox/browser" >&2
+docker build -q --label "ocw.namespace=$NS" -t "$IMAGE" -f "$ROOT/infra/sandbox/browser/Dockerfile" "$ROOT" >&2
 docker image inspect "$IMAGE" --format 'image size {{.Size}} bytes' >&2
 
 echo "== fake sites on $NET" >&2
