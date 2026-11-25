@@ -8,6 +8,7 @@
 import {
   CommandFrame,
   DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
+  DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   type DeviceToServerFrame,
   ServerToDeviceFrame,
 } from "@ocw/contracts";
@@ -114,6 +115,22 @@ export class DeviceLink {
       if (this.droppedFrames === 1 || this.droppedFrames % 1000 === 0) {
         this.log.warn("offline log full; dropping oldest frames", { dropped: this.droppedFrames });
       }
+    }
+  }
+
+  /**
+   * 07.13 (D-15, PD-12): one binary message (a live browser frame) now, or nothing: false when the socket is not open
+   * or the bytes exceed `DEVICE_LINK_MAX_DEVICE_FRAME_BYTES` (the API's inbound limit, which would close the link).
+   * Never queued offline, unlike JSON frames: a stale frame is worth nothing.
+   */
+  sendBinary(bytes: Uint8Array): boolean {
+    if (!this.connected || bytes.length > DEVICE_LINK_MAX_DEVICE_FRAME_BYTES) return false;
+    try {
+      this.ws?.send(bytes, { binary: true });
+      return true;
+    } catch (err) {
+      this.log.debug("binary send failed", { error: errorMessage(err) });
+      return false;
     }
   }
 

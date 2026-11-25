@@ -178,6 +178,30 @@ describe.skipIf(!executable)("BrowserChild with a real Chromium", () => {
     expect(child.state).toBe("closed");
   }, 120_000);
 
+  it("keeps only the named files (the session's shim token) when it removes its run dir (07.13-12)", async () => {
+    const root = newRoot();
+    const sessionId = randomUUID();
+    const runDir = sessionRunDir(root, sessionId);
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(runDir, "shim-token"), "t", { mode: 0o600 });
+    const child = new BrowserChild({
+      sessionId,
+      root,
+      executablePath: executable as string,
+      sandbox: testSandbox(),
+      entry: [ENTRY],
+      keepFiles: ["shim-token"],
+    });
+    try {
+      await child.call("open", { url: site.url("/") });
+      expect(readdirSync(runDir).some((n) => n.startsWith(PROFILE_PREFIX))).toBe(true);
+    } finally {
+      await child.close();
+    }
+    expect(readdirSync(runDir)).toEqual(["shim-token"]);
+    expect(readFileSync(join(runDir, "shim-token"), "utf8")).toBe("t");
+  }, 120_000);
+
   it("refuses a download and writes nothing of it under the run dir", async () => {
     const root = newRoot();
     const { child, runDir } = start(root);

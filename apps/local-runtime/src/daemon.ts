@@ -22,22 +22,33 @@
 // `runtime`; the new build comes from `config.serverUrl`. Every `runtime.maintenance` frame then carries `self`; the
 // boot reconcile's frames go first after `hello`; a held turn is told the OCW runtime is restarting; and once the
 // switch is done the daemon's stop is a hand-over: the link closes first, nothing reopens a gate, no run frame goes out.
+//
+// Work Zone browser (07.13, ADR-0035, D-02, D-10, D-18, D-19, PD-08 … PD-10, PD-20, PD-24): one `BrowserManager` owns
+// every session's browser and decides every call. The daemon only feeds it: each start's and prompt's grant
+// (`onPrompt`), the turns it sees in `forwardEvent` (`onTurnStarted` / `onTurnEnded`), session ends, the owner's local
+// opt-in (re-read by `reloadConfig`; off closes every page), the `browser.*` server frames, browser approval answers
+// (before the adapter's) and the shim's `browserCall` on the control socket. Adapters get `StartSessionOptions.browser`.
 
 import { realpathSync } from "node:fs";
 import { arch, homedir, platform, userInfo } from "node:os";
+import { join } from "node:path";
 import {
   AccountLoginPayload,
   AccountLogoutPayload,
   ApprovalResolvePayload,
+  type BrowserServerFrame,
   type CommandFrame,
   DEVICE_ACCOUNT_POOL_VERSION,
+  DEVICE_BROWSER_VERSION,
   DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
+  type DeviceBrowserReport,
   type DeviceHostKind,
   type DeviceToServerFrame,
   DiffRequestPayload,
   type DiffResultFrame,
+  minMode,
   OCW_RUNTIME_TARGET,
   type PermissionMode,
   PromptPayload,
@@ -63,6 +74,7 @@ import {
   stripImageData,
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
+  WORK_BROWSER_SIGNIN_ROUTES,
 } from "@ocw/contracts";
 import {
   CodexLoginError,
@@ -71,9 +83,15 @@ import {
   runCodexDeviceLogin,
 } from "./accounts/codex-login.js";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
+import { inContainer, resolveChromiumSandbox } from "./browser/agent/sandbox.js";
+import { sweepRunDirs } from "./browser/child.js";
+import { browsersRoot } from "./browser/install.js";
+import { BrowserManager, type BrowserManagerOptions } from "./browser/manager.js";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
 import { CodexRuntime, type SpawnAppServer } from "./codex/codex-runtime.js";
 import {
+  type BrowserOptInSource,
+  type BrowserSandboxMode,
   deviceName,
   ensureOcwHome,
   type FullAccessSource,
@@ -84,6 +102,7 @@ import {
   ocwHome,
   ProjectRegistry,
   type RuntimeConfig,
+  resolveBrowser,
   resolveFullAccess,
   resolveHostKind,
   resolveIsolatedServer,
@@ -132,6 +151,48 @@ const TOKEN_EXCHANGE_TIMEOUT_MS = 10_000;
 export function toDeviceTokenUrl(serverUrl: string): string {
   const u = new URL(serverUrl);
   u.pathname = `${u.pathname.replace(/\/$/, "")}/api/v1/devices/token`;
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+const SEMVER = /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z.-]{1,40})?(?:\+[0-9A-Za-z.-]{1,40})?$/;
+
+/** 07.13 (D-18, PD-21): the desktop app's version from `OCW_APP_VERSION`, only when it is a semver (else none). */
+export function appVersionOf(env: NodeJS.ProcessEnv): string | null {
+  const v = env.OCW_APP_VERSION?.trim();
+  return v && v.length <= 64 && SEMVER.test(v) ? v : null;
+}
+
+function isBrowserServerFrame(frame: { type: string }): frame is BrowserServerFrame {
+  return frame.type.startsWith("browser.");
+}
+
+/** 07.13 (PD-19): the browsers root under this daemon's own OCW home (`OCW_BROWSERS_DIR` still names another place). */
+function daemonBrowsersRoot(env: NodeJS.ProcessEnv, home: string): string {
+  try {
+    return browsersRoot({ ...env, OCW_HOME: home });
+  } catch {
+    return join(home, "browsers");
+  }
+}
+
+const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** 07.13 (PD-15, PD-17): the only paths the browser manager may PUT to: the sign-in routes with uuid ids. */
+const BROWSER_PUT_PATHS: readonly RegExp[] = [
+  WORK_BROWSER_SIGNIN_ROUTES.upload,
+  WORK_BROWSER_SIGNIN_ROUTES.reseal,
+].map((route) => new RegExp(`^${route.replace(/:[A-Za-z]+/g, UUID_PATTERN)}$`, "i"));
+const BROWSER_PUT_TIMEOUT_MS = 30_000;
+
+/**
+ * 07.13: `{serverUrl}{path}` for a browser sign-in PUT (keeping the server URL's path prefix); throws for any path but
+ * the sign-in routes with uuid ids, so nothing from a payload ever names where the device sends a storage state.
+ */
+export function toBrowserApiUrl(serverUrl: string, path: string): string {
+  if (!BROWSER_PUT_PATHS.some((re) => re.test(path))) throw new Error("invalid browser api path");
+  const u = new URL(serverUrl);
+  u.pathname = `${u.pathname.replace(/\/$/, "")}${path}`;
   u.search = "";
   u.hash = "";
   return u.toString();
@@ -248,6 +309,13 @@ export interface DaemonOptions {
    * sign-in bound. Without it the daemon spawns the configured or detected `codex` (in fake mode only a configured one).
    */
   codexAccounts?: { spawn?: SpawnAppServer; loginTimeoutMs?: number };
+  /**
+   * Tests only (07.13-12): the browser manager's seams (a scratch browsers root, the pinned browser from the test
+   * cache, a scripted child, the child's entry, a shorter idle close). Every rule stays the manager's.
+   */
+  browser?: Partial<
+    Pick<BrowserManagerOptions, "root" | "browsers" | "createChild" | "childEntry" | "idleMs">
+  >;
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -391,6 +459,9 @@ export type ReloadConfigResult = {
   isolatedServer: boolean;
   isolatedServerSource: IsolatedServerSource;
   host: DeviceHostKind | null;
+  /** 07.13 (D-10, PD-27): the owner's local browser opt-in and where it comes from. */
+  browserOptIn: boolean;
+  browserOptInSource: BrowserOptInSource;
 };
 
 export class Daemon {
@@ -443,6 +514,14 @@ export class Daemon {
   private isolated: { on: boolean; source: IsolatedServerSource } = { on: false, source: "config" };
   /** 07.18 (T-07.18-08-05): the Codex sign-ins running now, by slot id; aborted on stop. */
   private readonly accountLogins = new Map<string, AbortController>();
+  /** 07.13 (D-10, PD-18, PD-27): the owner's local browser opt-in and sandbox mode, re-read on `reloadConfig`. */
+  private browserCfg: { optIn: boolean; source: BrowserOptInSource; sandbox: BrowserSandboxMode };
+  /** 07.13: where browsers and the sessions' run dirs live (`browsersRoot` under this daemon's OCW home). */
+  private readonly browserRoot: string;
+  /** 07.13: every session's Work Zone browser (one manager per daemon). */
+  readonly browser: BrowserManager;
+  /** 07.13 (D-18, PD-21): `OCW_APP_VERSION` (the desktop app's version) when it is a semver, read once. */
+  private readonly appVersion: string | null;
 
   private constructor(
     readonly home: string,
@@ -461,6 +540,30 @@ export class Daemon {
       this.runtimes.set(r.id, r);
       this.gates.set(r.id, new RuntimeGate());
     }
+    this.browserCfg = resolveBrowser(config, env);
+    this.appVersion = appVersionOf(env);
+    this.browserRoot = opts.browser?.root ?? daemonBrowsersRoot(env, home);
+    this.browser = new BrowserManager({
+      root: this.browserRoot,
+      // `browser.event` is not kept in the offline log (a browser runs only while connected).
+      link: {
+        send: (frame) => {
+          if (this.isConnected) this.send(frame);
+        },
+        sendBinary: (bytes) => this.link?.sendBinary(bytes) ?? false,
+      },
+      api: { put: (path, body) => this.browserApiPut(path, body) },
+      optIn: () => this.browserCfg.optIn,
+      sandbox: () =>
+        resolveChromiumSandbox({ configured: this.browserCfg.sandbox, inContainer: inContainer() }),
+      emit: (sessionId, event) => this.forwardEvent(sessionId, event),
+      fullAccessAllowed: () => this.gate.optIn,
+      log,
+      ...(opts.browser?.browsers ? { browsers: opts.browser.browsers } : {}),
+      ...(opts.browser?.createChild ? { createChild: opts.browser.createChild } : {}),
+      ...(opts.browser?.childEntry ? { childEntry: opts.browser.childEntry } : {}),
+      ...(opts.browser?.idleMs !== undefined ? { idleMs: opts.browser.idleMs } : {}),
+    });
   }
 
   static async create(opts: DaemonOptions = {}): Promise<Daemon> {
@@ -684,6 +787,8 @@ export class Daemon {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    // 07.13 (PD-19, Pitfall 1): a crash or a kill leaves run dirs (throwaway profiles) behind; none of them is alive.
+    await sweepRunDirs(this.browserRoot, new Set(this.sessions.keys())).catch(() => undefined);
     if (this.opts.controlSocket !== false) {
       const path = this.opts.controlSocket ?? controlSocketPath(this.home);
       this.control = new ControlSocketServer(path, (req) => this.handleControl(req), this.log);
@@ -719,6 +824,16 @@ export class Daemon {
    * self-update then checks what the workspace serves (nothing at `off`).
    */
   private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
+    // 07.13 (PD-12 … PD-17): the six ephemeral browser frames go to the manager, never queued and never acked.
+    if (isBrowserServerFrame(frame)) {
+      void this.browser.onServerFrame(frame).catch((err: unknown) =>
+        this.log.warn("browser server frame failed", {
+          type: frame.type,
+          error: err instanceof Error ? err.name : "error",
+        }),
+      );
+      return;
+    }
     if (frame.type !== "runtime.config") return;
     this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
     void this.selfUpdate?.onConfig();
@@ -746,6 +861,7 @@ export class Daemon {
     this.maintenance?.stop();
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
+    await this.browser.stopAll();
     await this.link?.stop();
     await this.control?.close();
     this.started = false;
@@ -765,6 +881,13 @@ export class Daemon {
       isolatedServer: this.isolated.on,
       isolatedServerSource: this.isolated.source,
       host: this.hostKind,
+      // 07.13 (D-10, PD-27): the browser opt-in as the daemon enforces it (the desktop menu reads it here).
+      browser: {
+        optIn: this.browserCfg.optIn,
+        source: this.browserCfg.source,
+        sandbox: this.browserCfg.sandbox,
+        openPages: this.browser.openPages,
+      },
       ...(this.maintenance ? { runtimeUpdates: this.runtimeUpdatesStatus(this.maintenance) } : {}),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
@@ -908,6 +1031,8 @@ export class Daemon {
         platform: platform(),
         arch: arch(),
         daemonVersion: DAEMON_VERSION,
+        // 07.13 (D-18, PD-21): the desktop app's version, when it launched this daemon (a semver only).
+        ...(this.appVersion ? { appVersion: this.appVersion } : {}),
         ...(this.hostKind ? { host: this.hostKind } : {}),
       },
       runtimes: await this.detectRuntimes(),
@@ -918,6 +1043,8 @@ export class Daemon {
       isolatedServer: this.reportedIsolated,
       // 07.18 (PD-04): this daemon can run a session on a pool account.
       accountPool: DEVICE_ACCOUNT_POOL_VERSION,
+      // 07.13 (D-19, PD-20): this daemon can run a Work Zone browser, and the owner's local opt-in as it is now.
+      browser: this.browserReport,
     };
     await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [
@@ -966,7 +1093,13 @@ export class Daemon {
       catalogs,
       fullAccessOptIn: this.gate.optIn,
       isolatedServer: this.reportedIsolated,
+      browser: this.browserReport,
     };
+  }
+
+  /** 07.13 (PD-20): what hello and capabilities say about the browser. */
+  private get browserReport(): DeviceBrowserReport {
+    return { version: DEVICE_BROWSER_VERSION, optIn: this.browserCfg.optIn };
   }
 
   private send(frame: DeviceToServerFrame): void {
@@ -1032,6 +1165,9 @@ export class Daemon {
       event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
     this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
     this.trackTurn(sessionId, event);
+    // 07.13 (PD-09): the browser's calls use the grant of the turn running now.
+    if (event.type === "prompt.started") this.browser.onTurnStarted(sessionId, event.promptId);
+    else if (event.type === "prompt.completed") this.browser.onTurnEnded(sessionId, event.promptId);
     // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
     if (event.type === "prompt.completed" || event.type === "session.state") {
       const runtime = this.sessions.get(sessionId)?.runtime.id;
@@ -1057,6 +1193,8 @@ export class Daemon {
   private endSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.turnsRunning.delete(sessionId);
+    // 07.13 (PD-24): its page closes and its run dir goes.
+    void this.browser.endSession(sessionId);
   }
 
   /**
@@ -1225,6 +1363,19 @@ export class Daemon {
         { source: this.isolated.source },
       );
     }
+    // 07.13 (D-10, PD-20, PD-27): the browser opt-in; off closes every open page now and refuses the next call.
+    const browserWas = this.browserCfg.optIn;
+    this.browserCfg = resolveBrowser(merged, this.env);
+    const browserChanged = browserWas !== this.browserCfg.optIn;
+    if (browserChanged) {
+      this.log.warn(
+        this.browserCfg.optIn
+          ? "The Work Zone browser is enabled on this device"
+          : "The Work Zone browser is disabled on this device",
+        { source: this.browserCfg.source },
+      );
+      await this.browser.onOptInChanged();
+    }
     const next = resolveFullAccess(merged, this.env);
     const was = this.gate.optIn;
     this.gate.optIn = next.optIn;
@@ -1252,7 +1403,7 @@ export class Daemon {
       // the update ends (the adapters refuse its fullAccess turns meanwhile); the reload answers now rather than then.
       const lowering = Promise.all(full.map((s) => this.leaveFullAccess(s).catch(() => undefined)));
       if (full.every((s) => this.gates.get(s.runtime.id)?.isOpen !== false)) await lowering;
-    } else if (isolatedChanged && this.isConnected) {
+    } else if ((isolatedChanged || browserChanged) && this.isConnected) {
       this.send(await this.capabilitiesFrame());
     }
     return {
@@ -1264,6 +1415,8 @@ export class Daemon {
       isolatedServer: this.isolated.on,
       isolatedServerSource: this.isolated.source,
       host: this.hostKind,
+      browserOptIn: this.browserCfg.optIn,
+      browserOptInSource: this.browserCfg.source,
     };
   }
 
@@ -1323,6 +1476,8 @@ export class Daemon {
           break;
         case "approval.resolve": {
           const p = ApprovalResolvePayload.parse(cmd.payload);
+          // 07.13 (PD-10, Pitfall 7): a browser approval is the manager's, never the adapter's.
+          if (this.browser.resolveApproval(cmd.sessionId, p.approvalId, p.decision)) break;
           const ok = this.requireSession(cmd.sessionId).runtime.resolveApproval(
             cmd.sessionId,
             p.approvalId,
@@ -1572,6 +1727,11 @@ export class Daemon {
         s.accountRef = ref;
       }
     }
+    // 07.13 (PD-09): this turn's browser grant (absent = not allowed) and whether it runs in Full access.
+    const mode = prompt.permissionMode ? minMode(s.mode, prompt.permissionMode) : s.mode;
+    this.browser.onPrompt(cmd.sessionId, prompt.promptId, prompt.browser, {
+      fullAccess: mode === "fullAccess" && this.gate.optIn,
+    });
     if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
     } else {
@@ -1648,6 +1808,8 @@ export class Daemon {
       mode: payload.permissionMode,
       accountRef: account?.ref ?? null,
     });
+    // 07.13 (D-10, PD-09): the start's grant decides whether the adapter offers the browser tools from the start.
+    this.browser.onPrompt(cmd.sessionId, null, payload.browser);
     try {
       await runtime.start(
         {
@@ -1656,6 +1818,7 @@ export class Daemon {
           permissionMode: payload.permissionMode,
           ...(account ? { account } : {}),
           onAccountSignal: (signal) => this.sendAccountSignal(cmd.sessionId, signal),
+          browser: this.browser.forSession(cmd.sessionId),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.effort ? { effort: payload.effort } : {}),
           ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
@@ -1922,6 +2085,32 @@ export class Daemon {
     }
   }
 
+  /**
+   * 07.13 (PD-15, PD-17): the browser manager's PUT (a sign-in upload or re-seal) under the device JWT, to a path of
+   * `WORK_BROWSER_SIGNIN_ROUTES` only (`toBrowserApiUrl`), redirects refused, a 401 retried once with a fresh JWT.
+   * Answers the HTTP status; the body (a storage state) is never logged.
+   */
+  private async browserApiPut(path: string, body: unknown): Promise<number> {
+    const url = toBrowserApiUrl(this.config.serverUrl, path);
+    let refreshed = false;
+    for (;;) {
+      const token = await this.getAccessToken(refreshed);
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(BROWSER_PUT_TIMEOUT_MS),
+      });
+      await res.body?.cancel().catch(() => undefined);
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        continue;
+      }
+      return res.status;
+    }
+  }
+
   // -------------------------------------------------------------------------------------------
   // Control socket (local desktop shell only; absolute paths may appear here, never on the wire)
 
@@ -1957,6 +2146,9 @@ export class Daemon {
         const answer: UpdateRequestAnswer = await this.maintenance.requestUpdate(req.runtime, "local");
         return answer;
       }
+      // 07.13 (PD-08): the Codex shim's tool call; the manager checks the session's token, then decides it.
+      case "browserCall":
+        return this.browser.shimCall(req);
     }
   }
 }

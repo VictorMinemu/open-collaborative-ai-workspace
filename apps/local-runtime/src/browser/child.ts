@@ -105,6 +105,11 @@ export interface BrowserChildOptions {
   onEvent?: (event: BrowserChildEvent) => void;
   /** A live JPEG frame (15). Never persisted. */
   onFrame?: (jpeg: Uint8Array) => void;
+  /**
+   * 07.13-12: names in the run dir that outlive this child (the session's `shim-token`, which the manager owns and
+   * removes at session end). Everything else in the run dir goes when the child ends; absent = the whole dir goes.
+   */
+  keepFiles?: readonly string[];
 }
 
 interface Pending {
@@ -257,7 +262,21 @@ export class BrowserChild {
 
   /** Chromium may still be leaving after a crash: remove, then once more a moment later for what it wrote last. */
   private async removeRunDir(): Promise<void> {
-    const remove = () => rm(this.runDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    const keep = this.opts.keepFiles ?? [];
+    const remove = async () => {
+      if (keep.length === 0) {
+        await rm(this.runDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+        return;
+      }
+      const names = await readdir(this.runDir).catch(() => [] as string[]);
+      await Promise.all(
+        names
+          .filter((n) => !keep.includes(n))
+          .map((n) =>
+            rm(join(this.runDir, n), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}),
+          ),
+      );
+    };
     await remove();
     setTimeout(() => void remove(), 2_000).unref();
   }
