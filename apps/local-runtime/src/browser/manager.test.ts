@@ -585,8 +585,11 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
     expect(t.children[0]?.state).toBe("running");
     expect(closedFrames(t)).toEqual([]);
     expect(put).not.toHaveBeenCalled();
+    // 19: the fingerprint taken at `held` is a hash only; nothing is exported without a save.
     const ops = t.children[0]?.calls.map((c) => c.op) ?? [];
-    expect(ops.filter((op) => op !== "open" && op !== "snapshot" && op !== "takeover")).toEqual([]);
+    expect(
+      ops.filter((op) => op !== "open" && op !== "snapshot" && op !== "takeover" && op !== "fingerprint"),
+    ).toEqual([]);
   });
 
   it("a hand back with save goes to onSaveHandback (19 exports and uploads) and ends the pause", async () => {

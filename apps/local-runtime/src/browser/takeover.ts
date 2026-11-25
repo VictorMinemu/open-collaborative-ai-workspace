@@ -8,7 +8,9 @@
 //   op. Any other lease id, session or state is ignored. Input frames, their text, keys and events are never logged,
 //   kept or echoed (Semgrep `ocw.live-input-logging`): the only trace is the page itself.
 // - `browser.lease { released }` or `browser.handback { save: false }`: the pause ends; the page stays.
-// - `browser.handback { save: true, uploadId }`: `onSaveHandback` (07.13-19: export and upload), then the pause ends.
+// - `browser.handback { save: true, uploadId }`: `onSaveHandback` exports the page's site state and uploads it (07.13-19,
+//   `signin.ts`: compared with the fingerprint the manager took on `held`), then the pause ends. The API sends no
+//   `released` after a save: the hand back itself ends the pause.
 // - `browser.lease { abandoned }` (the lease was lost after input): the page closes and `takeover_abandoned` is
 //   reported, so a page a person may have signed in to is never left open (T-07.13-15-05).
 
@@ -30,6 +32,10 @@ export interface TakeoverHost {
   abandon(sessionId: string): Promise<void>;
   /** A person acted on the page: the idle close counts from now (PD-24). */
   touched(sessionId: string): void;
+  /** 19: a person took control of the page (a new lease): the manager takes the site state's fingerprint. */
+  held?(sessionId: string, leaseId: string): void;
+  /** 19: "Done, save my sign-in": export and upload (the agent is still paused while this runs). */
+  save?(sessionId: string, leaseId: string, uploadId: string): Promise<void>;
 }
 
 export class Takeover {
@@ -54,7 +60,10 @@ export class Takeover {
       const before = this.held.get(sessionId);
       this.held.set(sessionId, leaseId);
       // A new holder (or the first): the child marks their input and reports the focus to them.
-      if (before !== leaseId) this.tellChild(sessionId, true);
+      if (before !== leaseId) {
+        this.tellChild(sessionId, true);
+        this.host.held?.(sessionId, leaseId);
+      }
       return;
     }
     // Only the lease held now ends; a late frame of an earlier lease changes nothing.
@@ -87,11 +96,12 @@ export class Takeover {
   }
 
   /**
-   * "Save this sign-in" at hand back (D-22, PD-15): 07.13-19 exports the page's site state from the child and PUTs it to
-   * the one-use upload (`uploadId`, bound by the API to the session, the member and the origin) with the device JWT. Until
-   * then nothing is exported: the hand back only ends the pause.
+   * "Save this sign-in" at hand back (D-22, PD-15): the manager exports the page's site state from the child and PUTs it
+   * to the one-use upload (`uploadId`, bound by the API to the session, the member and the origin) with the device JWT.
    */
-  async onSaveHandback(_sessionId: string, _leaseId: string, _uploadId: string): Promise<void> {}
+  async onSaveHandback(sessionId: string, leaseId: string, uploadId: string): Promise<void> {
+    await this.host.save?.(sessionId, leaseId, uploadId);
+  }
 
   /** The holder's input: to the page only for the current held lease. Never logged. */
   onInput(frame: BrowserInputFrame): void {

@@ -37,6 +37,7 @@ import { type Logger, silentLogger } from "../logger.js";
 import type {
   ActResult,
   AgentOp,
+  FingerprintResult,
   OpenResult,
   ScreenshotResult,
   SnapshotResult,
@@ -47,6 +48,7 @@ import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js"
 import { type LiveClock, LiveFrames } from "./frames.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
 import { ensureShimToken, SHIM_TOKEN_FILE, verifyShimToken } from "./shim-token.js";
+import { saveHandback, siteHostOfOrigin } from "./signin.js";
 import { Takeover } from "./takeover.js";
 import {
   browserToolSummary,
@@ -164,6 +166,8 @@ interface SessionState {
   chain: Promise<void>;
   /** The idle close of the open page (PD-24). */
   idle: NodeJS.Timeout | null;
+  /** 19 (PD-15): the lease held now and the fingerprint of the page's site state taken when it was taken. */
+  held: { leaseId: string; fingerprint: Promise<string | null> } | null;
 }
 
 /** At most this many prompts' grants are kept waiting for their turn (a steady queue is far smaller). */
@@ -284,6 +288,8 @@ export class BrowserManager {
         const s = this.sessions.get(sessionId);
         if (s) this.armIdle(s);
       },
+      held: (sessionId, leaseId) => this.onHeld(sessionId, leaseId),
+      save: (sessionId, leaseId, uploadId) => this.onSave(sessionId, leaseId, uploadId),
     });
     this.live = new LiveFrames({
       link: opts.link,
@@ -438,6 +444,52 @@ export class BrowserManager {
       throw new Error("not allowed");
     }
     return s.tools.call(req.tool, req.args);
+  }
+
+  // ------------------------------------------------------------------ sign-ins (19: D-22, PD-15)
+
+  /** A person took control: the page's site state is fingerprinted now (hex, in memory), for the hand back's `changed`. */
+  private onHeld(sessionId: string, leaseId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    const child = s.child;
+    const origin = s.origin;
+    const fingerprint =
+      child?.state === "running" && origin
+        ? child.call("fingerprint", { host: siteHostOfOrigin(origin) }).then(
+            (r) => (r as FingerprintResult).fingerprint,
+            () => null,
+          )
+        : Promise.resolve(null);
+    s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * "Done, save my sign-in" (D-22, PD-15): the page's site state is exported and uploaded once (`signin.ts`). Sealed
+   * (201): the page holds the member's sign-in in a context that is not locked to its site, so it closes now; the next
+   * `open` in one of their turns loads the sealed state into a locked page (D-24, D-26). Too large: never sent, and
+   * reported as `refused too_large`.
+   */
+  private async onSave(sessionId: string, leaseId: string, uploadId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    const child = s?.child;
+    const origin = s?.origin ?? null;
+    if (!s || !child || child.state !== "running" || !origin) return;
+    const fingerprintAtHeld = s.held?.leaseId === leaseId ? await s.held.fingerprint : null;
+    const outcome = await saveHandback({
+      child,
+      api: this.opts.api,
+      sessionId: s.id,
+      uploadId,
+      origin,
+      fingerprintAtHeld,
+    });
+    const promptId = s.turn?.promptId ?? null;
+    if (outcome.kind === "refused" && outcome.refusal === "too_large") {
+      this.event(s, promptId, "refused", origin, { refusal: "too_large" });
+    }
+    if (outcome.kind !== "saved") return;
+    if (s.child === child) await this.closePage(s, "closed", promptId);
   }
 
   // ------------------------------------------------------------------ the call
@@ -816,6 +868,7 @@ export class BrowserManager {
     this.clearIdle(s);
     // No page, no takeover: input that arrives later is ignored (the API ends the lease on any close).
     this.takeover.end(s.id);
+    s.held = null;
     const child = s.child;
     if (!child) return;
     s.child = null;
@@ -857,6 +910,7 @@ export class BrowserManager {
       lastAvailable: false,
       chain: Promise.resolve(),
       idle: null,
+      held: null,
     };
     const manager = this;
     s.tools = {
