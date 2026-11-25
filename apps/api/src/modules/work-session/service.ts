@@ -25,6 +25,7 @@ import {
   TitleFailureCode,
   type TitleResultFrame,
   type WorkApproval,
+  type WorkBrowserApprovalRequest,
   type WorkPrompt,
   type WorkSession,
   type WorkSessionAgentRef,
@@ -80,7 +81,7 @@ import {
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
-import { type BrowserAsker, browserGrantFor, browserStateOf } from "./browser-grant";
+import { type BrowserAsker, browserGrantFor, browserRequestOf, browserStateOf } from "./browser-grant";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
@@ -197,6 +198,8 @@ function tokenAccountOf(
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
 type ApprovalRow = typeof workApprovals.$inferSelect;
+/** 07.13 (PD-10): `work_approvals.request` with the optional browser part (absent on every other approval). */
+export type StoredApprovalRequest = ApprovalRow["request"] & { browser?: WorkBrowserApprovalRequest };
 
 /** States in which the session is attached (or attaching) to a runtime on its device. */
 export const ACTIVE_STATES: WorkSessionStatus[] = [
@@ -2234,13 +2237,22 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       }
       case "approval.requested": {
+        // 07.13 (PD-10, T-07.13-07-05): the browser part only when it parses (else dropped, never stored as text). It is
+        // shown, never trusted: who may answer comes from the API's own state (`browserApproverRule`).
+        const browser = browserRequestOf(ev.browser);
+        const request: StoredApprovalRequest = {
+          tool: ev.tool,
+          summary: ev.summary,
+          paths: ev.paths,
+          ...(browser ? { browser } : {}),
+        };
         const [row] = await tx
           .insert(workApprovals)
           .values({
             id: ev.approvalId,
             organizationId: device.organizationId,
             workSessionId: s.id,
-            request: { tool: ev.tool, summary: ev.summary, paths: ev.paths },
+            request,
           })
           .onConflictDoNothing()
           .returning();
@@ -2253,7 +2265,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           actorId: device.deviceId,
           deviceId: device.deviceId,
           sessionId: s.id,
-          metadata: { tool: ev.tool, paths: ev.paths },
+          // 07.13: the origin (`scheme://host:port`) only, never a path or page content.
+          metadata: { tool: ev.tool, paths: ev.paths, ...(browser ? { origin: browser.origin } : {}) },
         });
         await this.emitApproval(tx, row);
         if (s.status !== "waiting_approval") await this.setStatus(tx, s, "waiting_approval");
@@ -2369,7 +2382,12 @@ export class WorkSessionService implements DeviceSessionHandler {
 
 /** Server-side defence in depth: only repo-relative paths are stored and fanned out. */
 export function normalizeEvent(ev: SessionEvent): SessionEvent {
-  if (ev.type === "approval.requested") return { ...ev, paths: onlyRelativePaths(ev.paths) };
+  if (ev.type === "approval.requested") {
+    // 07.13 (T-07.13-07-05): a browser part that does not parse never reaches the stream or the table.
+    const { browser: hint, ...rest } = ev;
+    const browser = browserRequestOf(hint);
+    return { ...rest, paths: onlyRelativePaths(ev.paths), ...(browser ? { browser } : {}) };
+  }
   return ev;
 }
 
@@ -2488,6 +2506,7 @@ async function visibilitySummaries(
 }
 
 export function toApproval(r: ApprovalRow, decidedByName: string | null): WorkApproval {
+  const browser = browserRequestOf((r.request as StoredApprovalRequest).browser);
   return {
     id: r.id,
     workSessionId: r.workSessionId,
@@ -2495,6 +2514,7 @@ export function toApproval(r: ApprovalRow, decidedByName: string | null): WorkAp
       tool: r.request.tool,
       summary: r.request.summary,
       paths: onlyRelativePaths(r.request.paths ?? []),
+      ...(browser ? { browser } : {}),
     },
     status: r.status,
     decidedBy: r.decidedBy,

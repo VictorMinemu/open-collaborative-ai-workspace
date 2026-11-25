@@ -1,12 +1,14 @@
 import {
+  browserToolFromName,
   canonicalBrowserTool,
   type SessionBrowserGrant,
+  WorkBrowserApprovalRequest,
   WorkBrowserTool,
   type WorkSessionBrowserState,
   type WorkZonePolicy,
 } from "@ocw/contracts";
-import { agents, devices, orgUnits, type Tx, workSessions } from "@ocw/db";
-import { eq, sql } from "drizzle-orm";
+import { agents, devices, orgUnits, type Tx, workBrowsers, workPrompts, workSessions } from "@ocw/db";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { loadPrincipalFacts, type PermissionService } from "../organization";
 import { type ApprovalFacts, loadToolApprovalPolicies, resolveToolApproval } from "../tool-approval";
 import { sessionFacts } from "./facts";
@@ -174,4 +176,69 @@ export function browserStateOf(input: {
           ? "off_device"
           : "available";
   return { status, live: input.open };
+}
+
+// ---------------------------------------------------------------- who answers a browser approval (PD-10)
+
+/**
+ * The browser part of an approval request as the device sent it, or null when there is none or it does not parse
+ * (T-07.13-07-05: a malformed origin is dropped, never stored as text). A hint for the timeline only: who may answer
+ * is `browserApproverRule`'s decision.
+ */
+export function browserRequestOf(value: unknown): WorkBrowserApprovalRequest | null {
+  if (value === undefined || value === null) return null;
+  const parsed = WorkBrowserApprovalRequest.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** A Work Zone browser tool by its Claude (`mcp__ocw_browser__open`) or canonical (`ocw_browser_open`) name. */
+function isBrowserToolName(tool: string): boolean {
+  const short = browserToolFromName(tool);
+  return short !== null && short !== tool;
+}
+
+/**
+ * Who may answer an approval: `approve_permission` = whoever has `work_session.approve` (today's rule); `{ only }` =
+ * that person alone, after the same check (`only: null` = nobody: the device's own timeout decides).
+ */
+export type BrowserApprover = "approve_permission" | { only: string | null };
+
+/**
+ * D-11, D-21, D-26, PD-10: decided from the API's own state, never from the device's `kind` alone.
+ *
+ * - A browser approval while a member's sign-in is loaded on the session's page (`work_browsers.signin_user_id`) is
+ *   that member's: the page is locked to their site and another host needs their approval (D-26), whatever kind the
+ *   device named. `signed_in_host` with no loaded sign-in has nobody.
+ * - `signin` belongs to the author of the session's in-flight prompt (D-21); a bot's turn, or no turn, has nobody.
+ * - `host`, `admin_rule` and every other approval keep the existing `work_session.approve` rule.
+ */
+export async function browserApproverRule(
+  tx: Tx,
+  session: { id: string },
+  request: { tool: string; browser?: unknown },
+): Promise<BrowserApprover> {
+  const browser = browserRequestOf(request.browser);
+  if (!browser && !isBrowserToolName(request.tool)) return "approve_permission";
+  if (browser?.kind === "signin") {
+    const [p] = await tx
+      .select({ userId: workPrompts.authorUserId, agentId: workPrompts.authorAgentId })
+      .from(workPrompts)
+      .where(
+        and(
+          eq(workPrompts.workSessionId, session.id),
+          inArray(workPrompts.status, ["dispatched", "running"]),
+        ),
+      )
+      .orderBy(desc(workPrompts.dispatchedAt))
+      .limit(1);
+    return { only: p && p.agentId === null ? p.userId : null };
+  }
+  const [page] = await tx
+    .select({ signinUserId: workBrowsers.signinUserId })
+    .from(workBrowsers)
+    .where(eq(workBrowsers.workSessionId, session.id))
+    .limit(1);
+  if (page?.signinUserId) return { only: page.signinUserId };
+  if (browser?.kind === "signed_in_host") return { only: null };
+  return "approve_permission";
 }

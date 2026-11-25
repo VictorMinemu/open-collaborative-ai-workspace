@@ -127,7 +127,7 @@ describe("browser approvals (D-11, D-21, D-26, PD-10)", () => {
     // Any approver of the session decides a host approval (the admin here).
     const r = await resolve(victor, sid, approvalId);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body!.request.browser).toEqual(browser);
+    expect((r.body as Json).request.browser).toEqual(browser);
     const cmd = await device.command("approval.resolve", sid);
     expect(cmd.payload).toMatchObject({ approvalId, decision: "once" });
     device.ack(cmd.id);
