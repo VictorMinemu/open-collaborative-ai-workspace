@@ -23,6 +23,7 @@ import {
   type ChildFactoryOptions,
   type ManagedChild,
 } from "./manager.js";
+import { Takeover } from "./takeover.js";
 import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "./test-browser.js";
 import { PASSWORD_CANARY, startTestSite, TAKEOVER_LAYOUT, type TestSite } from "./test-site.js";
 import { pageContentOf } from "./tools.js";
@@ -356,4 +357,32 @@ describe.skipIf(!executable)("takeover on a real Chromium (07.13-15 Task 2)", ()
     expect(JSON.stringify(frames)).not.toContain(TYPED);
     expect(JSON.stringify(frames)).not.toContain(PASSWORD_CANARY);
   }, 120_000);
+});
+
+describe("Takeover holder (07.13 review HI-03)", () => {
+  const host = { child: () => null, send: () => {}, abandon: async () => {}, touched: () => {} };
+  const sessionId = randomUUID();
+  const HOLDER = "00000000-0000-4000-8000-000000000002";
+
+  it("holderOf names the person the API granted the held lease to, until it ends; an older API names nobody", async () => {
+    const t = new Takeover(host);
+    const leaseId = randomUUID();
+    await t.onLease({ type: "browser.lease", sessionId, leaseId, state: "held", holderUserId: HOLDER });
+    expect(t.holderOf(sessionId)).toBe(HOLDER);
+    await t.onLease({ type: "browser.lease", sessionId, leaseId, state: "released" });
+    expect(t.holderOf(sessionId)).toBeUndefined();
+    await t.onLease({ type: "browser.lease", sessionId, leaseId: randomUUID(), state: "held" });
+    expect(t.isPaused(sessionId)).toBe(true);
+    expect(t.holderOf(sessionId)).toBeUndefined();
+    t.end(sessionId);
+    await t.onLease({
+      type: "browser.lease",
+      sessionId,
+      leaseId: randomUUID(),
+      state: "held",
+      holderUserId: HOLDER,
+    });
+    t.end(sessionId);
+    expect(t.holderOf(sessionId)).toBeUndefined();
+  });
 });

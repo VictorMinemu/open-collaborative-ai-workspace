@@ -1356,6 +1356,99 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     );
   });
 
+  it("HI-03: a lease whose holderUserId is someone else closes the signed-in page, even in the member's own turn", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId,
+      state: "held",
+      holderUserId: OTHER_MEMBER,
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    await t.manager.onServerFrame({
+      type: "browser.input",
+      sessionId: t.sid,
+      leaseId,
+      events: [{ type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 }],
+    } as never);
+    expect(t.children[0]?.calls.some((c) => c.op === "input")).toBe(false);
+  });
+
+  it("HI-03: a lease whose holderUserId is the member keeps their page, even with another person's prompt queued", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.manager.onPrompt(t.sid, "queued-by-other", { ...SIGNIN, askerId: OTHER_MEMBER });
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+      holderUserId: MEMBER,
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(t.manager.openPages).toBe(1);
+    expect((await t.tools.call("snapshot", {})).summary).toBe(
+      "Refused: A person is controlling the page. Try again later.",
+    );
+  });
+
+  it("HI-03: a lease held by someone else (holderUserId) while the member's state loads closes the page it opened", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const t = scripted(
+      {
+        createChild: (o) => {
+          const c = new ScriptedChild(o);
+          c.holdLoad = hold;
+          t.children.push(c);
+          return c;
+        },
+      },
+      HAS_SIGNIN,
+    );
+    t.turn(SIGNIN);
+    const opening = t.tools.call("open", { url: `${SITE}/account` });
+    for (let i = 0; i < 100 && !t.children[0]?.calls.some((c) => c.op === "openWithState"); i++)
+      await flush();
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+      holderUserId: OTHER_MEMBER,
+    });
+    release();
+    expect((await opening).isError).toBe(true);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(browserEvents(t).map((e) => e.kind)).not.toContain("signin_loaded");
+  });
+
+  it("MD-01: pages() lists every open page and whether a member's sign-in is loaded in it", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    expect(t.manager.pages()).toEqual([]);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    expect(t.manager.pages()).toEqual([{ sessionId: t.sid, signedIn: true }]);
+    // A public page of the same session (the signed-in one re-sealed and closed first).
+    t.turn({ ...ALLOW, askerId: OTHER_MEMBER });
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    expect(t.manager.pages()).toEqual([{ sessionId: t.sid, signedIn: false }]);
+    await t.tools.call("close", {});
+    expect(t.manager.pages()).toEqual([]);
+  });
+
   it("HI-04: after a sign-in loaded, an open to another host asks the member even in Full access, loopback too", async () => {
     const t = scripted({}, HAS_SIGNIN);
     t.turn(SIGNIN, true);
@@ -1544,6 +1637,24 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect(put).not.toHaveBeenCalled();
     expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
     expect(t.manager.openPages).toBe(0);
+  });
+
+  it("MD-03: browser.close policy or access_lost re-seals the sign-in, then closes the page and unloads it", async () => {
+    for (const reason of ["policy", "access_lost"] as const) {
+      const { order, put } = sequenced();
+      const t = scripted({ api: { put } }, HAS_SIGNIN);
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/account` });
+      await t.manager.onServerFrame({ type: "browser.close", sessionId: t.sid, reason });
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(put.mock.calls[0]?.[0]).toBe(`/api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+      expect(order).toContain(`put /api/v1/runtime/browser-signins/${SIGNIN_ID}/state`);
+      expect(t.children[0]?.state).toBe("closed");
+      const kinds = browserEvents(t).map((e) => e.kind);
+      expect(kinds).toContain("signin_unloaded");
+      expect(kinds).toContain("closed");
+      expect(t.manager.openPages).toBe(0);
+    }
   });
 
   it("unload: a page the member took control of closes before another asker's call", async () => {
