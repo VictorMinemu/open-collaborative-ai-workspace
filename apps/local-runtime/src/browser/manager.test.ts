@@ -1456,6 +1456,82 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect((await t.tools.call("snapshot", {})).isError).toBe(false);
   });
 
+  describe("HI-06: a Codex session's sign-in never loads while another person's session runs on the device", () => {
+    /** Another session on the same device, whose latest prompt is `grant`'s. */
+    const other = (t: ReturnType<typeof scripted>, grant: SessionBrowserGrant) => {
+      const id = randomUUID();
+      t.manager.forSession(id);
+      t.manager.onPrompt(id, null, grant);
+      return id;
+    };
+
+    it("a shim-driven session opens public pages only while someone else's session is live; Claude's still loads", async () => {
+      // Codex: the session's shim token exists, so any agent of this OS user could reach it over the control socket.
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      const res = await t.tools.call("open", { url: `${SITE}/account` });
+      expect(textOf(res)).toContain("Signed in: no");
+      expect(textOf(res)).toContain("another person's session runs on this device");
+      expect(t.frames.some((f) => f.type === "browser.signin.load")).toBe(false);
+      expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(false);
+
+      // Claude: no shim token, no control-socket path into the session.
+      const c = scripted({}, HAS_SIGNIN);
+      other(c, { ...ALLOW, askerId: OTHER_MEMBER });
+      c.turn(SIGNIN);
+      expect(textOf(await c.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: yes");
+    });
+
+    it("the member's own other private session, or none at all, does not block the load", async () => {
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, SIGNIN);
+      t.turn(SIGNIN);
+      expect(textOf(await t.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: yes");
+    });
+
+    it("a bot's session, a wider session or one with no grant blocks the load", async () => {
+      for (const grant of [
+        { ...SIGNIN, askerIsBot: true },
+        { ...ALLOW, signinAllowed: false },
+        undefined,
+      ] as const) {
+        const t = scripted({}, HAS_SIGNIN);
+        await t.tools.shimTokenFile();
+        other(t, grant as SessionBrowserGrant);
+        t.turn(SIGNIN);
+        expect(textOf(await t.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: no");
+      }
+    });
+
+    it("another person's session that starts while the sign-in is loaded unloads it at once", async () => {
+      const { put } = sequenced();
+      const t = scripted({ api: { put } }, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/account` });
+      expect(t.manager.openPages).toBe(1);
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      for (let i = 0; i < 50 && !browserEvents(t).some((e) => e.kind === "signin_unloaded"); i++)
+        await flush();
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(t.children[0]?.state).toBe("closed");
+    });
+
+    it("signin answers that sign-ins do not work while another person's session runs here", async () => {
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      const res = await t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain("another person's session runs on this device");
+      expect(t.approvals()).toEqual([]);
+    });
+  });
+
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {
     const { put } = sequenced();
     const t = scripted({ api: { put } }, HAS_SIGNIN);

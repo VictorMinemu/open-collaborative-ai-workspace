@@ -199,6 +199,14 @@ interface SessionState {
   lastAskerId: string | null;
   /** 19: origins the API had no sign-in to load for in this turn (asked once per turn). */
   noSignIn: Set<BrowserOrigin>;
+  /**
+   * HI-06: the session's Codex shim token was issued (`shimTokenFile`). Any process of the device's OS user can read
+   * that file and reach the control socket, so a sign-in loads here only while no other person's session runs on the
+   * device (`sharedWith`). A Claude session has no token: its tools run in the daemon only.
+   */
+  shimIssued: boolean;
+  /** HI-06: the last `open` of this turn did not load a sign-in because the device is shared (said in its result). */
+  sharedRefused: boolean;
 }
 
 interface LoadedSignIn {
@@ -388,6 +396,8 @@ export class BrowserManager {
       }
     }
     this.notifyAvailable(s);
+    // HI-06: a session (new, or with a new asker) may now share the device with another session's loaded sign-in.
+    this.unloadShared(s);
   }
 
   /**
@@ -624,13 +634,19 @@ export class BrowserManager {
     if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed || s.noSignIn.has(origin)) {
       return null;
     }
+    // HI-06: another person's session on this device could drive this one through the shim token: public page only.
+    if (this.sharedWith(s, grant.askerId)) {
+      s.sharedRefused = true;
+      return null;
+    }
     const answer = await this.signins.request(s.id, turn.promptId, origin);
     if (!answer?.ok) {
       s.noSignIn.add(origin);
       return null;
     }
-    // The turn may have ended, or the opt-in gone off, while the API answered: then nothing is loaded.
-    if (s.turn !== turn || !this.opts.optIn() || s.child !== child) {
+    // The turn may have ended, the opt-in gone off, or another person's session started (HI-06) while the API answered:
+    // then nothing is loaded.
+    if (s.turn !== turn || !this.opts.optIn() || s.child !== child || this.sharedWith(s, grant.askerId)) {
       this.event(s, turn.promptId, "signin_unloaded", origin);
       return null;
     }
@@ -655,7 +671,8 @@ export class BrowserManager {
     // page is then re-sealed and closed now, and never becomes the session's loaded sign-in.
     // HI-03: a lease taken while the state loaded may be another person's: the page is not theirs to see.
     const heldByOther = this.takeover.isPaused(s.id) && !this.onlyAskerIs(s, grant.askerId);
-    if (s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child || heldByOther) {
+    const stale = s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child;
+    if (stale || heldByOther || this.sharedWith(s, grant.askerId)) {
       await this.killChild(s, child, turn.promptId, loaded);
       this.event(s, turn.promptId, "signin_unloaded", origin);
       throw Object.assign(new Error("the turn ended"), { code: "not_allowed" });
@@ -735,6 +752,11 @@ export class BrowserManager {
     const grant = turn.grant;
     if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed) {
       return this.refuse(s, turn, "signin", "signin_not_allowed");
+    }
+    // HI-06: a page the member signs in to by hand would be as reachable as a loaded one: not while the device is shared.
+    if (this.sharedWith(s, grant.askerId)) {
+      const refused = this.refuse(s, turn, "signin", "signin_not_allowed");
+      return { ...refused, content: [...refused.content, { type: "text", text: SHARED_DEVICE_TEXT }] };
     }
     const site = siteOfHost(body.host);
     if (!site) return invalidResult("signin", "host: must be a host name such as github.com", s.origin);
@@ -896,6 +918,7 @@ export class BrowserManager {
     const child = await this.ensureChild(s, turn);
     s.opening = true;
     let res: OpenResult;
+    s.sharedRefused = false;
     try {
       const signedIn = target && !s.loaded ? await this.loadSignIn(s, turn, child, url, target) : null;
       res = signedIn ?? ((await child.call("open", { url })) as OpenResult);
@@ -927,6 +950,7 @@ export class BrowserManager {
     const summary = browserToolSummary("open", body, { origin });
     return textResult(summary, origin, [
       `Signed in: ${res.signedIn ? "yes" : "no"}`,
+      ...(s.sharedRefused ? [SHARED_DEVICE_TEXT] : []),
       "",
       pageContent(origin, `Title: ${res.title}`),
     ]);
@@ -1341,6 +1365,8 @@ export class BrowserManager {
       memberPage: null,
       lastAskerId: null,
       noSignIn: new Set(),
+      shimIssued: false,
+      sharedRefused: false,
     };
     const manager = this;
     s.tools = {
@@ -1390,7 +1416,36 @@ export class BrowserManager {
 
   private async shimTokenFile(s: SessionState): Promise<string> {
     if (!UUID.test(s.id)) throw new Error("the session id is not a uuid");
+    // HI-06: from now on the session is reachable through the control socket by any process holding the token.
+    s.shimIssued = true;
     return ensureShimToken(this.runDir(s.id));
+  }
+
+  /**
+   * HI-06: true when a session other than `s` on this device is not `userId`'s own private session (its running turn,
+   * its newest grant and every prompt it was handed must name `userId` as a person in a session only they and the device
+   * owner can see). Its agent runs as the same OS user and could drive `s` through the shim token, so `userId`'s
+   * sign-in must not be in `s`'s page meanwhile. Only a shim-driven session (`shimIssued`) is exposed that way.
+   */
+  private sharedWith(s: SessionState, userId: string): boolean {
+    if (!s.shimIssued) return false;
+    for (const other of this.sessions.values()) {
+      if (other === s) continue;
+      if (!privateTo(other.latestGrant, userId)) return true;
+      if (other.turn && !privateTo(other.turn.grant, userId)) return true;
+      for (const p of other.pendingGrants.values()) if (!privateTo(p.grant, userId)) return true;
+    }
+    return false;
+  }
+
+  /** HI-06: a session got a new grant: every other session's loaded sign-in it now shares the device with is unloaded. */
+  private unloadShared(changed: SessionState): void {
+    for (const s of this.sessions.values()) {
+      if (s === changed) continue;
+      const owner = s.loaded?.userId ?? null;
+      if (owner && this.sharedWith(s, owner))
+        void this.closePage(s, "closed", s.turn?.promptId ?? null).catch(() => {});
+    }
   }
 
   /** The idle close (PD-24): a page with no call for `idleMs` closes; a held lease keeps it (a person is on it). */
@@ -1474,6 +1529,15 @@ function siteOfHost(host: string): { origin: BrowserOrigin; url: string } | null
   const origin = originOf(url);
   return origin ? { origin, url } : null;
 }
+
+/** HI-06: the grant is a person's (`userId`) in a session only they and the device owner can see. */
+function privateTo(grant: SessionBrowserGrant | undefined, userId: string): boolean {
+  return grant?.signinAllowed === true && !grant.askerIsBot && grant.askerId === userId;
+}
+
+/** HI-06: what the model reads when a sign-in does not load because the device is shared. */
+const SHARED_DEVICE_TEXT =
+  "Saved sign-ins do not load while another person's session runs on this device: an agent of that session could reach this browser.";
 
 /** HI-04: the address names more than its site (a path, a query or a fragment) that could carry data. */
 function addressCarriesData(url: string): boolean {

@@ -2,6 +2,12 @@
 // inside the session's 0700 run dir. The shim reads it from the file its env names (never argv) and sends it with each
 // `browserCall`; the daemon compares it in constant time with the file. It binds a shim to its own session; it is not a
 // boundary against other processes of the same OS user (who can read the file), which ADR-0035 records.
+//
+// HI-06 (07.13 review): binding the call to the shim process itself was measured and is not available. Codex 0.172 does
+// not pass an inherited descriptor to its MCP servers (a socketpair on fd 3 of `codex app-server` is gone in the
+// server), and Node has no peer-credential API (SO_PEERCRED / LOCAL_PEERPID) for a Unix socket. So the manager never
+// loads a member's sign-in into a session that has a token while another person's session runs on the device
+// (`BrowserManager.sharedWith`), and unloads it when one starts.
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
