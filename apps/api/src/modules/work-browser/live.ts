@@ -77,9 +77,9 @@ import type { LiveRelay } from "./live-relay";
  * while watched, and is asked again by `FrameSlot` at the moment a frame is written (a frame that waited while the page
  * turned private is dropped). The member sign-in is decided first (HI-03): a lease never shows a member's signed-in page
  * to anyone else.
- * - **takeover:** while `lease_id` is set, frames go only to the socket registered for that lease
- *   (`registerLeaseSocket`, 07.13-18); every other viewer, the holder's other sockets included, gets `private`
- *   (`takeover`). A lease no socket here registered (held on another instance) lets nothing through here;
+ * - **takeover:** while `lease_id` is set (or a lease was just taken here, MD-02), frames go only to the socket that
+ *   took it with `take` (07.13-18); every other viewer, the holder's other sockets included, gets `private`
+ *   (`takeover`). A lease no socket here took (held on another instance) lets nothing through here;
  * - **member sign-in:** while `signin_user_id` is M, only M's sockets get frames; the others get `private`
  *   (`member_session`) with M's display name, never the page's host;
  * - **ended:** a closed row ends every viewer (`ended` with the reason of the page's last close) and closes 1000.
@@ -120,13 +120,6 @@ export interface WorkLiveStats {
 export interface WorkLiveHub {
   /** A frame of `sessionId` from the device link of this instance (the module checked it runs on that device). */
   onFrame(organizationId: string, frame: WorkBrowserFrame): void;
-  /**
-   * 07.13-18: the socket `viewerId` (a viewer of `sessionId` on this instance) holds lease `leaseId`: while the row's
-   * `lease_id` is that lease, only this socket receives frames. False when no such viewer is here.
-   */
-  registerLeaseSocket(sessionId: string, leaseId: string, viewerId: string): boolean;
-  /** 07.13-18: this instance holds no socket for the session's lease any more. */
-  clearLeaseSocket(sessionId: string): void;
   /**
    * 07.13-18 (D-20): the device's focus hint for lease `leaseId` (the module checked the session runs on that device):
    * sent to the holder's socket only (here, or on the instance holding it); a stale lease's reaches nobody.
@@ -1109,25 +1102,6 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         .catch((err: unknown) =>
           log.warn({ sessionId: frame.sessionId, error: name(err) }, "work live view frame publish failed"),
         );
-    },
-    registerLeaseSocket(sessionId, leaseId, viewerId) {
-      for (const e of entries.values()) {
-        if (e.sessionId !== sessionId.toLowerCase()) continue;
-        const viewer = [...e.viewers].find((v) => v.id === viewerId && !v.closed);
-        if (!viewer) continue;
-        if (e.lease) dropLease(e, e.lease);
-        e.lease = newLease(viewer, leaseId, e.view?.deviceId ?? null, false);
-        for (const v of e.viewers) pushState(v);
-        return true;
-      }
-      return false;
-    },
-    clearLeaseSocket(sessionId) {
-      for (const e of entries.values()) {
-        if (e.sessionId !== sessionId.toLowerCase() || !e.lease) continue;
-        dropLease(e, e.lease);
-        for (const v of e.viewers) pushState(v);
-      }
     },
     async onFocus(organizationId, frame) {
       if (deliverFocus(organizationId, frame.sessionId, frame.leaseId, frame.sensitive)) return;

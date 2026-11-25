@@ -270,47 +270,35 @@ describe("07.13-10 Task 2: the privacy gate, states and live re-authorization", 
     miaLive.close();
   });
 
-  it("during a takeover only the socket holding the lease gets frames; the holder's other socket and everyone else get `private takeover`", async () => {
+  it("a lease no socket here holds (taken on another instance) lets no frame through here: everyone gets `private takeover`", async () => {
+    // The holder's own socket, on the instance that took the lease, is covered by lease.int.test.ts (a real `take`).
     const sessionId = await sessionWithPage();
     const m1 = await open(mia, sessionId);
-    await waitState(m1, "live");
     const m2 = await open(mia, sessionId);
     const owenLive = await open(owen, sessionId);
-    await waitState(m2, "live");
-    await waitState(owenLive, "live");
-    const viewers = hub()
-      .stats()
-      .sessions.find((s) => s.sessionId === sessionId)!.viewers;
-    const holder = viewers[0]!;
-    expect(holder.userId).toBe(miaId);
+    for (const s of [m1, m2, owenLive]) await waitState(s, "live");
 
-    const leaseId = randomUUID();
-    expect(hub().registerLeaseSocket(sessionId, leaseId, holder.viewerId)).toBe(true);
     await su.query(
       "update app.work_browsers set lease_id = $2, controller_user_id = $3, lease_expires_at = now() + interval '10 minutes' where work_session_id = $1",
-      [sessionId, leaseId, miaId],
+      [sessionId, randomUUID(), miaId],
     );
-    expect(await waitState(m1, "controlling", 3000)).toMatchObject({ controller: "self" });
-    // Private from the moment the lease is held here (MD-02); the holder's name follows with the row's next read.
-    await waitFor(() => lastState(m2)?.memberName);
-    expect(await waitState(m2, "private", 3000)).toMatchObject({
-      privateReason: "takeover",
-      controller: "other_device",
-      memberName: "Mia Lopez",
-    });
+    for (const s of [m1, m2]) {
+      expect(await waitState(s, "private", 3000)).toMatchObject({
+        privateReason: "takeover",
+        controller: "other_device",
+        memberName: "Mia Lopez",
+      });
+    }
     expect(await waitState(owenLive, "private", 3000)).toMatchObject({
       privateReason: "takeover",
       controller: "other",
     });
-
-    await pump(sessionId, 21, () => tags(m1).includes(21));
+    for (let i = 0; i < 5; i++) {
+      await d.sendBinary(frame(sessionId, fakeJpeg(21)));
+      await sleep(60);
+    }
     await sleep(300);
-    expect(tags(m2)).not.toContain(21);
-    expect(tags(owenLive)).not.toContain(21);
-
-    // A lease in the row that no socket here registered: nobody here receives frames.
-    hub().clearLeaseSocket(sessionId);
-    await waitState(m1, "private", 3000);
+    for (const s of [m1, m2, owenLive]) expect(tags(s)).not.toContain(21);
 
     await su.query(
       "update app.work_browsers set lease_id = null, controller_user_id = null, lease_expires_at = null where work_session_id = $1",
@@ -318,6 +306,7 @@ describe("07.13-10 Task 2: the privacy gate, states and live re-authorization", 
     );
     await waitState(m1, "live", 3000);
     await waitState(owenLive, "live", 3000);
+    await pump(sessionId, 22, () => tags(m1).includes(22) && tags(owenLive).includes(22));
     m1.close();
     m2.close();
     owenLive.close();
