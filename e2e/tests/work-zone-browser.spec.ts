@@ -290,7 +290,9 @@ test.describe("work zone browser", () => {
       await boss.goto(`${BASE_URL}/work-zone/${first}`);
       await expect(boss.getByTestId("work-signin-only")).toBeVisible({ timeout: 20_000 });
 
-      await banner.getByTestId("work-signin-open").click();
+      const openSignIn = banner.getByTestId("work-signin-open");
+      await expect(openSignIn).toContainText("Open and sign in");
+      await openSignIn.click();
       const controlling = page.getByTestId("work-live-panel");
       await expect(controlling).toHaveAttribute("data-state", "controlling", { timeout: 20_000 });
       await expect(page.getByTestId("work-live-device-lines")).toBeVisible();
@@ -311,7 +313,9 @@ test.describe("work zone browser", () => {
       await expectTouchTargets(page, '[data-testid="work-live-panel"]');
       await captureReview(page, `wz-browser-controlling-${w}`);
 
-      await page.getByTestId("work-live-save").click();
+      const save = page.getByTestId("work-live-save");
+      await expect(save).toContainText("Done, save my sign-in");
+      await save.click();
       await expect
         .poll(async () => (await workSignInsOf(mara)).find((s) => s.site === site.host)?.status, {
           timeout: 20_000,
