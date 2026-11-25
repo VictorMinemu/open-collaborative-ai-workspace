@@ -178,7 +178,7 @@ B="$(uuid)"
 
 log "building ${SBX_IMAGE}, ${BRW_IMAGE}, ${EGRESS_IMAGE}"
 docker build -q --label "ocw.namespace=${NS}" -t "$SBX_IMAGE" -f infra/sandbox/sbx/Dockerfile infra/sandbox/sbx >/dev/null
-docker build -q --label "ocw.namespace=${NS}" -t "$BRW_IMAGE" infra/sandbox/browser >/dev/null
+docker build -q --label "ocw.namespace=${NS}" -t "$BRW_IMAGE" -f infra/sandbox/browser/Dockerfile "$ROOT" >/dev/null
 docker build -q --label "ocw.namespace=${NS}" -t "$EGRESS_IMAGE" -f infra/sandbox/egress/Dockerfile . >/dev/null
 
 # ---------------------------------------------------------------- 1. two sandboxes, one browser, a long command
