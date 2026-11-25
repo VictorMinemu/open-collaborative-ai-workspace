@@ -195,3 +195,136 @@ describe("07.13-10 Task 1: a session reader watches the device's frames live (tr
     ).toBe(403);
   });
 });
+
+/** Sends frames from Owen's device until `until()` holds (the poll and the decisions are asynchronous). */
+async function pump(sessionId: string, tag: number, until: () => boolean, timeoutMs = 6000): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (!until()) {
+    if (Date.now() > end) throw new Error("frames never arrived");
+    await d.sendBinary(frame(sessionId, fakeJpeg(tag)));
+    await sleep(100);
+  }
+}
+
+const tags = (s: WorkLiveSocket) => s.binary.map((b) => b[3]);
+
+describe("07.13-10 Task 2: the privacy gate, states and live re-authorization", () => {
+  it("a loaded sign-in is its member's alone: the others see `private member_session` with her name, and no frame until it is cleared", async () => {
+    const sessionId = await sessionWithPage();
+    const owenLive = await open(owen, sessionId);
+    const miaLive = await open(mia, sessionId);
+    await waitState(owenLive, "live");
+    await waitState(miaLive, "live");
+
+    await su.query("update app.work_browsers set signin_user_id = $2 where work_session_id = $1", [
+      sessionId,
+      miaId,
+    ]);
+    const priv = await waitState(owenLive, "private", 3000);
+    expect(LiveServerFrame.safeParse(priv).success).toBe(true);
+    expect(priv).toMatchObject({ privateReason: "member_session", memberName: "Mia Lopez", host: null });
+    expect(lastState(miaLive)).toMatchObject({ state: "live" });
+
+    await pump(sessionId, 11, () => tags(miaLive).includes(11));
+    await sleep(300);
+    expect(tags(owenLive)).not.toContain(11);
+
+    await su.query("update app.work_browsers set signin_user_id = null where work_session_id = $1", [
+      sessionId,
+    ]);
+    await waitState(owenLive, "live", 3000);
+    await pump(sessionId, 12, () => tags(owenLive).includes(12));
+    owenLive.close();
+    miaLive.close();
+  });
+
+  it("during a takeover only the socket holding the lease gets frames; the holder's other socket and everyone else get `private takeover`", async () => {
+    const sessionId = await sessionWithPage();
+    const m1 = await open(mia, sessionId);
+    await waitState(m1, "live");
+    const m2 = await open(mia, sessionId);
+    const owenLive = await open(owen, sessionId);
+    await waitState(m2, "live");
+    await waitState(owenLive, "live");
+    const viewers = hub()
+      .stats()
+      .sessions.find((s) => s.sessionId === sessionId)!.viewers;
+    const holder = viewers[0]!;
+    expect(holder.userId).toBe(miaId);
+
+    const leaseId = randomUUID();
+    expect(hub().registerLeaseSocket(sessionId, leaseId, holder.viewerId)).toBe(true);
+    await su.query(
+      "update app.work_browsers set lease_id = $2, controller_user_id = $3, lease_expires_at = now() + interval '10 minutes' where work_session_id = $1",
+      [sessionId, leaseId, miaId],
+    );
+    expect(await waitState(m1, "controlling", 3000)).toMatchObject({ controller: "self" });
+    expect(await waitState(m2, "private", 3000)).toMatchObject({
+      privateReason: "takeover",
+      controller: "other_device",
+      memberName: "Mia Lopez",
+    });
+    expect(await waitState(owenLive, "private", 3000)).toMatchObject({
+      privateReason: "takeover",
+      controller: "other",
+    });
+
+    await pump(sessionId, 21, () => tags(m1).includes(21));
+    await sleep(300);
+    expect(tags(m2)).not.toContain(21);
+    expect(tags(owenLive)).not.toContain(21);
+
+    // A lease in the row that no socket here registered: nobody here receives frames.
+    hub().clearLeaseSocket(sessionId);
+    await waitState(m1, "private", 3000);
+
+    await su.query(
+      "update app.work_browsers set lease_id = null, controller_user_id = null, lease_expires_at = null where work_session_id = $1",
+      [sessionId],
+    );
+    await waitState(m1, "live", 3000);
+    await waitState(owenLive, "live", 3000);
+    m1.close();
+    m2.close();
+    owenLive.close();
+  });
+
+  it("a page that ended tells every viewer `ended` with its reason and closes the socket with 1000", async () => {
+    const sessionId = await sessionWithPage();
+    const owenLive = await open(owen, sessionId);
+    const miaLive = await open(mia, sessionId);
+    await waitState(owenLive, "live");
+    await waitState(miaLive, "live");
+    d.browserEvent(sessionId, { kind: "crashed", origin: ORIGIN });
+    for (const s of [owenLive, miaLive]) {
+      expect((await s.closed).code).toBe(1000);
+      expect(lastState(s)).toMatchObject({ state: "ended", endReason: "crashed" });
+    }
+    await d.next((f) => f.type === "browser.frames" && f.sessionId === sessionId && f.on === false);
+  });
+
+  it("the heartbeat sends every viewer its current state again", async () => {
+    const sessionId = await sessionWithPage();
+    const owenLive = await open(owen, sessionId);
+    const first = await waitState(owenLive, "live");
+    const count = owenLive.json.filter((f) => f.type === "state").length;
+    hub().heartbeat();
+    await waitFor(() => owenLive.json.filter((f) => f.type === "state").length === count + 1);
+    expect(lastState(owenLive)).toEqual(first);
+    owenLive.close();
+  });
+
+  it("a viewer removed from the session's audience gets no frame after, `no_permission` and 4403", async () => {
+    const sessionId = await sessionWithPage();
+    const miaLive = await open(mia, sessionId);
+    await waitState(miaLive, "live");
+    await pump(sessionId, 31, () => tags(miaLive).includes(31));
+
+    const res = await owen.request("DELETE", `/api/v1/devices/${dId}/grants/user/${miaId}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((await miaLive.closed).code).toBe(4403);
+    expect(lastState(miaLive)).toMatchObject({ state: "no_permission" });
+    expect(tags(miaLive)).not.toContain(32);
+    await shareDevice(owen, dId, miaId);
+  });
+});
