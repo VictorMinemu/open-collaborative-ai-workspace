@@ -30,6 +30,7 @@ import {
   type ApprovalDecision,
   type CommandFrame,
   type DeviceToServerFrame,
+  originOf,
   type PromptPayload,
   RUNTIME_COMPATIBILITY_MANIFEST,
   RUNTIME_FILE_LAND_WITHIN_HEADER,
@@ -37,12 +38,14 @@ import {
   type RuntimeId,
   type RuntimeInfo,
   type ServerToDeviceFrame,
+  type SessionBrowserGrant,
   type SessionEvent,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
+import type { ChildFactoryOptions, ManagedChild } from "./browser/manager.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
 import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { type ControlRequest, controlRequest } from "./control-socket.js";
@@ -4011,5 +4014,151 @@ describe("07.18-11 the Codex catalog under a slot when the device's own login is
     const caps = await server.frame("capabilities");
     expect(caps.catalogs).toEqual([]);
     expect(spawned).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------- 07.13 browser
+
+const BROWSER_GRANT: SessionBrowserGrant = {
+  allowed: true,
+  reason: "ok",
+  askerId: "00000000-0000-4000-8000-000000000001",
+  askerIsBot: false,
+  alwaysAsk: [],
+  whenTainted: [],
+  signinAllowed: false,
+};
+
+/** A child without a browser: `open` reports the URL's origin; every child it made is kept for the test. */
+class ScriptedBrowserChild implements ManagedChild {
+  state: ManagedChild["state"] = "running";
+  readonly closed: Promise<void>;
+  readonly ops: string[] = [];
+  private done: () => void = () => {};
+  constructor(private readonly o: ChildFactoryOptions) {
+    this.closed = new Promise((r) => {
+      this.done = r;
+    });
+  }
+  async call(op: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    this.ops.push(op);
+    if (op === "open") {
+      const origin = originOf(String(input.url));
+      if (origin) this.o.onEvent({ event: "navigated", origin });
+      return { host: new URL(String(input.url)).host, secure: false, title: "T", signedIn: false };
+    }
+    if (op === "snapshot") return { host: "h", secure: false, title: "T", text: "x", truncated: false };
+    return { closed: true };
+  }
+  async close(): Promise<void> {
+    this.state = "closed";
+    this.done();
+  }
+}
+
+/** Replaces the default daemon with one whose browser opt-in is on and whose children are scripted. */
+async function browserDaemon(
+  over: { env?: NodeJS.ProcessEnv; idleMs?: number } = {},
+): Promise<{ children: ScriptedBrowserChild[] }> {
+  await daemon.stop();
+  const children: ScriptedBrowserChild[] = [];
+  daemon = await Daemon.create({
+    home,
+    env: { CODEX_HOME: join(home, "codex-default"), OCW_ALLOW_BROWSER: "1", ...over.env },
+    token: "device-token-123",
+    config: { serverUrl: server.url },
+    runtimes: [runtime],
+    logger: silentLogger,
+    controlSocket: socketPath(),
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    browser: {
+      browsers: {
+        installed: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+        install: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+      },
+      createChild: (o) => {
+        const c = new ScriptedBrowserChild(o);
+        children.push(c);
+        return c;
+      },
+      ...(over.idleMs !== undefined ? { idleMs: over.idleMs } : {}),
+    },
+  });
+  return { children };
+}
+
+/** A started session with a running turn whose prompt carried `grant`. */
+async function browserSession(grant: SessionBrowserGrant = BROWSER_GRANT): Promise<string> {
+  const localId = await addProject();
+  const sid = randomUUID();
+  server.send({
+    id: `start-${sid}`,
+    kind: "session.start",
+    sessionId: sid,
+    payload: { projectLocalId: localId, permissionMode: "acceptEdits", browser: grant },
+  });
+  await server.frame("ack", (f) => f.commandId === `start-${sid}`);
+  runtime.promptHold = new Promise(() => {});
+  server.send({
+    id: `prompt-${sid}`,
+    kind: "prompt",
+    sessionId: sid,
+    payload: { promptId: "bp1", text: "browse", browser: grant },
+  });
+  await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.started");
+  return sid;
+}
+
+describe("Work Zone browser: approvals through the daemon (07.13-12, Pitfall 7)", () => {
+  it("hands the adapter the session's browser, available with the start's grant", async () => {
+    await browserDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    const sid = await browserSession();
+    const started = runtime.started.find((s) => s.sessionId === sid);
+    expect(started?.browser?.available).toBe(true);
+  });
+
+  it("approval.resolve for a browser approval is answered by the broker; an unknown id still reaches the adapter", async () => {
+    await browserDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    const sid = await browserSession();
+    const call = daemon.browser.forSession(sid).call("open", { url: "https://github.com/" });
+    const asked = await server.frame(
+      "event",
+      (f) => f.sessionId === sid && f.event.type === "approval.requested",
+    );
+    if (asked.event.type !== "approval.requested") throw new Error("unreachable");
+    expect(asked.event.browser).toEqual({
+      kind: "host",
+      origin: "https://github.com:443",
+      tool: "ocw_browser_open",
+    });
+    server.send({
+      id: "ar1",
+      kind: "approval.resolve",
+      sessionId: sid,
+      payload: { approvalId: asked.event.approvalId, decision: "once" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "ar1")).toMatchObject({ ok: true });
+    expect((await call).summary).toBe("Opened github.com:443");
+    expect(runtime.resolved).toEqual([]);
+    // Answered twice: the broker no longer knows it and the adapter does not either.
+    server.send({
+      id: "ar2",
+      kind: "approval.resolve",
+      sessionId: sid,
+      payload: { approvalId: asked.event.approvalId, decision: "once" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "ar2")).toMatchObject({ ok: false });
+    server.send({
+      id: "ar3",
+      kind: "approval.resolve",
+      sessionId: sid,
+      payload: { approvalId: "ap1", decision: "deny" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "ar3")).toMatchObject({ ok: true });
+    expect(runtime.resolved).toEqual([["ap1", "deny"]]);
   });
 });
