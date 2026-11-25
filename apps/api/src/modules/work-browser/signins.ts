@@ -12,8 +12,8 @@ import { keepForSite, siteKeyOf } from "../browser";
 /**
  * A member's sealed Work Zone sign-ins (Phase 07.13; D-22, D-23, D-28, D-30, PD-03, PD-15, P7). One per member × site:
  * the Playwright storage state of that site only (re-filtered here with the bots' `keepForSite`, T-07.13-17-04), sealed
- * as a `browser_session` secret with the Work Zone AAD `${org}:${user}:browser:workzone:${siteKey}` (never a bot's
- * `${org}:${user}:browser:${agentId}:${siteKey}`: a bot's seal never opens here and this one never opens there, D-30),
+ * as a `browser_session` secret with the Work Zone AAD (`workSignInAad`, whose `workzone` segment is never a bot's
+ * agent id: a bot's seal never opens here and this one never opens there, D-30),
  * referenced by an owner-only `work_browser_signins` row (RESTRICTIVE `personal_owner_only`: another member, an admin or
  * a user-less session reads 0 rows and cannot write one).
  *

@@ -317,11 +317,24 @@ const CASES: Record<string, Case> = {
 };
 
 const PHASE_ROUTE = /\/sandbox|\/browser|\/browser-sessions|\/live\/browser/u;
+/**
+ * Phase 07.13's Work Zone device routes (`/runtime/browser-signins/…`, device JWT only) are not this phase's bot
+ * routes: their organization-B and other-device cases live in `modules/work-browser/signins.int.test.ts` and
+ * `load.int.test.ts`. Only these two exact paths are left out; every other route matching `PHASE_ROUTE` needs a case.
+ */
+const WORK_ZONE_DEVICE_ROUTES = new Set([
+  "PUT /api/v1/runtime/browser-signins/uploads/:uploadId",
+  "PUT /api/v1/runtime/browser-signins/:signinId/state",
+]);
 
 describe("the phase's cross-tenant matrix, derived from the authz registry (C-02, P-17)", () => {
   it("every registered sandbox, browser, session and live-view route has an organization-B case; none reaches organization A", async () => {
     const routes = l.s.stack.built.authz.routes;
-    const registered = [...routes.keys()].filter((k) => !k.startsWith("HEAD ") && PHASE_ROUTE.test(k)).sort();
+    const registered = [...routes.keys()]
+      .filter((k) => !k.startsWith("HEAD ") && PHASE_ROUTE.test(k) && !WORK_ZONE_DEVICE_ROUTES.has(k))
+      .sort();
+    // The left-out routes are device routes, never a people or cell route this matrix would have to cover.
+    for (const key of WORK_ZONE_DEVICE_ROUTES) expect(routes.get(key), key).toBe("device");
     expect(registered).toEqual(Object.keys(CASES).sort());
 
     const a = await factsOfA();

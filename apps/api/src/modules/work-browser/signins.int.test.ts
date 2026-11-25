@@ -477,6 +477,24 @@ describe("07.13-17 Task 3: revoke closes a loaded page, and expired sign-ins are
     expect(await audits("work_browser.signin_revoked", aId)).toHaveLength(1);
   });
 
+  it("a device of organization B never reaches A's upload or A's loaded sign-in (404), and A's rows stay", async () => {
+    const bDevice = await pairDevice(stack, eve, "Eve's box");
+    const bJwt = await FakeDevice.exchange(stack.baseUrl, bDevice.token);
+    const s = await startSession(owen, d, projectId);
+    const uploadId = await mintUpload(s, owenId);
+    const [mine] = await signinRows(owenId);
+    await loadInto(s, ORIGIN, mine!.id as string, owenId);
+    const body = { sessionId: s, origin: ORIGIN, state: state("from-b"), changed: true };
+    expect((await upload(uploadId, bJwt, body)).status).toBe(404);
+    expect((await put(`/api/v1/runtime/browser-signins/${mine!.id}/state`, bJwt, body)).status).toBe(404);
+    expect(await browserRow(s)).toMatchObject({
+      upload_id: uploadId,
+      signin_id: mine!.id,
+      signin_user_id: owenId,
+    });
+    expect(await signinRows(owenId)).toEqual([mine]);
+  });
+
   it("B's expired sign-in is swept in B alone: A's sign-ins are untouched", async () => {
     const now = Date.now();
     await su.query("update app.work_browser_signins set expires_at = $2 where id = $1", [
