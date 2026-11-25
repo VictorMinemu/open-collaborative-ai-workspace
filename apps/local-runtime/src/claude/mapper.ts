@@ -2,7 +2,19 @@
 // session; no I/O, so it can be tested against recorded fixtures. Output is NOT sanitised yet.
 
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { FastModeState, type SessionEvent, type Usage, type WorkSessionStatus } from "@ocw/contracts";
+import {
+  browserToolFromName,
+  canonicalBrowserTool,
+  FastModeState,
+  originOf,
+  type SessionEvent,
+  type Usage,
+  WORK_BROWSER_MCP_SERVER,
+  WORK_BROWSER_REFUSAL_TEXT,
+  type WorkBrowserTool,
+  type WorkSessionStatus,
+} from "@ocw/contracts";
+import { INVALID_REQUEST_TEXT } from "../browser/tools.js";
 import { truncateBytes } from "../sanitize.js";
 import { summarizeToolInput } from "./tool-policy.js";
 
@@ -94,6 +106,60 @@ function initSettings(msg: Loose): Extract<SessionEvent, { type: "session.settin
     ev.effort = msg.effort === null ? null : msg.effort.slice(0, 32);
   }
   return ev;
+}
+
+// ------------------------------------------------------------------ the Work Zone browser (07.13 D-09, PD-11)
+
+const BROWSER_PREFIX = `mcp__${WORK_BROWSER_MCP_SERVER}__`;
+
+/** The browser tool behind a Claude tool name: only the `ocw_browser` server's tools take the browser branch. */
+function browserToolOf(name: string): WorkBrowserTool | null {
+  return name.startsWith(BROWSER_PREFIX) ? browserToolFromName(name) : null;
+}
+
+const STARTED: Readonly<Record<Exclude<WorkBrowserTool, "open">, string>> = {
+  snapshot: "Reading the page",
+  act: "Acting on the page",
+  screenshot: "Taking a screenshot",
+  wait: "Waiting on the page",
+  close: "Closing the browser",
+  signin: "Asking for a sign-in",
+};
+
+/** `tool.started` summary: the action, and for `open` the target's origin only (never a path, element or text). */
+function browserStartedSummary(tool: WorkBrowserTool, input: Loose): string {
+  if (tool !== "open") return STARTED[tool];
+  const origin = typeof input.url === "string" ? originOf(input.url) : null;
+  return origin ? `Opening ${origin}` : "Opening a page";
+}
+
+// The summary grammar of `browser/tools.ts` (`browserToolSummary`): an action and `host[:port]` or "the page".
+const WHERE = String.raw`(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?`;
+const PLACE = `(?:${WHERE}|the page)`;
+const SUMMARY = new RegExp(
+  `^(?:Opened (?:${WHERE}|a page)|Read ${PLACE}|(?:Clicked on|Typed on|Selected on|Pressed a key on|Scrolled|Acted on) ${PLACE}|Took a screenshot of ${PLACE}|Waited on ${PLACE}|Closed the browser|Sign-in(?: on ${WHERE})?)$`,
+);
+const REFUSALS: ReadonlySet<string> = new Set(
+  [...Object.values(WORK_BROWSER_REFUSAL_TEXT), INVALID_REQUEST_TEXT].map((t) => `Refused: ${t}`),
+);
+
+/** The first line of a result's first text block (never the rest: that is page content). */
+function firstTextLine(content: unknown): string {
+  if (typeof content === "string") return content.split("\n", 1)[0] ?? "";
+  if (!Array.isArray(content)) return "";
+  for (const b of content) {
+    const block = asRecord(b);
+    if (block.type === "text" && typeof block.text === "string") return block.text.split("\n", 1)[0] ?? "";
+  }
+  return "";
+}
+
+/** `tool.completed` summary: the result's summary line when it follows the grammar, a known refusal on error. */
+function browserCompletedSummary(tool: WorkBrowserTool, ok: boolean, content: unknown): string {
+  const canonical = canonicalBrowserTool(tool);
+  const line = firstTextLine(content);
+  if (!ok) return REFUSALS.has(line) ? `${canonical} failed: ${line}` : `${canonical} failed`;
+  return SUMMARY.test(line) ? line : `${canonical} completed`;
 }
 
 export class ClaudeEventMapper {
@@ -203,6 +269,17 @@ export class ClaudeEventMapper {
         const toolUseId = String(block.id);
         const name = String(block.name);
         this.toolNames.set(toolUseId, name);
+        const browser = browserToolOf(name);
+        if (browser) {
+          // PD-11: the canonical name and the action (the origin for `open`), never the arguments.
+          out.push({
+            type: "tool.started",
+            toolUseId,
+            name: canonicalBrowserTool(browser),
+            summary: browserStartedSummary(browser, asRecord(block.input)),
+          });
+          continue;
+        }
         out.push({
           type: "tool.started",
           toolUseId,
@@ -229,6 +306,14 @@ export class ClaudeEventMapper {
       const toolUseId = String(block.tool_use_id);
       const name = this.toolNames.get(toolUseId) ?? "tool";
       const ok = block.is_error !== true;
+      const browser = browserToolOf(name);
+      if (browser) {
+        // D-09, Pitfall 2: the summary line only, never `output` (page text, image bytes).
+        const summary = browserCompletedSummary(browser, ok, block.content);
+        out.push({ type: "tool.completed", toolUseId, ok, summary });
+        this.toolNames.delete(toolUseId);
+        continue;
+      }
       const text = toolResultText(block.content);
       const { text: output } = truncateBytes(text, TOOL_OUTPUT_MAX_BYTES);
       const firstLine = text.split("\n", 1)[0]?.slice(0, 200) ?? "";
