@@ -1,18 +1,18 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 07.17.1.1.2
+current_phase: 07.13
 current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
 status: executing
 stopped_at: Phase 07.17 complete, ready to plan Phase 1
-last_updated: "2026-11-24T14:04:24.441Z"
+last_updated: "2026-11-25T16:40:45.103Z"
 last_activity: 2026-11-11
 last_activity_desc: Phase 07.17 complete, transitioned to Phase 1
-state_head: 756ceed130a7acbd824e0aa7a38724485ab6ff22
+state_head: a378bacaa6bb6624d5dd3665d8c4a6a431eddf3d
 progress:
   total_phases: 12
   completed_phases: 8
-  total_plans: 394
+  total_plans: 436
   completed_plans: 394
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-10-02)
 
 ## Current Position
 
-Phase: 07.17.1.1.2 — READY TO EXECUTE
+Phase: 07.13 — READY TO EXECUTE
 Plan: Not started
 Status: Executing (wave 1 done: plans 01–03)
 Last activity: 2026-11-11 — Phase 07.17.1 wave 1 done; main (PR #71: quick tasks 261111-gyk, 261111-hs9) merged in
