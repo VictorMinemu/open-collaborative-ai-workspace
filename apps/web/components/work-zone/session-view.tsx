@@ -403,6 +403,20 @@ function LoadedSession({
   );
   // Decided by the API resolver (creator, device owner or admin, minus Tool and Device layer denials).
   const canDecide = viewerCan.includes("work_session.approve");
+  // 07.13-21 (D-21, D-26): a member-only browser request is for the in-flight turn's human author; a bot's turn has
+  // nobody. A hint for the web's actions only: the API decides who may answer.
+  const viewerId = useMe({ enabled: false }).data?.user.id ?? null;
+  const inFlight = state.prompts
+    .filter((p) => p.status === "running" || p.status === "dispatched")
+    .sort((a, b) => (b.dispatchedAt ?? "").localeCompare(a.dispatchedAt ?? ""))[0];
+  const asker =
+    inFlight && !inFlight.authorAgent ? { id: inFlight.authorUserId, name: inFlight.authorName } : null;
+  // "Open and sign in": the Browser tab opens and takes control as soon as the server allows it.
+  const [takeRequest, setTakeRequest] = useState(0);
+  const openSignIn = useCallback(() => {
+    openPanel("browser");
+    setTakeRequest((n) => n + 1);
+  }, [openPanel]);
   const deciderHint = `Waiting for ${session.createdByName ?? "the session owner"}${
     device?.ownerName && device.ownerUserId !== session.createdBy ? ` or ${device.ownerName}` : ""
   } to decide.`;
@@ -468,6 +482,10 @@ function LoadedSession({
                 canDecide={canDecide}
                 agentLabel={RUNTIMES[session.runtime].label}
                 deciderHint={deciderHint}
+                viewerId={viewerId}
+                asker={asker}
+                deviceName={session.deviceName}
+                onOpenSignIn={openSignIn}
               />
             ) : null}
             {leftProject ? (
@@ -514,7 +532,7 @@ function LoadedSession({
               </Button>
             </div>
             <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
-              <PanelBody tab={openTab} session={session} state={state} />
+              <PanelBody tab={openTab} session={session} state={state} takeRequest={takeRequest} />
             </div>
           </aside>
         ) : null}
@@ -531,7 +549,7 @@ function LoadedSession({
             className="pr-12"
           />
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
-            <PanelBody tab={sheetTab ?? "queue"} session={session} state={state} />
+            <PanelBody tab={sheetTab ?? "queue"} session={session} state={state} takeRequest={takeRequest} />
           </div>
         </SheetContent>
       </Sheet>
@@ -540,8 +558,20 @@ function LoadedSession({
 }
 
 /** One panel's content: the side panel on wide screens and the sheet below share it. */
-function PanelBody({ tab, session, state }: { tab: PanelTab; session: WorkSession; state: LiveSession }) {
-  if (tab === "browser") return <WorkLivePanel key={session.id} session={session} />;
+function PanelBody({
+  tab,
+  session,
+  state,
+  takeRequest,
+}: {
+  tab: PanelTab;
+  session: WorkSession;
+  state: LiveSession;
+  /** 07.13-21: bumped by "Open and sign in", so the Browser panel takes control once the server allows it. */
+  takeRequest: number;
+}) {
+  if (tab === "browser")
+    return <WorkLivePanel key={session.id} session={session} takeRequest={takeRequest} />;
   if (tab === "changes") {
     return <ChangesPanel sessionId={session.id} live={state.changes} deviceOnline={session.deviceOnline} />;
   }

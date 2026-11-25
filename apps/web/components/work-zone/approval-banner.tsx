@@ -1,7 +1,7 @@
 "use client";
 
-import type { WorkApproval } from "@ocw/contracts";
-import { FileCode2, ShieldAlert } from "lucide-react";
+import type { WorkApproval, WorkBrowserApprovalKind } from "@ocw/contracts";
+import { FileCode2, ShieldAlert, UserRound } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,61 @@ import { Spinner } from "@/components/ui/spinner";
 import { errorMessage } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
 import { useResolveApproval } from "@/lib/workzone-queries";
+import { WorkSignInCard } from "./browser/work-signin-card";
 import { Markdown } from "./markdown";
+
+/** The in-flight turn's author: the person a member-only browser request is for (D-21, D-26). */
+export interface ApprovalAsker {
+  id: string;
+  name: string | null;
+}
+
+export interface BrowserApprovalWords {
+  kind: WorkBrowserApprovalKind;
+  /** The banner's title (unused for `signin`, which renders the sign-in card). */
+  title: string;
+  /** Whether the web offers this viewer the actions; the API still decides (PD-10). */
+  answerable: boolean;
+  /** Said instead of the actions when they are hidden. */
+  onlyLine: string | null;
+}
+
+/**
+ * The words of a browser approval and whether the web offers its actions to this viewer (07.13-21; D-11, D-21, D-26,
+ * D-34). `signin` and `signed_in_host` belong to the in-flight turn's (human) author alone, so anyone else gets no
+ * action, only who can answer; `host` and `admin_rule` keep the session's approve rule (`canDecide`). A hint from the
+ * device's `kind`: the API decides who may answer from its own state (`browserApproverRule`) and refuses the rest.
+ * Null for every other approval (rendered exactly as before).
+ */
+export function browserApprovalWords(
+  approval: WorkApproval,
+  who: { viewerId: string | null; asker: ApprovalAsker | null },
+): BrowserApprovalWords | null {
+  const b = approval.request.browser;
+  if (!b) return null;
+  const mine = who.asker !== null && who.viewerId !== null && who.viewerId === who.asker.id;
+  const member = who.asker?.name ?? "the person who asked";
+  switch (b.kind) {
+    case "signin":
+      return { kind: b.kind, title: `Sign in to ${b.origin}`, answerable: mine, onlyLine: null };
+    case "signed_in_host":
+      return {
+        kind: b.kind,
+        title: `Open ${b.origin}`,
+        answerable: mine,
+        onlyLine: mine ? null : `Only ${member} can answer this`,
+      };
+    case "host":
+      return { kind: b.kind, title: `Open ${b.origin}`, answerable: true, onlyLine: null };
+    case "admin_rule":
+      return {
+        kind: b.kind,
+        title: `Your organization asks before ${b.tool} is used`,
+        answerable: true,
+        onlyLine: null,
+      };
+  }
+}
 
 /** Sticky banner for the oldest pending approval: Approve once / Allow for session / Deny with comment. */
 export function ApprovalBanner({
@@ -20,6 +74,10 @@ export function ApprovalBanner({
   canDecide,
   agentLabel,
   deciderHint,
+  viewerId = null,
+  asker = null,
+  deviceName = "the device",
+  onOpenSignIn,
 }: {
   sessionId: string;
   approval: WorkApproval;
@@ -27,11 +85,18 @@ export function ApprovalBanner({
   canDecide: boolean;
   agentLabel: string;
   deciderHint: string;
+  /** 07.13-21: the viewer and the in-flight turn's author, for the member-only browser requests. */
+  viewerId?: string | null;
+  asker?: ApprovalAsker | null;
+  deviceName?: string;
+  /** "Open and sign in": opens the Browser tab and takes control there. */
+  onOpenSignIn?: () => void;
 }) {
   const resolve = useResolveApproval(sessionId);
   const [denying, setDenying] = useState(false);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const browser = browserApprovalWords(approval, { viewerId, asker });
 
   async function decide(decision: "once" | "session" | "deny") {
     setBusy(decision);
@@ -51,12 +116,38 @@ export function ApprovalBanner({
   }
 
   const { tool, summary, paths } = approval.request;
+  if (browser?.kind === "signin") {
+    // D-21: the agent's sign-in request, addressed to the in-flight turn's author only.
+    return (
+      <div
+        data-testid="approval-banner"
+        data-kind="signin"
+        className="mx-auto w-full max-w-3xl px-4 sm:px-6"
+        role="alertdialog"
+        aria-label={`${agentLabel} needs a sign-in`}
+      >
+        <WorkSignInCard
+          approval={approval}
+          agentLabel={agentLabel}
+          askerName={asker?.name ?? null}
+          viewerIsAsker={browser.answerable}
+          canDecline={browser.answerable && canDecide}
+          deviceName={deviceName}
+          onOpen={() => onOpenSignIn?.()}
+          onNotNow={() => void decide("deny")}
+          declining={busy === "deny"}
+        />
+      </div>
+    );
+  }
+  const decidable = canDecide && (browser?.answerable ?? true);
   return (
     <div
       data-testid="approval-banner"
+      data-kind={browser?.kind}
       className="mx-auto w-full max-w-3xl px-4 sm:px-6"
       role="alertdialog"
-      aria-label={`${agentLabel} wants to use ${tool}`}
+      aria-label={browser ? `${agentLabel}: ${browser.title}` : `${agentLabel} wants to use ${tool}`}
     >
       <div className="overflow-hidden rounded-xl border border-warning/50 bg-card shadow-lg shadow-warning/5">
         <div className="flex items-start gap-3 bg-warning/10 px-4 py-3">
@@ -65,7 +156,9 @@ export function ApprovalBanner({
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-medium text-sm">
-              {tool === "ExitPlanMode" ? (
+              {browser ? (
+                <span className="break-words">{browser.title}</span>
+              ) : tool === "ExitPlanMode" ? (
                 <>{agentLabel} has a plan and wants to start editing</>
               ) : (
                 <>
@@ -105,7 +198,15 @@ export function ApprovalBanner({
             </div>
           ) : null}
         </div>
-        {canDecide ? (
+        {browser?.onlyLine ? (
+          <p
+            data-testid="approval-only"
+            className="flex items-center gap-2 border-t px-4 py-3 text-muted-foreground text-sm"
+          >
+            <UserRound aria-hidden className="size-4 shrink-0" />
+            {browser.onlyLine}
+          </p>
+        ) : decidable ? (
           denying ? (
             <form
               className="flex flex-col gap-2 border-t px-4 py-3 sm:flex-row"
@@ -148,7 +249,8 @@ export function ApprovalBanner({
                 disabled={!!busy}
                 data-testid="allow-session"
               >
-                {busy === "session" ? <Spinner /> : null} Allow {tool} for session
+                {busy === "session" ? <Spinner /> : null}{" "}
+                {browser ? "For this session" : `Allow ${tool} for session`}
               </Button>
               <Button onClick={() => decide("once")} disabled={!!busy} data-testid="approve-once">
                 {busy === "once" ? <Spinner /> : null} Approve once
