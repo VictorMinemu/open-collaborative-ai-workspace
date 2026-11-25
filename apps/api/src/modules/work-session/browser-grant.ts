@@ -19,6 +19,7 @@ import {
 } from "@ocw/db";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { loadPrincipalFacts, type PermissionService } from "../organization";
+import { sandboxAvailable } from "../sandbox";
 import { type ApprovalFacts, loadToolApprovalPolicies, resolveToolApproval } from "../tool-approval";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
@@ -42,7 +43,10 @@ export interface BrowserAsker {
    */
   askerId: string | null;
   askerIsBot: boolean;
-  /** A bot's turn: the person it works for (`author_user_id` / `created_by`), whose unit rules also apply. */
+  /**
+   * A bot's turn: the person it works for (`author_user_id` / `created_by`), whose unit rules also apply, who must
+   * still be able to prompt the session, and for whom the bots' `browser.use` is decided (HI-05). Absent: no browser.
+   */
   onBehalfOf?: string | null;
 }
 
@@ -118,7 +122,9 @@ async function signinAllowedFor(
 /**
  * The grant of one turn, or null for a device that never reported a browser version (PD-20: an older daemon gets no
  * `browser` key at all). Reasons in order: `off_policy` (the organization's switch) before `off_device` (the device
- * owner's local opt-in) before `no_access` (a person who may no longer prompt this session).
+ * owner's local opt-in) before `no_access` (a person who may no longer prompt this session; for a bot's turn, the
+ * person it works for may not, or the bots' browser governance refuses the bot: `browser.use`, the confined tools'
+ * organization switch, the kill switch or the bot's own browser switch, HI-05).
  */
 export async function browserGrantFor(
   tx: Tx,
@@ -145,15 +151,21 @@ export async function browserGrantFor(
   if (!row.browserOptIn) return refused(a, "off_device");
   const askerId = a.askerId;
   if (askerId === null) return refused(a, "no_access");
-  if (!a.askerIsBot) {
-    const facts = await sessionFacts(tx, askerId, row);
-    const { allowed } = await perms.decide(
-      tx,
-      { kind: "user", userId: askerId },
-      "work_session.prompt",
-      facts,
-    );
-    if (!allowed) return refused(a, "no_access");
+  // The person whose turn it is, or for whom the bot works: they must still be able to prompt this session.
+  const human = a.askerIsBot ? (a.onBehalfOf ?? null) : askerId;
+  if (human === null) return refused(a, "no_access");
+  const facts = await sessionFacts(tx, human, row);
+  const prompt = await perms.decide(tx, { kind: "user", userId: human }, "work_session.prompt", facts);
+  if (!prompt.allowed) return refused(a, "no_access");
+  // HI-05 ("como los bots", principle 6): a bot's turn gets the browser only under the bots' own browser governance,
+  // the one decision `sandboxAvailable` makes for their confined browser: the resolver's `browser.use` for the bot
+  // acting for that person (module deny rules, deny rules on the bot, a disabled bot), the organization's switch for
+  // the bots' confined tools, its kill switch and the bot's own browser switch. Any refusal is `no_access`.
+  if (
+    a.askerIsBot &&
+    !(await sandboxAvailable(tx, perms, { agentId: askerId, userId: human }, "browser")).ok
+  ) {
+    return refused(a, "no_access");
   }
   const asker = { ...a, askerId };
   return {
