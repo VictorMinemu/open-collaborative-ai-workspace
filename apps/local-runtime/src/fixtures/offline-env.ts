@@ -150,6 +150,17 @@ export function assertOffline(env: Record<string, string | undefined>, caller: N
   }
 }
 
+/**
+ * The Claude recorder's cost guard for an offline run (07.13-25): an init reporting `apiKeySource:
+ * "ANTHROPIC_API_KEY"` is accepted only when that key is the fake one and the base URL it is sent to is loopback.
+ */
+export function offlineAnthropicKey(env: Record<string, string | undefined>): boolean {
+  const base = env.ANTHROPIC_BASE_URL;
+  return (
+    env.ANTHROPIC_API_KEY === OFFLINE_FAKE_ANTHROPIC_KEY && typeof base === "string" && isLoopbackUrl(base)
+  );
+}
+
 /** Creates every directory of an offline env (0700). */
 export function makeOfflineDirs(env: OfflineEnv): void {
   for (const key of OFFLINE_DIR_KEYS) mkdirSync(env[key] as string, { recursive: true, mode: 0o700 });

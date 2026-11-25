@@ -79,6 +79,43 @@ describe("buildCodexCatalog — over model/list recorded at codex-cli 0.160.0", 
   });
 });
 
+/**
+ * The pinned codex-cli 0.172.0, recorded OFFLINE (07.13-25, PD-29): `initialize` + `model/list` of the real binary
+ * with a throwaway CODEX_HOME and the fake model as its provider (`record-codex-fixture.ts --offline --scenario
+ * model-list`, no turn). With no ChatGPT account the list is the binary's bundled catalog: no Daybreak row, no
+ * `ultrafast` tier, every model on the priority tier.
+ */
+describe("buildCodexCatalog — over model/list recorded offline at codex-cli 0.172.0", () => {
+  const rec = JSON.parse(
+    readFileSync(join(import.meta.dirname, "__fixtures__", "codex-0.172.0.model-list.json"), "utf8"),
+  ) as ModelListResponse;
+  const catalog = buildCodexCatalog({
+    models: rec.data,
+    runtimeVersion: "0.172.0",
+    permissionModes: [...MODES],
+    collectedAt: "2026-11-25T12:00:00.000Z",
+  });
+  const byId = new Map(catalog.models.map((m) => [m.id, m]));
+
+  it("parses as a RuntimeCatalog with the same rules as 0.160.0", () => {
+    expect(RuntimeCatalog.parse(catalog)).toEqual(catalog);
+    expect(catalog.runtimeVersion).toBe("0.172.0");
+    expect(catalog.models.map((m) => m.id)).toEqual(rec.data.filter((m) => !m.hidden).map((m) => m.id));
+    expect(catalog.models.filter((m) => m.isDefault)).toHaveLength(1);
+    expect(byId.get("gpt-6-luna")).toBeDefined();
+    for (const m of rec.data) {
+      const row = byId.get(m.id);
+      expect(row?.efforts.map((e) => e.value)).toEqual(
+        m.supportedReasoningEfforts.map((e) => e.reasoningEffort).filter((e) => e !== "ultra"),
+      );
+      expect(row?.fastMode.supported).toBe(m.serviceTiers.some((t) => t.id === "priority"));
+      expect(row?.imageInput).toBe(m.inputModalities.includes("image"));
+      expect(row?.contextWindows).toEqual([]);
+    }
+    expect(JSON.stringify(catalog)).not.toContain("ultrafast");
+  });
+});
+
 describe("buildCodexCatalog — rows the recording does not have", () => {
   it("excludes hidden models and marks upgradable ones as legacy", () => {
     const catalog = build([

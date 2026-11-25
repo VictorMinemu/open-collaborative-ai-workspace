@@ -154,6 +154,45 @@ describe("generateClaudeTitle over the 2.1.289 recording", () => {
   });
 });
 
+/**
+ * The title turn at the pinned 2.1.332, recorded OFFLINE (07.13-25, PD-29): the real CLI against the fake model's
+ * Anthropic route with a throwaway CLAUDE_CONFIG_DIR (`record-fixture.ts --offline --scenario title`). The fake forces
+ * the title with its `[[title:…]]` rule, so the answer is the fake's, not a model's.
+ */
+const FIXTURE_332 = readFileSync(
+  join(import.meta.dirname, "__fixtures__", "claude-code-2.1.332.title.sdk.jsonl"),
+  "utf8",
+)
+  .trim()
+  .split("\n")
+  .map((l) => JSON.parse(l) as Record<string, unknown>);
+const OFFLINE_TITLE = "Redirección de login al expirar";
+
+describe("generateClaudeTitle over the 2.1.332 offline recording", () => {
+  it("returns the recorded answer; the init is Haiku 5.5 on the fake key, never a login", async () => {
+    const init = FIXTURE_332.find((m) => m.subtype === "init")!;
+    expect(init).toMatchObject({
+      claude_code_version: "2.1.332",
+      model: "claude-haiku-5-5",
+      permissionMode: "default",
+      apiKeySource: "ANTHROPIC_API_KEY",
+    });
+    expect(FIXTURE_332.filter((m) => m.type === "result")).toHaveLength(1);
+    const raw = await harness(FIXTURE_332, { resolvedModel: "claude-haiku-5-5" }).run;
+    expect(raw).toBe(OFFLINE_TITLE);
+    expect(normalizeSessionTitle(raw)).toBe(OFFLINE_TITLE);
+    expect(titleProblems(OFFLINE_TITLE)).toEqual([]);
+  });
+
+  it("the recorded turn used no tool and names no home directory", () => {
+    const blocks = FIXTURE_332.filter((m) => m.type === "assistant").flatMap(
+      (m) => (m.message as { content: Array<{ type: string }> }).content,
+    );
+    expect(blocks.map((b) => b.type)).not.toContain("tool_use");
+    expect(JSON.stringify(FIXTURE_332)).not.toMatch(/\/Users\/(?!fixture-user)|\/home\//);
+  });
+});
+
 describe("generateClaudeTitle", () => {
   it("returns the result text of a one-shot haiku query with locked-down options", async () => {
     const h = harness([

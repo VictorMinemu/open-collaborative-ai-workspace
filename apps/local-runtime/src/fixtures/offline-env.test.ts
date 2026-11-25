@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { assertOffline, isLoopbackUrl, OFFLINE_DIR_KEYS, offlineRecorderEnv } from "./offline-env.js";
+import {
+  assertOffline,
+  isLoopbackUrl,
+  OFFLINE_DIR_KEYS,
+  offlineAnthropicKey,
+  offlineRecorderEnv,
+} from "./offline-env.js";
 
 const APP = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TSX = join(APP, "node_modules", ".bin", "tsx");
@@ -66,6 +72,15 @@ describe("offlineRecorderEnv", () => {
     );
   });
 
+  it("offlineAnthropicKey accepts the fake key only against a loopback base URL (07.13-25 cost guard)", () => {
+    const env = offlineRecorderEnv({ env: caller, tmp, fakeUrl: FAKE });
+    expect(offlineAnthropicKey(env)).toBe(true);
+    expect(offlineAnthropicKey({ ...env, ANTHROPIC_BASE_URL: "https://api.anthropic.com" })).toBe(false);
+    expect(offlineAnthropicKey({ ...env, ANTHROPIC_BASE_URL: undefined })).toBe(false);
+    expect(offlineAnthropicKey({ ...env, ANTHROPIC_API_KEY: "sk-ant-real" })).toBe(false);
+    expect(offlineAnthropicKey(caller)).toBe(false);
+  });
+
   it("assertOffline rejects a real key or a home dir that left tmp", () => {
     const env = offlineRecorderEnv({ env: caller, tmp, fakeUrl: FAKE });
     expect(() => assertOffline({ ...env, OPENAI_API_KEY: "x" }, caller)).toThrow(/OPENAI_API_KEY/);
@@ -95,61 +110,69 @@ function runRecorder(
   });
 }
 
-describe.each([["record-codex-fixture.ts"], ["record-fixture.ts"]])(
-  "%s --scenario browser-mcp (canary HOME)",
-  (script) => {
-    let canary: string;
-    let env: NodeJS.ProcessEnv;
+describe.each([
+  ["record-codex-fixture.ts", ["--scenario", "browser-mcp"]],
+  ["record-fixture.ts", ["--scenario", "browser-mcp"]],
+  // 07.13-25: every pinned fixture is recorded with --offline (PD-29).
+  ["record-codex-fixture.ts", ["--offline", "--scenario", "plan-read"]],
+  ["record-codex-fixture.ts", ["--offline", "--scenario", "supervised-write"]],
+  ["record-codex-fixture.ts", ["--offline", "--scenario", "model-list"]],
+  ["record-codex-fixture.ts", ["--offline", "--scenario", "title"]],
+  ["record-fixture.ts", ["--offline", "--scenario", "catalog"]],
+  ["record-fixture.ts", ["--offline", "--scenario", "settings"]],
+  ["record-fixture.ts", ["--offline", "--scenario", "title"]],
+])("%s %j (canary HOME)", (script, scenarioArgs) => {
+  let canary: string;
+  let env: NodeJS.ProcessEnv;
 
-    beforeAll(() => {
-      canary = mkdtempSync(join(tmpdir(), "ocw-canary-home-"));
-      mkdirSync(join(canary, ".codex"));
-      mkdirSync(join(canary, ".claude"));
-      writeFileSync(join(canary, ".codex", "config.toml"), 'model = "canary-model"\n');
-      writeFileSync(join(canary, ".claude", "settings.json"), '{"canary":true}\n');
-      env = {
-        PATH: process.env.PATH,
-        HOME: canary,
-        TMPDIR: process.env.TMPDIR ?? tmpdir(),
-        OPENAI_API_KEY: "sk-canary-openai",
-        ANTHROPIC_API_KEY: "sk-ant-canary",
-        CODEX_HOME: join(canary, ".codex"),
-        CLAUDE_CONFIG_DIR: join(canary, ".claude"),
-      };
-    });
-    afterAll(() => rmSync(canary, { recursive: true, force: true }));
+  beforeAll(() => {
+    canary = mkdtempSync(join(tmpdir(), "ocw-canary-home-"));
+    mkdirSync(join(canary, ".codex"));
+    mkdirSync(join(canary, ".claude"));
+    writeFileSync(join(canary, ".codex", "config.toml"), 'model = "canary-model"\n');
+    writeFileSync(join(canary, ".claude", "settings.json"), '{"canary":true}\n');
+    env = {
+      PATH: process.env.PATH,
+      HOME: canary,
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      OPENAI_API_KEY: "sk-canary-openai",
+      ANTHROPIC_API_KEY: "sk-ant-canary",
+      CODEX_HOME: join(canary, ".codex"),
+      CLAUDE_CONFIG_DIR: join(canary, ".claude"),
+    };
+  });
+  afterAll(() => rmSync(canary, { recursive: true, force: true }));
 
-    it("--print-env prints only temp-dir paths, none under the canary HOME, and no caller key", async () => {
-      const { code, stdout, stderr } = await runRecorder(
-        script,
-        ["--scenario", "browser-mcp", "--print-env", "--fake-url", FAKE],
-        env,
-      );
-      expect(code, stderr).toBe(0);
-      const printed = JSON.parse(stdout) as Record<string, string>;
-      for (const key of ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"]) {
-        expect(printed[key], key).toBeTruthy();
-      }
-      for (const [key, value] of Object.entries(printed)) {
-        if (!value.startsWith("/")) continue;
-        expect(under(value, tmpdir()), `${key} under the OS temp dir`).toBe(true);
-        expect(under(value, canary), `${key} not under the canary HOME`).toBe(false);
-        expect(value.includes(`${canary}/.codex`) || value.includes(`${canary}/.claude`)).toBe(false);
-      }
-      expect(stdout).not.toContain("canary");
-      expect(printed.ANTHROPIC_API_KEY).toBe("ocw-fake-key");
-      expect(printed.OPENAI_API_KEY).toBeUndefined();
-    });
+  it("--print-env prints only temp-dir paths, none under the canary HOME, and no caller key", async () => {
+    const { code, stdout, stderr } = await runRecorder(
+      script,
+      [...scenarioArgs, "--print-env", "--fake-url", FAKE],
+      env,
+    );
+    expect(code, stderr).toBe(0);
+    const printed = JSON.parse(stdout) as Record<string, string>;
+    for (const key of ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"]) {
+      expect(printed[key], key).toBeTruthy();
+    }
+    for (const [key, value] of Object.entries(printed)) {
+      if (!value.startsWith("/")) continue;
+      expect(under(value, tmpdir()), `${key} under the OS temp dir`).toBe(true);
+      expect(under(value, canary), `${key} not under the canary HOME`).toBe(false);
+      expect(value.includes(`${canary}/.codex`) || value.includes(`${canary}/.claude`)).toBe(false);
+    }
+    expect(stdout).not.toContain("canary");
+    expect(printed.ANTHROPIC_API_KEY).toBe("ocw-fake-key");
+    expect(printed.OPENAI_API_KEY).toBeUndefined();
+  });
 
-    it("a non-loopback --fake-url exits non-zero before spawning anything", async () => {
-      const { code, stdout, stderr } = await runRecorder(
-        script,
-        ["--scenario", "browser-mcp", "--print-env", "--fake-url", "https://api.openai.com"],
-        env,
-      );
-      expect(code).not.toBe(0);
-      expect(stdout).toBe("");
-      expect(stderr).toMatch(/loopback/);
-    });
-  },
-);
+  it("a non-loopback --fake-url exits non-zero before spawning anything", async () => {
+    const { code, stdout, stderr } = await runRecorder(
+      script,
+      [...scenarioArgs, "--print-env", "--fake-url", "https://api.openai.com"],
+      env,
+    );
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(/loopback/);
+  });
+});
