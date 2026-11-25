@@ -102,14 +102,17 @@ export function createWorkBrowserSweeper(
   async function organizations(nowMs: number): Promise<string[]> {
     const out: string[] = [];
     let after: string | null = null;
-    const at = new Date(nowMs).toISOString();
+    // A sign-in counts once it expired before now.
+    const signinCutoff = new Date(nowMs).toISOString();
     // A lease counts once its grace passed (its holder's own live view ends it before that).
-    const lapsed = new Date(nowMs - DEAD_LEASE_GRACE_MS).toISOString();
+    const leaseCutoff = new Date(nowMs - DEAD_LEASE_GRACE_MS).toISOString();
     for (;;) {
       const rows: Array<{ organization_id: string }> = (
         await core.db.pool.query<{ organization_id: string }>(
+          // Positional (LO-05): the function's `p_now` is the LEASE cutoff (`lease_expires_at <= p_now`) and its
+          // `p_before` the SIGN-IN cutoff (`expires_at < p_before`), whatever their names suggest.
           "select organization_id from app.work_browser_sweep_organizations($1, $2, $3, $4)",
-          [lapsed, at, after, PAGE],
+          [leaseCutoff, signinCutoff, after, PAGE],
         )
       ).rows;
       out.push(...rows.map((r) => r.organization_id));
