@@ -3,7 +3,7 @@
 // The real-Chromium suite runs a real child on the fixture site; the rule suites use a scripted child.
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -416,5 +416,172 @@ describe("BrowserManager rules (07.13-12 Task 2: D-10, D-11, D-34, PD-09, PD-10)
     t.manager.onTurnEnded(t.sid, promptId);
     expect((await call).isError).toBe(true);
     expect(t.manager.pendingApprovals(t.sid)).toBe(0);
+  });
+});
+
+describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3: D-02, D-20, PD-08, PD-24)", () => {
+  const closedFrames = (t: ReturnType<typeof scripted>, sid = t.sid) =>
+    t.frames.filter((f) => f.type === "browser.event" && f.sessionId === sid && f.kind === "closed");
+
+  it("a page with no call for 10 minutes closes and says so; a call in between keeps it open", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = scripted();
+      t.turn();
+      await t.tools.call("open", { url: "http://localhost:3000/" });
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      await t.tools.call("snapshot", {});
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      expect(closedFrames(t)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      expect(closedFrames(t)).toEqual([
+        {
+          type: "browser.event",
+          sessionId: t.sid,
+          promptId: null,
+          kind: "closed",
+          origin: "http://localhost:3000",
+          action: "close",
+        },
+      ]);
+      expect(t.children[0]?.state).toBe("closed");
+      expect(t.manager.openPages).toBe(0);
+      // The next open starts a new child.
+      await t.tools.call("open", { url: "http://localhost:3000/" });
+      expect(t.children).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("browser.close closes that session's page only; endSession closes the rest", async () => {
+    const a = scripted();
+    a.turn();
+    await a.tools.call("open", { url: "http://localhost:3000/" });
+    const other = randomUUID();
+    a.manager.onPrompt(other, "q1", ALLOW);
+    a.manager.onTurnStarted(other, "q1");
+    await a.manager.forSession(other).call("open", { url: "http://localhost:4000/" });
+    await a.manager.onServerFrame({ type: "browser.close", sessionId: a.sid, reason: "revoked" });
+    expect(closedFrames(a)).toHaveLength(1);
+    expect(closedFrames(a, other)).toEqual([]);
+    expect(a.manager.openPages).toBe(1);
+    // The other frames reach the manager without error (07.13-15 and -19 add their handling).
+    await a.manager.onServerFrame({ type: "browser.frames", sessionId: other, on: true });
+    await a.manager.onServerFrame({
+      type: "browser.signin.state",
+      requestId: randomUUID(),
+      result: { ok: false, reason: "signin_not_allowed" },
+    });
+    await a.manager.endSession(other);
+    expect(closedFrames(a, other)).toHaveLength(1);
+    expect(a.manager.openPages).toBe(0);
+  });
+
+  it("a held lease answers paused at once; released works again; abandoned closes the page", async () => {
+    const t = scripted();
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    expect((await t.tools.call("snapshot", {})).summary).toBe("Refused: A person is controlling the page. Try again later.");
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "released" });
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "abandoned" });
+    expect(t.frames).toContainEqual(
+      expect.objectContaining({ type: "browser.event", kind: "takeover_abandoned", origin: "http://localhost:3000" }),
+    );
+    expect(t.manager.openPages).toBe(0);
+  });
+
+  it("the opt-in going off closes every page and the next call is refused", async () => {
+    const t = scripted();
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    t.optIn.on = false;
+    await t.manager.onOptInChanged();
+    expect(closedFrames(t)).toHaveLength(1);
+    expect(t.tools.available).toBe(false);
+    expect((await t.tools.call("open", { url: "http://localhost:3000/" })).isError).toBe(true);
+  });
+
+  it("shimCall answers with the session's own 0600 token only; the run dir is 0700 and keeps the token", async () => {
+    const t = scripted();
+    t.turn();
+    const file = await t.tools.shimTokenFile();
+    expect(file).toBe(join(t.manager.runDir(t.sid), "shim-token"));
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+    const token = readFileSync(file, "utf8").trim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    // Ensured once: the same file and token.
+    expect(await t.tools.shimTokenFile()).toBe(file);
+    expect(readFileSync(file, "utf8").trim()).toBe(token);
+
+    const ok = await t.manager.shimCall({
+      session: t.sid,
+      token,
+      tool: "open",
+      args: { url: "http://localhost:3000/" },
+    });
+    expect(ok.summary).toBe("Opened localhost:3000");
+
+    const wrong = "0".repeat(64);
+    await expect(t.manager.shimCall({ session: t.sid, token: wrong, tool: "snapshot", args: {} })).rejects.toThrow(
+      "not allowed",
+    );
+    const other = randomUUID();
+    t.manager.onPrompt(other, null, ALLOW);
+    const otherToken = readFileSync(await t.manager.forSession(other).shimTokenFile(), "utf8").trim();
+    await expect(
+      t.manager.shimCall({ session: t.sid, token: otherToken, tool: "snapshot", args: {} }),
+    ).rejects.toThrow("not allowed");
+    await expect(
+      t.manager.shimCall({ session: randomUUID(), token, tool: "snapshot", args: {} }),
+    ).rejects.toThrow("not allowed");
+
+    // The child's close leaves the token file (the shim keeps working); a removed file refuses.
+    await t.tools.call("close", {});
+    expect(readFileSync(file, "utf8").trim()).toBe(token);
+    rmSync(file);
+    await expect(t.manager.shimCall({ session: t.sid, token, tool: "snapshot", args: {} })).rejects.toThrow(
+      "not allowed",
+    );
+    // Session end removes the run dir.
+    await t.manager.endSession(other);
+    expect(existsSync(t.manager.runDir(other))).toBe(false);
+  });
+
+  it("a cold start downloads the browser with a status line in the session", async () => {
+    let installed = false;
+    const t = scripted({
+      browsers: {
+        installed: async () => (installed ? { executable: "/x", version: "156.0.8078.47" } : null),
+        install: async () => {
+          installed = true;
+          return { executable: "/x", version: "156.0.8078.47" };
+        },
+      },
+    });
+    t.turn();
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    const lines = t.events
+      .map((e) => e.event)
+      .filter((e) => e.type === "tool.started" || e.type === "tool.completed");
+    expect(lines).toEqual([
+      {
+        type: "tool.started",
+        toolUseId: expect.stringMatching(/^ocw-browser-install-/),
+        name: "ocw_browser_install",
+        summary: "Downloading the browser for first use (about 120 MB)",
+      },
+      {
+        type: "tool.completed",
+        toolUseId: (lines[0] as { toolUseId: string }).toolUseId,
+        ok: true,
+        summary: "Browser ready (156.0.8078.47)",
+      },
+    ]);
   });
 });

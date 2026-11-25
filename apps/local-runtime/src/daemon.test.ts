@@ -47,9 +47,9 @@ import { type WebSocket, WebSocketServer } from "ws";
 import { CodexSlotStore } from "./accounts/codex-slots.js";
 import type { ChildFactoryOptions, ManagedChild } from "./browser/manager.js";
 import { CodexRuntime } from "./codex/codex-runtime.js";
-import { setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
+import { setBrowserOptIn, setFullAccessOptIn, setIsolatedServer, setRuntimeUpdatesLevel } from "./config.js";
 import { type ControlRequest, controlRequest } from "./control-socket.js";
-import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toRuntimeFileUrl } from "./daemon.js";
+import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toBrowserApiUrl, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
@@ -4160,5 +4160,144 @@ describe("Work Zone browser: approvals through the daemon (07.13-12, Pitfall 7)"
     });
     expect(await server.frame("ack", (f) => f.commandId === "ar3")).toMatchObject({ ok: true });
     expect(runtime.resolved).toEqual([["ap1", "deny"]]);
+  });
+});
+
+describe("Work Zone browser: capability, lifecycle, server frames and the shim (07.13-12 Task 3)", () => {
+  const browserEvents = (sid: string, kind: string) =>
+    server.allFrames.filter((f) => f.type === "browser.event" && f.sessionId === sid && f.kind === kind);
+
+  it("hello says browser { version: 1, optIn: false } by default and no appVersion", async () => {
+    await daemon.start();
+    const hello = await server.frame("hello");
+    expect(hello.browser).toEqual({ version: 1, optIn: false });
+    expect(hello.device.appVersion).toBeUndefined();
+    expect((await server.frame("capabilities")).browser).toEqual({ version: 1, optIn: false });
+    expect((await daemon.status()).browser).toMatchObject({ optIn: false, source: "default", openPages: 0 });
+  });
+
+  it("device.appVersion carries OCW_APP_VERSION only when it is a semver", async () => {
+    await browserDaemon({ env: { OCW_APP_VERSION: "1.4.0" } });
+    await daemon.start();
+    expect((await server.frame("hello")).device.appVersion).toBe("1.4.0");
+    await browserDaemon({ env: { OCW_APP_VERSION: "1.4.0; rm -rf /" } });
+    await daemon.start();
+    await server.waitFor(() => (server.connections.length >= 2 ? true : undefined));
+    const hello = await server.waitFor(() =>
+      server.connections.at(-1)?.frames.find((f) => f.type === "hello"),
+    );
+    expect(hello.type === "hello" ? hello.device.appVersion : "x").toBeUndefined();
+  });
+
+  it("turning the opt-in on and off: capabilities follow, open pages close and the next call is refused", async () => {
+    await browserDaemon({ env: { OCW_ALLOW_BROWSER: "" } });
+    await daemon.start();
+    expect((await server.frame("hello")).browser).toEqual({ version: 1, optIn: false });
+    await setBrowserOptIn(home, true);
+    const on = await controlRequest(socketPath(), { cmd: "reloadConfig" });
+    expect(on.result).toMatchObject({ browserOptIn: true, browserOptInSource: "config" });
+    await server.frame("capabilities", (f) => f.browser?.optIn === true);
+    const sid = await browserSession();
+    const tools = daemon.browser.forSession(sid);
+    expect((await tools.call("open", { url: "http://localhost:3000/" })).isError).toBe(false);
+    await server.frame("browser.event", (f) => f.sessionId === sid && f.kind === "opened");
+    await setBrowserOptIn(home, false);
+    await controlRequest(socketPath(), { cmd: "reloadConfig" });
+    await server.frame("capabilities", (f) => f.browser?.optIn === false);
+    await server.frame("browser.event", (f) => f.sessionId === sid && f.kind === "closed");
+    expect((await tools.call("open", { url: "http://localhost:3000/" })).summary).toBe(
+      "Refused: The browser is not available in this session.",
+    );
+  });
+
+  it("at start, run dirs of sessions that are not alive are removed", async () => {
+    const stale = join(home, "browsers", "run", randomUUID());
+    mkdirSync(join(stale, "profile"), { recursive: true });
+    writeFileSync(join(stale, "profile", "Cookies"), "x");
+    await daemon.start();
+    await server.frame("hello");
+    expect(existsSync(stale)).toBe(false);
+  });
+
+  it("session.stop closes the session's page; browser.close closes only its own session's", async () => {
+    await browserDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    const a = await browserSession();
+    runtime.promptHold = null;
+    const b = await browserSession();
+    await daemon.browser.forSession(a).call("open", { url: "http://localhost:3000/" });
+    await daemon.browser.forSession(b).call("open", { url: "http://localhost:4000/" });
+    server.push({ type: "browser.frames", sessionId: b, on: true });
+    server.push({ type: "browser.close", sessionId: a, reason: "revoked" });
+    await server.frame("browser.event", (f) => f.sessionId === a && f.kind === "closed");
+    expect(browserEvents(b, "closed")).toEqual([]);
+    server.send({ id: "stop-b", kind: "session.stop", sessionId: b });
+    await server.frame("ack", (f) => f.commandId === "stop-b");
+    await server.frame("browser.event", (f) => f.sessionId === b && f.kind === "closed");
+    // No browser frame was queued as a command or acked.
+    expect(server.allFrames.filter((f) => f.type === "ack" && f.commandId.startsWith("browser"))).toEqual([]);
+  });
+
+  it("browserCall: the session's token answers the tool result; another token, a missing file or an extra key are refused", async () => {
+    await browserDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    const sid = await browserSession();
+    const file = await daemon.browser.forSession(sid).shimTokenFile();
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    const token = readFileSync(file, "utf8").trim();
+    const ok = await controlRequest(socketPath(), {
+      cmd: "browserCall",
+      session: sid,
+      token,
+      tool: "open",
+      args: { url: "http://localhost:3000/" },
+    });
+    expect(ok).toMatchObject({ ok: true, result: { summary: "Opened localhost:3000", isError: false } });
+
+    const other = await browserSession();
+    const otherToken = readFileSync(await daemon.browser.forSession(other).shimTokenFile(), "utf8").trim();
+    const wrong = await controlRequest(socketPath(), {
+      cmd: "browserCall",
+      session: sid,
+      token: otherToken,
+      tool: "snapshot",
+      args: {},
+    });
+    expect(wrong).toMatchObject({ ok: false, error: "not allowed" });
+    const extra = await controlRequest(socketPath(), {
+      cmd: "browserCall",
+      session: sid,
+      token,
+      tool: "snapshot",
+      args: {},
+      cwd: "/",
+    } as unknown as ControlRequest);
+    expect(extra).toMatchObject({ ok: false, error: "invalid request" });
+    rmSync(file);
+    const missing = await controlRequest(socketPath(), {
+      cmd: "browserCall",
+      session: sid,
+      token,
+      tool: "snapshot",
+      args: {},
+    });
+    expect(missing).toMatchObject({ ok: false, error: "not allowed" });
+    expect(JSON.stringify(server.allFrames)).not.toContain(token);
+  });
+
+  it("the browser's PUT goes only to a sign-in route with uuid ids, under the device JWT", async () => {
+    expect(() => toBrowserApiUrl("https://ocw.example/x", "/api/v1/runtime/files/abc")).toThrow();
+    expect(() =>
+      toBrowserApiUrl("https://ocw.example", "/api/v1/runtime/browser-signins/uploads/../../devices/token"),
+    ).toThrow();
+    const id = randomUUID();
+    expect(toBrowserApiUrl("https://ocw.example/x", `/api/v1/runtime/browser-signins/uploads/${id}`)).toBe(
+      `https://ocw.example/x/api/v1/runtime/browser-signins/uploads/${id}`,
+    );
+    expect(toBrowserApiUrl("https://ocw.example", `/api/v1/runtime/browser-signins/${id}/state`)).toBe(
+      `https://ocw.example/api/v1/runtime/browser-signins/${id}/state`,
+    );
   });
 });
