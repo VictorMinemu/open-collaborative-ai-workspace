@@ -366,7 +366,8 @@ GRANT EXECUTE ON FUNCTION app.purge_browser_sessions(timestamptz) TO ocw_app;
 -- - `work_browser_sweep_organizations` lists the organizations that have a Work Zone sign-in that expired before
 --   `p_before` or a session browser's takeover lease that lapsed at `p_now` (its holding API instance died, nobody
 --   released it); ids only, keyset-paged by id, at most 1000. The API then works inside each organization's own
---   withTenant() transaction;
+--   withTenant() transaction. The API passes the lease cutoff (now minus the dead-lease grace) as `p_now` and the
+--   sign-in cutoff (now) as `p_before` (07.13 review LO-05: the names are kept, a rename needs a DROP FUNCTION);
 -- - `purge_work_browser_signins` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
 --   transaction, never an argument), the member sign-ins that expired before `p_before`, past the owner-only policy no
 --   user-less session could cross. Their sealed secrets go with them (`work_browser_signin_secret_cleanup`) and a

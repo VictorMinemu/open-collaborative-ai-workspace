@@ -8,9 +8,10 @@ import {
 import { type Tx, workBrowsers, workPrompts, workSessions } from "@ocw/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { DeviceRef } from "../device";
+import type { DeviceRef, SendResult } from "../device";
 import type { PermissionService } from "../organization";
 import { browserGrantFor } from "../work-session";
+import { announceLease } from "./lease";
 import { type OpenedSignIn, openWorkSignIn, siteKeyOfOrigin } from "./signins";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -97,11 +98,16 @@ export async function decideSignInLoad(
  * The state is held only by the reply frame: it is never assigned to anything that is logged, and every failure is
  * logged by its error name only.
  */
-export function onSignInLoad(core: Core, perms: PermissionService) {
+export function onSignInLoad(
+  core: Core,
+  perms: PermissionService,
+  /** MD-02: this instance's live view learns of the load at once (the other instances through the announcement). */
+  loaded: (organizationId: string, sessionId: string, userId: string) => void = () => {},
+) {
   return async (
     device: DeviceRef,
     frame: BrowserSignInLoadFrame,
-    reply: (frame: BrowserServerFrame) => void,
+    reply: (frame: BrowserServerFrame) => SendResult,
   ): Promise<void> => {
     const answer = (result: BrowserSignInStateFrame["result"]) =>
       reply({ type: "browser.signin.state", requestId: frame.requestId, result });
@@ -169,14 +175,29 @@ export function onSignInLoad(core: Core, perms: PermissionService) {
       answer({ ok: false, reason: "signin_expired" });
       return;
     }
+    // MD-02 (D-27): the page is private for everyone but the member BEFORE the device has the state: this instance's
+    // viewers at once, every other instance on the announcement (ids only; the 1 s poll stays the backstop).
+    loaded(device.organizationId, frame.sessionId, member.userId);
+    await announceLease(core.bus, device.organizationId, frame.sessionId);
+    let sent: SendResult | "invalid";
     try {
-      answer({ ok: true, signinId: opened.signinId, state: opened.state, expiresAt: opened.expiresAt });
+      sent = answer({
+        ok: true,
+        signinId: opened.signinId,
+        state: opened.state,
+        expiresAt: opened.expiresAt,
+      });
     } catch (err) {
-      // Not sent (the frame did not validate): the page holds nothing, so nothing stays recorded as loaded.
       failed(err, "reply");
-      await clearLoaded(core, device, frame.sessionId, opened.signinId).catch(() => {});
-      answer({ ok: false, reason: "too_large" });
+      sent = "invalid";
     }
+    if (sent === "sent") return;
+    // Not sent (the frame did not validate or did not fit, or the socket closed meanwhile, MD-01): no device holds the
+    // state, so nothing stays recorded as loaded, and every live view reads the page again.
+    if (sent === "closed") failed(new Error("socket closed"), "reply");
+    await clearLoaded(core, device, frame.sessionId, opened.signinId).catch(() => {});
+    await announceLease(core.bus, device.organizationId, frame.sessionId);
+    if (sent !== "closed") answer({ ok: false, reason: "too_large" });
   };
 }
 

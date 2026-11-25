@@ -28,6 +28,7 @@ import {
   endWorkLease,
   keepWorkLease,
   markWorkLeaseInput,
+  pageTakeableBy,
   parseLeaseAnnouncement,
   TAKEOVER_MS,
   TAKEOVER_WARN_MS,
@@ -74,10 +75,11 @@ import type { LiveRelay } from "./live-relay";
  *
  * The privacy gate (D-20, D-27, PD-13) decides per viewer from the session's `work_browsers` row, polled every second
  * while watched, and is asked again by `FrameSlot` at the moment a frame is written (a frame that waited while the page
- * turned private is dropped):
- * - **takeover:** while `lease_id` is set, frames go only to the socket registered for that lease
- *   (`registerLeaseSocket`, 07.13-18); every other viewer, the holder's other sockets included, gets `private`
- *   (`takeover`). A lease no socket here registered (held on another instance) lets nothing through here;
+ * turned private is dropped). The member sign-in is decided first (HI-03): a lease never shows a member's signed-in page
+ * to anyone else.
+ * - **takeover:** while `lease_id` is set (or a lease was just taken here, MD-02), frames go only to the socket that
+ *   took it with `take` (07.13-18); every other viewer, the holder's other sockets included, gets `private`
+ *   (`takeover`). A lease no socket here took (held on another instance) lets nothing through here;
  * - **member sign-in:** while `signin_user_id` is M, only M's sockets get frames; the others get `private`
  *   (`member_session`) with M's display name, never the page's host;
  * - **ended:** a closed row ends every viewer (`ended` with the reason of the page's last close) and closes 1000.
@@ -119,17 +121,15 @@ export interface WorkLiveHub {
   /** A frame of `sessionId` from the device link of this instance (the module checked it runs on that device). */
   onFrame(organizationId: string, frame: WorkBrowserFrame): void;
   /**
-   * 07.13-18: the socket `viewerId` (a viewer of `sessionId` on this instance) holds lease `leaseId`: while the row's
-   * `lease_id` is that lease, only this socket receives frames. False when no such viewer is here.
-   */
-  registerLeaseSocket(sessionId: string, leaseId: string, viewerId: string): boolean;
-  /** 07.13-18: this instance holds no socket for the session's lease any more. */
-  clearLeaseSocket(sessionId: string): void;
-  /**
    * 07.13-18 (D-20): the device's focus hint for lease `leaseId` (the module checked the session runs on that device):
    * sent to the holder's socket only (here, or on the instance holding it); a stale lease's reaches nobody.
    */
   onFocus(organizationId: string, frame: BrowserFocusFrame): Promise<void>;
+  /**
+   * MD-02 (D-27): a member's sign-in was just recorded on the session's page (the load committed): every viewer here
+   * but that member goes private at once, before the device receives the state; the row is then read again.
+   */
+  onSignInLoaded(organizationId: string, sessionId: string, userId: string): void;
   /** 07.13-18: ends idle leases (10 minutes without input) and warns their holder at 9 (tests pass a clock). */
   sweep(nowMs?: number): Promise<void>;
   /** Sends every open viewer its current state frame again (the client's liveness signal). */
@@ -395,8 +395,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       const read = await perms.decide(tx, user, "work_session.read", facts);
       if (!read.allowed) return none;
       const prompt = (await perms.decide(tx, user, "work_session.prompt", facts)).allowed;
-      // D-20: only the person whose turn it is (in flight, else the last one) takes control.
-      const control = prompt && (await askerOf(tx, v.entry.sessionId)) === auth.userId;
+      // D-20: only the person whose turn it is (in flight, else the last one) takes control; HI-03: never a page that
+      // holds another member's sign-in.
+      const control =
+        prompt &&
+        (await askerOf(tx, v.entry.sessionId)) === auth.userId &&
+        (await pageTakeableBy(tx, v.entry.sessionId, auth.userId));
       return { watch: true, prompt, control };
     });
   }
@@ -458,9 +462,25 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         close: LIVE_CLOSE.ended,
       };
     }
-    if (page.leaseId) {
-      const lease = v.entry.lease;
-      if (lease && lease.leaseId === page.leaseId && lease.viewer === v) {
+    if (page.signinUserId && page.signinUserId !== v.auth.userId) {
+      // D-27: a member's signed-in page is theirs alone; the others learn who, not where. HI-03: decided before the
+      // lease, so a lease holder who is not that member never gets the frames of their signed-in page either.
+      return {
+        frame: {
+          ...base,
+          state: "private",
+          privateReason: "member_session",
+          ...(view.memberName ? { memberName: view.memberName.slice(0, 200) } : {}),
+        },
+        frames: false,
+        close: null,
+      };
+    }
+    // MD-02: a lease taken here is private from the moment it is taken, before the row's next read shows it.
+    const local = v.entry.lease;
+    const leaseId = page.leaseId ?? local?.leaseId ?? null;
+    if (leaseId) {
+      if (local && local.leaseId === leaseId && local.viewer === v) {
         return {
           frame: { ...base, ...hostOf(page.origin), state: "controlling", controller: "self" },
           frames: true,
@@ -475,19 +495,6 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           privateReason: "takeover",
           controller: page.controllerUserId === v.auth.userId ? "other_device" : "other",
           ...(view.controllerName ? { memberName: view.controllerName.slice(0, 200) } : {}),
-        },
-        frames: false,
-        close: null,
-      };
-    }
-    if (page.signinUserId && page.signinUserId !== v.auth.userId) {
-      // D-27: a member's signed-in page is theirs alone; the others learn who, not where.
-      return {
-        frame: {
-          ...base,
-          state: "private",
-          privateReason: "member_session",
-          ...(view.memberName ? { memberName: view.memberName.slice(0, 200) } : {}),
         },
         frames: false,
         close: null,
@@ -672,6 +679,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     const l = newLease(v, taken.lease.leaseId, taken.lease.deviceId, true);
     l.expiresAtMs = Date.parse(taken.lease.expiresAt);
     e.lease = l;
+    // MD-02: every viewer here goes private now, before the device or the holder hears of the lease (the row says so
+    // from the commit on; this instance's copy of it is patched instead of waiting for the next read).
+    if (e.view?.page) {
+      e.view.page = { ...e.view.page, leaseId: l.leaseId, controllerUserId: auth.userId };
+    }
+    for (const viewer of e.viewers) pushState(viewer);
     if (v.closed) {
       await endLease(e, "closed");
       return;
@@ -683,6 +696,8 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         sessionId: e.sessionId,
         leaseId: l.leaseId,
         state: "held",
+        // HI-03: the device checks the holder against a loaded sign-in itself (defence in depth behind the take).
+        holderUserId: auth.userId,
       })
       .catch(() => "closed" as const);
     if (sent === "closed" || sent === "too_large" || sent === "unsupported") {
@@ -690,8 +705,9 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       sendJson(v, { type: "refused", op: "take", reason: "expired" });
       return;
     }
-    sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
+    // The other instances re-read the row before the holder may type (MD-02; the poll stays the backstop).
     await announceLease(core.bus, e.orgId, e.sessionId);
+    sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
     refresh(e);
   }
 
@@ -725,10 +741,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     if (l.inputs.length >= INPUT_QUEUE_MAX) return;
     l.inputs.push(event);
     const now = Date.now();
-    // 10 minutes after the latest input; the row learns it at most every 30 s (the sweep's grace covers the gap).
+    // 10 minutes after the latest input; the row learns it at most every 30 s (the sweep's grace covers the gap). Any
+    // input counts, pointer moves and scrolls included (LO-01): a holder who only looks around is still active, and
+    // the shared sweep reads the row, not this instance's clock.
     l.expiresAtMs = now + TAKEOVER_MS;
     l.warned = false;
-    if (l.inputMarked && now - l.lastKeepMs >= KEEP_EVERY_MS) {
+    if (now - l.lastKeepMs >= KEEP_EVERY_MS) {
       l.lastKeepMs = now;
       void onKeep(v, now).catch(() => {});
     }
@@ -1089,25 +1107,6 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           log.warn({ sessionId: frame.sessionId, error: name(err) }, "work live view frame publish failed"),
         );
     },
-    registerLeaseSocket(sessionId, leaseId, viewerId) {
-      for (const e of entries.values()) {
-        if (e.sessionId !== sessionId.toLowerCase()) continue;
-        const viewer = [...e.viewers].find((v) => v.id === viewerId && !v.closed);
-        if (!viewer) continue;
-        if (e.lease) dropLease(e, e.lease);
-        e.lease = newLease(viewer, leaseId, e.view?.deviceId ?? null, false);
-        for (const v of e.viewers) pushState(v);
-        return true;
-      }
-      return false;
-    },
-    clearLeaseSocket(sessionId) {
-      for (const e of entries.values()) {
-        if (e.sessionId !== sessionId.toLowerCase() || !e.lease) continue;
-        dropLease(e, e.lease);
-        for (const v of e.viewers) pushState(v);
-      }
-    },
     async onFocus(organizationId, frame) {
       if (deliverFocus(organizationId, frame.sessionId, frame.leaseId, frame.sensitive)) return;
       // The holder's socket may be on another instance: ids and the flag only (never a field's value or name).
@@ -1117,6 +1116,20 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           JSON.stringify({ o: organizationId, s: frame.sessionId, l: frame.leaseId, f: frame.sensitive }),
         )
         .catch(() => {});
+    },
+    onSignInLoaded(organizationId, sessionId, userId) {
+      const e = entries.get(keyOf(organizationId, sessionId));
+      if (!e?.view) return;
+      const page: PageRow = e.view.page ?? {
+        state: "open",
+        origin: null,
+        leaseId: null,
+        controllerUserId: null,
+        signinUserId: null,
+      };
+      e.view.page = { ...page, signinUserId: userId };
+      for (const v of e.viewers) pushState(v);
+      refresh(e);
     },
     sweep,
     heartbeat,

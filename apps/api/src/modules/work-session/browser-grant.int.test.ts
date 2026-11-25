@@ -298,8 +298,22 @@ describe("admin rule modes, the sign-in audience and the session's browser state
         [orgId],
       )
     ).rows[0].id as string;
+    // HI-05: a bot's turn is decided by the bots' browser governance (here all on), for the person it works for.
+    await su.query(
+      "insert into app.sandbox_policies (organization_id, enabled) values ($1, true) on conflict (organization_id) do update set enabled = true, killed_at = null",
+      [orgId],
+    );
+    await su.query(
+      "update app.agents set capabilities = capabilities || jsonb_build_object('browser', true) where id = $1",
+      [agentId],
+    );
     const asBot = await db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
-      browserGrantFor(tx, perms, { sessionId: danaSid, askerId: agentId, askerIsBot: true }),
+      browserGrantFor(tx, perms, {
+        sessionId: danaSid,
+        askerId: agentId,
+        askerIsBot: true,
+        onBehalfOf: danaId,
+      }),
     );
     expect(asBot).toMatchObject({ allowed: true, askerId: agentId, askerIsBot: true, signinAllowed: false });
     // A person's turn in a session a bot started.
@@ -308,6 +322,91 @@ describe("admin rule modes, the sign-in audience and the session's browser state
     expect((await grantOf(dana, sid)).signinAllowed).toBe(true);
     await su.query("update app.work_sessions set started_by_agent_id = $2 where id = $1", [sid, agentId]);
     expect((await grantOf(dana, sid)).signinAllowed).toBe(false);
+  });
+
+  it("HI-05: a bot's turn gets the browser only under the bots' browser governance and its sponsor's prompt right", async () => {
+    const { db } = stack.built.core;
+    const perms = createPermissionService(stack.built.core);
+    const roverId = (
+      await su.query(
+        "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id, capabilities) values ($1, 'Rover', 'rover', 'Help', 'mock', 'mock-1', '{\"browser\": true}'::jsonb) returning id",
+        [orgId],
+      )
+    ).rows[0].id as string;
+    const policy = (sql: string) =>
+      su.query(`update app.sandbox_policies set ${sql} where organization_id = $1`, [orgId]);
+    await su.query(
+      "insert into app.sandbox_policies (organization_id, enabled) values ($1, true) on conflict (organization_id) do update set enabled = true, killed_at = null",
+      [orgId],
+    );
+    const grant = (onBehalfOf: string | null = danaId) =>
+      db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        browserGrantFor(tx, perms, { sessionId: danaSid, askerId: roverId, askerIsBot: true, onBehalfOf }),
+      );
+    const refusedNoAccess = { allowed: false, reason: "no_access", askerIsBot: true, signinAllowed: false };
+
+    // Everything on: allowed (never a sign-in for a bot).
+    expect(await grant()).toMatchObject({
+      allowed: true,
+      reason: "ok",
+      askerId: roverId,
+      signinAllowed: false,
+    });
+    // A bot turn with no person it works for.
+    expect(await grant(null)).toMatchObject(refusedNoAccess);
+
+    // The organization's switch for the bots' confined tools, then its kill switch.
+    await policy("enabled = false");
+    expect(await grant()).toMatchObject(refusedNoAccess);
+    await policy("enabled = true, killed_at = now()");
+    expect(await grant()).toMatchObject(refusedNoAccess);
+    await policy("killed_at = null");
+    expect(await grant()).toMatchObject({ allowed: true });
+
+    // The bot's own browser switch.
+    await su.query(
+      "update app.agents set capabilities = capabilities || '{\"browser\": false}'::jsonb where id = $1",
+      [roverId],
+    );
+    expect(await grant()).toMatchObject(refusedNoAccess);
+    await su.query(
+      "update app.agents set capabilities = capabilities || '{\"browser\": true}'::jsonb where id = $1",
+      [roverId],
+    );
+
+    // A disabled bot, then an explicit deny of `browser.use` for the bot (principle 6: deny wins).
+    await su.query("update app.agents set status = 'disabled' where id = $1", [roverId]);
+    expect(await grant()).toMatchObject(refusedNoAccess);
+    await su.query("update app.agents set status = 'ready' where id = $1", [roverId]);
+    const deny = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "agent",
+        subjectId: roverId,
+        permission: "browser.use",
+        effect: "deny",
+      }),
+    );
+    try {
+      expect(await grant()).toMatchObject(refusedNoAccess);
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/permission-rules/${deny.id as string}`));
+    }
+
+    // The sponsor may no longer prompt the session.
+    const noPrompt = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: danaId,
+        permission: "work_session.prompt",
+        effect: "deny",
+      }),
+    );
+    try {
+      expect(await grant()).toMatchObject(refusedNoAccess);
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/permission-rules/${noPrompt.id as string}`));
+    }
+    expect(await grant()).toMatchObject({ allowed: true });
   });
 
   it("GET /work-sessions/:id shows the browser state from policy, opt-in and capability; live from an open page", async () => {

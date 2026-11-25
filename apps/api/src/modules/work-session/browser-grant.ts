@@ -2,6 +2,7 @@ import {
   browserToolFromName,
   canonicalBrowserTool,
   type SessionBrowserGrant,
+  WORK_BROWSER_AUDIT,
   WorkBrowserApprovalRequest,
   WorkBrowserTool,
   type WorkSessionBrowserState,
@@ -9,6 +10,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  auditEvents,
   devices,
   orgUnits,
   type Tx,
@@ -17,8 +19,10 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, max, sql } from "drizzle-orm";
+import { loadDeviceAccess } from "../device";
 import { loadPrincipalFacts, type PermissionService } from "../organization";
+import { sandboxAvailable } from "../sandbox";
 import { type ApprovalFacts, loadToolApprovalPolicies, resolveToolApproval } from "../tool-approval";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
@@ -42,7 +46,10 @@ export interface BrowserAsker {
    */
   askerId: string | null;
   askerIsBot: boolean;
-  /** A bot's turn: the person it works for (`author_user_id` / `created_by`), whose unit rules also apply. */
+  /**
+   * A bot's turn: the person it works for (`author_user_id` / `created_by`), whose unit rules also apply, who must
+   * still be able to prompt the session, and for whom the bots' `browser.use` is decided (HI-05). Absent: no browser.
+   */
   onBehalfOf?: string | null;
 }
 
@@ -102,14 +109,32 @@ async function ruleModes(
 /**
  * D-24, D-32: a member's sign-in may load only in a human session (not started by a bot) on a human turn, and only
  * while everyone who sees the session (`app.work_session_viewers`, the SQL audience rule) is the asker or the device
- * owner. Admins are never enumerated there for being admins.
+ * owner. Admins are never enumerated there for being admins. D-29 (07.13 review MD-03): and only on a device the
+ * member may use for Work Zone sessions themselves (their own cap on it: owner or a live grant), never through the
+ * session alone.
  */
 async function signinAllowedFor(
   tx: Tx,
   a: BrowserAsker & { askerId: string },
-  s: { startedByAgentId: string | null; deviceOwner: string },
+  s: {
+    startedByAgentId: string | null;
+    deviceId: string;
+    deviceOwner: string;
+    deviceShared: boolean;
+    deviceShareMaxMode: typeof devices.$inferSelect.shareMaxMode;
+    deviceRevokedAt: typeof devices.$inferSelect.revokedAt;
+  },
 ): Promise<boolean> {
   if (a.askerIsBot || s.startedByAgentId !== null) return false;
+  const access = await loadDeviceAccess(tx, a.askerId);
+  const cap = access.capOf({
+    id: s.deviceId,
+    ownerUserId: s.deviceOwner,
+    shared: s.deviceShared,
+    shareMaxMode: s.deviceShareMaxMode,
+    revokedAt: s.deviceRevokedAt,
+  });
+  if (cap === null) return false;
   const res = await tx.execute(sql`select user_id from app.work_session_viewers(${a.sessionId}::uuid)`);
   const viewers = (res.rows as Array<{ user_id: string }>).map((r) => r.user_id);
   return viewers.every((v) => v === a.askerId || v === s.deviceOwner);
@@ -118,7 +143,9 @@ async function signinAllowedFor(
 /**
  * The grant of one turn, or null for a device that never reported a browser version (PD-20: an older daemon gets no
  * `browser` key at all). Reasons in order: `off_policy` (the organization's switch) before `off_device` (the device
- * owner's local opt-in) before `no_access` (a person who may no longer prompt this session).
+ * owner's local opt-in) before `no_access` (a person who may no longer prompt this session; for a bot's turn, the
+ * person it works for may not, or the bots' browser governance refuses the bot: `browser.use`, the confined tools'
+ * organization switch, the kill switch or the bot's own browser switch, HI-05).
  */
 export async function browserGrantFor(
   tx: Tx,
@@ -132,6 +159,9 @@ export async function browserGrantFor(
       deviceId: workSessions.deviceId,
       startedByAgentId: workSessions.startedByAgentId,
       deviceOwner: devices.ownerUserId,
+      deviceShared: devices.shared,
+      deviceShareMaxMode: devices.shareMaxMode,
+      deviceRevokedAt: devices.revokedAt,
       browserVersion: devices.browserVersion,
       browserOptIn: devices.browserOptIn,
     })
@@ -145,15 +175,21 @@ export async function browserGrantFor(
   if (!row.browserOptIn) return refused(a, "off_device");
   const askerId = a.askerId;
   if (askerId === null) return refused(a, "no_access");
-  if (!a.askerIsBot) {
-    const facts = await sessionFacts(tx, askerId, row);
-    const { allowed } = await perms.decide(
-      tx,
-      { kind: "user", userId: askerId },
-      "work_session.prompt",
-      facts,
-    );
-    if (!allowed) return refused(a, "no_access");
+  // The person whose turn it is, or for whom the bot works: they must still be able to prompt this session.
+  const human = a.askerIsBot ? (a.onBehalfOf ?? null) : askerId;
+  if (human === null) return refused(a, "no_access");
+  const facts = await sessionFacts(tx, human, row);
+  const prompt = await perms.decide(tx, { kind: "user", userId: human }, "work_session.prompt", facts);
+  if (!prompt.allowed) return refused(a, "no_access");
+  // HI-05 ("como los bots", principle 6): a bot's turn gets the browser only under the bots' own browser governance,
+  // the one decision `sandboxAvailable` makes for their confined browser: the resolver's `browser.use` for the bot
+  // acting for that person (module deny rules, deny rules on the bot, a disabled bot), the organization's switch for
+  // the bots' confined tools, its kill switch and the bot's own browser switch. Any refusal is `no_access`.
+  if (
+    a.askerIsBot &&
+    !(await sandboxAvailable(tx, perms, { agentId: askerId, userId: human }, "browser")).ok
+  ) {
+    return refused(a, "no_access");
   }
   const asker = { ...a, askerId };
   return {
@@ -164,6 +200,15 @@ export async function browserGrantFor(
     ...(await ruleModes(tx, asker)),
     signinAllowed: await signinAllowedFor(tx, asker, row),
   };
+}
+
+/** 07.13 review MD-03: the open pages of the transaction's organization and their sessions' devices (ids only). */
+export async function openBrowserPages(tx: Tx): Promise<Array<{ sessionId: string; deviceId: string }>> {
+  return tx
+    .select({ sessionId: workBrowsers.workSessionId, deviceId: workSessions.deviceId })
+    .from(workBrowsers)
+    .innerJoin(workSessions, eq(workSessions.id, workBrowsers.workSessionId))
+    .where(eq(workBrowsers.state, "open"));
 }
 
 /**
@@ -206,6 +251,11 @@ function isBrowserToolName(tool: string): boolean {
   return short !== null && short !== tool;
 }
 
+/** An approval of the browser: a browser part, or a browser tool's name. */
+function isBrowserRequest(request: { tool: string; browser?: unknown }): boolean {
+  return browserRequestOf(request.browser) !== null || isBrowserToolName(request.tool);
+}
+
 /**
  * Who may answer an approval: `approve_permission` = whoever has `work_session.approve` (today's rule); `{ only }` =
  * that person alone, after the same check (`only: null` = nobody: the device's own timeout decides).
@@ -217,7 +267,13 @@ export type BrowserApprover = "approve_permission" | { only: string | null };
  *
  * - A browser approval while a member's sign-in is loaded on the session's page (`work_browsers.signin_user_id`) is
  *   that member's: the page is locked to their site and another host needs their approval (D-26), whatever kind the
- *   device named. `signed_in_host` with no loaded sign-in has nobody.
+ *   device named.
+ * - HI-04 (D-26, the bots' sticky member-data rule, `agent-channel/browser.ts`): once a member's sign-in loaded in the
+ *   session's in-flight turn (the API's own `work_browser.signin_loaded` record of that load, since the turn was
+ *   dispatched), every browser approval of the rest of that turn is that member's too, even after the page unloaded
+ *   it: what the agent read there stays in the turn, so leaving for another host is the member's call. A sign-in loads
+ *   only in its member's own human turn (D-24), so that member is the turn's author.
+ * - `signed_in_host` with neither has nobody.
  * - `signin` belongs to the author of the session's in-flight prompt (D-21); a bot's turn, or no turn, has nobody.
  * - `host`, `admin_rule` and every other approval keep the existing `work_session.approve` rule.
  */
@@ -226,28 +282,92 @@ export async function browserApproverRule(
   session: { id: string },
   request: { tool: string; browser?: unknown },
 ): Promise<BrowserApprover> {
-  const browser = browserRequestOf(request.browser);
-  if (!browser && !isBrowserToolName(request.tool)) return "approve_permission";
-  if (browser?.kind === "signin") {
-    const [p] = await tx
-      .select({ userId: workPrompts.authorUserId, agentId: workPrompts.authorAgentId })
-      .from(workPrompts)
-      .where(
-        and(
-          eq(workPrompts.workSessionId, session.id),
-          inArray(workPrompts.status, ["dispatched", "running"]),
-        ),
-      )
-      .orderBy(desc(workPrompts.dispatchedAt))
-      .limit(1);
-    return approverOn(request, { inFlight: p ?? null, signinUserId: null });
-  }
+  if (!isBrowserRequest(request)) return "approve_permission";
+  const prompts = await inFlightPrompts(tx, [session.id]);
   const [page] = await tx
     .select({ signinUserId: workBrowsers.signinUserId })
     .from(workBrowsers)
     .where(eq(workBrowsers.workSessionId, session.id))
     .limit(1);
-  return approverOn(request, { inFlight: null, signinUserId: page?.signinUserId ?? null });
+  const memberData = await memberDataTurns(tx, prompts);
+  return approverOn(request, {
+    inFlight: prompts.get(session.id) ?? null,
+    signinUserId: page?.signinUserId ?? null,
+    memberDataUserId: memberData.get(session.id) ?? null,
+  });
+}
+
+interface InFlightPrompt {
+  userId: string;
+  agentId: string | null;
+  dispatchedAtMs: number | null;
+}
+
+/** The in-flight prompt of each session (the most recently dispatched one still running). */
+async function inFlightPrompts(tx: Tx, sessionIds: readonly string[]): Promise<Map<string, InFlightPrompt>> {
+  const rows = await tx
+    .select({
+      sessionId: workPrompts.workSessionId,
+      userId: workPrompts.authorUserId,
+      agentId: workPrompts.authorAgentId,
+      dispatchedAt: workPrompts.dispatchedAt,
+    })
+    .from(workPrompts)
+    .where(
+      and(
+        inArray(workPrompts.workSessionId, [...sessionIds]),
+        inArray(workPrompts.status, ["dispatched", "running"]),
+      ),
+    )
+    .orderBy(desc(workPrompts.dispatchedAt));
+  const out = new Map<string, InFlightPrompt>();
+  // Most recently dispatched first: the first row per session is its in-flight prompt.
+  for (const r of rows) {
+    if (out.has(r.sessionId)) continue;
+    out.set(r.sessionId, {
+      userId: r.userId,
+      agentId: r.agentId,
+      dispatchedAtMs: r.dispatchedAt ? Date.parse(String(r.dispatchedAt)) : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * HI-04: the sessions whose in-flight human turn loaded its author's sign-in (a `work_browser.signin_loaded` audit row
+ * of that session and that member, written in the load's own transaction, since the turn was dispatched), with that
+ * member. One read for all the sessions, bounded below by the earliest dispatch.
+ */
+async function memberDataTurns(
+  tx: Tx,
+  prompts: ReadonlyMap<string, InFlightPrompt>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const human = [...prompts].filter(([, p]) => p.agentId === null);
+  if (human.length === 0) return out;
+  const since = Math.min(...human.map(([, p]) => p.dispatchedAtMs ?? 0));
+  const rows = await tx
+    .select({ sessionId: auditEvents.sessionId, userId: auditEvents.userId, at: max(auditEvents.occurredAt) })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.action, WORK_BROWSER_AUDIT.signin_loaded),
+        inArray(
+          auditEvents.sessionId,
+          human.map(([id]) => id),
+        ),
+        gte(auditEvents.occurredAt, new Date(since).toISOString()),
+      ),
+    )
+    .groupBy(auditEvents.sessionId, auditEvents.userId);
+  for (const r of rows) {
+    const p = r.sessionId ? prompts.get(r.sessionId) : undefined;
+    if (!r.sessionId || !p || r.userId !== p.userId || !r.at) continue;
+    // No dispatch time recorded: any load of the session by its author counts (stricter, never looser).
+    if (p.dispatchedAtMs === null || Date.parse(String(r.at)) >= p.dispatchedAtMs)
+      out.set(r.sessionId, p.userId);
+  }
+  return out;
 }
 
 /** The facts `browserApproverRule` decides on, loaded once per session. */
@@ -256,6 +376,8 @@ interface ApproverFacts {
   inFlight: { userId: string; agentId: string | null } | null;
   /** `work_browsers.signin_user_id`: the member whose sign-in is loaded on the session's page. */
   signinUserId: string | null;
+  /** HI-04: the in-flight turn's author when their sign-in loaded in that turn (member data for the rest of it). */
+  memberDataUserId: string | null;
 }
 
 /** `browserApproverRule` on facts already loaded (one rule for the answer route and Needs you). */
@@ -267,6 +389,7 @@ function approverOn(request: { tool: string; browser?: unknown }, facts: Approve
     return { only: p && p.agentId === null ? p.userId : null };
   }
   if (facts.signinUserId) return { only: facts.signinUserId };
+  if (facts.memberDataUserId) return { only: facts.memberDataUserId };
   if (browser?.kind === "signed_in_host") return { only: null };
   return "approve_permission";
 }
@@ -274,7 +397,7 @@ function approverOn(request: { tool: string; browser?: unknown }, facts: Approve
 /**
  * Who among the people allowed `work_session.approve` may answer some pending approval of each session (07.13-21,
  * the "Needs you" gap): `open` when one pending approval keeps the session's approve rule, `only` the people a
- * member-only one is for (`browserApproverRule`'s rule on the same facts, batched: three queries for all sessions).
+ * member-only one is for (`browserApproverRule`'s rule on the same facts, batched: four queries for all sessions).
  * A session with nothing pending is absent. "Needs you" asks a person only where the answer route would let them.
  */
 export async function pendingApprovers(
@@ -284,7 +407,7 @@ export async function pendingApprovers(
   const out = new Map<string, { open: boolean; only: Set<string> }>();
   if (sessionIds.length === 0) return out;
   const ids = [...new Set(sessionIds)];
-  const [pending, pages, prompts] = await Promise.all([
+  const [pending, pages, inFlight] = await Promise.all([
     tx
       .select({ sessionId: workApprovals.workSessionId, request: workApprovals.request })
       .from(workApprovals)
@@ -293,27 +416,18 @@ export async function pendingApprovers(
       .select({ sessionId: workBrowsers.workSessionId, signinUserId: workBrowsers.signinUserId })
       .from(workBrowsers)
       .where(inArray(workBrowsers.workSessionId, ids)),
-    tx
-      .select({
-        sessionId: workPrompts.workSessionId,
-        userId: workPrompts.authorUserId,
-        agentId: workPrompts.authorAgentId,
-      })
-      .from(workPrompts)
-      .where(
-        and(inArray(workPrompts.workSessionId, ids), inArray(workPrompts.status, ["dispatched", "running"])),
-      )
-      .orderBy(desc(workPrompts.dispatchedAt)),
+    inFlightPrompts(tx, ids),
   ]);
   const signin = new Map(pages.map((p) => [p.sessionId, p.signinUserId]));
-  const inFlight = new Map<string, { userId: string; agentId: string | null }>();
-  // Most recently dispatched first: the first row per session is its in-flight prompt.
-  for (const p of prompts) if (!inFlight.has(p.sessionId)) inFlight.set(p.sessionId, p);
+  // HI-04: only sessions with a pending browser approval need the member-data read.
+  const asked = new Set(pending.filter((a) => isBrowserRequest(a.request)).map((a) => a.sessionId));
+  const memberData = await memberDataTurns(tx, new Map([...inFlight].filter(([id]) => asked.has(id))));
   for (const a of pending) {
     const entry = out.get(a.sessionId) ?? { open: false, only: new Set<string>() };
     const rule = approverOn(a.request, {
       inFlight: inFlight.get(a.sessionId) ?? null,
       signinUserId: signin.get(a.sessionId) ?? null,
+      memberDataUserId: memberData.get(a.sessionId) ?? null,
     });
     if (rule === "approve_permission") entry.open = true;
     else if (rule.only) entry.only.add(rule.only);

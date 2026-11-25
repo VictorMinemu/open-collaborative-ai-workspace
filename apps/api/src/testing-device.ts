@@ -85,6 +85,8 @@ export class FakeDevice {
       claudeLoggedIn?: boolean;
       /** 07.13 (D-19, PD-20): the Work Zone browser report (`hello.browser`); sent only when given. */
       browser?: { version: 1; optIn: boolean };
+      /** 07.13 review MD-01: the pages open on the device as it says hello (`hello.browserPages`); sent only when given. */
+      browserPages?: Array<{ sessionId: string; signedIn: boolean }>;
     } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
@@ -117,6 +119,7 @@ export class FakeDevice {
       ...(opts.isolatedServer !== undefined ? { isolatedServer: opts.isolatedServer } : {}),
       ...(opts.accountPool !== undefined ? { accountPool: opts.accountPool } : {}),
       ...(opts.browser ? { browser: opts.browser } : {}),
+      ...(opts.browserPages ? { browserPages: opts.browserPages } : {}),
     });
     await d.next((f) => f.type === "welcome");
     return d;

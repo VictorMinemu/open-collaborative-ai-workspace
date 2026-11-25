@@ -5,7 +5,8 @@ import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { DeviceBrowserHandler, DeviceHub, DeviceRef } from "../device";
 import { createPermissionService } from "../organization";
-import { onBrowserEvent } from "./events";
+import { createAccessWatch } from "./access";
+import { onBrowserEvent, onDeviceHello } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
 import { onSignInLoad } from "./load";
@@ -57,11 +58,17 @@ export function createWorkBrowserModule(
   let live: WorkLiveHub | null = null;
   const perms = createPermissionService(core);
   const sweeper = createWorkBrowserSweeper(core, deps.hub);
+  // MD-03: a loaded sign-in is decided again whenever access may have changed in its organization.
+  const access = createAccessWatch(core, perms, deps.hub);
   const sessionDevice = sessionDeviceCheck(core);
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
+    // MD-01: the device's pages reconciled with what its hello says it holds.
+    onHello: onDeviceHello(core, deps.hub),
     // 07.13-17 (D-24, D-32, PD-16, P7): decided by the API, answered on the requesting socket only.
-    onSignInLoad: onSignInLoad(core, perms),
+    onSignInLoad: onSignInLoad(core, perms, (organizationId, sessionId, userId) =>
+      live?.onSignInLoaded(organizationId, sessionId, userId),
+    ),
     // Per frame, not awaited, after hello (07.13-08): cheap until the session is known. A frame naming a session
     // that does not run on the sending device reaches nobody (T-07.13-10-03).
     async onBinary(device, bytes) {
@@ -89,6 +96,11 @@ export function createWorkBrowserModule(
         // sign-ins are swept.
         registerSignInRoutes(app, { core, perms, hub: deps.hub });
         sweeper.start();
+        void access
+          .start()
+          .catch((err: unknown) =>
+            core.log.warn({ error: (err as Error | undefined)?.name }, "work browser access watch failed"),
+          );
         live = registerWorkLiveView(app, {
           core,
           perms,
@@ -100,6 +112,7 @@ export function createWorkBrowserModule(
       },
       async close() {
         sweeper.stop();
+        await access.stop();
         await live?.close();
       },
     },

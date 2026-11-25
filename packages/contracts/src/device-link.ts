@@ -200,6 +200,18 @@ export const HelloFrame = z.object({
    * parses (absent = no browser: the API never sends that device a grant or a browser frame).
    */
   browser: DeviceBrowserReport.optional(),
+  /**
+   * 07.13 review MD-01: the Work Zone pages open on the device as it says hello (on every link, a reconnect of the same
+   * daemon as much as a restarted one), and whether a member's sign-in is loaded in each. Ids and a flag only. The API
+   * reconciles its `work_browsers` rows of this device's sessions with it: a page not listed is closed (its lease and
+   * loaded sign-in cleared), a listed page with `signedIn: false` loses the sign-in the API recorded, and a listed page
+   * with `signedIn: true` the API recorded no sign-in for is told `browser.close { reason: "revoked" }`. Optional:
+   * without it, only the pages of sessions missing from `sessions` are closed.
+   */
+  browserPages: z
+    .array(z.strictObject({ sessionId: z.uuid(), signedIn: z.boolean() }))
+    .max(1000)
+    .optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 
@@ -505,12 +517,17 @@ export type BrowserFramesFrame = z.infer<typeof BrowserFramesFrame>;
 /**
  * 07.13 (D-20, PD-14): a person holds the page (`held`: the agent's browser tools answer `paused`), handed it back
  * (`released`) or left it after input without a hand back (`abandoned`: the device closes the page).
+ *
+ * `holderUserId` (07.13 review HI-03): on `held`, the person the API granted the lease to, so the device can refuse a
+ * lease on a page whose loaded sign-in is someone else's without inferring the holder from its turns. Optional: a
+ * frame without it still parses (older API builds); the API always sends it on `held`.
  */
 export const BrowserLeaseFrame = z.strictObject({
   type: z.literal("browser.lease"),
   sessionId: z.uuid(),
   leaseId: z.uuid(),
   state: z.enum(["held", "released", "abandoned"]),
+  holderUserId: Id.optional(),
 });
 export type BrowserLeaseFrame = z.infer<typeof BrowserLeaseFrame>;
 
