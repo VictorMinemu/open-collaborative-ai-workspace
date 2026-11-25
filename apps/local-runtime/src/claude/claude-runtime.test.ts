@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -1769,7 +1769,7 @@ const BROWSER_ALLOW: SessionBrowserGrant = {
   whenTainted: [],
   signinAllowed: false,
 };
-const BROWSER_DENY: SessionBrowserGrant = { ...BROWSER_ALLOW, allowed: false, reason: "policy" };
+const BROWSER_DENY: SessionBrowserGrant = { ...BROWSER_ALLOW, allowed: false, reason: "off_policy" };
 
 /** A child that answers like the agent without a real browser (the manager's rules are tested in 12). */
 class ScriptedBrowserChild implements ManagedChild {
@@ -1788,7 +1788,8 @@ class ScriptedBrowserChild implements ManagedChild {
       if (origin) this.o.onEvent({ event: "navigated", origin });
       return { host: url.host, secure: false, title: "Scripted", signedIn: false };
     }
-    if (op === "screenshot") return { mimeType: "image/jpeg", data: "/9j/2w==", width: 1, height: 1, masked: 0 };
+    if (op === "screenshot")
+      return { mimeType: "image/jpeg", data: "/9j/2w==", width: 1, height: 1, masked: 0 };
     return { closed: true };
   }
   async close(): Promise<void> {
@@ -1956,7 +1957,9 @@ describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-
   it("browser: a configured ocw_browser reported by mcpServerStatus makes the browser unavailable (shadowed)", async () => {
     const h = harness({
       prepare: (q) => {
-        q.mcpStatus = [{ name: "ocw_browser", status: "connected", config: { type: "stdio", command: "node" } }];
+        q.mcpStatus = [
+          { name: "ocw_browser", status: "connected", config: { type: "stdio", command: "node" } },
+        ];
       },
     });
     h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
@@ -1982,7 +1985,12 @@ describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-
     const h = harness({
       prepare: (q) => {
         q.mcpStatus = [
-          { name: "ocw_browser", status: "connected", source: "sdk", config: { type: "sdk", name: "ocw_browser" } },
+          {
+            name: "ocw_browser",
+            status: "connected",
+            source: "sdk",
+            config: { type: "sdk", name: "ocw_browser" },
+          },
         ];
       },
     });
