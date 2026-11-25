@@ -6,7 +6,15 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, sleep } from "../../testing-device";
 import { invite, pairDevice, shareDevice, startSession } from "../../testing-workzone";
-import { fakeJpeg, type Json, lastState, type WorkLiveSocket, waitFor, waitState, workLiveSocket } from "./live-testing";
+import {
+  fakeJpeg,
+  type Json,
+  lastState,
+  type WorkLiveSocket,
+  waitFor,
+  waitState,
+  workLiveSocket,
+} from "./live-testing";
 
 /**
  * The takeover lease of a Work Zone session's page (Phase 07.13-18; D-20, D-22, D-28, D-33, PD-14, PD-15; WZB-08,
@@ -78,7 +86,9 @@ const send = (s: WorkLiveSocket, frame: Json) => s.socket.send(JSON.stringify(fr
 
 /** `as` asks a turn of `sid`: the device received the prompt and runs it (in flight). */
 async function ask(as: TestClient, sid: string): Promise<string> {
-  const res = await as.request("POST", `/api/v1/work-sessions/${sid}/prompts`, { body: "Sign in to the app" });
+  const res = await as.request("POST", `/api/v1/work-sessions/${sid}/prompts`, {
+    body: "Sign in to the app",
+  });
   expect(res.status, JSON.stringify(res.body)).toBe(200);
   const promptId = res.body!.id as string;
   const cmd = await d.command("prompt", sid);
@@ -215,8 +225,16 @@ describe("07.13-18 Task 1: the asker takes control, types into the device's page
     await waitState(miaLive, "live");
     // Mia asked the turn: she may take control; Owen (the creator, who did not ask it) may not.
     await waitFor(() => miaLive.json.find((f) => f.type === "viewerCan"));
-    expect(miaLive.json.find((f) => f.type === "viewerCan")).toEqual({ type: "viewerCan", watch: true, control: true });
-    expect(owenLive.json.find((f) => f.type === "viewerCan")).toEqual({ type: "viewerCan", watch: true, control: false });
+    expect(miaLive.json.find((f) => f.type === "viewerCan")).toEqual({
+      type: "viewerCan",
+      watch: true,
+      control: true,
+    });
+    expect(owenLive.json.find((f) => f.type === "viewerCan")).toEqual({
+      type: "viewerCan",
+      watch: true,
+      control: false,
+    });
 
     const leaseId = await take(miaLive, sid);
     const row = await browserRow(sid);
@@ -226,7 +244,11 @@ describe("07.13-18 Task 1: the asker takes control, types into the device's page
     const lease = miaLive.json.find((f) => f.type === "lease")!;
     expect(LiveServerFrame.safeParse(lease).success).toBe(true);
     expect(Math.abs(Date.parse(String(lease.expiresAt)) - expires)).toBeLessThan(1_000);
-    expect(lastState(miaLive)).toMatchObject({ state: "controlling", controller: "self", host: "localhost:3000" });
+    expect(lastState(miaLive)).toMatchObject({
+      state: "controlling",
+      controller: "self",
+      host: "localhost:3000",
+    });
     expect(await waitState(owenLive, "private", 3000)).toMatchObject({
       privateReason: "takeover",
       controller: "other",
@@ -241,7 +263,12 @@ describe("07.13-18 Task 1: the asker takes control, types into the device's page
     send(miaLive, { type: "text", text: CANARY });
     const input = await deviceFrame("browser.input", sid);
     expect((await browserRow(sid)).lease_input).toBe(true);
-    expect(input).toEqual({ type: "browser.input", sessionId: sid, leaseId, events: [{ type: "text", text: CANARY }] });
+    expect(input).toEqual({
+      type: "browser.input",
+      sessionId: sid,
+      leaseId,
+      events: [{ type: "text", text: CANARY }],
+    });
     // Owen's input is dropped (he does not hold the lease).
     send(owenLive, { type: "text", text: "not-the-holder" });
     await sleep(300);

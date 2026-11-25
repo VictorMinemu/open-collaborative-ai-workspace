@@ -72,6 +72,14 @@ export function createWorkBrowserModule(
       if (!(await sessionDevice(device, frame.sessionId))) return;
       hubNow.onFrame(device.organizationId, frame);
     },
+    // 07.13-18 (D-20): the masking hint goes to the lease holder's socket only; a frame naming a session that does not
+    // run on the sending device, or a lease that is not the page's current one, reaches nobody.
+    async onFocus(device, frame) {
+      const hubNow = live;
+      if (!hubNow) return;
+      if (!(await sessionDevice(device, frame.sessionId))) return;
+      await hubNow.onFocus(device.organizationId, frame);
+    },
   };
   return {
     module: {
