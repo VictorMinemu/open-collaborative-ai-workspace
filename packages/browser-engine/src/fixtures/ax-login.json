@@ -1,0 +1,299 @@
+{
+  "$comment": "Accessibility.getFullAXTree nodes (CDP shape, trimmed) of a sign-in page, plus the agent's per-field DOM facts keyed by backendDOMNodeId. Values are fixture strings; the redaction tests assert which ones may appear in a snapshot.",
+  "nodes": [
+    {
+      "nodeId": "1",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "RootWebArea" },
+      "name": { "type": "computedString", "value": "Sign in - Panel" },
+      "childIds": [
+        "2",
+        "3",
+        "50",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17"
+      ],
+      "backendDOMNodeId": 1
+    },
+    {
+      "nodeId": "2",
+      "ignored": false,
+      "role": { "type": "role", "value": "heading" },
+      "name": { "type": "computedString", "value": "Sign in" },
+      "childIds": ["20"],
+      "backendDOMNodeId": 10
+    },
+    {
+      "nodeId": "20",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "StaticText" },
+      "name": { "type": "computedString", "value": "Sign in" },
+      "childIds": ["21"],
+      "backendDOMNodeId": 11
+    },
+    {
+      "nodeId": "21",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "InlineTextBox" },
+      "name": { "type": "computedString", "value": "Sign in" },
+      "childIds": [],
+      "backendDOMNodeId": 11
+    },
+    {
+      "nodeId": "3",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Email" },
+      "value": { "type": "string", "value": "ana@example.test" },
+      "childIds": ["30"],
+      "backendDOMNodeId": 20
+    },
+    {
+      "nodeId": "30",
+      "ignored": false,
+      "role": { "type": "role", "value": "generic" },
+      "name": { "type": "computedString", "value": "" },
+      "childIds": ["31"],
+      "backendDOMNodeId": 21
+    },
+    {
+      "nodeId": "31",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "StaticText" },
+      "name": { "type": "computedString", "value": "ana@example.test" },
+      "childIds": [],
+      "backendDOMNodeId": 22
+    },
+    {
+      "nodeId": "50",
+      "ignored": true,
+      "role": { "type": "role", "value": "none" },
+      "childIds": ["51"],
+      "backendDOMNodeId": 25
+    },
+    {
+      "nodeId": "51",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "StaticText" },
+      "name": { "type": "computedString", "value": "Use your work account" },
+      "childIds": [],
+      "backendDOMNodeId": 26
+    },
+    {
+      "nodeId": "4",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Secret word" },
+      "value": { "type": "string", "value": "••••••••••••" },
+      "childIds": [],
+      "backendDOMNodeId": 30
+    },
+    {
+      "nodeId": "5",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Current" },
+      "value": { "type": "string", "value": "hunter2-current" },
+      "childIds": [],
+      "backendDOMNodeId": 31
+    },
+    {
+      "nodeId": "6",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Choose one" },
+      "value": { "type": "string", "value": "hunter2-new" },
+      "childIds": [],
+      "backendDOMNodeId": 32
+    },
+    {
+      "nodeId": "7",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Enter the digits" },
+      "value": { "type": "string", "value": "735190" },
+      "childIds": [],
+      "backendDOMNodeId": 40
+    },
+    {
+      "nodeId": "8",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Verification" },
+      "value": { "type": "string", "value": "998877" },
+      "childIds": [],
+      "backendDOMNodeId": 45
+    },
+    {
+      "nodeId": "9",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Your PIN" },
+      "value": { "type": "string", "value": "4321" },
+      "childIds": [],
+      "backendDOMNodeId": 50
+    },
+    {
+      "nodeId": "10",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Field" },
+      "value": { "type": "string", "value": "named-pwd-value" },
+      "childIds": [],
+      "backendDOMNodeId": 55
+    },
+    {
+      "nodeId": "11",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Display name" },
+      "value": { "type": "string", "value": "Ana Lopez" },
+      "childIds": [],
+      "backendDOMNodeId": 60
+    },
+    {
+      "nodeId": "12",
+      "ignored": false,
+      "role": { "type": "role", "value": "searchbox" },
+      "name": { "type": "computedString", "value": "Search" },
+      "value": { "type": "string", "value": "invoices 2026" },
+      "childIds": [],
+      "backendDOMNodeId": 70
+    },
+    {
+      "nodeId": "13",
+      "ignored": false,
+      "role": { "type": "role", "value": "textbox" },
+      "name": { "type": "computedString", "value": "Notes" },
+      "value": { "type": "string", "value": "aria-div-value" },
+      "childIds": [],
+      "backendDOMNodeId": 80
+    },
+    {
+      "nodeId": "14",
+      "ignored": false,
+      "role": { "type": "role", "value": "button" },
+      "name": { "type": "computedString", "value": "Show password" },
+      "childIds": [],
+      "backendDOMNodeId": 100
+    },
+    {
+      "nodeId": "15",
+      "ignored": false,
+      "role": { "type": "role", "value": "link" },
+      "name": { "type": "computedString", "value": "Forgot?" },
+      "value": { "type": "string", "value": "http://panel.fake.test:8080/reset?token=link-token-value" },
+      "childIds": [],
+      "backendDOMNodeId": 110
+    },
+    {
+      "nodeId": "16",
+      "ignored": false,
+      "role": { "type": "role", "value": "checkbox" },
+      "name": { "type": "computedString", "value": "Remember me" },
+      "childIds": [],
+      "backendDOMNodeId": 120
+    },
+    {
+      "nodeId": "17",
+      "ignored": false,
+      "role": { "type": "role", "value": "paragraph" },
+      "name": { "type": "computedString", "value": "" },
+      "childIds": ["170"],
+      "backendDOMNodeId": 130
+    },
+    {
+      "nodeId": "170",
+      "ignored": false,
+      "role": { "type": "internalRole", "value": "StaticText" },
+      "name": { "type": "computedString", "value": "Welcome back" },
+      "childIds": [],
+      "backendDOMNodeId": 131
+    }
+  ],
+  "facts": {
+    "20": {
+      "tag": "input",
+      "type": "email",
+      "autocomplete": "username",
+      "textSecurity": "none",
+      "label": "Email"
+    },
+    "30": {
+      "tag": "input",
+      "type": "password",
+      "autocomplete": null,
+      "textSecurity": "disc",
+      "label": "Secret word"
+    },
+    "31": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": "section-a current-password",
+      "textSecurity": "none",
+      "label": "Current"
+    },
+    "32": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": "new-password",
+      "textSecurity": "none",
+      "label": "Choose one"
+    },
+    "40": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": "one-time-code",
+      "textSecurity": "none",
+      "label": "Enter the digits"
+    },
+    "45": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": "off",
+      "textSecurity": "disc",
+      "label": "Verification"
+    },
+    "50": {
+      "tag": "input",
+      "type": "tel",
+      "autocomplete": null,
+      "textSecurity": "none",
+      "label": "Your PIN"
+    },
+    "55": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": null,
+      "textSecurity": "none",
+      "label": "Field",
+      "attrName": "pwd"
+    },
+    "60": {
+      "tag": "input",
+      "type": "text",
+      "autocomplete": "nickname",
+      "textSecurity": "none",
+      "label": "Display name"
+    },
+    "70": {
+      "tag": "input",
+      "type": "search",
+      "autocomplete": "off",
+      "textSecurity": "none",
+      "label": "Search"
+    }
+  }
+}
