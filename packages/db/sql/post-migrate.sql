@@ -361,6 +361,44 @@ REVOKE ALL ON FUNCTION app.purge_browser_sessions(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.purge_browser_sessions(timestamptz) TO ocw_app;
 
+-- The Work Zone browser sweep (Phase 07.13, D-20, D-23, PD-14), the same shape as the bots' above. It runs without a
+-- user, across organizations:
+-- - `work_browser_sweep_organizations` lists the organizations that have a Work Zone sign-in that expired before
+--   `p_before` or a session browser's takeover lease that lapsed at `p_now` (its holding API instance died, nobody
+--   released it); ids only, keyset-paged by id, at most 1000. The API then works inside each organization's own
+--   withTenant() transaction;
+-- - `purge_work_browser_signins` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
+--   transaction, never an argument), the member sign-ins that expired before `p_before`, past the owner-only policy no
+--   user-less session could cross. Their sealed secrets go with them (`work_browser_signin_secret_cleanup`) and a
+--   session browser that had one loaded only unlinks it. It returns the ids, the owner and the site for the audit only:
+--   never a secret id or any sealed value.
+CREATE OR REPLACE FUNCTION app.work_browser_sweep_organizations(
+  p_now timestamptz, p_before timestamptz, p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT o.organization_id FROM (
+    SELECT s.organization_id FROM app.work_browser_signins s WHERE s.expires_at < p_before
+    UNION
+    SELECT w.organization_id FROM app.work_browsers w
+    WHERE w.lease_id IS NOT NULL AND w.lease_expires_at <= p_now
+  ) o
+  WHERE p_after IS NULL OR o.organization_id > p_after
+  ORDER BY o.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+CREATE OR REPLACE FUNCTION app.purge_work_browser_signins(p_before timestamptz)
+RETURNS TABLE (id uuid, user_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.work_browser_signins s
+  WHERE s.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND s.expires_at < p_before
+  RETURNING s.id, s.user_id, s.site_key
+$fn$;
+REVOKE ALL ON FUNCTION app.work_browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.purge_work_browser_signins(timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.work_browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.purge_work_browser_signins(timestamptz) TO ocw_app;
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)
