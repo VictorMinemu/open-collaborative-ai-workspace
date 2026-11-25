@@ -1045,6 +1045,8 @@ export class Daemon {
       accountPool: DEVICE_ACCOUNT_POOL_VERSION,
       // 07.13 (D-19, PD-20): this daemon can run a Work Zone browser, and the owner's local opt-in as it is now.
       browser: this.browserReport,
+      // 07.13 review MD-01: the pages open now and whether a sign-in is loaded in each; the API reconciles its rows.
+      browserPages: this.browser.pages().slice(0, 1000),
     };
     await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [

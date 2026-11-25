@@ -4176,6 +4176,20 @@ describe("Work Zone browser: capability, lifecycle, server frames and the shim (
     expect((await daemon.status()).browser).toMatchObject({ optIn: false, source: "default", openPages: 0 });
   });
 
+  it("MD-01: every hello lists the open pages (browserPages), a reconnect included", async () => {
+    await browserDaemon();
+    await daemon.start();
+    expect((await server.frame("hello")).browserPages).toEqual([]);
+    const sid = await browserSession();
+    await daemon.browser.forSession(sid).call("open", { url: "http://localhost:3000/" });
+    server.last.ws.terminate();
+    await server.waitFor(() => (daemon.isConnected ? undefined : true));
+    const hello = await server.waitFor(() =>
+      server.connections.length >= 2 ? server.last.frames.find((f) => f.type === "hello") : undefined,
+    );
+    expect(hello.type === "hello" ? hello.browserPages : null).toEqual([{ sessionId: sid, signedIn: false }]);
+  });
+
   it("device.appVersion carries OCW_APP_VERSION only when it is a semver", async () => {
     await browserDaemon({ env: { OCW_APP_VERSION: "1.4.0" } });
     await daemon.start();

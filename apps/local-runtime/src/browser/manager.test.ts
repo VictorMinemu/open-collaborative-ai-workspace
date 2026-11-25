@@ -1435,6 +1435,20 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect(browserEvents(t).map((e) => e.kind)).not.toContain("signin_loaded");
   });
 
+  it("MD-01: pages() lists every open page and whether a member's sign-in is loaded in it", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    expect(t.manager.pages()).toEqual([]);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    expect(t.manager.pages()).toEqual([{ sessionId: t.sid, signedIn: true }]);
+    // A public page of the same session (the signed-in one re-sealed and closed first).
+    t.turn({ ...ALLOW, askerId: OTHER_MEMBER });
+    await t.tools.call("open", { url: "http://localhost:3000/" });
+    expect(t.manager.pages()).toEqual([{ sessionId: t.sid, signedIn: false }]);
+    await t.tools.call("close", {});
+    expect(t.manager.pages()).toEqual([]);
+  });
+
   it("HI-04: after a sign-in loaded, an open to another host asks the member even in Full access, loopback too", async () => {
     const t = scripted({}, HAS_SIGNIN);
     t.turn(SIGNIN, true);

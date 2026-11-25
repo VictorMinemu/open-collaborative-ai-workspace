@@ -364,6 +364,19 @@ export class BrowserManager {
     return n;
   }
 
+  /**
+   * 07.13 review MD-01: every open page and whether a member's sign-in is loaded in it, for `hello.browserPages` (sent
+   * on every link). Ids and a flag only. A page the person signed in to by hand is not a loaded sign-in: the API records
+   * none for it. Only uuid session ids (the contract's), so one odd id never fails the whole hello.
+   */
+  pages(): Array<{ sessionId: string; signedIn: boolean }> {
+    const out: Array<{ sessionId: string; signedIn: boolean }> = [];
+    for (const s of this.sessions.values()) {
+      if (s.child && UUID.test(s.id)) out.push({ sessionId: s.id, signedIn: s.loaded !== null });
+    }
+    return out;
+  }
+
   /** The session's tools (one object per session, created on first use). */
   forSession(sessionId: string): SessionBrowserTools {
     return this.state(sessionId).tools;
