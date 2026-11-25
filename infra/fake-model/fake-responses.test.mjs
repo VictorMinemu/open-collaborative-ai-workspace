@@ -653,3 +653,117 @@ describe("attributed prompts (06-03, P-06): every route answers the people in <t
     assert.equal((await chat.json()).choices[0].message.content, "Hi there! [tools: 0]");
   });
 });
+
+// 07.13-04: `[[call <tool> <json>]]` on the Responses API (the Codex browser-mcp recorder's model turn).
+describe("POST /v1/responses: [[call]] function tools", () => {
+  const BROWSER_TOOLS = [
+    { type: "function", name: "mcp__ocw_browser__open", parameters: { type: "object" } },
+    { type: "function", name: "mcp__ocw_browser__screenshot", parameters: { type: "object" } },
+  ];
+  const DIRECTIVES = '[[call open {"url":"http://localhost:1/"}]] [[call screenshot {}]]';
+  const callBody = (input, tools = BROWSER_TOOLS) => ({
+    model: "fake-model",
+    input,
+    tools,
+    store: false,
+    stream: true,
+  });
+  const userItem = (text) => ({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  });
+  const fnCall = (callId, name, args) => ({
+    type: "function_call",
+    call_id: callId,
+    name,
+    arguments: JSON.stringify(args),
+  });
+  const fnOut = (callId, output) => ({ type: "function_call_output", call_id: callId, output });
+  const doneItems = (events) =>
+    events.filter((e) => e.data.type === "response.output_item.done").map((e) => e.data.item);
+
+  it("streams a function_call item for the first directive, naming the offered tool that ends with __open", async () => {
+    const res = await post("/v1/responses", callBody([userItem(DIRECTIVES)]), "Bearer x");
+    assert.equal(res.status, 200);
+    const events = await sse(res);
+    const types = events.map((e) => e.data.type);
+    assert.equal(types[0], "response.created");
+    assert.ok(types.includes("response.function_call_arguments.delta"));
+    assert.ok(types.includes("response.function_call_arguments.done"));
+    assert.equal(types.at(-1), "response.completed");
+    const [item] = doneItems(events);
+    assert.equal(item.type, "function_call");
+    assert.equal(item.name, "mcp__ocw_browser__open");
+    assert.deepEqual(JSON.parse(item.arguments), { url: "http://localhost:1/" });
+    assert.match(item.call_id, /^call_fake_/);
+    const completed = events.at(-1).data.response;
+    assert.equal(completed.output[0].call_id, item.call_id);
+    assert.equal(deltasOf(events).length, 0, "no text while a tool is being called");
+  });
+
+  it("calls the next directive once the first has its function_call_output", async () => {
+    const res = await post(
+      "/v1/responses",
+      callBody([
+        userItem(DIRECTIVES),
+        fnCall("c1", "mcp__ocw_browser__open", { url: "http://localhost:1/" }),
+        fnOut("c1", "Opened localhost:1"),
+      ]),
+      "Bearer x",
+    );
+    const [item] = doneItems(await sse(res));
+    assert.equal(item.type, "function_call");
+    assert.equal(item.name, "mcp__ocw_browser__screenshot");
+    assert.deepEqual(JSON.parse(item.arguments), {});
+  });
+
+  it("answers with one `Tool <tool> said:` line per directive and counts image parts of tool outputs", async () => {
+    const res = await post(
+      "/v1/responses",
+      callBody([
+        userItem(DIRECTIVES),
+        fnCall("c1", "mcp__ocw_browser__open", { url: "http://localhost:1/" }),
+        fnOut("c1", [{ type: "input_text", text: "Opened localhost:1" }]),
+        fnCall("c2", "mcp__ocw_browser__screenshot", {}),
+        fnOut("c2", [
+          { type: "input_text", text: "Screenshot of localhost:1" },
+          { type: "input_image", image_url: "data:image/jpeg;base64,AAAA" },
+        ]),
+      ]),
+      "Bearer x",
+    );
+    const events = await sse(res);
+    assert.equal(
+      deltasOf(events).join(""),
+      "Tool open said: Opened localhost:1\nTool screenshot said: Screenshot of localhost:1 [tool-images:1]",
+    );
+    assert.equal(doneItems(events).at(-1).type, "message");
+  });
+
+  it("a string output keeps only its first 200 characters; no images means no suffix", async () => {
+    const long = "x".repeat(300);
+    const res = await post(
+      "/v1/responses",
+      callBody([
+        userItem('[[call open {"url":"http://localhost:1/"}]]'),
+        fnCall("c1", "mcp__ocw_browser__open", {}),
+        fnOut("c1", long),
+      ]),
+      "Bearer x",
+    );
+    assert.equal(deltasOf(await sse(res)).join(""), `Tool open said: ${"x".repeat(200)}`);
+  });
+
+  it("a directive for a tool that is not offered answers `Tool <tool> not offered`", async () => {
+    const res = await post("/v1/responses", callBody([userItem('[[call click {"ref":"e1"}]]')]), "Bearer x");
+    const events = await sse(res);
+    assert.equal(deltasOf(events).join(""), "Tool click not offered");
+    assert.ok(doneItems(events).every((i) => i.type === "message"));
+  });
+
+  it("requests without a [[call]] directive keep the plain echo", async () => {
+    const res = await post("/v1/responses", callBody([userItem("Hello there")]), "Bearer x");
+    assert.equal(deltasOf(await sse(res)).join(""), "Echo: Hello there");
+  });
+});

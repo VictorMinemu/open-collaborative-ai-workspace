@@ -32,6 +32,15 @@
 // text a `<turn_context>`, the echo becomes `Hi <names>! (participants: <humans>) Echo: <last message body>`, with the
 // same directives, pacing, citation and attachment suffix.
 //
+// Function tools (07.13-04, the Codex browser-mcp recorder): `[[call <tool> <json-args>]]` in the last user message
+// makes the model call that tool, with the same matching rule server.mjs uses for chat completions: the offered
+// function tool whose name equals <tool> or ends with `__<tool>` (Codex offers MCP tools as `mcp__<server>__<tool>`).
+// Several directives run in order, one `function_call` output item per response; the follow-up request carries the
+// `function_call` and `function_call_output` items after that user message, and the next directive is called. Once
+// every directive has an outcome the reply is one line per directive, `Tool <tool> said: <first 200 chars of the
+// result's text>` (or `Tool <tool> not offered`), plus ` [tool-images:N]` when the tool outputs (and any user item
+// after the directive message) carried N `input_image` parts. Requests without a `[[call]]` behave as before.
+//
 // Plan bearers (`fake-plan-…`) get the ChatGPT-plan preview rules: `store` must be false, `stream` true, no
 // `system` input item and none of PLAN_FORBIDDEN_KEYS, else 400 `fake_preview_violation` naming the key.
 
@@ -180,6 +189,119 @@ function offersWebSearch(body) {
   );
 }
 
+/** End index (exclusive) of the JSON object starting at `start` (`{`), or -1. String-aware (as server.mjs). */
+function jsonObjectEnd(text, start) {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** `[[call <tool> <json>]]` directives, in order (server.mjs `parseDirectives`'s rule). Malformed ones are ignored. */
+export function callDirectives(text) {
+  const out = [];
+  for (const m of text.matchAll(/\[\[call\s+([A-Za-z0-9_.:-]+)\s+(?=\{)/gu)) {
+    const start = m.index + m[0].length;
+    const end = jsonObjectEnd(text, start);
+    if (end === -1 || !text.startsWith("]]", end)) continue;
+    try {
+      const args = JSON.parse(text.slice(start, end));
+      if (args && typeof args === "object" && !Array.isArray(args)) out.push({ tool: m[1], args });
+    } catch {
+      /* not a directive */
+    }
+  }
+  return out;
+}
+
+/**
+ * The function tools a Responses body offers: `{ full, name, namespace? }`. A tool inside a `namespace` tool (Codex
+ * 0.172 offers each MCP server as `{ type: "namespace", name: "mcp__<server>", tools: [...] }`) is called with its
+ * own `name` and the `namespace` field; its full name is `<namespace>__<name>`.
+ */
+function offeredFunctions(body) {
+  const out = [];
+  for (const t of Array.isArray(body.tools) ? body.tools : []) {
+    if (t?.type === "function" && typeof t.name === "string") out.push({ full: t.name, name: t.name });
+    else if (t?.type === "namespace" && typeof t.name === "string" && Array.isArray(t.tools)) {
+      for (const f of t.tools) {
+        if (f?.type === "function" && typeof f.name === "string")
+          out.push({ full: `${t.name}__${f.name}`, name: f.name, namespace: t.name });
+      }
+    }
+  }
+  return out;
+}
+
+/** Text and `input_image` count of a `function_call_output` output (string or content parts). */
+function toolOutputOf(output) {
+  if (typeof output === "string") return { text: output, images: 0 };
+  if (!Array.isArray(output)) return { text: "", images: 0 };
+  return {
+    text: output
+      .map((p) => (typeof p?.text === "string" ? p.text : ""))
+      .filter(Boolean)
+      .join("\n"),
+    images: output.filter((p) => p?.type === "input_image").length,
+  };
+}
+
+/**
+ * Next step of a `[[call]]` turn on the Responses API: `{ call: {name, args} }` when a tool must be called now,
+ * `{ reply }` when every directive has an outcome, or null when the turn's user message has no `[[call]]`.
+ */
+export function planResponsesToolStep(body) {
+  const input = Array.isArray(body.input) ? body.input : [];
+  let idx = input.findLastIndex((i) => i?.role === "user");
+  if (idx === -1) return null;
+  // A user item right after a tool output (a runtime that sends tool images as a user message) is not a new turn:
+  // the directives come from the user message before it.
+  while (callDirectives(itemText(input[idx])).length === 0) {
+    const prev = input.slice(0, idx).findLastIndex((i) => i?.role === "user");
+    const before = input[idx - 1];
+    if (prev === -1 || !(before?.type === "function_call_output" || before?.role === "user")) break;
+    idx = prev;
+  }
+  const directives = callDirectives(itemText(input[idx]));
+  if (directives.length === 0) return null;
+  const offered = offeredFunctions(body);
+  const after = input.slice(idx + 1);
+  const calls = after.filter((i) => i?.type === "function_call");
+  const outputs = new Map(
+    after.filter((i) => i?.type === "function_call_output").map((i) => [i.call_id, toolOutputOf(i.output)]),
+  );
+  const images =
+    [...outputs.values()].reduce((n, o) => n + o.images, 0) +
+    after.filter((i) => i?.role === "user").reduce((n, i) => n + partCount(i, "input_image"), 0);
+  const lines = [];
+  let k = 0;
+  for (const d of directives) {
+    const tool =
+      offered.find((f) => f.full === d.tool) ?? offered.find((f) => f.full.endsWith(`__${d.tool}`));
+    if (!tool) {
+      lines.push(`Tool ${d.tool} not offered`);
+      continue;
+    }
+    const done = calls[k];
+    if (!done) {
+      const call = { name: tool.name, args: d.args };
+      return { call: tool.namespace ? { ...call, namespace: tool.namespace } : call };
+    }
+    k++;
+    const text = (outputs.get(done.call_id)?.text ?? "").replace(/\s+/gu, " ").trim();
+    lines.push(`Tool ${d.tool} said: ${text.slice(0, 200)}`);
+  }
+  return { reply: `${lines.join("\n")}${images > 0 ? ` [tool-images:${images}]` : ""}` };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function sendJson(res, status, obj) {
@@ -255,7 +377,10 @@ export async function handleResponses(req, res, body, ctx = {}) {
     });
   }
 
-  const title = isTitleRequest(responsesInstructions(body));
+  const toolStep = planResponsesToolStep(body);
+  if (toolStep?.call) return functionCallResponse(res, body, toolStep.call);
+
+  const title = !toolStep && isTitleRequest(responsesInstructions(body));
   const webQuery = title
     ? null
     : directives
@@ -271,7 +396,7 @@ export async function handleResponses(req, res, body, ctx = {}) {
     partCount(user, "input_file"),
   )}`;
   const citation = search ? ` ([example.com](${search.url}))` : "";
-  const reply = title ? titleReply(userText) : `${echo}${citation}`;
+  const reply = toolStep ? toolStep.reply : title ? titleReply(userText) : `${echo}${citation}`;
   // `[[slow:N]]`: the same slow stream, paced over about N seconds.
   const slowSecs = Number(directives.map((d) => /^slow:(\d{1,2})$/u.exec(d)?.[1]).find(Boolean) ?? 0);
   const slowInterval =
@@ -395,5 +520,53 @@ export async function handleResponses(req, res, body, ctx = {}) {
   ev("response.output_item.done", { output_index: msgIndex, item });
   const output = searchItem ? [searchItem, item] : [item];
   ev("response.completed", { response: response("completed", { output, usage }) });
+  res.end();
+}
+
+/** One `function_call` output item (07.13-04): added, the arguments as one delta, done, completed. */
+function functionCallResponse(res, body, call) {
+  const n = ++responseCounter;
+  const id = `resp_fake_${n}`;
+  const itemId = `fc_fake_${n}`;
+  const callId = `call_fake_${n}_${Math.random().toString(36).slice(2, 8)}`;
+  const args = JSON.stringify(call.args);
+  const createdAt = Math.floor(Date.now() / 1000);
+  const model = body.model ?? "gpt-6-astra";
+  let seq = 0;
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  const ev = (type, data) =>
+    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...data })}\n\n`);
+  const response = (status, extra = {}) => ({
+    id,
+    object: "response",
+    created_at: createdAt,
+    model,
+    status,
+    service_tier: null,
+    ...extra,
+  });
+  const item = (status, argText) => ({
+    type: "function_call",
+    id: itemId,
+    call_id: callId,
+    name: call.name,
+    ...(call.namespace ? { namespace: call.namespace } : {}),
+    arguments: argText,
+    status,
+  });
+  ev("response.created", { response: response("in_progress") });
+  ev("response.output_item.added", { output_index: 0, item: item("in_progress", "") });
+  ev("response.function_call_arguments.delta", { item_id: itemId, output_index: 0, delta: args });
+  ev("response.function_call_arguments.done", { item_id: itemId, output_index: 0, arguments: args });
+  const done = item("completed", args);
+  ev("response.output_item.done", { output_index: 0, item: done });
+  const usage = {
+    input_tokens: 100 + Math.ceil(JSON.stringify(body.input ?? []).length / 4),
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: Math.max(1, Math.ceil(args.length / 4)),
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
+  usage.total_tokens = usage.input_tokens + usage.output_tokens;
+  ev("response.completed", { response: response("completed", { output: [done], usage }) });
   res.end();
 }
