@@ -8,9 +8,15 @@ import { createPermissionService } from "../organization";
 import { onBrowserEvent } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
+import { onSignInLoad } from "./load";
+import { registerSignInRoutes } from "./signin-routes";
+import { createWorkBrowserSweeper, type WorkBrowserSweeper } from "./sweep";
 
 export { onBrowserEvent } from "./events";
 export type { WorkLiveHub, WorkLiveStats } from "./live";
+export { decideSignInLoad, type SignInLoadDecision } from "./load";
+export { workSignInAad } from "./signins";
+export type { WorkBrowserSweeper } from "./sweep";
 
 /**
  * The Work Zone browser module (Phase 07.13; D-14, D-15, D-20 … D-28): the Control Plane side of the browser a
@@ -25,6 +31,9 @@ export type { WorkLiveHub, WorkLiveStats } from "./live";
  *   reach viewers on other API instances through `live-relay.ts` (Redis transit only while watched, D-33).
  * - Server → device browser frames go through `hub.sendBrowserFrame` (ephemeral: never queued, never logged), and only
  *   to a device whose hello carried `browser` (PD-20).
+ * - Members' sign-ins (07.13-17, D-22 … D-25, D-32): sealed per member × site (`signins.ts`), listed and revoked by
+ *   their owner and uploaded / re-sealed by the session's device (`signin-routes.ts`), loaded only by the API's own
+ *   decision and answered on the requesting socket (`load.ts`, `onSignInLoad`), swept when expired (`sweep.ts`).
  */
 export interface WorkBrowserModule {
   module: ApiModule;
@@ -34,6 +43,8 @@ export interface WorkBrowserModule {
   hub: DeviceHub;
   /** This instance's live-view hub once the routes are registered (tests: `stats`, `heartbeat`). */
   live(): WorkLiveHub | null;
+  /** The expired sign-in sweep (07.13-17; tests call `runOnce(nowMs)`). */
+  sweeper: WorkBrowserSweeper;
 }
 
 /** How long the session → device answer of a frame is trusted before it is read again (T-07.13-10-03). */
@@ -44,9 +55,13 @@ export function createWorkBrowserModule(
   deps: { hub: DeviceHub; allowedOrigins?: Set<string> },
 ): WorkBrowserModule {
   let live: WorkLiveHub | null = null;
+  const perms = createPermissionService(core);
+  const sweeper = createWorkBrowserSweeper(core, deps.hub);
   const sessionDevice = sessionDeviceCheck(core);
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
+    // 07.13-17 (D-24, D-32, PD-16, P7): decided by the API, answered on the requesting socket only.
+    onSignInLoad: onSignInLoad(core, perms),
     // Per frame, not awaited, after hello (07.13-08): cheap until the session is known. A frame naming a session
     // that does not run on the sending device reaches nobody (T-07.13-10-03).
     async onBinary(device, bytes) {
@@ -62,9 +77,13 @@ export function createWorkBrowserModule(
     module: {
       name: "work-browser",
       register(app) {
+        // 07.13-17: the member's own sign-ins (Keychain), the device's hand-back upload and its re-seal; expired
+        // sign-ins are swept.
+        registerSignInRoutes(app, { core, perms, hub: deps.hub });
+        sweeper.start();
         live = registerWorkLiveView(app, {
           core,
-          perms: createPermissionService(core),
+          perms,
           hub: deps.hub,
           allowedOrigins: deps.allowedOrigins ?? new Set(),
           // D-33: this instance's frames transit (one per instance; its id only tells its own messages apart).
@@ -72,12 +91,14 @@ export function createWorkBrowserModule(
         });
       },
       async close() {
+        sweeper.stop();
         await live?.close();
       },
     },
     deviceHandler,
     hub: deps.hub,
     live: () => live,
+    sweeper,
   };
 }
 
