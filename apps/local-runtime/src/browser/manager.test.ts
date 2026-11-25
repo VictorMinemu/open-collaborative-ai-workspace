@@ -1209,6 +1209,65 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     }
   });
 
+  it("HI-02: a turn that ends while the sign-in loads closes the late page at once; it is never kept loaded", async () => {
+    const { order, put } = sequenced();
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const t = scripted(
+      {
+        api: { put },
+        createChild: (o) => {
+          const c = new ScriptedChild(o);
+          c.holdLoad = hold;
+          t.children.push(c);
+          return c;
+        },
+        link: {
+          send: (f) => {
+            t.frames.push(f);
+            if (f.type === "browser.event") order.push(`${f.kind}:${t.children[0]?.state ?? "none"}`);
+            if (f.type === "browser.signin.load") {
+              setImmediate(() => {
+                const result = HAS_SIGNIN(f);
+                if (result) {
+                  void t.manager.onServerFrame({
+                    type: "browser.signin.state",
+                    requestId: f.requestId,
+                    result,
+                  });
+                }
+              });
+            }
+          },
+          sendBinary: () => false,
+        },
+      },
+      HAS_SIGNIN,
+    );
+    const promptId = t.turn(SIGNIN);
+    const opening = t.tools.call("open", { url: `${SITE}/account` });
+    for (let i = 0; i < 100 && !t.children[0]?.calls.some((c) => c.op === "openWithState"); i++)
+      await flush();
+    expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(true);
+    // The member presses Stop: the turn completes while the child still loads their state.
+    t.manager.onTurnEnded(t.sid, promptId);
+    release();
+    const res = await opening;
+    expect(res.isError).toBe(true);
+    // The late signed-in page was re-sealed and closed, and only then reported unloaded; never reported loaded.
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+    const kinds = order.filter((o) => !o.startsWith("put "));
+    expect(kinds.some((k) => k.startsWith("signin_loaded"))).toBe(false);
+    expect(kinds).toContain("signin_unloaded:closed");
+    // The next person's turn finds no page at all.
+    t.turn({ ...ALLOW, askerId: OTHER_MEMBER });
+    expect((await t.tools.call("snapshot", {})).summary).toBe("Refused: No page is open. Open one first.");
+  });
+
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {
     const { put } = sequenced();
     const t = scripted({ api: { put } }, HAS_SIGNIN);

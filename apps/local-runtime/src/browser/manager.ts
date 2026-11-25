@@ -141,6 +141,11 @@ interface TurnState {
   grant: SessionBrowserGrant | undefined;
   /** The turn runs in Full access (the daemon's effective mode for it). */
   fullAccess: boolean;
+  /**
+   * HI-02: the turn is over (completed, replaced by the next one, or its session ended). The `TurnState` object is the
+   * per-turn token: a call that awaited something checks `s.turn === turn && !turn.ended` before it keeps a result.
+   */
+  ended: boolean;
 }
 
 interface SessionState {
@@ -378,7 +383,8 @@ export class BrowserManager {
     if (!s) return;
     const pending = s.pendingGrants.get(promptId);
     s.pendingGrants.delete(promptId);
-    s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false };
+    if (s.turn) s.turn.ended = true;
+    s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false, ended: false };
     s.lastAskerId = pending?.grant?.askerId ?? null;
     s.noSignIn.clear();
   }
@@ -390,6 +396,7 @@ export class BrowserManager {
   onTurnEnded(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.turn?.promptId !== promptId) return;
+    s.turn.ended = true;
     s.turn = null;
     this.broker.cancelSession(sessionId);
     if (s.loaded) void this.serial(s, () => this.closePage(s, "closed", promptId)).catch(() => {});
@@ -408,6 +415,7 @@ export class BrowserManager {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.sessions.delete(sessionId);
+    if (s.turn) s.turn.ended = true;
     s.turn = null;
     this.live.stop(sessionId);
     this.broker.cancelSession(sessionId);
@@ -567,31 +575,57 @@ export class BrowserManager {
       this.event(s, turn.promptId, "signin_unloaded", origin);
       return null;
     }
+    let res: OpenWithStateResult;
     try {
-      const res = (await child.call("openWithState", {
+      res = (await child.call("openWithState", {
         url,
         state: answer.state,
         siteHost: siteHostOfOrigin(origin),
       })) as OpenWithStateResult;
-      s.loaded = { signinId: answer.signinId, userId: grant.askerId, origin, fingerprint: res.fingerprint };
-      s.memberPage = null;
-      this.event(s, turn.promptId, "signin_loaded", origin);
-      return res;
     } catch (err) {
       // HI-01: a failed or timed-out load is never trusted to have dropped the state: the child may still open the
       // signed-in page after its answer. The whole child goes (its Chromium and the state with it) before the API
       // hears that the sign-in is unloaded; nothing is re-sealed from a page that did not load.
-      await this.killChild(s, child, turn.promptId);
+      await this.killChild(s, child, turn.promptId, null);
       this.event(s, turn.promptId, "signin_unloaded", origin);
       throw err;
     }
+    const loaded = { signinId: answer.signinId, userId: grant.askerId, origin, fingerprint: res.fingerprint };
+    // HI-02: the turn object is this load's token. The member's turn may have ended (Stop completes the turn while the
+    // child still loads the state), the opt-in gone off, or the session's child changed meanwhile: the late signed-in
+    // page is then re-sealed and closed now, and never becomes the session's loaded sign-in.
+    if (s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child) {
+      await this.killChild(s, child, turn.promptId, loaded);
+      this.event(s, turn.promptId, "signin_unloaded", origin);
+      throw Object.assign(new Error("the turn ended"), { code: "not_allowed" });
+    }
+    s.loaded = loaded;
+    s.memberPage = null;
+    this.event(s, turn.promptId, "signin_loaded", origin);
+    return res;
   }
 
   /**
-   * Ends `child` for good (HI-01): through `closePage` when it is still the session's page (it reports `closed`), else
-   * directly. Resolves once the process is gone.
+   * Ends `child` for good (HI-01, HI-02): through `closePage` when it is still the session's page (it reports `closed`),
+   * else directly. With `loaded` (a page that did load the member's state), the state is re-sealed from it first.
+   * Resolves once the process is gone; the caller then reports `signin_unloaded`.
    */
-  private async killChild(s: SessionState, child: ManagedChild, promptId: string | null): Promise<void> {
+  private async killChild(
+    s: SessionState,
+    child: ManagedChild,
+    promptId: string | null,
+    loaded: LoadedSignIn | null,
+  ): Promise<void> {
+    if (loaded && child.state === "running") {
+      await reseal({
+        child,
+        api: this.opts.api,
+        sessionId: s.id,
+        signinId: loaded.signinId,
+        origin: loaded.origin,
+        fingerprintAtLoad: loaded.fingerprint,
+      }).catch(() => null);
+    }
     if (s.child === child) await this.closePage(s, "closed", promptId, { reseal: false });
     await child.close().catch(() => {});
   }
