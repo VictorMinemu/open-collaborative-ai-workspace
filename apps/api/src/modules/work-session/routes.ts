@@ -41,10 +41,11 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
-import { conflict, HttpError, notFound } from "../../lib/errors";
+import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
+import { browserApproverRule } from "./browser-grant";
 import { loadControlsContext } from "./context";
 import {
   archiveWorkSession,
@@ -718,6 +719,12 @@ export function registerWorkSessionRoutes(
           "work_session.approve",
           await sessionFacts(tx, auth, s, approval.request.tool),
         );
+        // 07.13 (D-11, D-21, D-26, PD-10): a member's browser approval (a signed-in page, a sign-in) is answered only by
+        // that member, decided from the API's own state; the device's `browser.kind` is a hint.
+        const approver = await browserApproverRule(tx, s, approval.request);
+        if (approver !== "approve_permission" && approver.only !== auth.userId) {
+          throw forbidden("This approval is for the person the browser runs for", "approval_not_yours");
+        }
         const { decision, comment } = req.body;
         // Decided exactly once: the conditional update is the arbiter between concurrent deciders.
         const [row] = await tx

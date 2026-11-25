@@ -567,3 +567,65 @@ describe("07.17.1.1: the largest file a bot moves (D-07, PD-11)", () => {
     expect(await stored()).toBe(41943040);
   });
 });
+
+describe("07.13: the organization's browser switch (D-10)", () => {
+  const browserAudits = async () =>
+    (
+      await su.query(
+        `select metadata from app.audit_events where action = 'work_zone_policy.updated' and organization_id = $1
+           and metadata->'changed' @> '["allowBrowser"]'::jsonb order by occurred_at`,
+        [orgId],
+      )
+    ).rows;
+  const stored = async () =>
+    (await su.query("select allow_browser from app.work_zone_policies where organization_id = $1", [orgId]))
+      .rows[0]?.allow_browser as boolean | undefined;
+
+  it("an admin turns it on: answered, read back, stored and audited once with the changed key", async () => {
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      allowBrowser: false,
+    });
+    const res = await put({ allowBrowser: true });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ allowBrowser: true });
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      allowBrowser: true,
+    });
+    expect(await stored()).toBe(true);
+    const audits = await browserAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata.changed).toEqual(["allowBrowser"]);
+
+    // Absent in a later body = unchanged; the same value again audits nothing.
+    expect((await put({ allowFastMode: false })).body).toMatchObject({ allowBrowser: true });
+    expect((await put({ allowBrowser: true })).status).toBe(200);
+    expect(await browserAudits()).toHaveLength(1);
+  });
+
+  it("a member without work_zone.manage cannot change it (403)", async () => {
+    expect((await put({ allowBrowser: false }, dana)).status).toBe(403);
+    expect(await stored()).toBe(true);
+  });
+
+  it("another organization reads its own default (off), never this org's switch", async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Zeta', $2)", [
+      orgB,
+      `zeta-${orgB}`,
+    ]);
+    const { db } = stack.built.core;
+    const read = (organizationId: string) =>
+      db.withTenant({ organizationId, userId: null }, (tx) => loadWorkZonePolicy(tx));
+    expect((await read(orgB)).allowBrowser).toBe(false);
+    // With a row of its own that never set it: still off. Org A still reads on.
+    await su.query("insert into app.work_zone_policies (organization_id) values ($1)", [orgB]);
+    expect((await read(orgB)).allowBrowser).toBe(false);
+    expect((await read(orgId)).allowBrowser).toBe(true);
+  });
+
+  it("turning it off is audited too", async () => {
+    expect((await put({ allowBrowser: false })).body).toMatchObject({ allowBrowser: false });
+    expect(await stored()).toBe(false);
+    expect(await browserAudits()).toHaveLength(2);
+  });
+});

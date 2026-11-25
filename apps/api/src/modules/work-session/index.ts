@@ -72,6 +72,16 @@ export {
   ownBotSession,
   refusedAnswer,
 } from "./bot-sessions";
+// 07.13 (D-10, D-19, D-32, PD-09, PD-10): the per-turn browser grant, the session's browser state and who answers a
+// browser approval, for the work-browser module (08, 10, 17).
+export {
+  type BrowserApprover,
+  type BrowserAsker,
+  browserApproverRule,
+  browserGrantFor,
+  browserRequestOf,
+  browserStateOf,
+} from "./browser-grant";
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
 export type { OrgQueueOptions, OrgTask } from "./org-queue";
