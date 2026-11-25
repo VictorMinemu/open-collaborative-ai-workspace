@@ -34,7 +34,11 @@ interface Org {
 async function person(org: string, role: "admin" | "developer"): Promise<string> {
   const id = randomUUID();
   await db.query("insert into auth.user (id, name, email) values ($1, 'P', $2)", [id, `${id}@wb.test`]);
-  await db.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, $3)", [org, id, role]);
+  await db.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, $3)", [
+    org,
+    id,
+    role,
+  ]);
   await db.query(
     "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'P', $3)",
     [org, id, role],
@@ -147,9 +151,10 @@ afterAll(async () => {
 describe("the switch, the opt-in and the capability version (07.13 D-10, PD-20)", () => {
   it("starts a policy with the browser off and a device without opt-in or version; a version of 0 or 101 is refused", async () => {
     await db.query("insert into app.work_zone_policies (organization_id) values ($1)", [A.id]);
-    const policy = await db.query("select allow_browser from app.work_zone_policies where organization_id = $1", [
-      A.id,
-    ]);
+    const policy = await db.query(
+      "select allow_browser from app.work_zone_policies where organization_id = $1",
+      [A.id],
+    );
     expect(policy.rows).toEqual([{ allow_browser: false }]);
     const device = await db.query("select browser_opt_in, browser_version from app.devices where id = $1", [
       A.device,
@@ -161,13 +166,15 @@ describe("the switch, the opt-in and the capability version (07.13 D-10, PD-20)"
       });
     }
     for (const ok of [1, 100]) {
-      const r = await db.query("update app.devices set browser_version = $2, browser_opt_in = true where id = $1", [
-        A.device,
-        ok,
-      ]);
+      const r = await db.query(
+        "update app.devices set browser_version = $2, browser_opt_in = true where id = $1",
+        [A.device, ok],
+      );
       expect(r.rowCount).toBe(1);
     }
-    await db.query("update app.devices set browser_version = null, browser_opt_in = false where id = $1", [A.device]);
+    await db.query("update app.devices set browser_version = null, browser_opt_in = false where id = $1", [
+      A.device,
+    ]);
   });
 });
 
@@ -207,8 +214,11 @@ describe("a member's Work Zone sign-ins (07.13 D-23, D-30, PD-03)", () => {
   it("hides one organization's sign-ins from another and refuses an insert with its id", async () => {
     await as(B.id, B.user, async (q) => {
       expect(
-        (await q("select count(*)::int as n from app.work_browser_signins where organization_id = $1", [A.id])).rows[0]
-          .n,
+        (
+          await q("select count(*)::int as n from app.work_browser_signins where organization_id = $1", [
+            A.id,
+          ])
+        ).rows[0].n,
       ).toBe(0);
       const del = await q("delete from app.work_browser_signins where organization_id = $1", [A.id]);
       expect(del.rowCount).toBe(0);
@@ -250,7 +260,9 @@ describe("a member's Work Zone sign-ins (07.13 D-23, D-30, PD-03)", () => {
       const r = await q("delete from app.work_browser_signins where id = $1", [s.id]);
       expect(r.rowCount).toBe(1);
       // The secret went in the same statement (the owner's own transaction sees it gone).
-      expect((await q("select count(*)::int as n from app.secrets where id = $1", [s.secret])).rows[0].n).toBe(0);
+      expect(
+        (await q("select count(*)::int as n from app.secrets where id = $1", [s.secret])).rows[0].n,
+      ).toBe(0);
     });
     // Rolled back above; now for real, as the migrator.
     expect(await count("app.secrets where id = $1", [s.secret])).toBe(1);
@@ -266,17 +278,20 @@ describe("a member's Work Zone sign-ins (07.13 D-23, D-30, PD-03)", () => {
     const gone = await person(A.id, "developer");
     const left = await signin(A, gone, "left.test");
     const stays = await signin(A, A.user, "left.test");
-    await db.query("update app.org_members set deactivated_at = now() where organization_id = $1 and user_id = $2", [
-      A.id,
-      gone,
-    ]);
+    await db.query(
+      "update app.org_members set deactivated_at = now() where organization_id = $1 and user_id = $2",
+      [A.id, gone],
+    );
     expect(await count("app.work_browser_signins where id = $1", [left.id])).toBe(0);
     expect(await count("app.secrets where id = $1", [left.secret])).toBe(0);
     expect(await count("app.work_browser_signins where id = $1", [stays.id])).toBe(1);
 
     const removed = await person(A.id, "developer");
     const r1 = await signin(A, removed, "removed.test");
-    await db.query("delete from app.org_members where organization_id = $1 and user_id = $2", [A.id, removed]);
+    await db.query("delete from app.org_members where organization_id = $1 and user_id = $2", [
+      A.id,
+      removed,
+    ]);
     expect(await count("app.work_browser_signins where id = $1", [r1.id])).toBe(0);
     expect(await count("app.secrets where id = $1", [r1.secret])).toBe(0);
 
@@ -317,8 +332,18 @@ describe("policies and privileges (07.13 PD-03, PD-04)", () => {
         where schemaname = 'app' and tablename in ('work_browsers', 'work_browser_signins') order by tablename, policyname`,
     );
     expect(policies.rows).toEqual([
-      { tablename: "work_browser_signins", policyname: "personal_owner_only", permissive: "RESTRICTIVE", cmd: "ALL" },
-      { tablename: "work_browser_signins", policyname: "tenant_isolation", permissive: "PERMISSIVE", cmd: "ALL" },
+      {
+        tablename: "work_browser_signins",
+        policyname: "personal_owner_only",
+        permissive: "RESTRICTIVE",
+        cmd: "ALL",
+      },
+      {
+        tablename: "work_browser_signins",
+        policyname: "tenant_isolation",
+        permissive: "PERMISSIVE",
+        cmd: "ALL",
+      },
       { tablename: "work_browsers", policyname: "audience_backstop", permissive: "RESTRICTIVE", cmd: "ALL" },
       { tablename: "work_browsers", policyname: "tenant_isolation", permissive: "PERMISSIVE", cmd: "ALL" },
     ]);

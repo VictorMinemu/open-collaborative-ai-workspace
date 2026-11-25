@@ -90,6 +90,12 @@ REVOKE TRUNCATE ON app.bot_tasks, app.bot_task_processes FROM ocw_app;
 -- cascade (a deleted device deletes its slots) and the API's own writes.
 REVOKE TRUNCATE ON app.account_pool_accounts, app.account_pool_policies FROM ocw_app;
 
+-- Work Zone browser (Phase 07.13, D-23, PD-03, PD-04): TRUNCATE ignores RLS (the owner-only policy on the sign-ins and the
+-- session audience backstop on the session browsers below), so the app role never truncates every organization's
+-- session browsers or every member's sealed sign-ins (stated explicitly, as for 07.16). DELETE stays granted for the
+-- cascades of a session, a secret or a sign-in and for the API's own writes.
+REVOKE TRUNCATE ON app.work_browsers, app.work_browser_signins FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
@@ -285,6 +291,16 @@ GRANT EXECUTE ON FUNCTION app.clear_connector_connections(uuid) TO ocw_app;
 -- API answers 404 to anyone else. FK cascades (a deleted bot or secret) are not subject to it.
 DROP POLICY IF EXISTS personal_owner_only ON app.browser_sessions;
 CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
+  USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
+-- Work Zone sign-ins (Phase 07.13, D-23, D-30, PD-03): a member's sealed sign-in to a site for their Work Zone sessions
+-- is theirs alone, exactly as a bot browser session above. Same RESTRICTIVE shape on the row's own `user_id`: an admin,
+-- another member and a user-less session (Device Link, the sweeps) read 0 rows and cannot insert, update or delete one;
+-- the sweeps cross it only through `purge_work_browser_signins` below. FK cascades (a deleted secret) are not subject to
+-- it.
+DROP POLICY IF EXISTS personal_owner_only ON app.work_browser_signins;
+CREATE POLICY personal_owner_only ON app.work_browser_signins AS RESTRICTIVE FOR ALL
   USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
   WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
@@ -827,6 +843,13 @@ DROP POLICY IF EXISTS audience_backstop ON app.bot_work_sessions;
 CREATE POLICY audience_backstop ON app.bot_work_sessions AS RESTRICTIVE FOR ALL
   USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id))
   WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id));
+-- Phase 07.13 (PD-04): a session's local browser (state, origin, lease, loaded sign-in, pending upload) follows its
+-- session's audience, as its prompts do; a user-less system transaction (Device Link, the sweeps) passes through the
+-- session policy's own rule.
+DROP POLICY IF EXISTS audience_backstop ON app.work_browsers;
+CREATE POLICY audience_backstop ON app.work_browsers AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_browsers.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_browsers.work_session_id));
 
 -- Automations and watched records (Phase 07.6; D-02, D-04, D-07, P-10, Pitfalls 3 and 6; ADR-0028).
 --
