@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import type { SessionBrowserTools } from "../browser/manager.js";
 import {
   ACCOUNT_SWITCH_FAILED_MESSAGE,
   type AccountSignal,
   type RuntimeAccount,
   RuntimeError,
 } from "../runtime.js";
-import type { SessionBrowserTools } from "../browser/manager.js";
 import {
   type AppServerProcess,
   CODEX_APP_SERVER_ARGS,
@@ -463,8 +463,11 @@ describe("CodexRuntime — turns and approvals", () => {
   it("answers unsupported server requests with a JSON-RPC error", async () => {
     const { start } = setup();
     const server = await start();
-    const resp = await server.request("item/tool/requestUserInput", {});
+    // 07.13 (PD-08): `item/tool/requestUserInput` is answered now (empty for any server but ours); others still fail.
+    const resp = await server.request("item/tool/call", {});
     expect(resp.error).toMatchObject({ code: -32601 });
+    const question = await server.request("item/tool/requestUserInput", {});
+    expect(question.result).toEqual({ answers: {} });
   });
 
   it("interrupts the running turn via turn/interrupt", async () => {
@@ -2371,7 +2374,10 @@ describe("CodexRuntime — the Work Zone browser through the stdio shim (07.13-1
 
     const off = browserSetup();
     const plain = await off.start(undefined);
-    const r = await plain.request("mcpServer/elicitation/request", { serverName: "ocw_browser", mode: "form" });
+    const r = await plain.request("mcpServer/elicitation/request", {
+      serverName: "ocw_browser",
+      mode: "form",
+    });
     expect(r.result).toEqual({ action: "decline", content: null, _meta: null });
     await off.runtime.stopAll();
   });
@@ -2506,20 +2512,20 @@ describe("CodexRuntime — the recorded browser-mcp turns replay through the ada
     return { lines, events, sent: (server as unknown as ReplayAppServer).sent };
   }
 
-  it.each([
-    "codex-0.172.0.browser-mcp.rpc.jsonl",
-    "codex-0.172.0.browser-mcp.prompt-mode.rpc.jsonl",
-  ])("%s: both browser calls complete, every server request answered as recorded", async (file) => {
-    const { lines, events, sent } = await replayBrowser(file);
-    const requests = lines.filter((l) => l.dir === "in" && l.msg.method && l.msg.id !== undefined);
-    for (const req of requests) {
-      const recorded = lines.find((l) => l.dir === "out" && l.msg.id === req.msg.id && !l.msg.method);
-      const answered = sent.find((m) => m.id === req.msg.id && !m.method);
-      expect(answered?.result).toEqual(recorded?.msg.result);
-    }
-    const completed = events.filter((e) => e.type === "tool.completed");
-    expect(completed).toHaveLength(2);
-    expect(completed.every((e) => e.type === "tool.completed" && e.ok)).toBe(true);
-    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-1" });
-  });
+  it.each(["codex-0.172.0.browser-mcp.rpc.jsonl", "codex-0.172.0.browser-mcp.prompt-mode.rpc.jsonl"])(
+    "%s: both browser calls complete, every server request answered as recorded",
+    async (file) => {
+      const { lines, events, sent } = await replayBrowser(file);
+      const requests = lines.filter((l) => l.dir === "in" && l.msg.method && l.msg.id !== undefined);
+      for (const req of requests) {
+        const recorded = lines.find((l) => l.dir === "out" && l.msg.id === req.msg.id && !l.msg.method);
+        const answered = sent.find((m) => m.id === req.msg.id && !m.method);
+        expect(answered?.result).toEqual(recorded?.msg.result);
+      }
+      const completed = events.filter((e) => e.type === "tool.completed");
+      expect(completed).toHaveLength(2);
+      expect(completed.every((e) => e.type === "tool.completed" && e.ok)).toBe(true);
+      expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-1" });
+    },
+  );
 });
