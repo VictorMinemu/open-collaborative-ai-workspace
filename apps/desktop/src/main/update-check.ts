@@ -1,4 +1,4 @@
-// "Update available" (07.13, D-18, PD-21): the desktop app asks GitHub's public `releases/latest` at most once a day
+// "Update available" (07.13, D-18, PD-21): the desktop app asks GitHub's public latest-release API at most once a day
 // and, when the latest stable release is newer than its own version, the tray and the onboarding window link to that
 // release's page. It never downloads or installs anything: the builds are unsigned until Phase 9, so the person
 // updates by hand. One unauthenticated GET, no token, no identity beyond a generic User-Agent. The answer is untrusted
