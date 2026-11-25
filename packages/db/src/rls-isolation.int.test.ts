@@ -775,6 +775,22 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.account_pool_policies (organization_id, provider, strategy) values ($1, 'claude', 'round_robin')",
     [org],
   );
+  // Phase 07.13 (D-23, PD-03, PD-04): the member's sealed Work Zone sign-in (its state only a `browser_session` secret)
+  // and the seeded session's browser with that sign-in loaded.
+  const wbSecret = randomUUID();
+  const wbSignin = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'work zone sign-in', 'browser_session', 'c', 'i', 't')",
+    [wbSecret, org],
+  );
+  await q(
+    "insert into app.work_browser_signins (id, organization_id, user_id, site_key, secret_id, expires_at) values ($1, $2, $3, 'github.com', $4, now() + interval '30 days')",
+    [wbSignin, org, user, wbSecret],
+  );
+  await q(
+    "insert into app.work_browsers (work_session_id, organization_id, origin, signin_id, signin_user_id) values ($1, $2, 'https://github.com:443', $3, $4)",
+    [ws, org, wbSignin, user],
+  );
 
   // Phase 07.17 (D-02, D-03): a fan-out automation posting to the channel, one Run now and the one item it opened, with
   // the channel's message as its root (the item's key is stored only as a sha256 hex).
@@ -1027,7 +1043,8 @@ describe("tenant isolation (RLS)", () => {
       expect(seeded.rows[0].n, `${tbl} has no fixture row: add one to seedOrg()`).toBeGreaterThan(0);
 
       // Same tenant sees its rows (sanity), minus the personal keys (07.4-07), the member connector connections
-      // (07.4-10) and the sealed browser sessions (07.8-02) only their owner's session sees …
+      // (07.4-10), the sealed browser sessions (07.8-02) and the Work Zone sign-ins (07.13-03) only their owner's
+      // session sees …
       const ownerOnly =
         tbl === "app.vault_items"
           ? (
@@ -1036,7 +1053,9 @@ describe("tenant isolation (RLS)", () => {
                 [A],
               )
             ).rows[0].n
-          : tbl === "app.connector_connections" || tbl === "app.browser_sessions"
+          : tbl === "app.connector_connections" ||
+              tbl === "app.browser_sessions" ||
+              tbl === "app.work_browser_signins"
             ? seeded.rows[0].n
             : tbl === "app.agent_vault_grants"
               ? (
@@ -1940,7 +1959,8 @@ describe("tenant isolation (RLS)", () => {
       ).rejects.toThrow(/row-level security/);
     }
     // The four memory tables (and, since 07.4-07, the keychain's personal keys, their grants since 07.4-14 and member
-    // connections since 07.4-10, sealed browser sessions since 07.8-02) carry the restrictive owner-only policy on top
+    // connections since 07.4-10, sealed browser sessions since 07.8-02, Work Zone sign-ins since 07.13-03) carry the
+    // restrictive owner-only policy on top
     // of the tenant policy.
     const restrictive = await migrator.query(
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
@@ -1955,6 +1975,7 @@ describe("tenant isolation (RLS)", () => {
         "memory_proposals",
         "memory_scopes",
         "vault_items",
+        "work_browser_signins",
       ].map((tablename) => ({
         tablename,
         cmd: "ALL",

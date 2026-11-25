@@ -90,6 +90,12 @@ REVOKE TRUNCATE ON app.bot_tasks, app.bot_task_processes FROM ocw_app;
 -- cascade (a deleted device deletes its slots) and the API's own writes.
 REVOKE TRUNCATE ON app.account_pool_accounts, app.account_pool_policies FROM ocw_app;
 
+-- Work Zone browser (Phase 07.13, D-23, PD-03, PD-04): TRUNCATE ignores RLS (the owner-only policy on the sign-ins and the
+-- session audience backstop on the session browsers below), so the app role never truncates every organization's
+-- session browsers or every member's sealed sign-ins (stated explicitly, as for 07.16). DELETE stays granted for the
+-- cascades of a session, a secret or a sign-in and for the API's own writes.
+REVOKE TRUNCATE ON app.work_browsers, app.work_browser_signins FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
@@ -288,6 +294,16 @@ CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
   USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
   WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
+-- Work Zone sign-ins (Phase 07.13, D-23, D-30, PD-03): a member's sealed sign-in to a site for their Work Zone sessions
+-- is theirs alone, exactly as a bot browser session above. Same RESTRICTIVE shape on the row's own `user_id`: an admin,
+-- another member and a user-less session (Device Link, the sweeps) read 0 rows and cannot insert, update or delete one;
+-- the sweeps cross it only through `purge_work_browser_signins` below. FK cascades (a deleted secret) are not subject to
+-- it.
+DROP POLICY IF EXISTS personal_owner_only ON app.work_browser_signins;
+CREATE POLICY personal_owner_only ON app.work_browser_signins AS RESTRICTIVE FOR ALL
+  USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
 -- The browser sweep (07.8-21; D-08, R7, R9): sign-in cards that waited 15 minutes expire, and sessions expired for 7
 -- days are removed; since 07.8-28 (WINDOWS #271) takeover leases left by a dead API instance are cleared. The sweep runs without a user, across organizations:
 -- - `browser_sweep_organizations` lists the organizations that have such work (ids only, keyset-paged by id); the API
@@ -344,6 +360,44 @@ REVOKE ALL ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz,
 REVOKE ALL ON FUNCTION app.purge_browser_sessions(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.purge_browser_sessions(timestamptz) TO ocw_app;
+
+-- The Work Zone browser sweep (Phase 07.13, D-20, D-23, PD-14), the same shape as the bots' above. It runs without a
+-- user, across organizations:
+-- - `work_browser_sweep_organizations` lists the organizations that have a Work Zone sign-in that expired before
+--   `p_before` or a session browser's takeover lease that lapsed at `p_now` (its holding API instance died, nobody
+--   released it); ids only, keyset-paged by id, at most 1000. The API then works inside each organization's own
+--   withTenant() transaction;
+-- - `purge_work_browser_signins` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
+--   transaction, never an argument), the member sign-ins that expired before `p_before`, past the owner-only policy no
+--   user-less session could cross. Their sealed secrets go with them (`work_browser_signin_secret_cleanup`) and a
+--   session browser that had one loaded only unlinks it. It returns the ids, the owner and the site for the audit only:
+--   never a secret id or any sealed value.
+CREATE OR REPLACE FUNCTION app.work_browser_sweep_organizations(
+  p_now timestamptz, p_before timestamptz, p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT o.organization_id FROM (
+    SELECT s.organization_id FROM app.work_browser_signins s WHERE s.expires_at < p_before
+    UNION
+    SELECT w.organization_id FROM app.work_browsers w
+    WHERE w.lease_id IS NOT NULL AND w.lease_expires_at <= p_now
+  ) o
+  WHERE p_after IS NULL OR o.organization_id > p_after
+  ORDER BY o.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+CREATE OR REPLACE FUNCTION app.purge_work_browser_signins(p_before timestamptz)
+RETURNS TABLE (id uuid, user_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.work_browser_signins s
+  WHERE s.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND s.expires_at < p_before
+  RETURNING s.id, s.user_id, s.site_key
+$fn$;
+REVOKE ALL ON FUNCTION app.work_browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.purge_work_browser_signins(timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.work_browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.purge_work_browser_signins(timestamptz) TO ocw_app;
 
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
@@ -827,6 +881,13 @@ DROP POLICY IF EXISTS audience_backstop ON app.bot_work_sessions;
 CREATE POLICY audience_backstop ON app.bot_work_sessions AS RESTRICTIVE FOR ALL
   USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id))
   WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id));
+-- Phase 07.13 (PD-04): a session's local browser (state, origin, lease, loaded sign-in, pending upload) follows its
+-- session's audience, as its prompts do; a user-less system transaction (Device Link, the sweeps) passes through the
+-- session policy's own rule.
+DROP POLICY IF EXISTS audience_backstop ON app.work_browsers;
+CREATE POLICY audience_backstop ON app.work_browsers AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_browsers.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_browsers.work_session_id));
 
 -- Automations and watched records (Phase 07.6; D-02, D-04, D-07, P-10, Pitfalls 3 and 6; ADR-0028).
 --
