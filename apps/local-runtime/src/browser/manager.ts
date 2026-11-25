@@ -44,6 +44,7 @@ import type {
 } from "./agent/ops.js";
 import { BrowserApprovalBroker } from "./approvals.js";
 import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js";
+import { type LiveClock, LiveFrames } from "./frames.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
 import { ensureShimToken, SHIM_TOKEN_FILE, verifyShimToken } from "./shim-token.js";
 import {
@@ -122,6 +123,8 @@ export interface BrowserManagerOptions {
   childEntry?: string[];
   /** A page with no call for this long closes (default `WORK_BROWSER_LIMITS.idleMinutes`, PD-24). */
   idleMs?: number;
+  /** Tests: the clock of the live frames' watch lapse (15). */
+  liveClock?: LiveClock;
   log?: Logger;
 }
 
@@ -261,9 +264,16 @@ export class BrowserManager {
   private readonly log: Logger;
   private readonly browsers: NonNullable<BrowserManagerOptions["browsers"]>;
   private readonly broker: BrowserApprovalBroker;
+  /** Who watches which session's page (15): frames flow only while someone does. */
+  private readonly live: LiveFrames;
 
   constructor(private readonly opts: BrowserManagerOptions) {
     this.log = opts.log ?? silentLogger;
+    this.live = new LiveFrames({
+      link: opts.link,
+      control: (sessionId, on) => this.frameControl(sessionId, on),
+      ...(opts.liveClock ? { clock: opts.liveClock } : {}),
+    });
     this.broker = new BrowserApprovalBroker({ emit: opts.emit });
     this.browsers = opts.browsers ?? {
       installed: () => installedBrowser(opts.root),
@@ -338,6 +348,7 @@ export class BrowserManager {
     if (!s) return;
     this.sessions.delete(sessionId);
     s.turn = null;
+    this.live.stop(sessionId);
     this.broker.cancelSession(sessionId);
     await this.closePage(s, "closed", null);
     if (UUID.test(sessionId)) {
@@ -357,9 +368,9 @@ export class BrowserManager {
 
   /**
    * The six ephemeral `browser.*` server frames (never queued, never acked). Here: `browser.close` closes that
-   * session's page (opt-in revoked, policy off, access lost, abandoned takeover) and `browser.lease` pauses the
-   * agent's calls while a person holds the page. Live frames, input, hand back and sign-in states are 07.13-15's and
-   * -19's; they arrive here without error.
+   * session's page (opt-in revoked, policy off, access lost, abandoned takeover), `browser.frames` streams the page
+   * while someone watches (15) and `browser.lease` pauses the agent's calls while a person holds the page. Sign-in
+   * states are 07.13-19's; they arrive here without error.
    */
   async onServerFrame(frame: BrowserServerFrame): Promise<void> {
     switch (frame.type) {
@@ -368,6 +379,13 @@ export class BrowserManager {
         if (!s) return;
         const kind = frame.reason === "takeover_abandoned" ? "takeover_abandoned" : "closed";
         await this.closePage(s, kind, null);
+        return;
+      }
+      case "browser.frames": {
+        // Someone watches (re-sent every `watchPingMs`), or nobody does any more.
+        if (!this.sessions.has(frame.sessionId)) return;
+        if (frame.on) this.live.ping(frame.sessionId);
+        else this.live.stop(frame.sessionId);
         return;
       }
       case "browser.lease": {
@@ -721,13 +739,17 @@ export class BrowserManager {
       sandbox: this.opts.sandbox(),
       ...(this.opts.childEntry ? { entry: this.opts.childEntry } : {}),
       onEvent,
-      // Live frames are 07.13-15's; nothing is kept here.
-      onFrame: () => {},
+      // A live JPEG: sent now if someone watches, else dropped; never kept.
+      onFrame: (payload) => {
+        if (child && s.child === child) this.live.onJpeg(s.id, payload);
+      },
     };
     // The shim token outlives a child: the manager removes it with the run dir at session end.
     child = this.opts.createChild
       ? this.opts.createChild(factoryOpts)
       : new BrowserChild({ ...factoryOpts, keepFiles: [SHIM_TOKEN_FILE] });
+    // Someone already watches: the first page streams as soon as it exists.
+    if (this.live.watching(s.id)) void child.call("frames", { on: true }).catch(() => {});
     return child;
   }
 
@@ -779,6 +801,13 @@ export class BrowserManager {
     s.leaseId = null;
     this.event(s, promptId, kind, origin, kind === "closed" ? { action: "close" } : {});
     await child.close().catch(() => {});
+  }
+
+  /** The session's screencast on or off in its child (a no-op without a running page). */
+  private frameControl(sessionId: string, on: boolean): void {
+    const child = this.sessions.get(sessionId)?.child;
+    if (child?.state !== "running") return;
+    void child.call("frames", { on }).catch(() => {});
   }
 
   // ------------------------------------------------------------------ helpers

@@ -125,7 +125,10 @@ describe("LiveFrames (07.13-15 Task 1: PD-12, A-7)", () => {
   it("drops a frame that would exceed 256 KiB, never splits it, and keeps streaming", () => {
     const h = liveHarness();
     h.frames.ping(sid);
-    h.frames.onJpeg(sid, encodeChildJpeg(fakeJpeg(WORK_BROWSER_FRAME_MAX_BYTES), { width: 960, height: 600 }));
+    h.frames.onJpeg(
+      sid,
+      encodeChildJpeg(fakeJpeg(WORK_BROWSER_FRAME_MAX_BYTES), { width: 960, height: 600 }),
+    );
     expect(h.sent).toHaveLength(0);
     expect(h.frames.counters.oversize).toBe(1);
     expect(h.frames.watching(sid)).toBe(true);

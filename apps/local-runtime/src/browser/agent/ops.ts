@@ -15,7 +15,12 @@
 // with fixed messages (never page text, a URL or a path); events name a page by its origin only.
 
 import { randomBytes } from "node:crypto";
-import { type CdpSession, type MaskRect, maskedScreenshot } from "@ocw/browser-engine/capture";
+import {
+  type CdpSession,
+  type MaskRect,
+  maskedScreenshot,
+  startScreencast,
+} from "@ocw/browser-engine/capture";
 import {
   type AXNode,
   backendIdFromRef,
@@ -57,10 +62,19 @@ import type {
 // ---------------------------------------------------------------- ops, errors, events
 
 /**
- * The ops the child dispatches (`main.ts` reads only this list). Later plans add theirs here (15: `frames`, `input`,
- * `takeover`; 19: `exportState`, `lock`, `loadState`) together with their `runOp` arm.
+ * The ops the child dispatches (`main.ts` reads only this list). Later plans add theirs here (19: `exportState`,
+ * `lock`, `loadState`) together with their `runOp` arm. 15 added `frames` (the live screencast), `takeover` and `input`.
  */
-export const AGENT_OPS = ["open", "snapshot", "act", "wait", "screenshot", "close", "info"] as const;
+export const AGENT_OPS = [
+  "open",
+  "snapshot",
+  "act",
+  "wait",
+  "screenshot",
+  "close",
+  "info",
+  "frames",
+] as const;
 export type AgentOp = (typeof AGENT_OPS)[number];
 
 export function isAgentOp(op: unknown): op is AgentOp {
@@ -151,6 +165,11 @@ export interface InfoResult {
 }
 
 export interface BrowserAgent {
+  /**
+   * The live screencast (07.13-15, D-15): `{ on }`. Remembered while no page is open, so the next page streams at
+   * once. Not queued behind other ops: a frame request never waits for a navigation.
+   */
+  frames(input: OpInput): Promise<{ on: boolean }>;
   open(input: OpInput): Promise<OpenResult>;
   snapshot(input: OpInput): Promise<SnapshotResult>;
   act(input: OpInput): Promise<ActResult>;
@@ -177,6 +196,8 @@ export function runOp(agent: BrowserAgent, op: AgentOp, input: OpInput): Promise
       return agent.close(input);
     case "info":
       return agent.info(input);
+    case "frames":
+      return agent.frames(input);
   }
 }
 
@@ -229,6 +250,12 @@ export interface BrowserAgentOptions {
   /** From `resolveChromiumSandbox` only (PD-18). */
   chromiumSandbox: boolean;
   emit?: (event: AgentEvent) => void;
+  /**
+   * One live screencast JPEG and its size (07.13-15): at most `WORK_BROWSER_LIMITS.fps` per second, at most
+   * `frameWidth`×`frameHeight`, quality `jpegQuality`. `main.ts` sends it as `FRAME_TYPES.jpeg` with a fixed 4-byte size
+   * header (`encodeChildJpeg`, frames.ts). Never logged.
+   */
+  onJpeg?: (jpeg: Uint8Array, size: { width: number; height: number }) => void;
   /** Chromium went away without `close` (the child exits 3). */
   onDisconnected?: () => void;
 }
@@ -344,7 +371,17 @@ interface Session {
   refused: "navigation_refused" | "metadata_refused" | null;
   /** The last http(s) URL the page committed (where a refused or failed navigation returns to). */
   lastGoodUrl: string | null;
+  /** The running screencast's stop (15), or null. */
+  frames: (() => Promise<void>) | null;
 }
+
+/** The live screencast's settings (D-15): the bounds of every Work Zone frame. */
+export const SCREENCAST = {
+  maxWidth: WORK_BROWSER_LIMITS.frameWidth,
+  maxHeight: WORK_BROWSER_LIMITS.frameHeight,
+  quality: WORK_BROWSER_LIMITS.jpegQuality,
+  fps: WORK_BROWSER_LIMITS.fps,
+} as const;
 
 /** One page in one in-memory context of one Chromium. Ops run one at a time, in order. */
 export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
@@ -353,6 +390,24 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
   let session: Session | null = null;
   let closing = false;
   let queue: Promise<unknown> = Promise.resolve();
+  /** Someone watches (`frames { on: true }`): the page streams, and so does the next one. */
+  let wantFrames = false;
+
+  async function startFrames(s: Session): Promise<void> {
+    if (s.frames || !opts.onJpeg || session !== s) return;
+    const onJpeg = opts.onJpeg;
+    s.frames = await startScreencast(s.cdp, SCREENCAST, (jpeg, size) => {
+      if (session === s && s.frames) onJpeg(jpeg, size);
+    });
+    // Stopped or closed while the screencast was starting.
+    if (!wantFrames || session !== s) await stopFrames(s);
+  }
+
+  async function stopFrames(s: Session): Promise<void> {
+    const stop = s.frames;
+    s.frames = null;
+    await stop?.().catch(() => {});
+  }
 
   /** Run `fn` after every earlier op (ops on one page never interleave). */
   function serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -437,6 +492,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     page.on("crash", () => {
       if (session !== s) return;
       session = null;
+      s.frames = null;
       emit({ event: "crashed", scope: "page" });
       void s.context.close().catch(() => {});
     });
@@ -484,12 +540,14 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         pendingNav: new Set(),
         refused: null,
         lastGoodUrl: null,
+        frames: null,
       };
       await context.route("**/*", (route) => onRoute(s, route));
       await cdp.send("Page.enable");
       s.worldScriptId = await replaceWorldScript(cdp, null, false);
       attachPage(s);
       session = s;
+      if (wantFrames) await startFrames(s).catch(() => {});
       return s;
     } catch (err) {
       await context.close().catch(() => {});
@@ -763,6 +821,16 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
   // ------------------------------------------------------------ ops
 
   return {
+    async frames(input) {
+      wantFrames = input.on === true;
+      const s = session;
+      if (s) {
+        if (wantFrames) await startFrames(s).catch(() => {});
+        else await stopFrames(s);
+      }
+      return { on: wantFrames && session !== null && session.frames !== null };
+    },
+
     async open(input) {
       const url = typeof input.url === "string" ? input.url : "";
       const refusal = urlRefusal(url);
@@ -890,6 +958,7 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         try {
           const s = session;
           session = null;
+          if (s) await stopFrames(s);
           await s?.context.close().catch(() => {});
           const b = browser;
           browser = null;
