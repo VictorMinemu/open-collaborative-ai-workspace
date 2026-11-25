@@ -141,13 +141,26 @@ interface TurnState {
   grant: SessionBrowserGrant | undefined;
   /** The turn runs in Full access (the daemon's effective mode for it). */
   fullAccess: boolean;
+  /**
+   * HI-02: the turn is over (completed, replaced by the next one, or its session ended). The `TurnState` object is the
+   * per-turn token: a call that awaited something checks `s.turn === turn && !turn.ended` before it keeps a result.
+   */
+  ended: boolean;
+  /**
+   * HI-04 (D-13, the bots' sticky member data): set when a member's sign-in loads in this turn and kept for the rest of
+   * it (cleared only by the next turn's start): their id and the origins they allowed for this turn (the signed-in
+   * site first). Any other origin needs their `signed_in_host` yes.
+   */
+  memberData: { userId: string; sites: Set<BrowserOrigin> } | null;
+  /** LO-04: the turn was steered by more than one asker (or a bot): no sign-in loads in it. */
+  mixed: boolean;
 }
 
 interface SessionState {
   id: string;
   tools: SessionBrowserTools;
   /** Grants of prompts handed to the adapter, by prompt id, until their turn starts. */
-  pendingGrants: Map<string, { grant: SessionBrowserGrant | undefined; fullAccess: boolean }>;
+  pendingGrants: Map<string, { grant: SessionBrowserGrant | undefined; fullAccess: boolean; steer: boolean }>;
   /** The newest grant the session got (start or prompt): decides `available`. */
   latestGrant: SessionBrowserGrant | undefined;
   turn: TurnState | null;
@@ -186,6 +199,14 @@ interface SessionState {
   lastAskerId: string | null;
   /** 19: origins the API had no sign-in to load for in this turn (asked once per turn). */
   noSignIn: Set<BrowserOrigin>;
+  /**
+   * HI-06: the session's Codex shim token was issued (`shimTokenFile`). Any process of the device's OS user can read
+   * that file and reach the control socket, so a sign-in loads here only while no other person's session runs on the
+   * device (`sharedWith`). A Claude session has no token: its tools run in the daemon only.
+   */
+  shimIssued: boolean;
+  /** HI-06: the last `open` of this turn did not load a sign-in because the device is shared (said in its result). */
+  sharedRefused: boolean;
 }
 
 interface LoadedSignIn {
@@ -350,19 +371,24 @@ export class BrowserManager {
 
   /**
    * A grant arrived with `session.start` (`promptId` null) or a `prompt` (PD-09). The turn that prompt starts uses it;
-   * the newest one decides `available`. `fullAccess` = the turn's effective mode is Full access.
+   * the newest one decides `available`. `fullAccess` = the turn's effective mode is Full access. `steer` = the daemon
+   * hands the prompt to the adapter as a steer of the running turn (LO-04).
    */
   onPrompt(
     sessionId: string,
     promptId: string | null,
     grant: SessionBrowserGrant | undefined,
-    opts: { fullAccess?: boolean } = {},
+    opts: { fullAccess?: boolean; steer?: boolean } = {},
   ): void {
     const s = this.state(sessionId);
     s.latestGrant = grant;
     if (promptId !== null) {
       s.pendingGrants.delete(promptId);
-      s.pendingGrants.set(promptId, { grant, fullAccess: opts.fullAccess === true });
+      s.pendingGrants.set(promptId, {
+        grant,
+        fullAccess: opts.fullAccess === true,
+        steer: opts.steer === true,
+      });
       while (s.pendingGrants.size > MAX_PENDING_GRANTS) {
         const first = s.pendingGrants.keys().next().value;
         if (first === undefined) break;
@@ -370,17 +396,41 @@ export class BrowserManager {
       }
     }
     this.notifyAvailable(s);
+    // HI-06: a session (new, or with a new asker) may now share the device with another session's loaded sign-in.
+    this.unloadShared(s);
   }
 
-  /** `prompt.started`: the turn's calls use the grant of that prompt (absent = not allowed). */
+  /**
+   * `prompt.started`: the turn's calls use the grant of that prompt (absent = not allowed).
+   *
+   * LO-04: a steer that starts while a turn still runs joins that turn (Codex emits its `prompt.started` inside it).
+   * The model's context goes on, so the turn's member data stays sticky (HI-04); and when the steer is by anyone but
+   * the member whose sign-in (or hand-signed page) is open, that page is re-sealed and closed now, and no sign-in loads
+   * in the rest of this mixed turn.
+   */
   onTurnStarted(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     const pending = s.pendingGrants.get(promptId);
     s.pendingGrants.delete(promptId);
-    s.turn = { promptId, grant: pending?.grant, fullAccess: pending?.fullAccess ?? false };
-    s.lastAskerId = pending?.grant?.askerId ?? null;
+    const steered = pending?.steer && s.turn ? s.turn : null;
+    if (s.turn) s.turn.ended = true;
+    const grant = pending?.grant;
+    const asker = grant && !grant.askerIsBot ? grant.askerId : null;
+    const previousAsker = steered?.grant && !steered.grant.askerIsBot ? steered.grant.askerId : null;
+    const mixed = steered !== null && (steered.mixed || asker === null || asker !== previousAsker);
+    s.turn = {
+      promptId,
+      grant,
+      fullAccess: pending?.fullAccess ?? false,
+      ended: false,
+      memberData: steered?.memberData ?? null,
+      mixed,
+    };
+    s.lastAskerId = grant?.askerId ?? null;
     s.noSignIn.clear();
+    const owner = s.loaded?.userId ?? (s.child ? s.memberPage : null);
+    if (steered && owner && owner !== asker) void this.closePage(s, "closed", promptId).catch(() => {});
   }
 
   /**
@@ -390,6 +440,7 @@ export class BrowserManager {
   onTurnEnded(sessionId: string, promptId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.turn?.promptId !== promptId) return;
+    s.turn.ended = true;
     s.turn = null;
     this.broker.cancelSession(sessionId);
     if (s.loaded) void this.serial(s, () => this.closePage(s, "closed", promptId)).catch(() => {});
@@ -408,6 +459,7 @@ export class BrowserManager {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.sessions.delete(sessionId);
+    if (s.turn) s.turn.ended = true;
     s.turn = null;
     this.live.stop(sessionId);
     this.broker.cancelSession(sessionId);
@@ -495,9 +547,18 @@ export class BrowserManager {
   // ------------------------------------------------------------------ sign-ins (19: D-22, PD-15)
 
   /** A person took control: the page's site state is fingerprinted now (hex, in memory), for the hand back's `changed`. */
-  private onHeld(sessionId: string, leaseId: string): void {
+  private async onHeld(sessionId: string, leaseId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    // HI-03: the lease frame does not name its holder; the API grants it to the asker of the in-flight (newest
+    // dispatched) or last prompt. While a member's sign-in is loaded, the lease is applied only when every prompt that
+    // could be that one is the member's own; otherwise the input is cut off now and the page is re-sealed and closed
+    // before anyone can see or type into it (the API ends the lease on `closed`).
+    if (s.loaded && !this.onlyAskerIs(s, s.loaded.userId)) {
+      this.takeover.end(sessionId);
+      await this.closePage(s, "closed", s.turn?.promptId ?? null);
+      return;
+    }
     const child = s.child;
     const origin = s.origin;
     // The API lets only the asker of the running (or last) turn take control: what they type is theirs (D-25).
@@ -510,6 +571,20 @@ export class BrowserManager {
           )
         : Promise.resolve(null);
     s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * HI-03: true when `userId` is the only person the API could name as this session's asker now: the running (or last)
+   * turn's and every prompt this device was handed that has not started yet (a bot's prompt names nobody, so it fails).
+   */
+  private onlyAskerIs(s: SessionState, userId: string): boolean {
+    const current = s.turn ? s.turn.grant : undefined;
+    const now = s.turn ? (current && !current.askerIsBot ? current.askerId : null) : s.lastAskerId;
+    if (now !== userId) return false;
+    for (const pending of s.pendingGrants.values()) {
+      if (!pending.grant || pending.grant.askerIsBot || pending.grant.askerId !== userId) return false;
+    }
+    return true;
   }
 
   /**
@@ -556,34 +631,88 @@ export class BrowserManager {
     origin: BrowserOrigin,
   ): Promise<OpenResult | null> {
     const grant = turn.grant;
-    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || s.noSignIn.has(origin)) return null;
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed || s.noSignIn.has(origin)) {
+      return null;
+    }
+    // HI-06: another person's session on this device could drive this one through the shim token: public page only.
+    if (this.sharedWith(s, grant.askerId)) {
+      s.sharedRefused = true;
+      return null;
+    }
     const answer = await this.signins.request(s.id, turn.promptId, origin);
     if (!answer?.ok) {
       s.noSignIn.add(origin);
       return null;
     }
-    // The turn may have ended, or the opt-in gone off, while the API answered: then nothing is loaded.
-    if (s.turn !== turn || !this.opts.optIn() || s.child !== child) {
+    // The turn may have ended, the opt-in gone off, or another person's session started (HI-06) while the API answered:
+    // then nothing is loaded.
+    if (s.turn !== turn || !this.opts.optIn() || s.child !== child || this.sharedWith(s, grant.askerId)) {
       this.event(s, turn.promptId, "signin_unloaded", origin);
       return null;
     }
+    let res: OpenWithStateResult;
     try {
-      const res = (await child.call("openWithState", {
+      res = (await child.call("openWithState", {
         url,
         state: answer.state,
         siteHost: siteHostOfOrigin(origin),
       })) as OpenWithStateResult;
-      s.loaded = { signinId: answer.signinId, userId: grant.askerId, origin, fingerprint: res.fingerprint };
-      s.memberPage = null;
-      this.event(s, turn.promptId, "signin_loaded", origin);
-      return res;
     } catch (err) {
-      // The child closed the context it had opened with the state: the page is gone, and the sign-in is not loaded.
-      s.origin = null;
-      s.pageApproved = null;
+      // HI-01: a failed or timed-out load is never trusted to have dropped the state: the child may still open the
+      // signed-in page after its answer. The whole child goes (its Chromium and the state with it) before the API
+      // hears that the sign-in is unloaded; nothing is re-sealed from a page that did not load.
+      await this.killChild(s, child, turn.promptId, null);
       this.event(s, turn.promptId, "signin_unloaded", origin);
       throw err;
     }
+    const loaded = { signinId: answer.signinId, userId: grant.askerId, origin, fingerprint: res.fingerprint };
+    // HI-02: the turn object is this load's token. The member's turn may have ended (Stop completes the turn while the
+    // child still loads the state), the opt-in gone off, or the session's child changed meanwhile: the late signed-in
+    // page is then re-sealed and closed now, and never becomes the session's loaded sign-in.
+    // HI-03: a lease taken while the state loaded may be another person's: the page is not theirs to see.
+    const heldByOther = this.takeover.isPaused(s.id) && !this.onlyAskerIs(s, grant.askerId);
+    const stale = s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child;
+    if (stale || heldByOther || this.sharedWith(s, grant.askerId)) {
+      await this.killChild(s, child, turn.promptId, loaded);
+      this.event(s, turn.promptId, "signin_unloaded", origin);
+      throw Object.assign(new Error("the turn ended"), { code: "not_allowed" });
+    }
+    s.loaded = loaded;
+    s.memberPage = null;
+    this.markMemberData(turn, grant.askerId, origin);
+    this.event(s, turn.promptId, "signin_loaded", origin);
+    return res;
+  }
+
+  /** HI-04: the turn now carries `userId`'s member data; `origin` is one of their sites for the rest of it. */
+  private markMemberData(turn: TurnState, userId: string, origin: BrowserOrigin): void {
+    turn.memberData ??= { userId, sites: new Set() };
+    turn.memberData.sites.add(origin);
+  }
+
+  /**
+   * Ends `child` for good (HI-01, HI-02): through `closePage` when it is still the session's page (it reports `closed`),
+   * else directly. With `loaded` (a page that did load the member's state), the state is re-sealed from it first.
+   * Resolves once the process is gone; the caller then reports `signin_unloaded`.
+   */
+  private async killChild(
+    s: SessionState,
+    child: ManagedChild,
+    promptId: string | null,
+    loaded: LoadedSignIn | null,
+  ): Promise<void> {
+    if (loaded && child.state === "running") {
+      await reseal({
+        child,
+        api: this.opts.api,
+        sessionId: s.id,
+        signinId: loaded.signinId,
+        origin: loaded.origin,
+        fingerprintAtLoad: loaded.fingerprint,
+      }).catch(() => null);
+    }
+    if (s.child === child) await this.closePage(s, "closed", promptId, { reseal: false });
+    await child.close().catch(() => {});
   }
 
   /**
@@ -621,8 +750,13 @@ export class BrowserManager {
     signal: AbortSignal | undefined,
   ): Promise<WorkBrowserToolResult> {
     const grant = turn.grant;
-    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId) {
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId || turn.mixed) {
       return this.refuse(s, turn, "signin", "signin_not_allowed");
+    }
+    // HI-06: a page the member signs in to by hand would be as reachable as a loaded one: not while the device is shared.
+    if (this.sharedWith(s, grant.askerId)) {
+      const refused = this.refuse(s, turn, "signin", "signin_not_allowed");
+      return { ...refused, content: [...refused.content, { type: "text", text: SHARED_DEVICE_TEXT }] };
     }
     const site = siteOfHost(body.host);
     if (!site) return invalidResult("signin", "host: must be a host name such as github.com", s.origin);
@@ -784,6 +918,7 @@ export class BrowserManager {
     const child = await this.ensureChild(s, turn);
     s.opening = true;
     let res: OpenResult;
+    s.sharedRefused = false;
     try {
       const signedIn = target && !s.loaded ? await this.loadSignIn(s, turn, child, url, target) : null;
       res = signedIn ?? ((await child.call("open", { url })) as OpenResult);
@@ -794,8 +929,16 @@ export class BrowserManager {
     const origin = s.origin ?? target;
     s.origin = origin;
     this.markTainted(s, origin);
+    // HI-04: a redirect that left the member's sites in a turn with their data needs the member's yes first.
+    if (origin && origin !== target && turn.memberData && !turn.memberData.sites.has(origin)) {
+      const refusal = await this.askMemberData(s, turn, "open", body, origin, signal);
+      if (refusal) {
+        await this.closePage(s, "closed", turn.promptId);
+        return this.refuse(s, turn, "open", refusal, undefined, body);
+      }
+    }
     // A redirect landed on another origin: it needs its own yes before anything of it reaches the model.
-    if (origin && origin !== target && this.needsHost(s, turn, "open", origin)) {
+    else if (origin && origin !== target && this.needsHost(s, turn, "open", origin)) {
       const refusal = await this.askHost(s, turn, "open", body, origin, signal);
       if (refusal) {
         await this.closePage(s, "closed", turn.promptId);
@@ -807,6 +950,7 @@ export class BrowserManager {
     const summary = browserToolSummary("open", body, { origin });
     return textResult(summary, origin, [
       `Signed in: ${res.signedIn ? "yes" : "no"}`,
+      ...(s.sharedRefused ? [SHARED_DEVICE_TEXT] : []),
       "",
       pageContent(origin, `Title: ${res.title}`),
     ]);
@@ -831,6 +975,16 @@ export class BrowserManager {
     const grant = turn.grant;
     const origin = tool === "open" ? originOf(String(body.url)) : s.origin;
     if (!grant || !origin) return null;
+    // HI-04 (D-13, D-26, the bots' sticky member data): once a member's sign-in was loaded in this turn, what the agent
+    // read from it may ride any address. Going to (or acting on) a host outside the member's sites needs the member's
+    // own yes first: loopback included, never skipped by Full access. Their yes covers the host for this call. Closing
+    // the page sends nothing anywhere, so it never asks.
+    let memberAllowed = false;
+    if (tool !== "close" && turn.memberData && !turn.memberData.sites.has(origin)) {
+      const refusal = await this.askMemberData(s, turn, tool, body, origin, signal);
+      if (refusal) return refusal;
+      memberAllowed = true;
+    }
     const rule = grant.alwaysAsk.includes(tool) || (s.tainted && grant.whenTainted.includes(tool));
     if (rule) {
       const outcome = await this.broker.ask(s.id, {
@@ -846,8 +1000,43 @@ export class BrowserManager {
       if (tool !== "open") s.pageApproved = origin;
       return null;
     }
+    if (memberAllowed) {
+      if (tool !== "open") s.pageApproved = origin;
+      return null;
+    }
     if (!this.needsHost(s, turn, tool, origin)) return null;
     return this.askHost(s, turn, tool, body, origin, signal);
+  }
+
+  /**
+   * HI-04: the member's approval (`signed_in_host`, 15 minutes, member-only at the API) for `origin` in a turn that
+   * loaded their sign-in. A yes adds the origin to the turn's member sites. The summary names the origin and whether the
+   * address carries a path or query, never the path or query itself (P1).
+   */
+  private async askMemberData(
+    s: SessionState,
+    turn: TurnState,
+    tool: WorkBrowserTool,
+    body: Record<string, unknown>,
+    origin: BrowserOrigin,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserRefusal | null> {
+    const memberData = turn.memberData;
+    if (!memberData) return null;
+    const site = memberData.sites.values().next().value;
+    const from = site ? hostPortOf(site) : "your signed-in site";
+    const carries = tool === "open" && addressCarriesData(String(body.url));
+    const outcome = await this.broker.ask(s.id, {
+      kind: "signed_in_host",
+      origin,
+      tool: canonicalBrowserTool(tool),
+      summary: `${approvalSummary(tool, body, origin)} after reading your signed-in page on ${from}${carries ? " (the address has a path or query)" : ""}`,
+      ...(signal ? { signal } : {}),
+    });
+    const refusal = refusalOfOutcome(outcome);
+    if (refusal) return refusal;
+    memberData.sites.add(origin);
+    return null;
   }
 
   /** The host gate: loopback, an origin allowed for the session, the page's own approved origin or Full access pass. */
@@ -927,6 +1116,8 @@ export class BrowserManager {
         navigated: boolean;
       };
       s.pageApproved = res.blocked;
+      // HI-04: the member allowed that host for this turn.
+      turn.memberData?.sites.add(res.blocked);
       navigated ||= allowed.navigated;
     }
     if (navigated) rest.push("The page navigated. Take a new snapshot to read it.");
@@ -1175,6 +1366,8 @@ export class BrowserManager {
       memberPage: null,
       lastAskerId: null,
       noSignIn: new Set(),
+      shimIssued: false,
+      sharedRefused: false,
     };
     const manager = this;
     s.tools = {
@@ -1224,7 +1417,36 @@ export class BrowserManager {
 
   private async shimTokenFile(s: SessionState): Promise<string> {
     if (!UUID.test(s.id)) throw new Error("the session id is not a uuid");
+    // HI-06: from now on the session is reachable through the control socket by any process holding the token.
+    s.shimIssued = true;
     return ensureShimToken(this.runDir(s.id));
+  }
+
+  /**
+   * HI-06: true when a session other than `s` on this device is not `userId`'s own private session (its running turn,
+   * its newest grant and every prompt it was handed must name `userId` as a person in a session only they and the device
+   * owner can see). Its agent runs as the same OS user and could drive `s` through the shim token, so `userId`'s
+   * sign-in must not be in `s`'s page meanwhile. Only a shim-driven session (`shimIssued`) is exposed that way.
+   */
+  private sharedWith(s: SessionState, userId: string): boolean {
+    if (!s.shimIssued) return false;
+    for (const other of this.sessions.values()) {
+      if (other === s) continue;
+      if (!privateTo(other.latestGrant, userId)) return true;
+      if (other.turn && !privateTo(other.turn.grant, userId)) return true;
+      for (const p of other.pendingGrants.values()) if (!privateTo(p.grant, userId)) return true;
+    }
+    return false;
+  }
+
+  /** HI-06: a session got a new grant: every other session's loaded sign-in it now shares the device with is unloaded. */
+  private unloadShared(changed: SessionState): void {
+    for (const s of this.sessions.values()) {
+      if (s === changed) continue;
+      const owner = s.loaded?.userId ?? null;
+      if (owner && this.sharedWith(s, owner))
+        void this.closePage(s, "closed", s.turn?.promptId ?? null).catch(() => {});
+    }
   }
 
   /** The idle close (PD-24): a page with no call for `idleMs` closes; a held lease keeps it (a person is on it). */
@@ -1307,6 +1529,25 @@ function siteOfHost(host: string): { origin: BrowserOrigin; url: string } | null
   const url = `${isLoopbackHost(hostname) ? "http" : "https"}://${host}/`;
   const origin = originOf(url);
   return origin ? { origin, url } : null;
+}
+
+/** HI-06: the grant is a person's (`userId`) in a session only they and the device owner can see. */
+function privateTo(grant: SessionBrowserGrant | undefined, userId: string): boolean {
+  return grant?.signinAllowed === true && !grant.askerIsBot && grant.askerId === userId;
+}
+
+/** HI-06: what the model reads when a sign-in does not load because the device is shared. */
+const SHARED_DEVICE_TEXT =
+  "Saved sign-ins do not load while another person's session runs on this device: an agent of that session could reach this browser.";
+
+/** HI-04: the address names more than its site (a path, a query or a fragment) that could carry data. */
+function addressCarriesData(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.pathname !== "/" || u.search !== "" || u.hash !== "";
+  } catch {
+    return true;
+  }
 }
 
 /** Waits for a sign-in's save: `saved`, `expired` after `ms`, or `ended` (cancelled, or the turn is over). */

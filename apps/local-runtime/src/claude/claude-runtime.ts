@@ -1187,13 +1187,18 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.browser.markUnavailable("shadowed");
   }
 
-  /** Why a `mcp__ocw_browser__*` call is not the workspace browser's, or null when it is. */
+  /**
+   * Why a `mcp__ocw_browser__*` call is not the workspace browser's, or null when it is. LO-02: only a call the SDK
+   * names as served by our registered `sdk` server; a call with no provenance is never trusted (`isSdkServer`'s rule),
+   * since the shadow check runs after `init` and cannot tell a project `ocw_browser` from ours before it completes.
+   */
   private browserDenyReason(s: Session, server: { name: string; source: string } | undefined): string | null {
     const ours =
       s.browser !== null &&
       s.browserRegistered &&
       !s.browserShadowed &&
-      (server === undefined || server.source === "sdk");
+      server?.source === "sdk" &&
+      server.name === WORK_BROWSER_MCP_SERVER;
     return ours ? null : WORK_BROWSER_REFUSAL_TEXT.not_allowed;
   }
 

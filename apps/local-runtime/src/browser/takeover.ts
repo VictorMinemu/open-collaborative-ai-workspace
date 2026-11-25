@@ -32,8 +32,11 @@ export interface TakeoverHost {
   abandon(sessionId: string): Promise<void>;
   /** A person acted on the page: the idle close counts from now (PD-24). */
   touched(sessionId: string): void;
-  /** 19: a person took control of the page (a new lease): the manager takes the site state's fingerprint. */
-  held?(sessionId: string, leaseId: string): void;
+  /**
+   * 19: a person took control of the page (a new lease): the manager takes the site state's fingerprint. HI-03: it may
+   * also end the lease (`end`) and close a page that holds another member's sign-in; awaited before `onLease` returns.
+   */
+  held?(sessionId: string, leaseId: string): void | Promise<void>;
   /** 19: "Done, save my sign-in": export and upload (the agent is still paused while this runs). */
   save?(sessionId: string, leaseId: string, uploadId: string): Promise<void>;
 }
@@ -62,7 +65,7 @@ export class Takeover {
       // A new holder (or the first): the child marks their input and reports the focus to them.
       if (before !== leaseId) {
         this.tellChild(sessionId, true);
-        this.host.held?.(sessionId, leaseId);
+        await this.host.held?.(sessionId, leaseId);
       }
       return;
     }

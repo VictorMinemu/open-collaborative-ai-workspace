@@ -1876,9 +1876,10 @@ describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-
         mcpServer: { name: "ocw_browser", source: "sdk" },
       } as never),
     ).resolves.toEqual({ behavior: "allow", updatedInput: { url: "http://localhost:3000/" } });
+    // LO-02: a call with no provenance is never trusted to be ours.
     await expect(
       canUseTool?.("mcp__ocw_browser__snapshot", {}, { signal: signal() } as never),
-    ).resolves.toMatchObject({ behavior: "allow" });
+    ).resolves.toEqual({ behavior: "deny", message: WORK_BROWSER_REFUSAL_TEXT.not_allowed });
     expect(h.events.some((e) => e.type === "approval.requested")).toBe(false);
 
     // Every other tool keeps the approval flow and the secret denies.
@@ -1916,6 +1917,18 @@ describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-
       hookSpecificOutput: { permissionDecision: "deny" },
     });
     await expect(pre("sdk")).resolves.toEqual({});
+    // LO-02: the hook denies a call whose server is not named at all.
+    await expect(
+      hook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__ocw_browser__open",
+          tool_input: { url: "http://x/" },
+        } as never,
+        undefined,
+        { signal: signal() },
+      ),
+    ).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
   });
 
   it("browser: without an allowed grant no server; a later allowed grant registers it with setMcpServers, no relaunch", async () => {
@@ -1939,7 +1952,10 @@ describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-
     expect(h.queries).toHaveLength(1);
     expect(q.methodCalls("mcpServerStatus")).toHaveLength(1);
     await expect(
-      q.params.options.canUseTool?.("mcp__ocw_browser__open", {}, { signal: signal() } as never),
+      q.params.options.canUseTool?.("mcp__ocw_browser__open", {}, {
+        signal: signal(),
+        mcpServer: { name: "ocw_browser", source: "sdk" },
+      } as never),
     ).resolves.toMatchObject({ behavior: "allow" });
 
     // A grant denied for a queued prompt withdraws the server before that turn, never inside the running one.

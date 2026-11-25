@@ -18,7 +18,15 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BrowserChild, BrowserChildError, childEnv, sessionRunDir, sweepRunDirs } from "./child.js";
+import { AGENT_OPS, opDeadlineMs } from "./agent/ops.js";
+import {
+  BrowserChild,
+  BrowserChildError,
+  callTimeoutMs,
+  childEnv,
+  sessionRunDir,
+  sweepRunDirs,
+} from "./child.js";
 import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "./test-browser.js";
 import { DOWNLOAD_MARKER, startTestSite, type TestSite } from "./test-site.js";
 
@@ -61,6 +69,16 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   }
   return check();
 }
+
+describe("the parent's call timeout (HI-01)", () => {
+  it("is longer than the child's own deadline for every op, so the child always answers first", () => {
+    for (const op of AGENT_OPS) {
+      expect(callTimeoutMs(op), op).toBeGreaterThan(opDeadlineMs(op));
+    }
+    // `openWithState` may launch Chromium first, exactly like `open`.
+    expect(callTimeoutMs("openWithState")).toBe(callTimeoutMs("open"));
+  });
+});
 
 describe("sessionRunDir and sweepRunDirs (PD-19)", () => {
   it("names <root>/run/<sessionId> and refuses anything but a uuid", () => {
