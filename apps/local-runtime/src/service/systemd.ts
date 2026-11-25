@@ -3,6 +3,8 @@
 // by `ocw-runtime run` itself, PD-10), no socket and no port. The text is compared byte for byte on re-install, so it
 // must be a pure function of its inputs.
 
+import type { GeneratedUnitFacts } from "./types.js";
+
 export const SYSTEMD_UNIT_NAME = "ocw-runtime.service";
 export const SYSTEMD_SYSTEM_UNIT_DIR = "/etc/systemd/system";
 
@@ -126,4 +128,30 @@ export function parseSystemdExecStart(unit: string): { nodePath: string; bundleP
   const words = line.slice("ExecStart=".length).match(/"(?:[^"\\]|\\.)*"/g);
   if (!words || words.length < 2) return null;
   return { nodePath: unquoteWord(words[0]!), bundlePath: unquoteWord(words[1]!) };
+}
+
+/**
+ * A unit this installer wrote (its first line is our header and ExecStart runs a bundle with `run`), read back; null
+ * for any other unit. systemd restarts after exit 75 when the last `Restart=` is `on-failure` or `always` and no
+ * `SuccessExitStatus=` or `RestartPreventExitStatus=` line exists (we never write either, so one is an edit).
+ */
+export function readGeneratedSystemdUnit(unit: string): GeneratedUnitFacts | null {
+  const lines = unit.split("\n");
+  if (lines[0] !== HEADER) return null;
+  const exec = lines.find((l) => l.startsWith("ExecStart="));
+  const paths = parseSystemdExecStart(unit);
+  if (!exec || !paths || !exec.endsWith('" run')) return null;
+  const restart = lines
+    .filter((l) => l.startsWith("Restart="))
+    .at(-1)
+    ?.slice("Restart=".length)
+    .trim();
+  const exitOverride = lines.some(
+    (l) => l.startsWith("SuccessExitStatus=") || l.startsWith("RestartPreventExitStatus="),
+  );
+  return {
+    bundlePath: paths.bundlePath,
+    restartsOnUpdateExit: (restart === "on-failure" || restart === "always") && !exitOverride,
+    setsServiceHost: lines.includes(`Environment=${systemdEnvQuote("OCW_RUNTIME_HOST", "service")}`),
+  };
 }

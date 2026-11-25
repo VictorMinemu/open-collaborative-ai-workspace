@@ -20,17 +20,19 @@ import {
   LAUNCHD_PLIST_FILE,
   parseLaunchctlPrint,
   parseLaunchdProgramArguments,
+  readGeneratedLaunchdPlist,
   renderLaunchdPlist,
 } from "./launchd.js";
 import { runtimeIdle, runtimeOwnerConflict } from "./owner.js";
 import {
   isValidAccountName,
   parseSystemdExecStart,
+  readGeneratedSystemdUnit,
   renderSystemdUnit,
   SYSTEMD_SYSTEM_UNIT_DIR,
   SYSTEMD_UNIT_NAME,
 } from "./systemd.js";
-import type { ServiceManagerKind, ServiceStatus } from "./types.js";
+import type { GeneratedUnitFacts, ServiceManagerKind, ServiceStatus } from "./types.js";
 
 export type { DetectedManager } from "./detect.js";
 export type { ServiceExecFn } from "./exec.js";
@@ -562,9 +564,12 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       unitPath: null,
       nodePathExists: null,
       bundlePathExists: null,
+      outdated: null,
       reason,
     };
   }
+
+  const outdatedOf = (facts: GeneratedUnitFacts | null) => (facts ? !facts.setsServiceHost : null);
 
   async function pathFacts(paths: { nodePath: string; bundlePath: string } | null) {
     return {
@@ -591,6 +596,7 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       account: t.account,
       unitPath: display(t.unitPath),
       ...(await pathFacts(parseSystemdExecStart(text))),
+      outdated: outdatedOf(readGeneratedSystemdUnit(text)),
       reason: null,
     };
   }
@@ -608,6 +614,7 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       account: t.account,
       unitPath: display(t.unitPath),
       ...(await pathFacts(parseLaunchdProgramArguments(text))),
+      outdated: outdatedOf(readGeneratedLaunchdPlist(text)),
       reason: null,
     };
   }
@@ -837,6 +844,8 @@ function statusText(s: ServiceStatus): string[] {
     lines.push("  the node binary it names is gone: re-run `ocw-runtime service install`");
   if (s.bundlePathExists === false)
     lines.push("  the runtime bundle it names is gone: re-run the install command");
+  if (s.outdated === true)
+    lines.push("  written by an older runtime: re-run `ocw-runtime service install` once to rewrite it");
   if (s.reason) lines.push(`  ${s.reason}`);
   return lines;
 }

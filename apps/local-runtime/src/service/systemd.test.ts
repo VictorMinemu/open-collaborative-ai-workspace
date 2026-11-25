@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isValidAccountName,
   parseSystemdExecStart,
+  readGeneratedSystemdUnit,
   renderSystemdUnit,
   SYSTEMD_UNIT_NAME,
   systemdEnvQuote,
@@ -190,5 +191,72 @@ describe("renderSystemdUnit, system scope (07.12, D-04, PD-11)", () => {
     expect(isValidAccountName("Bad")).toBe(false);
     expect(isValidAccountName("-x")).toBe(false);
     expect(isValidAccountName("a b")).toBe(false);
+  });
+});
+
+/** What a unit written before 07.16-05 (v0.2.x installers) looks like: the same unit without OCW_RUNTIME_HOST. */
+const LEGACY_USER_UNIT = USER_UNIT.replace('Environment="OCW_RUNTIME_HOST=service"\n', "");
+
+describe("readGeneratedSystemdUnit (stale service units)", () => {
+  const bundlePath = "/home/alice/.ocw/runtime/current/ocw-runtime.mjs";
+
+  it("reads a current unit: the bundle it runs, restarts after the update exit, sets the service host", () => {
+    expect(readGeneratedSystemdUnit(USER_UNIT)).toEqual({
+      bundlePath,
+      restartsOnUpdateExit: true,
+      setsServiceHost: true,
+    });
+  });
+
+  it("reads a unit written by an older installer: same bundle and restart policy, no service host", () => {
+    expect(LEGACY_USER_UNIT).not.toContain("OCW_RUNTIME_HOST");
+    expect(readGeneratedSystemdUnit(LEGACY_USER_UNIT)).toEqual({
+      bundlePath,
+      restartsOnUpdateExit: true,
+      setsServiceHost: false,
+    });
+  });
+
+  it("is null for a unit we did not write or one that does not run the bundle with `run`", () => {
+    expect(readGeneratedSystemdUnit(LEGACY_USER_UNIT.split("\n").slice(1).join("\n"))).toBeNull();
+    expect(
+      readGeneratedSystemdUnit(LEGACY_USER_UNIT.replace('ocw-runtime.mjs" run', 'ocw-runtime.mjs"')),
+    ).toBeNull();
+    expect(readGeneratedSystemdUnit("")).toBeNull();
+  });
+
+  it("does not restart after the update exit with Restart=no, a success or prevent status, or no Restart=", () => {
+    const edits = [
+      LEGACY_USER_UNIT.replace("Restart=on-failure", "Restart=no"),
+      LEGACY_USER_UNIT.replace("Restart=on-failure", "Restart=on-abnormal"),
+      LEGACY_USER_UNIT.replace("Restart=on-failure\n", ""),
+      LEGACY_USER_UNIT.replace("RestartSec=5", "RestartSec=5\nSuccessExitStatus=75"),
+      LEGACY_USER_UNIT.replace("RestartSec=5", "RestartSec=5\nRestartPreventExitStatus=75"),
+      // The last Restart= wins, as in systemd.
+      LEGACY_USER_UNIT.replace("RestartSec=5", "RestartSec=5\nRestart=no"),
+    ];
+    for (const unit of edits) expect(readGeneratedSystemdUnit(unit)?.restartsOnUpdateExit).toBe(false);
+    expect(
+      readGeneratedSystemdUnit(LEGACY_USER_UNIT.replace("Restart=on-failure", "Restart=always"))
+        ?.restartsOnUpdateExit,
+    ).toBe(true);
+  });
+
+  it("reads back what renderSystemdUnit writes, user and system scope", () => {
+    for (const scope of ["user", "system"] as const) {
+      const unit = renderSystemdUnit({
+        scope,
+        nodePath: "/opt/node/bin/node",
+        bundlePath: "/srv/ocw 100%/.ocw/runtime/current/ocw-runtime.mjs",
+        workingDirectory: "/srv/ocw 100%",
+        path: "/opt/node/bin",
+        ...(scope === "system" ? { account: "build" } : {}),
+      });
+      expect(readGeneratedSystemdUnit(unit)).toEqual({
+        bundlePath: "/srv/ocw 100%/.ocw/runtime/current/ocw-runtime.mjs",
+        restartsOnUpdateExit: true,
+        setsServiceHost: true,
+      });
+    }
   });
 });

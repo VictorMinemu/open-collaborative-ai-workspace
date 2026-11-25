@@ -537,7 +537,14 @@ export class Daemon {
         : await runningBuild({ argv1, ocwHome: this.home, version: RUNTIME_VERSION });
     const supervision =
       over.supervision ??
-      (await isSupervised({ env: this.env, platform: process.platform, argv1, ocwHome: this.home }));
+      (await isSupervised({
+        env: this.env,
+        platform: process.platform,
+        argv1,
+        ocwHome: this.home,
+        // A unit an older installer wrote (no OCW_RUNTIME_HOST) is read from the scope's home, never another one.
+        unit: { userHome: scope.userHome },
+      }));
     const report = await reconcileSelfUpdate({ ocwHome: this.home, running });
     await clearStaging(this.home).catch(() => 0);
     // Review CR-01: a build that came back on the previous version (this boot, or an earlier one) never runs again

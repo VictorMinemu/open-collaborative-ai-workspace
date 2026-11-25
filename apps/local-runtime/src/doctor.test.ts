@@ -129,6 +129,7 @@ const serviceActive: ServiceStatus = {
   unitPath: "~/.config/systemd/user/ocw-runtime.service",
   nodePathExists: true,
   bundlePathExists: true,
+  outdated: false,
   reason: null,
 };
 
@@ -375,6 +376,7 @@ describe("ocw-runtime doctor: every other check with its fix line (07.12, D-05, 
       unitPath: null,
       nodePathExists: null,
       bundlePathExists: null,
+      outdated: null,
       reason: "no systemd in this container",
     });
     expect(none.status).toBe("warn");
@@ -392,6 +394,18 @@ describe("ocw-runtime doctor: every other check with its fix line (07.12, D-05, 
     const linger = await svc({ linger: false });
     expect(linger.status).toBe("warn");
     expect(linger.fix).toContain("`sudo loginctl enable-linger build` so it runs without a login session");
+
+    // A unit an older installer wrote (no OCW_RUNTIME_HOST=service): one line names the one command that rewrites it.
+    const outdated = await svc({ outdated: true });
+    expect(outdated.status).toBe("warn");
+    expect(outdated.summary).toBe("The systemd user service was written by an older runtime");
+    expect(outdated.fix).toBe(
+      "run `ocw-runtime service install` once to rewrite it (it restarts the runtime only when no session runs)",
+    );
+    const outdatedSystem = await svc({ manager: "systemd-system", linger: null, outdated: true });
+    expect(outdatedSystem.fix).toBe(
+      "run `ocw-runtime service install --system` once and the root lines it prints, when no session runs",
+    );
   });
 
   it("claude-code: not installed, unsupported, broken, signed out, the env token and a system account", async () => {
