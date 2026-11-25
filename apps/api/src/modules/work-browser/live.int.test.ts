@@ -36,6 +36,8 @@ let mia: TestClient;
 let miaId: string;
 /** Nia is a member outside every session's audience. */
 let nia: TestClient;
+/** Eve is organization B's admin. */
+let eve: TestClient;
 let dId: string;
 let d: FakeDevice;
 /** Ada's device (also has a browser): its frames never reach Owen's sessions' viewers. */
@@ -89,6 +91,25 @@ beforeAll(async () => {
   ({ client: owen } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
   ({ client: mia, userId: miaId } = await invite(stack, ada, "mia@example.test", "Mia Lopez", "developer"));
   ({ client: nia } = await invite(stack, ada, "nia@example.test", "Nia", "developer"));
+  // Organization B: Eve moves into her own organization as its admin (tenant isolation).
+  let eveId: string;
+  ({ client: eve, userId: eveId } = await invite(stack, ada, "eve@example.test", "Eve", "developer"));
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+    orgB,
+    `evil-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [eveId]);
+  await su.query("delete from app.org_members where user_id = $1", [eveId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    eveId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, eveId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
 
   const paired = await pairDevice(stack, owen, "Owen's Mac");
   dId = paired.deviceId;
@@ -163,6 +184,18 @@ describe("07.13-10 Task 1: a session reader watches the device's frames live (tr
     expect(owenLive.binary.map((b) => new Uint8Array(b)[3])).toEqual([3]);
     owenLive.close();
     await owenLive.closed;
+  });
+
+  it("tenant isolation: organization B's admin opening organization A's session is closed with 4403, gets no frame and starts no stream", async () => {
+    const sessionId = await sessionWithPage();
+    const before = framesFor(d, sessionId, true);
+    const eveLive = await open(eve, sessionId);
+    expect((await eveLive.closed).code).toBe(4403);
+    expect(lastState(eveLive)).toMatchObject({ state: "no_permission", host: null });
+    await d.sendBinary(frame(sessionId, fakeJpeg(9)));
+    await sleep(300);
+    expect(eveLive.binary).toHaveLength(0);
+    expect(framesFor(d, sessionId, true)).toBe(before);
   });
 
   it("a member outside the session's audience is closed with 4403 and receives no frame", async () => {

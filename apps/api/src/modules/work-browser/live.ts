@@ -24,7 +24,7 @@ import type { LiveRelay } from "./live-relay";
 /**
  * The live view of a Work Zone session's browser (07.13-10; D-15, D-20, D-27, D-33, PD-12, PD-13; WZB-05, WZB-08).
  *
- * `GET /api/v1/live/work-browser/:sessionId` is a dedicated binary WebSocket on the API's own origin, opened exactly like
+ * `GET /api/v1/live/work-browser/<sessionId>` is a dedicated binary WebSocket on the API's own origin, opened exactly like
  * `/ws` and the bots' live view: an allowed Origin and the `ocw.auth.<jwt>` subprotocol, checked before the upgrade
  * (`authenticateUpgrade`). Who watches is the resolver's alone: `work_session.read` on the session resource built by
  * `sessionFacts` (the session's audience, D-15 research correction), decided in the viewer's tenant. Server → client:
@@ -188,7 +188,7 @@ function hostOf(origin: string | null): { host: string | null; secure: boolean |
   }
 }
 
-/** Registers `GET /live/work-browser/:sessionId` (mounted under `/api/v1`) and returns this instance's hub. */
+/** Registers `GET /live/work-browser/<sessionId>` (mounted under `/api/v1`) and returns this instance's hub. */
 export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub {
   const { core, perms, hub, relay } = deps;
   const log = core.log;
