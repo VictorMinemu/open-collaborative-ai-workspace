@@ -16,11 +16,17 @@ import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { yauzl } = require("playwright-core/lib/utilsBundle");
+// Loaded on first extraction, not on import (07.13-20): the runtime imports this module for `browser install`, and
+// every other command of the runtime must start without playwright-core (only the browser loads it).
+let yauzl;
+const reader = () => {
+  yauzl ??= require("playwright-core/lib/utilsBundle").yauzl;
+  return yauzl;
+};
 
 const open = (file) =>
   new Promise((resolve, reject) =>
-    yauzl.open(file, { lazyEntries: true, autoClose: true }, (err, zip) =>
+    reader().open(file, { lazyEntries: true, autoClose: true }, (err, zip) =>
       err ? reject(new Error(`refused zip archive: ${err.message}`)) : resolve(zip),
     ),
   );
@@ -85,7 +91,11 @@ export async function extractZip(archive, dest) {
   return { files };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Script mode only when this very file is the main script. A bundle that inlines this module (the Local Runtime's
+// ocw-runtime.mjs, 07.13-06) shares the bundle's import.meta.url, which IS argv[1] there: without the file name check
+// every runtime command would run this script instead (07.13-20).
+const SELF = import.meta.url.endsWith("/unzip.mjs");
+if (SELF && process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [archive, dest] = process.argv.slice(2);
   if (!archive || !dest) {
     process.stderr.write("usage: node unzip.mjs <archive.zip> <dest-dir>\n");

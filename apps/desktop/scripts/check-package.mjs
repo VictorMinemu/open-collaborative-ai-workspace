@@ -23,3 +23,22 @@ const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
 const out = execFileSync(exe, [entry, "version"], { env, encoding: "utf8", timeout: 60_000 }).trim();
 if (!/^\d+\.\d+\.\d+/.test(out)) throw new Error(`unexpected daemon version output: ${JSON.stringify(out)}`);
 console.log(`packaged daemon runs: ocw-runtime ${out}`);
+
+// 07.13-20 (D-18, PD-22): the Work Zone browser's engine. `browser-agent --check` loads playwright-core and the
+// engine's serializer from the packaged daemon's own node_modules and prints `browser-agent ok <version>`, without
+// launching a browser. A build that cannot load them fails here, before release.
+let check;
+try {
+  check = execFileSync(exe, [entry, "browser-agent", "--check"], {
+    env,
+    encoding: "utf8",
+    timeout: 60_000,
+  }).trim();
+} catch (err) {
+  const said = typeof err?.stdout === "string" ? err.stdout.trim() : "";
+  throw new Error(`packaged daemon cannot load the browser engine: ${said || String(err)}`);
+}
+if (!/^browser-agent ok \d+\.\d+\.\d+/.test(check)) {
+  throw new Error(`unexpected browser-agent check output: ${JSON.stringify(check)}`);
+}
+console.log(`packaged daemon loads the browser engine: ${check}`);

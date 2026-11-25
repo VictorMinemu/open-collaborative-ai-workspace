@@ -53,6 +53,7 @@
 //                                  remove a running daemon re-sends its slots (`reloadAccounts`). Runs as the user that
 //                                  owns the OCW home; under a system service, as that service's user.
 
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { type DeviceHostKind, PoolLabel, RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
@@ -696,9 +697,16 @@ async function run(): Promise<void> {
 /**
  * 07.13 (D-02): the hidden `browser-agent` child of a session's browser, started only by the daemon's `BrowserChild`
  * over pipes (not in the usage text). Refuses a terminal: it speaks frames, not text. Loaded lazily, so no other
- * command loads playwright-core.
+ * command loads playwright-core. `--check` (07.13-20, PD-22, its only flag, fine from a terminal) is the build's
+ * self-test: the bundle test and the desktop package check run it to prove this build loads the browser engine.
  */
-async function browserAgentCommand(): Promise<void> {
+async function browserAgentCommand(args: string[]): Promise<void> {
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) {
+    process.stderr.write("usage: ocw-runtime browser-agent [--check]\n");
+    process.exitCode = 2;
+    return;
+  }
+  if (args[0] === "--check") return browserAgentCheck();
   if (process.stdin.isTTY) {
     process.stderr.write("ocw-runtime: browser-agent is started by the daemon, not from a terminal\n");
     process.exitCode = 2;
@@ -706,6 +714,30 @@ async function browserAgentCommand(): Promise<void> {
   }
   const { runBrowserAgent } = await import("./browser/agent/main.js");
   runBrowserAgent(process.stdin, process.stdout);
+}
+
+/**
+ * `browser-agent --check`: loads playwright-core and the engine's serializer the way the agent does, reads
+ * playwright-core's version and prints `browser-agent ok <version>` (exit 0). Never launches a browser and needs none
+ * installed. A missing playwright-core (an install without the externals, a desktop build that dropped it) prints
+ * `browser-agent failed: playwright-core is not installed`; any other load error its first line; both exit 1.
+ */
+async function browserAgentCheck(): Promise<void> {
+  try {
+    await import("playwright-core");
+    await import("@ocw/browser-engine/redact");
+    // Resolved beside this file, like the import above: the bundle's or the packaged daemon's own node_modules.
+    const { version } = createRequire(import.meta.url)("playwright-core/package.json") as { version: string };
+    process.stdout.write(`browser-agent ok ${version}\n`);
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    const message = errorMessage(err);
+    const missing =
+      (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") && message.includes("playwright-core");
+    const reason = missing ? "playwright-core is not installed" : (message.split("\n")[0] ?? "");
+    process.stdout.write(`browser-agent failed: ${reason}\n`);
+    process.exitCode = 1;
+  }
 }
 
 /**
@@ -803,7 +835,7 @@ async function main(argv: string[]): Promise<void> {
     case "account":
       return accountCommand(rest);
     case "browser-agent":
-      return browserAgentCommand();
+      return browserAgentCommand(rest);
     case "browser-mcp":
       return browserMcpCommand();
     default:

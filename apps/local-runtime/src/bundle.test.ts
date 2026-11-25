@@ -278,13 +278,18 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
 });
 
 describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
-  function scratch(withSdk: boolean): {
+  function scratch(
+    withSdk: boolean,
+    withPlaywright = withSdk,
+  ): {
     file: string;
     env: Record<string, string>;
     ocwHome: string;
     root: string;
   } {
-    const root = tempDir("ocwr-");
+    // The real path, as on Linux and in an install: macOS's tmpdir is behind the /var → /private/var symlink, which
+    // once hid a bundled module's "am I the main script?" guard firing for the runtime's own file (07.13-20).
+    const root = realpathSync(tempDir("ocwr-"));
     const app = join(root, "app");
     mkdirSync(app);
     const file = join(app, "ocw-runtime.mjs");
@@ -295,6 +300,9 @@ describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
       mkdirSync(join(app, "node_modules", "@anthropic-ai"), { recursive: true });
       const real = realpathSync(join(PKG_ROOT, "node_modules", "@anthropic-ai", "claude-agent-sdk"));
       symlinkSync(real, join(app, "node_modules", "@anthropic-ai", "claude-agent-sdk"), "dir");
+    }
+    if (withPlaywright) {
+      mkdirSync(join(app, "node_modules"), { recursive: true });
       const playwright = realpathSync(join(PKG_ROOT, "node_modules", PLAYWRIGHT));
       symlinkSync(playwright, join(app, "node_modules", PLAYWRIGHT), "dir");
     }
@@ -358,6 +366,24 @@ describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
     const exited = new Promise<number | null>((resolve) => daemon.once("exit", (code) => resolve(code)));
     daemon.kill("SIGTERM");
     expect(await exited).toBe(0);
+  }, 60_000);
+
+  it("is the 0.5.0 build and proves it loads the browser engine with only the externals beside it (07.13-20, PD-22)", async () => {
+    expect(manifest.version).toBe("0.5.0");
+    const s = scratch(true);
+    const r = await run(s.file, ["browser-agent", "--check"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toBe("browser-agent ok 1.64.1\n");
+  }, 60_000);
+
+  it("fails the browser check naming playwright-core when only the SDK is beside it", async () => {
+    const s = scratch(true, false);
+    const r = await run(s.file, ["browser-agent", "--check"], s.env);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe("browser-agent failed: playwright-core is not installed\n");
+    // The rest of the runtime still runs: playwright-core loads only for the browser.
+    const v = await run(s.file, ["version"], s.env);
+    expect(v.code, v.stderr).toBe(0);
   }, 60_000);
 
   it("fails naming the Claude Agent SDK when nothing is installed beside it (the SDK is not inside)", async () => {

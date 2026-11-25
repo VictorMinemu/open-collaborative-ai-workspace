@@ -1374,4 +1374,28 @@ describe("ocw-runtime browser-agent (07.13-09, D-02)", () => {
       expect.objectContaining({ id: 2, ok: false, error: expect.objectContaining({ code: "no_context" }) }),
     );
   }, 60_000);
+
+  it("--check loads the engine and playwright-core and prints its version without launching a browser (07.13-20, PD-22)", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocw-bac-"));
+    dirs.push(home);
+    // No executable anywhere: a launch would fail, the check never launches.
+    const out = cli(home, ["browser-agent", "--check"], { OCW_BROWSERS_DIR: join(home, "none") });
+    expect(out).toBe("browser-agent ok 1.64.1\n");
+    expect(existsSync(join(home, "none"))).toBe(false);
+  }, 60_000);
+
+  it("refuses any other argument with a usage error (exit 2)", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocw-bau-"));
+    dirs.push(home);
+    let code = 0;
+    let stderr = "";
+    try {
+      cli(home, ["browser-agent", "--nope"]);
+    } catch (err) {
+      code = (err as { status: number }).status;
+      stderr = String((err as { stderr: string }).stderr);
+    }
+    expect(code).toBe(2);
+    expect(stderr).toContain("usage: ocw-runtime browser-agent [--check]");
+  }, 60_000);
 });
