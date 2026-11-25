@@ -804,7 +804,13 @@ async function signInByHand(t: ReturnType<typeof scripted>): Promise<string> {
   const leaseId = randomUUID();
   const uploadId = randomUUID();
   await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
-  await t.manager.onServerFrame({ type: "browser.handback", sessionId: t.sid, leaseId, save: true, uploadId });
+  await t.manager.onServerFrame({
+    type: "browser.handback",
+    sessionId: t.sid,
+    leaseId,
+    save: true,
+    uploadId,
+  });
   return uploadId;
 }
 

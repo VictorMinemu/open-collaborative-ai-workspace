@@ -39,6 +39,8 @@ export interface BrowserApprovalAsk {
   summary: string;
   /** The model's sign-in reason (`signin` only, 19). */
   reason?: string;
+  /** The approval's id (default: a new uuid); 19 resolves a sign-in request itself once the sign-in is saved. */
+  approvalId?: string;
   /** Default: `approvalTimeoutMs(kind)`. */
   timeoutMs?: number;
   /** The turn was cancelled: the ask ends as `deny`. */
@@ -62,7 +64,7 @@ export class BrowserApprovalBroker {
 
   /** Asks a person; resolves with their decision, `expired` after the kind's wait, or `deny` when cancelled. */
   ask(sessionId: string, req: BrowserApprovalAsk): Promise<ApprovalOutcome> {
-    const approvalId = randomUUID();
+    const approvalId = req.approvalId ?? randomUUID();
     return new Promise<ApprovalOutcome>((resolve) => {
       let done = false;
       const timer = setTimeout(() => settle("expired"), req.timeoutMs ?? approvalTimeoutMs(req.kind));

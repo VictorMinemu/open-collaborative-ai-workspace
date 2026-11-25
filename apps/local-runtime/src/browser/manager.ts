@@ -31,6 +31,7 @@ import {
   type WorkBrowserEventKind,
   WorkBrowserLaunchFailure,
   WorkBrowserRefusal,
+  type WorkBrowserSignInInput,
   type WorkBrowserTool,
 } from "@ocw/contracts";
 import { type Logger, silentLogger } from "../logger.js";
@@ -52,6 +53,7 @@ import { saveHandback, siteHostOfOrigin } from "./signin.js";
 import { Takeover } from "./takeover.js";
 import {
   browserToolSummary,
+  hostPortOf,
   invalidResult,
   pageContent,
   refusedResult,
@@ -168,6 +170,8 @@ interface SessionState {
   idle: NodeJS.Timeout | null;
   /** 19 (PD-15): the lease held now and the fingerprint of the page's site state taken when it was taken. */
   held: { leaseId: string; fingerprint: Promise<string | null> } | null;
+  /** 19 (D-21): `ocw_browser_signin` calls waiting for the person's saved sign-in, by origin. */
+  signinWaits: Set<{ origin: BrowserOrigin; saved: () => void }>;
 }
 
 /** At most this many prompts' grants are kept waiting for their turn (a steady queue is far smaller). */
@@ -489,7 +493,85 @@ export class BrowserManager {
       this.event(s, promptId, "refused", origin, { refusal: "too_large" });
     }
     if (outcome.kind !== "saved") return;
+    for (const wait of s.signinWaits) if (wait.origin === origin) wait.saved();
     if (s.child === child) await this.closePage(s, "closed", promptId);
+  }
+
+  /**
+   * `ocw_browser_signin { host, reason }` (D-21, D-32): only in a turn whose grant allows sign-ins (a person's turn in a
+   * session only they and the device owner can see), else `signin_not_allowed` at once. The page first opens the site
+   * through the normal `open` path and its gates (so the person who takes control lands on it), then the turn's asker
+   * is asked (`signin`, 15 minutes). Only this call waits: the turn's other calls go on. A sealed save for that origin
+   * answers "Signed in" (and resolves the request); "Not now" `signin_denied`; nothing in 15 minutes `signin_expired`.
+   */
+  private async signin(
+    s: SessionState,
+    turn: TurnState,
+    body: { host: string; reason: string },
+    signal: AbortSignal | undefined,
+  ): Promise<WorkBrowserToolResult> {
+    const grant = turn.grant;
+    if (!grant?.signinAllowed || grant.askerIsBot || !grant.askerId) {
+      return this.refuse(s, turn, "signin", "signin_not_allowed");
+    }
+    const site = siteOfHost(body.host);
+    if (!site) return invalidResult("signin", "host: must be a host name such as github.com", s.origin);
+    const { origin, url } = site;
+    if (s.origin !== origin || !s.child) {
+      const opened = await this.serial(s, async () => {
+        this.clearIdle(s);
+        try {
+          return await this.run(s, turn, "open", { url }, signal);
+        } finally {
+          this.armIdle(s);
+        }
+      });
+      if (opened.isError) return opened;
+    }
+    if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, "signin", "not_allowed");
+    if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, "signin", "paused");
+
+    const deadline = Date.now() + WORK_BROWSER_LIMITS.signinWaitMinutes * 60_000;
+    const approvalId = randomUUID();
+    let saved = false;
+    let onSaved: () => void = () => {};
+    const savedNow = new Promise<void>((resolve) => {
+      onSaved = resolve;
+    });
+    const wait = {
+      origin,
+      saved: () => {
+        saved = true;
+        onSaved();
+        this.broker.resolve(s.id, approvalId, "once");
+      },
+    };
+    s.signinWaits.add(wait);
+    try {
+      const outcome = await this.broker.ask(s.id, {
+        approvalId,
+        kind: "signin",
+        origin,
+        tool: canonicalBrowserTool("signin"),
+        summary: `Sign in to ${hostPortOf(origin)}: ${body.reason}`,
+        reason: body.reason,
+        ...(signal ? { signal } : {}),
+      });
+      if (!saved) {
+        if (outcome === "deny") return this.refuse(s, turn, "signin", "signin_denied");
+        if (outcome === "expired") return this.refuse(s, turn, "signin", "signin_expired");
+        // A yes on the request ("Open and sign in"): the person is signing in; the save is awaited until the 15 minutes end.
+        const done = await untilSaved(savedNow, deadline - Date.now(), signal, () => s.turn !== turn);
+        if (done === "ended") return this.refuse(s, null, "signin", "not_allowed");
+        if (done === "expired") return this.refuse(s, turn, "signin", "signin_expired");
+      }
+      return textResult(browserToolSummary("signin", body, { origin }), origin, [
+        `Signed in to ${hostPortOf(origin)}.`,
+        "The sign-in is saved for that site only. Open the site again to continue signed in.",
+      ]);
+    } finally {
+      s.signinWaits.delete(wait);
+    }
   }
 
   // ------------------------------------------------------------------ the call
@@ -505,9 +587,10 @@ export class BrowserManager {
       const turn = s.turn;
       if (!this.opts.optIn() || !turn?.grant?.allowed) return this.refuse(s, turn, tool, "not_allowed");
       if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
-      if (tool === "signin") return this.refuse(s, turn, tool, "not_allowed");
       const parsed = WORK_BROWSER_INPUTS[tool].safeParse(args);
       if (!parsed.success) return invalidResult(tool, parseMessage(parsed.error), s.origin);
+      // The sign-in waits for a person outside the session's call chain (its own `open` runs inside it).
+      if (tool === "signin") return await this.signin(s, turn, parsed.data as WorkBrowserSignInInput, signal);
       const body = parsed.data as Record<string, unknown>;
       return await this.serial(s, async () => {
         this.clearIdle(s);
@@ -911,6 +994,7 @@ export class BrowserManager {
       chain: Promise.resolve(),
       idle: null,
       held: null,
+      signinWaits: new Set(),
     };
     const manager = this;
     s.tools = {
@@ -1027,6 +1111,52 @@ export class BrowserManager {
     if (!UUID.test(s.id)) return;
     this.opts.link.send({ type: "browser.event", sessionId: s.id, promptId, kind, origin, ...extra });
   }
+}
+
+/**
+ * The site a sign-in names (`github.com`, `127.0.0.1:3000`): its origin and the page the person lands on. A loopback
+ * host is the device's own `http:` server; any other host is `https:`.
+ */
+function siteOfHost(host: string): { origin: BrowserOrigin; url: string } | null {
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${host}/`).hostname;
+  } catch {
+    return null;
+  }
+  const url = `${isLoopbackHost(hostname) ? "http" : "https"}://${host}/`;
+  const origin = originOf(url);
+  return origin ? { origin, url } : null;
+}
+
+/** Waits for a sign-in's save: `saved`, `expired` after `ms`, or `ended` (cancelled, or the turn is over). */
+function untilSaved(
+  saved: Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+  ended: () => boolean,
+): Promise<"saved" | "expired" | "ended"> {
+  if (ms <= 0) return Promise.resolve("expired");
+  return new Promise((resolve) => {
+    let poll: NodeJS.Timeout | undefined;
+    const finish = (r: "saved" | "expired" | "ended") => {
+      clearTimeout(timer);
+      clearTimeout(poll);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(r);
+    };
+    const onAbort = () => finish("ended");
+    const timer = setTimeout(() => finish("expired"), ms);
+    timer.unref?.();
+    const check = () => {
+      if (ended()) return finish("ended");
+      poll = setTimeout(check, 1_000);
+      poll.unref?.();
+    };
+    check();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void saved.then(() => finish("saved"));
+  });
 }
 
 /** The status line of a failed first-use install (D-05): fixed sentences, never a path. */
