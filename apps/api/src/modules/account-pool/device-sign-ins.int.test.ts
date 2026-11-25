@@ -293,6 +293,18 @@ const settle = (dev: Dev, pred: (s: Json) => boolean) =>
 const failedAudits = async (flowSlot: string) =>
   (await auditRows(["account_pool.sign_in_failed"])).filter((a) => a.metadata.slotId === flowSlot);
 
+const failedCodes = async (flowSlot: string) => (await failedAudits(flowSlot)).map((a) => a.metadata.code);
+
+/**
+ * The flow's failure audits read exactly `codes`. The end of a flow is claimed in Redis inside the transaction that
+ * writes its audit, so the state can read `error` a moment before the audit row commits: wait for it (bounded), then
+ * assert the exact array once more so a second audit still fails "audited once".
+ */
+async function expectFailedAudits(flowSlot: string, codes: string[]) {
+  await expect.poll(() => failedCodes(flowSlot), { timeout: 10_000, interval: 50 }).toEqual(codes);
+  expect(await failedCodes(flowSlot)).toEqual(codes);
+}
+
 /** Rewrites the device's Redis flow record (to age it without waiting). */
 async function ageRecord(dev: Dev, patch: Json) {
   const redis = stack.built.core.bus.pub;
@@ -396,7 +408,7 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
       code: "runtime_too_old",
       message: "Update the OCW runtime on this device first.",
     });
-    expect((await failedAudits(a.slotId)).map((x) => x.metadata.code)).toEqual(["runtime_too_old"]);
+    await expectFailedAudits(a.slotId, ["runtime_too_old"]);
 
     const b = await begin(server);
     server.device.send(codeFrame(b.cmd.id, b.slotId));
@@ -416,7 +428,7 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
       verificationUrl: null,
       userCode: null,
     });
-    expect((await failedAudits(b.slotId)).map((x) => x.metadata.code)).toEqual(["denied"]);
+    await expectFailedAudits(b.slotId, ["denied"]);
 
     const c = await begin(server);
     server.device.send({
@@ -438,7 +450,7 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
     const silent = await settle(server, (s) => s.state === "error");
     expect(silent.error.code).toBe("device_offline");
     await ok(current(victor, server.deviceId));
-    expect((await failedAudits(a.slotId)).map((x) => x.metadata.code)).toEqual(["device_offline"]);
+    await expectFailedAudits(a.slotId, ["device_offline"]);
     // A late code changes nothing.
     server.device.send(codeFrame(a.cmd.id, a.slotId));
     await new Promise((r) => setTimeout(r, 300));
@@ -450,7 +462,7 @@ describe("refusals, failures, cancel and sign-out on removal (07.18-13 T3)", () 
     await ageRecord(server, { expiresAt: new Date(Date.now() - 1000).toISOString() });
     const expired = await settle(server, (s) => s.state === "error");
     expect(expired).toMatchObject({ error: { code: "expired" }, userCode: null, verificationUrl: null });
-    expect((await failedAudits(b.slotId)).map((x) => x.metadata.code)).toEqual(["expired"]);
+    await expectFailedAudits(b.slotId, ["expired"]);
   });
 
   it("a frame for another device's command, or for no account.login, changes nothing (E11)", async () => {
