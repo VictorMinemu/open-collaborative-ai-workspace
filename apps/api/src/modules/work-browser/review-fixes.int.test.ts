@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { encodeWorkBrowserFrame } from "@ocw/contracts";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, sleep } from "../../testing-device";
 import { invite, pairDevice, setAudience, shareDevice, startSession } from "../../testing-workzone";
@@ -331,5 +331,34 @@ describe("MD-02: the gate closes at once on a new lease or a new sign-in, not on
     expect(atReply).toEqual([false]);
     expect(await waitState(owenLive, "private", 3000)).toMatchObject({ privateReason: "member_session" });
     owenLive.close();
+  });
+});
+
+describe("LO-01: pointer-only input keeps the lease's row fresh", () => {
+  it("a holder who only moves the pointer for longer than the keep interval has the row's expiry pushed", async () => {
+    const { sid } = await askedSessionWithPage(mia);
+    const miaLive = await open(mia, sid);
+    await waitState(miaLive, "live");
+    await take(miaLive, sid);
+    const before = Date.parse(String((await browserRow(sid))?.lease_expires_at));
+    // 31 s later on the API's clock (past the 30 s keep interval), only pointer moves and a scroll.
+    const real = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => real() + 31_000);
+    try {
+      send(miaLive, { type: "mouse", event: "move", x: 5, y: 5, button: "none" });
+      send(miaLive, { type: "wheel", x: 5, y: 5, dx: 0, dy: 40 });
+      await eventually(
+        async () =>
+          Date.parse(String((await browserRow(sid))?.lease_expires_at)) >= before + 25_000 || undefined,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    const row = await browserRow(sid);
+    // Nothing that may leave something in the page was sent: the lease is still input-free.
+    expect(row).toMatchObject({ controller_user_id: miaId, lease_input: false });
+    send(miaLive, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    miaLive.close();
   });
 });

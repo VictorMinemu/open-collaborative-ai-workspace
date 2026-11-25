@@ -739,10 +739,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     if (l.inputs.length >= INPUT_QUEUE_MAX) return;
     l.inputs.push(event);
     const now = Date.now();
-    // 10 minutes after the latest input; the row learns it at most every 30 s (the sweep's grace covers the gap).
+    // 10 minutes after the latest input; the row learns it at most every 30 s (the sweep's grace covers the gap). Any
+    // input counts, pointer moves and scrolls included (LO-01): a holder who only looks around is still active, and
+    // the shared sweep reads the row, not this instance's clock.
     l.expiresAtMs = now + TAKEOVER_MS;
     l.warned = false;
-    if (l.inputMarked && now - l.lastKeepMs >= KEEP_EVERY_MS) {
+    if (now - l.lastKeepMs >= KEEP_EVERY_MS) {
       l.lastKeepMs = now;
       void onKeep(v, now).catch(() => {});
     }
