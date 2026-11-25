@@ -36,6 +36,7 @@ let owenId: string;
 /** Mia and Pia may use Owen's device: they ask the turns of these tests. */
 let mia: TestClient;
 let miaId: string;
+let pia: TestClient;
 let piaId: string;
 let dId: string;
 let dToken: string;
@@ -139,7 +140,7 @@ beforeAll(async () => {
   orgId = (setup.body!.organization as Json).id as string;
   ({ client: owen, userId: owenId } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
   ({ client: mia, userId: miaId } = await invite(stack, ada, "mia@example.test", "Mia Lopez", "developer"));
-  ({ userId: piaId } = await invite(stack, ada, "pia@example.test", "Pia", "developer"));
+  ({ client: pia, userId: piaId } = await invite(stack, ada, "pia@example.test", "Pia", "developer"));
   expect((await ada.request("PUT", "/api/v1/work-zone-policy", { allowBrowser: true })).status).toBe(200);
 
   const paired = await pairDevice(stack, owen, "Owen's Mac");
@@ -381,6 +382,75 @@ describe("LO-01: pointer-only input keeps the lease's row fresh", () => {
     send(miaLive, { type: "release", save: false });
     await deviceFrame("browser.lease", sid, (f) => f.state === "released");
     miaLive.close();
+  });
+});
+
+/** `who`'s personal session on Owen's device with their own sign-in loaded in their in-flight turn. */
+async function signedInSession(who: TestClient, userId: string): Promise<string> {
+  const sid = await startSession(who, d, projectId);
+  await setAudience(who, sid, { kind: "owner" });
+  const promptId = await ask(who, sid);
+  d.browserEvent(sid, { kind: "opened", origin: ORIGIN, promptId });
+  await eventually(async () => (await browserRow(sid))?.state === "open" || undefined);
+  await sealFor(userId, sid);
+  expect((await load(sid, promptId)).ok).toBe(true);
+  expect(await browserRow(sid)).toMatchObject({ signin_user_id: userId });
+  return sid;
+}
+
+const closeFrame = (sid: string) => deviceFrame("browser.close", sid);
+
+describe("MD-03: a page closes when its member loses access, or when the policy turns the browser off", () => {
+  it("the member's session gets wider than them and the device owner: `browser.close { access_lost }`", async () => {
+    const sid = await signedInSession(mia, miaId);
+    await setAudience(mia, sid, { kind: "project" });
+    expect(await closeFrame(sid)).toEqual({ type: "browser.close", sessionId: sid, reason: "access_lost" });
+  });
+
+  it("the member loses the device (grant removed): `browser.close { access_lost }`", async () => {
+    const sid = await signedInSession(mia, miaId);
+    const res = await owen.request("DELETE", `/api/v1/devices/${dId}/grants/user/${miaId}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    try {
+      expect(await closeFrame(sid)).toEqual({ type: "browser.close", sessionId: sid, reason: "access_lost" });
+    } finally {
+      await shareDevice(owen, dId, miaId);
+    }
+  });
+
+  it("a page whose member keeps access is left alone by an unrelated access change", async () => {
+    const sid = await signedInSession(mia, miaId);
+    // Another person's grant changes: every subscription of the organization is re-decided, Mia keeps hers.
+    const res = await owen.request("DELETE", `/api/v1/devices/${dId}/grants/user/${piaId}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await shareDevice(owen, dId, piaId);
+    await sleep(800);
+    expect(d.frames.some((f) => f.type === "browser.close" && f.sessionId === sid)).toBe(false);
+  });
+
+  it("the policy turns the browser off: every open page of the organization gets `browser.close { policy }`", async () => {
+    const { sid: plain } = await askedSessionWithPage(mia);
+    const signed = await signedInSession(mia, miaId);
+    expect((await ada.request("PUT", "/api/v1/work-zone-policy", { allowBrowser: false })).status).toBe(200);
+    try {
+      for (const sid of [plain, signed]) {
+        expect(await closeFrame(sid)).toEqual({ type: "browser.close", sessionId: sid, reason: "policy" });
+      }
+    } finally {
+      expect((await ada.request("PUT", "/api/v1/work-zone-policy", { allowBrowser: true })).status).toBe(200);
+    }
+    // Another policy change (the browser stays on) closes nothing.
+    const { sid: later } = await askedSessionWithPage(mia);
+    expect((await ada.request("PUT", "/api/v1/work-zone-policy", { allowFastMode: true })).status).toBe(200);
+    await sleep(500);
+    expect(d.frames.some((f) => f.type === "browser.close" && f.sessionId === later)).toBe(false);
+  });
+
+  it("the member is deactivated: their loaded sign-in is gone and the device is told `browser.close { access_lost }`", async () => {
+    const sid = await signedInSession(pia, piaId);
+    const res = await ada.request("POST", `/api/v1/members/${piaId}/deactivate`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await closeFrame(sid)).toEqual({ type: "browser.close", sessionId: sid, reason: "access_lost" });
   });
 });
 

@@ -20,6 +20,7 @@ import {
   workSessions,
 } from "@ocw/db";
 import { and, desc, eq, gte, inArray, max, sql } from "drizzle-orm";
+import { loadDeviceAccess } from "../device";
 import { loadPrincipalFacts, type PermissionService } from "../organization";
 import { sandboxAvailable } from "../sandbox";
 import { type ApprovalFacts, loadToolApprovalPolicies, resolveToolApproval } from "../tool-approval";
@@ -108,14 +109,32 @@ async function ruleModes(
 /**
  * D-24, D-32: a member's sign-in may load only in a human session (not started by a bot) on a human turn, and only
  * while everyone who sees the session (`app.work_session_viewers`, the SQL audience rule) is the asker or the device
- * owner. Admins are never enumerated there for being admins.
+ * owner. Admins are never enumerated there for being admins. D-29 (07.13 review MD-03): and only on a device the
+ * member may use for Work Zone sessions themselves (their own cap on it: owner or a live grant), never through the
+ * session alone.
  */
 async function signinAllowedFor(
   tx: Tx,
   a: BrowserAsker & { askerId: string },
-  s: { startedByAgentId: string | null; deviceOwner: string },
+  s: {
+    startedByAgentId: string | null;
+    deviceId: string;
+    deviceOwner: string;
+    deviceShared: boolean;
+    deviceShareMaxMode: typeof devices.$inferSelect.shareMaxMode;
+    deviceRevokedAt: typeof devices.$inferSelect.revokedAt;
+  },
 ): Promise<boolean> {
   if (a.askerIsBot || s.startedByAgentId !== null) return false;
+  const access = await loadDeviceAccess(tx, a.askerId);
+  const cap = access.capOf({
+    id: s.deviceId,
+    ownerUserId: s.deviceOwner,
+    shared: s.deviceShared,
+    shareMaxMode: s.deviceShareMaxMode,
+    revokedAt: s.deviceRevokedAt,
+  });
+  if (cap === null) return false;
   const res = await tx.execute(sql`select user_id from app.work_session_viewers(${a.sessionId}::uuid)`);
   const viewers = (res.rows as Array<{ user_id: string }>).map((r) => r.user_id);
   return viewers.every((v) => v === a.askerId || v === s.deviceOwner);
@@ -140,6 +159,9 @@ export async function browserGrantFor(
       deviceId: workSessions.deviceId,
       startedByAgentId: workSessions.startedByAgentId,
       deviceOwner: devices.ownerUserId,
+      deviceShared: devices.shared,
+      deviceShareMaxMode: devices.shareMaxMode,
+      deviceRevokedAt: devices.revokedAt,
       browserVersion: devices.browserVersion,
       browserOptIn: devices.browserOptIn,
     })
@@ -178,6 +200,15 @@ export async function browserGrantFor(
     ...(await ruleModes(tx, asker)),
     signinAllowed: await signinAllowedFor(tx, asker, row),
   };
+}
+
+/** 07.13 review MD-03: the open pages of the transaction's organization and their sessions' devices (ids only). */
+export async function openBrowserPages(tx: Tx): Promise<Array<{ sessionId: string; deviceId: string }>> {
+  return tx
+    .select({ sessionId: workBrowsers.workSessionId, deviceId: workSessions.deviceId })
+    .from(workBrowsers)
+    .innerJoin(workSessions, eq(workSessions.id, workBrowsers.workSessionId))
+    .where(eq(workBrowsers.state, "open"));
 }
 
 /**

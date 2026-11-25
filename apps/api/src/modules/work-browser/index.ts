@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { DeviceBrowserHandler, DeviceHub, DeviceRef } from "../device";
 import { createPermissionService } from "../organization";
+import { createAccessWatch } from "./access";
 import { onBrowserEvent, onDeviceHello } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
@@ -57,6 +58,8 @@ export function createWorkBrowserModule(
   let live: WorkLiveHub | null = null;
   const perms = createPermissionService(core);
   const sweeper = createWorkBrowserSweeper(core, deps.hub);
+  // MD-03: a loaded sign-in is decided again whenever access may have changed in its organization.
+  const access = createAccessWatch(core, perms, deps.hub);
   const sessionDevice = sessionDeviceCheck(core);
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
@@ -93,6 +96,11 @@ export function createWorkBrowserModule(
         // sign-ins are swept.
         registerSignInRoutes(app, { core, perms, hub: deps.hub });
         sweeper.start();
+        void access
+          .start()
+          .catch((err: unknown) =>
+            core.log.warn({ error: (err as Error | undefined)?.name }, "work browser access watch failed"),
+          );
         live = registerWorkLiveView(app, {
           core,
           perms,
@@ -104,6 +112,7 @@ export function createWorkBrowserModule(
       },
       async close() {
         sweeper.stop();
+        await access.stop();
         await live?.close();
       },
     },

@@ -45,7 +45,7 @@ import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
-import { browserApproverRule } from "./browser-grant";
+import { browserApproverRule, openBrowserPages } from "./browser-grant";
 import { loadControlsContext } from "./context";
 import {
   archiveWorkSession,
@@ -319,10 +319,14 @@ export function registerWorkSessionRoutes(
     { ...manage, schema: { tags, body: UpdateWorkZonePolicyRequest, response: { 200: WorkZonePolicyView } } },
     async (req) => {
       const auth = authOf(req);
-      const { view, changed } = await core.db.withTenant(tenant(req), async (tx) => {
+      const { view, changed, browserOff } = await core.db.withTenant(tenant(req), async (tx) => {
         const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId, {
           serverFileMaxBytes: fileCeiling,
         });
+        // 07.13 review MD-03 (D-10): the browser turned off closes every open page of the organization now; the
+        // device's own `closed` event then ends each row (a device offline now closes it on its next turn's grant).
+        const browserOff =
+          changed.includes("allowBrowser") && !policy.allowBrowser ? await openBrowserPages(tx) : [];
         if (changed.length > 0) {
           await core.audit.record(tx, {
             action: "work_zone_policy.updated",
@@ -334,8 +338,19 @@ export function registerWorkSessionRoutes(
           // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told).
           await svc.reauthorizeOrg(tx, "policy");
         }
-        return { view: await policyView(tx, policy), changed };
+        return { view: await policyView(tx, policy), changed, browserOff };
       });
+      for (const page of browserOff) {
+        await hub
+          .sendBrowserFrame(page.deviceId, {
+            type: "browser.close",
+            sessionId: page.sessionId,
+            reason: "policy",
+          })
+          .catch((err: unknown) =>
+            req.log.warn({ error: (err as Error | undefined)?.name }, "browser close failed"),
+          );
+      }
       // 07.11 (D-02, PD-03): once committed, every online device of the org hears the new runtime updates level. A
       // failed push never turns the saved change into an error (07.11 review LO-03): devices also get the level on
       // their next hello.
