@@ -16,6 +16,7 @@ import {
   SERVER_ONLY_SESSION_EVENTS,
   type SessionAccount,
   type SessionAccountLimitedFrame,
+  type SessionBrowserGrant,
   type SessionEvent,
   SessionTitle,
   type SessionVisibilityKind,
@@ -78,6 +79,7 @@ import {
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
+import { browserGrantFor } from "./browser-grant";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
@@ -169,6 +171,8 @@ type AccountCheck =
 interface CommandPlan {
   images: PromptImagesPlan | undefined;
   account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
+  /** 07.13 (PD-09, PD-20): the turn's browser grant, decided at send time; undefined for a device without a browser. */
+  browser?: SessionBrowserGrant;
 }
 
 /** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
@@ -1612,8 +1616,38 @@ export class WorkSessionService implements DeviceSessionHandler {
   async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
     const images = await preparePromptImages(tx, cmd);
     const account = await this.prepareAccount(tx, cmd);
-    if (images === undefined && account === undefined) return undefined;
-    return { images, account } satisfies CommandPlan;
+    const browser = await this.prepareBrowser(tx, cmd);
+    if (images === undefined && account === undefined && browser === undefined) return undefined;
+    return { images, account, ...(browser ? { browser } : {}) } satisfies CommandPlan;
+  }
+
+  /**
+   * 07.13 (D-10, PD-09, PD-20): the browser grant of a `session.start` (asker = the session's creator, or the bot that
+   * started it) or a `prompt` (asker = the prompt's author, or the bot that wrote it), decided now from the live policy,
+   * the device's opt-in and capability. Undefined for any other command and for a device without a browser version.
+   */
+  private async prepareBrowser(tx: Tx, cmd: DeviceCommandRow): Promise<SessionBrowserGrant | undefined> {
+    const sessionId = cmd.workSessionId;
+    if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    let asker: { askerId: string | null; askerIsBot: boolean } = { askerId: null, askerIsBot: false };
+    if (cmd.kind === "session.start") {
+      const [s] = await tx
+        .select({ createdBy: workSessions.createdBy, agentId: workSessions.startedByAgentId })
+        .from(workSessions)
+        .where(eq(workSessions.id, sessionId));
+      if (s) asker = { askerId: s.agentId ?? s.createdBy, askerIsBot: s.agentId !== null };
+    } else {
+      const promptId = cmd.payload.promptId;
+      const [p] =
+        typeof promptId === "string" && UUID_RE.test(promptId)
+          ? await tx
+              .select({ userId: workPrompts.authorUserId, agentId: workPrompts.authorAgentId })
+              .from(workPrompts)
+              .where(and(eq(workPrompts.id, promptId), eq(workPrompts.workSessionId, sessionId)))
+          : [];
+      if (p) asker = { askerId: p.agentId ?? p.userId, askerIsBot: p.agentId !== null };
+    }
+    return (await browserGrantFor(tx, this.deps.perms, { sessionId, ...asker })) ?? undefined;
   }
 
   /**
@@ -1639,15 +1673,18 @@ export class WorkSessionService implements DeviceSessionHandler {
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    const { images, account } = plan as CommandPlan;
+    const { images, account, browser } = plan as CommandPlan;
     if (account && account.token === null) {
       throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
     }
     const payload = images ? await hydratePromptImages(this.deps.storage ?? null, cmd, images) : cmd.payload;
-    if (!account?.token) return payload;
     // The sent copy only: `SessionAccount` with the token, on its way to this session's own device.
-    const sent: SessionAccount = { ...account.stored, oauthToken: account.token };
-    return { ...payload, account: sent };
+    const sent: SessionAccount | undefined = account?.token
+      ? { ...account.stored, oauthToken: account.token }
+      : undefined;
+    // 07.13 (PD-09): then the turn's browser grant, on the sent copy only too (never written back).
+    if (!sent && !browser) return payload;
+    return { ...payload, ...(sent ? { account: sent } : {}), ...(browser ? { browser } : {}) };
   }
 
   async onCommandResult(

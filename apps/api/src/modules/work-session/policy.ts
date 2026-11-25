@@ -60,6 +60,8 @@ function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
     runtimeUpdates: runtimeUpdates.success ? runtimeUpdates.data : d.runtimeUpdates,
     botSessionsMax: row.botSessionsMax,
     botFileMaxBytes: Number(row.botFileMaxBytes),
+    // 07.13 (D-10): the organization's browser switch; the column defaults to off.
+    allowBrowser: row.allowBrowser,
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -85,6 +87,7 @@ function changedKeys(before: WorkZonePolicy, after: WorkZonePolicy): string[] {
   if (before.runtimeUpdates !== after.runtimeUpdates) out.push("runtimeUpdates");
   if (before.botSessionsMax !== after.botSessionsMax) out.push("botSessionsMax");
   if (before.botFileMaxBytes !== after.botFileMaxBytes) out.push("botFileMaxBytes");
+  if ((before.allowBrowser ?? false) !== (after.allowBrowser ?? false)) out.push("allowBrowser");
   return out;
 }
 
@@ -153,6 +156,8 @@ export async function saveWorkZonePolicy(
     runtimeUpdates: patch.runtimeUpdates ?? before.runtimeUpdates,
     botSessionsMax: patch.botSessionsMax ?? before.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
     botFileMaxBytes: patch.botFileMaxBytes ?? before.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes,
+    // 07.13 (D-10): absent in the request = unchanged.
+    allowBrowser: patch.allowBrowser ?? before.allowBrowser ?? false,
     updatedAt: before.updatedAt,
   };
   if (next.allowedPermissionModes.length === 0) {
@@ -170,6 +175,7 @@ export async function saveWorkZonePolicy(
     runtimeUpdates: next.runtimeUpdates,
     botSessionsMax: next.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
     botFileMaxBytes: next.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes,
+    allowBrowser: next.allowBrowser ?? false,
     updatedBy: actorUserId,
     updatedAt: new Date().toISOString(),
   };

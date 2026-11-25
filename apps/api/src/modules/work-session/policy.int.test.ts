@@ -582,11 +582,15 @@ describe("07.13: the organization's browser switch (D-10)", () => {
       .rows[0]?.allow_browser as boolean | undefined;
 
   it("an admin turns it on: answered, read back, stored and audited once with the changed key", async () => {
-    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({ allowBrowser: false });
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      allowBrowser: false,
+    });
     const res = await put({ allowBrowser: true });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toMatchObject({ allowBrowser: true });
-    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({ allowBrowser: true });
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      allowBrowser: true,
+    });
     expect(await stored()).toBe(true);
     const audits = await browserAudits();
     expect(audits).toHaveLength(1);

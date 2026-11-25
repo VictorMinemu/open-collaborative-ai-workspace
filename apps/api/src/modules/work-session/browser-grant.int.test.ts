@@ -36,7 +36,11 @@ const setPolicy = (allowBrowser: boolean) =>
 
 /** The device's browser columns as the hub stores them from `hello.browser` (plan 08); set here by SQL. */
 const setDevice = (version: number | null, optIn: boolean, id = deviceId) =>
-  su.query("update app.devices set browser_version = $2, browser_opt_in = $3 where id = $1", [id, version, optIn]);
+  su.query("update app.devices set browser_version = $2, browser_opt_in = $3 where id = $1", [
+    id,
+    version,
+    optIn,
+  ]);
 
 const storedPayload = async (commandId: string) =>
   (await su.query("select payload from app.device_commands where id = $1", [commandId])).rows[0]
@@ -47,8 +51,9 @@ const sessionOf = async (as: TestClient, id: string) =>
 
 /** `as` prompts `sid`; the `prompt` frame the device received, after its turn ran to the end (the session is idle). */
 async function promptFrame(as: TestClient, sid: string, dev = device) {
-  const promptId = (await ok(as.request("POST", `/api/v1/work-sessions/${sid}/prompts`, { body: "Open the app" })))
-    .id as string;
+  const promptId = (
+    await ok(as.request("POST", `/api/v1/work-sessions/${sid}/prompts`, { body: "Open the app" }))
+  ).id as string;
   const frame = await dev.command("prompt", sid);
   dev.ack(frame.id);
   dev.emitTurn(sid, { promptId, text: "Done" });
@@ -73,7 +78,10 @@ beforeAll(async () => {
   ({ client: dana, userId: danaId } = await invite(stack, victor, "dana@example.test", "Dana", "developer"));
   const paired = await pairDevice(stack, dana, "Dana's Mac");
   deviceId = paired.deviceId;
-  ({ device, projectId } = await connectWithProject(stack, dana, paired.token, { localId: "lp_web", name: "web" }));
+  ({ device, projectId } = await connectWithProject(stack, dana, paired.token, {
+    localId: "lp_web",
+    name: "web",
+  }));
 }, 180_000);
 
 afterAll(async () => {
@@ -126,7 +134,12 @@ describe("the per-turn browser grant (D-10, PD-09, PD-20)", () => {
   it("policy off → off_policy (even with the device opted out); opt-in off → off_device", async () => {
     await setPolicy(false);
     let grant = SessionBrowserGrant.parse((await promptFrame(dana, sid)).frame.payload.browser);
-    expect(grant).toMatchObject({ allowed: false, reason: "off_policy", askerId: danaId, signinAllowed: false });
+    expect(grant).toMatchObject({
+      allowed: false,
+      reason: "off_policy",
+      askerId: danaId,
+      signinAllowed: false,
+    });
     await setDevice(1, false);
     grant = SessionBrowserGrant.parse((await promptFrame(dana, sid)).frame.payload.browser);
     expect(grant.reason).toBe("off_policy");
@@ -152,8 +165,13 @@ describe("the per-turn browser grant (D-10, PD-09, PD-20)", () => {
 
   it("another organization's switch never reaches this org's grant", async () => {
     const orgB = randomUUID();
-    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [orgB, `o-${orgB}`]);
-    await su.query("insert into app.work_zone_policies (organization_id, allow_browser) values ($1, true)", [orgB]);
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `o-${orgB}`,
+    ]);
+    await su.query("insert into app.work_zone_policies (organization_id, allow_browser) values ($1, true)", [
+      orgB,
+    ]);
     await setPolicy(false);
     const grant = SessionBrowserGrant.parse((await promptFrame(dana, sid)).frame.payload.browser);
     expect(grant.reason).toBe("off_policy");
