@@ -15,16 +15,6 @@ export interface TestSite {
   close(): Promise<void>;
 }
 
-/** The schemes the browser refuses, with a target for each (links, redirects and `open`). */
-export const REFUSED_SCHEME_URLS: Readonly<Record<string, string>> = {
-  "file:": "file:///etc/passwd",
-  "chrome:": "chrome://version/",
-  "devtools:": "devtools://devtools/bundled/inspector.html",
-  "view-source:": "view-source:http://127.0.0.1/",
-  "data:": "data:text/html,<h1>fixture data page</h1>",
-  "javascript:": "javascript:document.title='fixture javascript ran'",
-};
-
 /** The password a test types; it must never appear in a snapshot or a frame the agent returns. */
 export const PASSWORD_CANARY = "fixture-canary-Pa55w0rd-7f3a";
 

@@ -5,11 +5,30 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "../test-browser.js";
 import { PASSWORD_CANARY, startTestSite, type TestSite } from "../test-site.js";
-import { AgentError, type AgentEvent, type BrowserAgent, createBrowserAgent } from "./ops.js";
+import {
+  AgentError,
+  type AgentEvent,
+  type BrowserAgent,
+  createBrowserAgent,
+  launchFailureOf,
+  launchOptionsFor,
+  metadataResolverRules,
+  urlRefusal,
+} from "./ops.js";
 import { resolveChromiumSandbox } from "./sandbox.js";
 
 const executable = await testBrowser();
 if (!executable) console.warn(TEST_BROWSER_HINT);
+
+/** One target per scheme the browser refuses (A-8): through `open`, a link click and a 302 of the fixture site. */
+const REFUSED_SCHEMES: ReadonlyArray<readonly [string, string]> = [
+  ["file:", "file:///etc/passwd"],
+  ["chrome:", "chrome://version/"],
+  ["devtools:", "devtools://devtools/bundled/inspector.html"],
+  ["view-source:", "view-source:http://127.0.0.1/"],
+  ["data:", "data:text/html,<h1>fixture data page</h1>"],
+  ["javascript:", "javascript:document.title='fixture javascript ran'"],
+];
 
 /** The ref of the first node with this role and name in a snapshot text. */
 function refOf(text: string, role: string, name: string): string {
@@ -172,4 +191,151 @@ describe.skipIf(!executable)("createBrowserAgent on a real Chromium", () => {
     expect(await refusal(agent.snapshot({}))).toBe("no_context");
     expect(await agent.open({ url: site.url("/next") })).toMatchObject({ title: "Next page" });
   }, 90_000);
+});
+
+describe("launch posture (PD-18, P4, D-35)", () => {
+  it("passes no debugging port and no profile directory; the sandbox is the resolved one", () => {
+    for (const chromiumSandbox of [true, false]) {
+      const o = launchOptionsFor({ executablePath: "/b/chrome-headless-shell", chromiumSandbox });
+      expect(o).toMatchObject({
+        headless: true,
+        chromiumSandbox,
+        executablePath: "/b/chrome-headless-shell",
+      });
+      const args = o.args ?? [];
+      // Playwright adds the pipe itself; nothing here may open a port or pin a profile outside the run dir.
+      expect(args.filter((a) => /^--remote-debugging-(port|address)/.test(a))).toEqual([]);
+      expect(args.filter((a) => /^--(user-data|profile)-/.test(a))).toEqual([]);
+      expect(args).not.toContain("--no-sandbox");
+      expect(args.some((a) => a.startsWith("--proxy-server"))).toBe(false);
+    }
+  });
+
+  it("maps every metadata host, and its IPv6 spellings, to not found in Chromium's resolver", () => {
+    const rules = metadataResolverRules();
+    for (const h of [
+      "169.254.169.254",
+      "[fd00:ec2::254]",
+      "metadata.google.internal",
+      "[::ffff:a9fe:a9fe]",
+      "[64:ff9b::a9fe:a9fe]",
+      "100.100.100.200",
+      "169.254.170.2",
+    ])
+      expect(rules).toContain(`MAP ${h} ~NOTFOUND`);
+    expect(launchOptionsFor({ executablePath: "/b", chromiumSandbox: true }).args).toContain(
+      `--host-resolver-rules=${rules}`,
+    );
+  });
+
+  it("names a launch failure like brw and never by its message", () => {
+    expect(launchFailureOf(new Error("[FATAL:zygote_host_impl_linux.cc] No usable sandbox!"))).toBe(
+      "no_usable_sandbox",
+    );
+    expect(
+      launchFailureOf(
+        new Error("error while loading shared libraries: libnss3.so: cannot open shared object file"),
+      ),
+    ).toBe("missing_library");
+    expect(launchFailureOf(new Error("Timeout 60000ms exceeded"))).toBe("launch_failed");
+    expect(new AgentError("no_usable_sandbox").message).not.toMatch(/zygote|FATAL/);
+  });
+
+  it("refuses every scheme but http(s), user info and metadata hosts by URL", () => {
+    for (const [, url] of REFUSED_SCHEMES) expect(urlRefusal(url)).toBe("navigation_refused");
+    expect(urlRefusal("http://user:pw@127.0.0.1/")).toBe("navigation_refused");
+    expect(urlRefusal("http://[::ffff:169.254.169.254]/")).toBe("metadata_refused");
+    expect(urlRefusal("http://2852039166/")).toBe("metadata_refused");
+    expect(urlRefusal("https://127.0.0.1:8443/x")).toBeNull();
+  });
+});
+
+describe.skipIf(!executable)("only http(s) pages, one page, no downloads (A-8, PD-24)", () => {
+  let site: TestSite;
+  let agent: BrowserAgent;
+
+  beforeAll(async () => {
+    site = await startTestSite();
+    agent = createBrowserAgent({ executablePath: executable as string, chromiumSandbox: testSandbox() });
+  }, 120_000);
+
+  afterAll(async () => {
+    await agent?.close({});
+    await site?.close();
+  }, 60_000);
+
+  /** The page is still on the fixture site, over http. */
+  async function stillOnSite(): Promise<void> {
+    const snap = await agent.snapshot({});
+    expect(snap.host).toBe(site.host);
+    expect(snap.secure).toBe(false);
+  }
+
+  it.each(REFUSED_SCHEMES)(
+    "%s: open is refused before navigating",
+    async (_scheme, url) => {
+      await agent.open({ url: site.url("/next") });
+      expect(await refusal(agent.open({ url }))).toBe("navigation_refused");
+      await stillOnSite();
+    },
+    60_000,
+  );
+
+  it.each(REFUSED_SCHEMES)(
+    "%s: a link click never leaves http(s)",
+    async (_scheme, url) => {
+      await agent.open({ url: site.url(`/link-file?to=${encodeURIComponent(url)}`) });
+      const snap = await agent.snapshot({});
+      const res = await agent.act({ action: "click", ref: refOf(snap.text, "link", "Refused link") });
+      expect(res.download).toBeNull();
+      // Chromium blocks these itself (the route never sees a non-network scheme, A-8); the end state is what counts.
+      expect(res.host).toBe(site.host);
+      await stillOnSite();
+    },
+    60_000,
+  );
+
+  it.each(REFUSED_SCHEMES)(
+    "%s: a 302 to it is refused",
+    async (_scheme, url) => {
+      await agent.open({ url: site.url("/next") });
+      expect(await refusal(agent.open({ url: site.url(`/redirect?to=${encodeURIComponent(url)}`) }))).toBe(
+        "navigation_refused",
+      );
+      await stillOnSite();
+    },
+    60_000,
+  );
+
+  it("a link to a metadata host is refused by the route", async () => {
+    await agent.open({
+      url: site.url(`/link-file?to=${encodeURIComponent("http://169.254.169.254/latest/")}`),
+    });
+    const snap = await agent.snapshot({});
+    const res = await agent.act({ action: "click", ref: refOf(snap.text, "link", "Refused link") });
+    expect(res).toMatchObject({ refused: "metadata_refused", navigated: false });
+    await stillOnSite();
+  }, 60_000);
+
+  it("closes a window.open pop-up and keeps one page", async () => {
+    await agent.open({ url: site.url("/popup") });
+    const snap = await agent.snapshot({});
+    await agent.act({ action: "click", ref: refOf(snap.text, "button", "Open popup") });
+    // The pop-up's http(s) URL is opened in the session's one page instead (brw's single-tab policy).
+    let title = "";
+    for (let i = 0; i < 40 && title !== "Next page"; i++) {
+      title = (await agent.snapshot({})).title;
+      if (title !== "Next page") await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(title).toBe("Next page");
+    expect((await agent.info({})).pages).toBe(1);
+  }, 60_000);
+
+  it("refuses a download: the act answers ok with no download and the page stays", async () => {
+    await agent.open({ url: site.url("/download-page") });
+    const snap = await agent.snapshot({});
+    const res = await agent.act({ action: "click", ref: refOf(snap.text, "link", "Get the file") });
+    expect(res).toMatchObject({ download: null, refused: null });
+    expect((await agent.snapshot({})).title).toBe("Download page");
+  }, 60_000);
 });
