@@ -385,9 +385,9 @@ export class BrowserManager {
   /**
    * The six ephemeral `browser.*` server frames (never queued, never acked). Here: `browser.close` closes that
    * session's page (opt-in revoked, policy off, access lost, abandoned takeover), `browser.frames` streams the page
-   * while someone watches (15), and `browser.lease` / `browser.input` go to the takeover (15: the agent's calls are
-   * paused while a person holds the page, and only that person's input reaches it). Sign-in states are 07.13-19's;
-   * they arrive here without error.
+   * while someone watches (15), and `browser.lease`, `browser.input` and `browser.handback` go to the takeover (15:
+   * the agent's calls are paused while a person holds the page, and only that person's input reaches it). Sign-in
+   * states are 07.13-19's; they arrive here without error.
    */
   async onServerFrame(frame: BrowserServerFrame): Promise<void> {
     switch (frame.type) {
@@ -413,6 +413,10 @@ export class BrowserManager {
         // Synchronous up to the child's stdin: batches reach the page in the order they arrived. Never logged.
         if (!this.sessions.has(frame.sessionId)) return;
         this.takeover.onInput(frame);
+        return;
+      case "browser.handback":
+        if (!this.sessions.has(frame.sessionId)) return;
+        await this.takeover.onHandback(frame);
         return;
       default:
         return;

@@ -598,7 +598,13 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
       const leaseId = randomUUID();
       const uploadId = randomUUID();
       await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
-      await t.manager.onServerFrame({ type: "browser.handback", sessionId: t.sid, leaseId, save: true, uploadId });
+      await t.manager.onServerFrame({
+        type: "browser.handback",
+        sessionId: t.sid,
+        leaseId,
+        save: true,
+        uploadId,
+      });
       expect(save).toHaveBeenCalledTimes(1);
       expect(save).toHaveBeenCalledWith(t.sid, leaseId, uploadId);
       expect((await t.tools.call("snapshot", {})).isError).toBe(false);
