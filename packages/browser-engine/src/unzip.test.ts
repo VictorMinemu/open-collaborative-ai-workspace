@@ -119,9 +119,10 @@ describe("extractZip", () => {
         { name: "top/ok", data: "1" },
         { name: "top/../escaped", data: "x" },
       ],
-      /refused zip entry/,
+      // yauzl refuses the name before emitting the entry; extractZip names the entry and passes the reason on.
+      /refused zip entry #2: invalid relative path/,
     ],
-    ["an absolute path", [{ name: "/abs", data: "x" }], /refused zip entry/],
+    ["an absolute path", [{ name: "/abs", data: "x" }], /refused zip entry #1: absolute path/],
     [
       "a symlink entry",
       [{ name: "top/link", data: "/etc/passwd", mode: 0o120777 }],
