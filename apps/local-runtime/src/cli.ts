@@ -693,6 +693,21 @@ async function run(): Promise<void> {
   await started;
 }
 
+/**
+ * 07.13 (D-02): the hidden `browser-agent` child of a session's browser, started only by the daemon's `BrowserChild`
+ * over pipes (not in the usage text). Refuses a terminal: it speaks frames, not text. Loaded lazily, so no other
+ * command loads playwright-core.
+ */
+async function browserAgentCommand(): Promise<void> {
+  if (process.stdin.isTTY) {
+    process.stderr.write("ocw-runtime: browser-agent is started by the daemon, not from a terminal\n");
+    process.exitCode = 2;
+    return;
+  }
+  const { runBrowserAgent } = await import("./browser/agent/main.js");
+  runBrowserAgent(process.stdin, process.stdout);
+}
+
 async function main(argv: string[]): Promise<void> {
   const [cmd = "run", ...rest] = argv;
   switch (cmd) {
@@ -764,6 +779,8 @@ async function main(argv: string[]): Promise<void> {
       return doctorCommand(rest);
     case "account":
       return accountCommand(rest);
+    case "browser-agent":
+      return browserAgentCommand();
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

@@ -17,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RuntimeId } from "@ocw/contracts";
+import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES, type RuntimeId } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CFT_PINS, CFT_VERSION, cftPlatformOf, headlessShellRelativePath } from "./browser/pins.js";
 import {
@@ -1329,5 +1329,49 @@ describe("ocw-runtime browser (07.13-06, D-10, PD-27)", () => {
       expect(res.stderr).toContain("usage: ocw-runtime browser on|off|status|install [--from-zip <zip>]");
     }
     expect(existsSync(join(home, "runtime.json"))).toBe(false);
+  }, 60_000);
+});
+
+describe("ocw-runtime browser-agent (07.13-09, D-02)", () => {
+  it("is hidden from the usage text and answers framed JSON lines over its pipes, without launching anything", async () => {
+    const usage = readFileSync(join(import.meta.dirname, "cli.ts"), "utf8").split("\nimport ")[0] ?? "";
+    expect(usage).not.toContain("browser-agent");
+
+    const child = spawn(process.execPath, [BIN, "browser-agent"], {
+      // The browser child's own allowlist: no executable is needed to refuse these.
+      env: { PATH: process.env.PATH ?? "", HOME: tmpdir(), OCW_BROWSER_SANDBOX: "on" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    let buf = Buffer.alloc(0);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        const header = decodeFrameHeader(buf);
+        if (!header || buf.length < FRAME_HEADER_BYTES + header.length) break;
+        expect(header.type).toBe(FRAME_TYPES.control);
+        messages.push(
+          JSON.parse(buf.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + header.length).toString()),
+        );
+        buf = buf.subarray(FRAME_HEADER_BYTES + header.length);
+      }
+    });
+    const exited = new Promise<number | null>((r) => child.once("exit", (code) => r(code)));
+    child.stdin.write(`${JSON.stringify({ id: 1, op: "evaluate", expression: "document.cookie" })}\n`);
+    child.stdin.write("not json\n");
+    child.stdin.write(`${JSON.stringify({ id: 2, op: "snapshot" })}\n`);
+    for (let i = 0; i < 150 && messages.length < 4; i++) await new Promise((r) => setTimeout(r, 100));
+    child.stdin.end();
+    expect(await exited).toBe(0);
+    expect(messages[0]).toEqual({ event: "ready" });
+    expect(messages).toContainEqual({
+      id: 1,
+      ok: false,
+      error: { code: "invalid_request", message: "The browser has no such operation." },
+    });
+    expect(messages).toContainEqual(expect.objectContaining({ id: null, ok: false }));
+    expect(messages).toContainEqual(
+      expect.objectContaining({ id: 2, ok: false, error: expect.objectContaining({ code: "no_context" }) }),
+    );
   }, 60_000);
 });
