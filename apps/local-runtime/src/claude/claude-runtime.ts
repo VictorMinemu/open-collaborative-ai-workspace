@@ -47,9 +47,12 @@ import {
   type SessionEvent,
   type SessionSettingsPatch,
   slashDisposition,
+  WORK_BROWSER_MCP_SERVER,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
+import { browserMcpServer } from "../browser/claude-server.js";
+import type { SessionBrowserTools } from "../browser/manager.js";
 import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
@@ -66,6 +69,7 @@ import {
   type TitleRequest,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { RUNTIME_VERSION } from "../version.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { claudeLimitSignal, claudeResetsAt, claudeUsage } from "./limits.js";
@@ -200,6 +204,10 @@ interface Session {
   pending: SessionSettingsPatch | null;
   /** Serialises control requests (settings changes, the per-turn mode) on this session. */
   applying: Promise<void>;
+  /** 07.13 (PD-07): the session's Work Zone browser; null = none. Offered only while the manager says `available`. */
+  browser: SessionBrowserTools | null;
+  /** The current CLI process has the in-process `ocw_browser` server (at launch or through `setMcpServers`). */
+  browserRegistered: boolean;
 }
 
 /**
@@ -486,6 +494,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       },
       pending: null,
       applying: Promise.resolve(),
+      browser: options.browser ?? null,
+      browserRegistered: false,
     };
     // Start-time effort / fast mode / context window go through the same between-turn path (first turn).
     const initial: SessionSettingsPatch = {};
@@ -538,6 +548,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       abortController: s.abort,
       stderr: (data: string) => this.log.debug(`[claude-code ${s.id}] ${redact(data.trimEnd())}`),
     };
+    // 07.13 (PD-07): the in-process browser server, only while the manager offers it; project servers stay as they are.
+    s.browserRegistered = s.browser?.available === true;
+    if (s.browser && s.browserRegistered) {
+      o.mcpServers = { [WORK_BROWSER_MCP_SERVER]: browserMcpServer(s.browser, { version: RUNTIME_VERSION }) };
+    }
     if (s.runtimeModel) o.model = s.runtimeModel;
     if (resume) o.resume = resume;
     if (this.claudePath) o.pathToClaudeCodeExecutable = this.claudePath;

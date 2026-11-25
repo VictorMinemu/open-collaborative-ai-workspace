@@ -132,8 +132,10 @@ async function connect(server: McpSdkServerConfigWithInstance): Promise<Client> 
   return client;
 }
 
-function texts(result: { content?: unknown }): string[] {
-  const content = Array.isArray(result.content) ? (result.content as Array<{ type: string; text?: string }>) : [];
+function texts(result: Record<string, unknown>): string[] {
+  const content = Array.isArray(result.content)
+    ? (result.content as Array<{ type: string; text?: string }>)
+    : [];
   return content.filter((c) => c.type === "text").map((c) => c.text ?? "");
 }
 
@@ -169,7 +171,10 @@ describe("ClaudeCodeRuntime registers the in-process ocw_browser server (07.13-1
 
   it("no browser, or a browser that is not available → no ocw_browser server", async () => {
     h = harness();
-    await h.runtime.start({ sessionId: randomUUID(), cwd: h.cwd, permissionMode: "default" }, () => undefined);
+    await h.runtime.start(
+      { sessionId: randomUUID(), cwd: h.cwd, permissionMode: "default" },
+      () => undefined,
+    );
     expect(h.queries.at(-1)?.params.options.mcpServers?.ocw_browser).toBeUndefined();
 
     const sid = randomUUID();
@@ -213,7 +218,9 @@ describe("ClaudeCodeRuntime registers the in-process ocw_browser server (07.13-1
       expect(snap.isError).toBeFalsy();
       const snapText = texts(snap).join("\n");
       expect(snapText.split("\n")[0]).toBe(`Read ${site.host}`);
-      expect(snapText).toMatch(/\[begin page content [0-9a-f]{12}\][\s\S]*Fixture heading[\s\S]*\[end page content/);
+      expect(snapText).toMatch(
+        /\[begin page content [0-9a-f]{12}\][\s\S]*Fixture heading[\s\S]*\[end page content/,
+      );
     }, 120_000);
   });
 });
