@@ -37,6 +37,7 @@ import {
   CLOUD_METADATA_HOSTS,
   FRAME_MAX_PAYLOAD_BYTES,
   isCloudMetadataHost,
+  LiveInputFrame,
   originOf,
   WORK_BROWSER_LIMITS,
   WORK_BROWSER_REFUSAL_TEXT,
@@ -58,6 +59,7 @@ import type {
   Request,
   Route,
 } from "playwright-core";
+import { z } from "zod";
 
 // ---------------------------------------------------------------- ops, errors, events
 
@@ -74,6 +76,8 @@ export const AGENT_OPS = [
   "close",
   "info",
   "frames",
+  "takeover",
+  "input",
 ] as const;
 export type AgentOp = (typeof AGENT_OPS)[number];
 
@@ -118,7 +122,9 @@ const fail = (code: AgentErrorCode, message?: string): never => {
 export type AgentEvent =
   | { event: "navigated"; origin: BrowserOrigin }
   | { event: "refused"; refusal: "navigation_refused" | "metadata_refused" }
-  | { event: "crashed"; scope: "page" | "browser" };
+  | { event: "crashed"; scope: "page" | "browser" }
+  /** During a takeover the focused field became password-like or stopped being so (15, D-20): never its value. */
+  | { event: "focus"; sensitive: boolean };
 
 export type OpInput = Readonly<Record<string, unknown>>;
 
@@ -170,6 +176,17 @@ export interface BrowserAgent {
    * once. Not queued behind other ops: a frame request never waits for a navigation.
    */
   frames(input: OpInput): Promise<{ on: boolean }>;
+  /**
+   * A person holds the page (`{ on: true }`) or handed it back (15, D-20, PD-14): the isolated world marks the fields
+   * that receive their trusted input, and the focus hint is reported. The manager decides who holds it; this only
+   * applies it.
+   */
+  takeover(input: OpInput): Promise<{ active: boolean }>;
+  /**
+   * The holder's input (`{ events }`: 1 to 64 `LiveInputFrame`s) through CDP `Input.*` only, while a takeover is active.
+   * Never logged, never echoed: the answer is the count.
+   */
+  input(input: OpInput): Promise<{ applied: number }>;
   open(input: OpInput): Promise<OpenResult>;
   snapshot(input: OpInput): Promise<SnapshotResult>;
   act(input: OpInput): Promise<ActResult>;
@@ -198,6 +215,10 @@ export function runOp(agent: BrowserAgent, op: AgentOp, input: OpInput): Promise
       return agent.info(input);
     case "frames":
       return agent.frames(input);
+    case "takeover":
+      return agent.takeover(input);
+    case "input":
+      return agent.input(input);
   }
 }
 
@@ -373,6 +394,10 @@ interface Session {
   lastGoodUrl: string | null;
   /** The running screencast's stop (15), or null. */
   frames: (() => Promise<void>) | null;
+  /** Mouse buttons the holder keeps pressed (CDP `buttons` bitmask, 15). */
+  buttons: number;
+  /** The last focus hint sent (null: none yet in this takeover, so the next report always goes). */
+  lastFocusSensitive: boolean | null;
 }
 
 /** The live screencast's settings (D-15): the bounds of every Work Zone frame. */
@@ -541,6 +566,8 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         refused: null,
         lastGoodUrl: null,
         frames: null,
+        buttons: 0,
+        lastFocusSensitive: null,
       };
       await context.route("**/*", (route) => onRoute(s, route));
       await cdp.send("Page.enable");
@@ -818,6 +845,85 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
     return rects;
   }
 
+  // ------------------------------------------------------------ takeover input (brw's dispatchInput, reportFocus)
+
+  /** One `LiveInputFrame` (already parsed): applied to the page through CDP and written nowhere else. */
+  async function dispatchInput(s: Session, ev: LiveInputFrame): Promise<void> {
+    const cdp = s.cdp;
+    switch (ev.type) {
+      case "key": {
+        const modifiers = ev.modifiers & 15;
+        const printable = [...ev.key].length === 1;
+        // Ctrl or Meta held: a shortcut, not text.
+        const text =
+          ev.event === "down" && (modifiers & 6) === 0
+            ? (NAMED_KEYS[ev.key]?.[1] ?? (printable ? ev.key : undefined))
+            : undefined;
+        await cdp.send("Input.dispatchKeyEvent", {
+          type: ev.event === "up" ? "keyUp" : text ? "keyDown" : "rawKeyDown",
+          key: ev.key,
+          code: ev.code,
+          modifiers,
+          windowsVirtualKeyCode: keyCode(ev.key),
+          ...(text ? { text, unmodifiedText: text } : {}),
+        });
+        return;
+      }
+      case "text":
+        await cdp.send("Input.insertText", { text: ev.text });
+        return;
+      case "mouse": {
+        if (ev.event === "down") s.buttons |= BUTTON_BITS[ev.button];
+        if (ev.event === "up") s.buttons &= ~BUTTON_BITS[ev.button];
+        await cdp.send("Input.dispatchMouseEvent", {
+          type: MOUSE_TYPES[ev.event],
+          x: ev.x,
+          y: ev.y,
+          button: ev.button,
+          buttons: s.buttons,
+          clickCount: ev.event === "move" ? 0 : 1,
+        });
+        return;
+      }
+      case "wheel":
+        await cdp.send("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: ev.x,
+          y: ev.y,
+          deltaX: ev.dx,
+          deltaY: ev.dy,
+        });
+        return;
+      case "touch":
+        // The device's page is never in phone mode: a touch is a left click.
+        await cdp.send("Input.dispatchMouseEvent", {
+          type: ev.event === "start" ? "mousePressed" : "mouseReleased",
+          x: ev.x,
+          y: ev.y,
+          button: "left",
+          buttons: ev.event === "start" ? 1 : 0,
+          clickCount: 1,
+        });
+        return;
+    }
+  }
+
+  /** `focus { sensitive }` when the focused field turns password-like or stops being so (never its value or name). */
+  async function reportFocus(s: Session): Promise<void> {
+    const contextId = await createWorld(s.cdp, s.takeover);
+    const { result } = await s.cdp.send<EvaluateResult>("Runtime.evaluate", {
+      contextId,
+      expression: "__ocw.focusFacts()",
+      returnByValue: true,
+    });
+    const facts = (result?.value ?? null) as FieldFacts | null;
+    // No focused field (brw): nothing to mask. A field without facts is sensitive (doubt redacts).
+    const sensitive = facts ? isSensitiveField(facts) : false;
+    if (sensitive === s.lastFocusSensitive) return;
+    s.lastFocusSensitive = sensitive;
+    emit({ event: "focus", sensitive });
+  }
+
   // ------------------------------------------------------------ ops
 
   return {
@@ -829,6 +935,37 @@ export function createBrowserAgent(opts: BrowserAgentOptions): BrowserAgent {
         else await stopFrames(s);
       }
       return { on: wantFrames && session !== null && session.frames !== null };
+    },
+
+    takeover(input) {
+      const on = input.on === true;
+      return serial(async () => {
+        const s = current();
+        s.takeover = on;
+        // New documents get the flag from the registered script, the current one from `createWorld`.
+        s.worldScriptId = await replaceWorldScript(s.cdp, s.worldScriptId, on);
+        await createWorld(s.cdp, on);
+        if (on) {
+          s.lastFocusSensitive = null;
+          await reportFocus(s).catch(() => {});
+        } else s.buttons = 0;
+        return { active: on };
+      });
+    },
+
+    input(input) {
+      const parsed = TakeoverInput.safeParse(input.events);
+      if (!parsed.success) return Promise.reject(new AgentError("invalid_request"));
+      const events = parsed.data;
+      return serial(async () => {
+        const s = current();
+        if (!s.takeover) return fail("invalid_request", "No takeover is active.");
+        // From now on whole frames are masked in screenshots too (fields inside frames are not in the marks).
+        s.humanInput = true;
+        for (const ev of events) await dispatchInput(s, ev);
+        await reportFocus(s).catch(() => {});
+        return { applied: events.length };
+      });
     },
 
     async open(input) {
@@ -1017,6 +1154,44 @@ async function mouseClick(cdp: Cdp, x: number, y: number): Promise<void> {
     clickCount: 1,
   });
 }
+
+/** A takeover's input batch: the contracts' `LiveInputFrame`s, as many as one `browser.input` frame carries. */
+const TakeoverInput = z.array(LiveInputFrame).min(1).max(64);
+
+/** brw's named keys: Windows virtual key code, and the text a key down types (none for the rest). */
+const NAMED_KEYS: Readonly<Record<string, readonly [number, string?]>> = {
+  Enter: [13, "\r"],
+  Tab: [9],
+  Backspace: [8],
+  Delete: [46],
+  Escape: [27],
+  ArrowLeft: [37],
+  ArrowUp: [38],
+  ArrowRight: [39],
+  ArrowDown: [40],
+  Home: [36],
+  End: [35],
+  PageUp: [33],
+  PageDown: [34],
+  Shift: [16],
+  Control: [17],
+  Alt: [18],
+  Meta: [91],
+  " ": [32, " "],
+};
+
+function keyCode(key: string): number {
+  const named = NAMED_KEYS[key];
+  if (named) return named[0];
+  if (key.length === 1) {
+    const c = key.toUpperCase().charCodeAt(0);
+    if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57)) return c;
+  }
+  return 0;
+}
+
+const MOUSE_TYPES = { move: "mouseMoved", down: "mousePressed", up: "mouseReleased" } as const;
+const BUTTON_BITS = { none: 0, left: 1, right: 2, middle: 4 } as const;
 
 const SCROLL: Readonly<Record<"up" | "down" | "left" | "right", readonly [number, number]>> = {
   up: [0, -400],

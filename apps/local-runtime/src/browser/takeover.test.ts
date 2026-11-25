@@ -176,7 +176,12 @@ describe("takeover on the device (07.13-15 Task 2, a scripted child)", () => {
     const leaseId = randomUUID();
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "released" });
-    expect(t.child().ops("takeover").map((c) => c.input)).toEqual([{ on: true }, { on: false }]);
+    expect(
+      t
+        .child()
+        .ops("takeover")
+        .map((c) => c.input),
+    ).toEqual([{ on: true }, { on: false }]);
     expect((await t.tools.call("snapshot", {})).isError).toBe(false);
   });
 
@@ -208,7 +213,12 @@ describe("takeover on the device (07.13-15 Task 2, a scripted child)", () => {
     expect(t.child().ops("input")).toHaveLength(1);
 
     // Released: ignored again.
-    await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId: next, state: "released" });
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: next,
+      state: "released",
+    });
     await t.manager.onServerFrame(input(t.sid, next, PASSWORD_CANARY));
     expect(t.child().ops("input")).toHaveLength(1);
 
@@ -303,14 +313,17 @@ describe.skipIf(!executable)("takeover on a real Chromium (07.13-15 Task 2)", ()
       ],
     });
     const focus = () =>
-      frames.flatMap((f) => (f.type === "browser.focus" ? [{ leaseId: f.leaseId, sensitive: f.sensitive }] : []));
-    for (let i = 0; i < 100 && focus().at(-1)?.sensitive !== true; i++) await new Promise((r) => setTimeout(r, 50));
+      frames.flatMap((f) =>
+        f.type === "browser.focus" ? [{ leaseId: f.leaseId, sensitive: f.sensitive }] : [],
+      );
+    for (let i = 0; i < 100 && focus().at(-1)?.sensitive !== true; i++)
+      await new Promise((r) => setTimeout(r, 50));
     expect(focus().at(-1)).toEqual({ leaseId, sensitive: true });
 
     await manager.onServerFrame({ type: "browser.lease", sessionId: sid, leaseId, state: "released" });
     const snap = await tools.call("snapshot", {});
     expect(snap.isError).toBe(false);
-    const content = pageContentOf(snap);
+    const content = pageContentOf(snap) ?? "";
     const line = (name: string) => content.split("\n").find((l) => l.includes(`textbox "${name}"`)) ?? "";
     expect(line("Username")).toContain("[redacted]");
     expect(line("Password")).toContain("[redacted]");

@@ -378,9 +378,7 @@ describe.skipIf(!executable)("takeover input on a real Chromium (07.13-15 Task 2
 
   it("refuses input while no takeover is active, and a batch outside 1 to 64 valid events", async () => {
     await agent.open({ url: site.url("/takeover") });
-    expect(await refusal(agent.input({ events: click(TAKEOVER_LAYOUT.username) }))).toBe(
-      "invalid_request",
-    );
+    expect(await refusal(agent.input({ events: click(TAKEOVER_LAYOUT.username) }))).toBe("invalid_request");
     await agent.takeover({ on: true });
     expect(await refusal(agent.input({ events: [] }))).toBe("invalid_request");
     expect(await refusal(agent.input({ events: [{ type: "text", text: "" }] }))).toBe("invalid_request");

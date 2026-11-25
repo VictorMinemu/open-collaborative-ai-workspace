@@ -47,6 +47,7 @@ import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js"
 import { type LiveClock, LiveFrames } from "./frames.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
 import { ensureShimToken, SHIM_TOKEN_FILE, verifyShimToken } from "./shim-token.js";
+import { Takeover } from "./takeover.js";
 import {
   browserToolSummary,
   invalidResult,
@@ -155,8 +156,6 @@ interface SessionState {
   pageApproved: BrowserOrigin | null;
   /** A non-loopback page was open in this session (`whenTainted` rules, D-34). */
   tainted: boolean;
-  /** A person holds the page (`browser.lease held`, 15): every call answers `paused`. */
-  leaseId: string | null;
   unavailable: "shadowed" | "runtime" | null;
   imageInput: boolean;
   availableCallbacks: Set<(available: boolean) => void>;
@@ -266,9 +265,26 @@ export class BrowserManager {
   private readonly broker: BrowserApprovalBroker;
   /** Who watches which session's page (15): frames flow only while someone does. */
   private readonly live: LiveFrames;
+  /** Who holds which session's page (15): the agent waits, only the holder's input reaches it. */
+  private readonly takeover: Takeover;
 
   constructor(private readonly opts: BrowserManagerOptions) {
     this.log = opts.log ?? silentLogger;
+    this.takeover = new Takeover({
+      child: (sessionId) => {
+        const child = this.sessions.get(sessionId)?.child ?? null;
+        return child?.state === "running" ? child : null;
+      },
+      send: (frame) => opts.link.send(frame),
+      abandon: async (sessionId) => {
+        const s = this.sessions.get(sessionId);
+        if (s) await this.closePage(s, "takeover_abandoned", null);
+      },
+      touched: (sessionId) => {
+        const s = this.sessions.get(sessionId);
+        if (s) this.armIdle(s);
+      },
+    });
     this.live = new LiveFrames({
       link: opts.link,
       control: (sessionId, on) => this.frameControl(sessionId, on),
@@ -369,8 +385,9 @@ export class BrowserManager {
   /**
    * The six ephemeral `browser.*` server frames (never queued, never acked). Here: `browser.close` closes that
    * session's page (opt-in revoked, policy off, access lost, abandoned takeover), `browser.frames` streams the page
-   * while someone watches (15) and `browser.lease` pauses the agent's calls while a person holds the page. Sign-in
-   * states are 07.13-19's; they arrive here without error.
+   * while someone watches (15), and `browser.lease` / `browser.input` go to the takeover (15: the agent's calls are
+   * paused while a person holds the page, and only that person's input reaches it). Sign-in states are 07.13-19's;
+   * they arrive here without error.
    */
   async onServerFrame(frame: BrowserServerFrame): Promise<void> {
     switch (frame.type) {
@@ -388,19 +405,15 @@ export class BrowserManager {
         else this.live.stop(frame.sessionId);
         return;
       }
-      case "browser.lease": {
-        const s = this.sessions.get(frame.sessionId);
-        if (!s) return;
-        if (frame.state === "held") {
-          s.leaseId = frame.leaseId;
-          return;
-        }
-        if (s.leaseId !== frame.leaseId) return;
-        s.leaseId = null;
-        if (frame.state === "abandoned") await this.closePage(s, "takeover_abandoned", null);
-        else this.armIdle(s);
+      case "browser.lease":
+        if (!this.sessions.has(frame.sessionId)) return;
+        await this.takeover.onLease(frame);
         return;
-      }
+      case "browser.input":
+        // Synchronous up to the child's stdin: batches reach the page in the order they arrived. Never logged.
+        if (!this.sessions.has(frame.sessionId)) return;
+        this.takeover.onInput(frame);
+        return;
       default:
         return;
     }
@@ -435,7 +448,7 @@ export class BrowserManager {
       if (s.unavailable || !UUID.test(s.id)) return refusedResult(tool, "browser_unavailable", s.origin);
       const turn = s.turn;
       if (!this.opts.optIn() || !turn?.grant?.allowed) return this.refuse(s, turn, tool, "not_allowed");
-      if (s.leaseId) return this.refuse(s, turn, tool, "paused");
+      if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
       if (tool === "signin") return this.refuse(s, turn, tool, "not_allowed");
       const parsed = WORK_BROWSER_INPUTS[tool].safeParse(args);
       if (!parsed.success) return invalidResult(tool, parseMessage(parsed.error), s.origin);
@@ -463,7 +476,7 @@ export class BrowserManager {
   ): Promise<WorkBrowserToolResult> {
     // Re-checked after waiting behind an earlier call of the session.
     if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, tool, "not_allowed");
-    if (s.leaseId) return this.refuse(s, turn, tool, "paused");
+    if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
     if (tool !== "open" && !s.child) {
       return tool === "close" ? this.closeTool(s, turn) : this.refuse(s, turn, tool, "no_context");
     }
@@ -471,7 +484,7 @@ export class BrowserManager {
     if (gate) return this.refuse(s, turn, tool, gate, undefined, body);
     // A person may have taken minutes to answer: the opt-in, the turn and the lease are read again.
     if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, tool, "not_allowed");
-    if (s.leaseId) return this.refuse(s, turn, tool, "paused");
+    if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, tool, "paused");
     try {
       switch (tool) {
         case "close":
@@ -766,9 +779,14 @@ export class BrowserManager {
         const origin = s.origin;
         s.origin = null;
         if (e.scope === "process" || child.state !== "running") s.child = null;
+        // The API ends the lease on `crashed` too: the page a person held is gone.
+        this.takeover.end(s.id);
         this.event(s, s.turn?.promptId ?? null, "crashed", origin);
         return;
       }
+      case "focus":
+        this.takeover.onFocus(s.id, e.sensitive);
+        return;
       default:
         // `refused` is reported with the call it belongs to; `ready` needs nothing.
         return;
@@ -792,13 +810,14 @@ export class BrowserManager {
     const starting = s.starting;
     if (starting) await starting.catch(() => null);
     this.clearIdle(s);
+    // No page, no takeover: input that arrives later is ignored (the API ends the lease on any close).
+    this.takeover.end(s.id);
     const child = s.child;
     if (!child) return;
     s.child = null;
     const origin = s.origin;
     s.origin = null;
     s.pageApproved = null;
-    s.leaseId = null;
     this.event(s, promptId, kind, origin, kind === "closed" ? { action: "close" } : {});
     await child.close().catch(() => {});
   }
@@ -828,7 +847,6 @@ export class BrowserManager {
       allowedOrigins: new Set(),
       pageApproved: null,
       tainted: false,
-      leaseId: null,
       unavailable: null,
       imageInput: false,
       availableCallbacks: new Set(),
@@ -894,7 +912,7 @@ export class BrowserManager {
     s.idle = setTimeout(
       () => {
         s.idle = null;
-        if (s.leaseId) return this.armIdle(s);
+        if (this.takeover.isPaused(s.id)) return this.armIdle(s);
         void this.serial(s, () => this.closePage(s, "closed", null));
       },
       this.opts.idleMs ?? WORK_BROWSER_LIMITS.idleMinutes * 60_000,
