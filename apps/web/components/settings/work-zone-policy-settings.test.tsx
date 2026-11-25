@@ -124,6 +124,7 @@ describe("Bot sessions at once (Task 3)", () => {
     expect(titles).toEqual([
       "Permission modes",
       "Full access",
+      "Browser",
       "Models",
       "Maximum effort",
       "Fast mode",
@@ -282,5 +283,44 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
     expect(html.indexOf('data-testid="policy-bot-sessions"')).toBeLessThan(
       html.indexOf('data-testid="bot-file-max"'),
     );
+  });
+});
+
+/**
+ * 07.13-11 (D-10): the organization's browser switch, one of the three the browser needs (org ∩ device opt-in ∩
+ * capability). Off by default; saved with the rest of the policy.
+ */
+describe("Allow the browser in Work Zone sessions (07.13-11 Task 1)", () => {
+  it("renders the switch, off by default, with the one-line explanation", () => {
+    const html = render(policy());
+    const t = text(html);
+    expect(t).toContain("Allow the browser in Work Zone sessions");
+    expect(t).toContain(
+      "Agents open pages on the device that runs the session, its localhost included. Each device's owner must allow it too.",
+    );
+    const sw = tagsOf(html, "allow-browser")[0] ?? "";
+    expect(sw).toContain('aria-label="Allow the browser in Work Zone sessions"');
+    expect(sw).toContain('aria-checked="false"');
+    // An older API that sends no allowBrowser: off.
+    const older = render(policy({ allowBrowser: undefined }));
+    expect(tagsOf(older, "allow-browser")[0]).toContain('aria-checked="false"');
+  });
+
+  it("shows a saved allowBrowser as on", () => {
+    expect(tagsOf(render(policy({ allowBrowser: true })), "allow-browser")[0]).toContain('aria-checked="true"');
+  });
+
+  it("saving after switching it on sends allowBrowser: true", () => {
+    const saved = toDraft(policy());
+    const body = toPolicyBody({ ...saved, allowBrowser: true }, { "claude-code": false, codex: false }, saved);
+    expect(body.allowBrowser).toBe(true);
+    const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
+    expect(source).toContain("checked={draft.allowBrowser ?? false}");
+    expect(source).toContain("onCheckedChange={(allowBrowser) => setDraft((d) => ({ ...d, allowBrowser }))}");
+  });
+
+  it("is its own section right after Full access", () => {
+    const titles = [...render(policy()).matchAll(/<h2[^>]*>([^<]+)<\/h2>/g)].map((m) => m[1]);
+    expect(titles.slice(0, 3)).toEqual(["Permission modes", "Full access", "Browser"]);
   });
 });
