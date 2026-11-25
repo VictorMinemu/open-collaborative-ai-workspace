@@ -18,7 +18,9 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES } from "@ocw/contracts";
-import { type AgentErrorCode, type AgentEvent, type AgentOp, opDeadlineMs } from "./agent/ops.js";
+// Types only from ops.ts (it loads playwright-core); the deadline table lives apart (HI-01).
+import { opDeadlineMs } from "./agent/deadline.js";
+import type { AgentErrorCode, AgentEvent, AgentOp } from "./agent/ops.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

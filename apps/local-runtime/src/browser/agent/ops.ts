@@ -284,12 +284,8 @@ export function runOp(agent: BrowserAgent, op: AgentOp, input: OpInput): Promise
   }
 }
 
-/** The child's deadline for one op: `open` and `openWithState` may launch Chromium first. */
-export function opDeadlineMs(op: AgentOp): number {
-  return op === "open" || op === "openWithState"
-    ? WORK_BROWSER_TIMEOUTS_MS.launch + WORK_BROWSER_TIMEOUTS_MS.op
-    : WORK_BROWSER_TIMEOUTS_MS.op;
-}
+/** The child's deadline for one op (HI-01: one table, `deadline.ts`, read by the parent too). */
+export { opDeadlineMs } from "./deadline.js";
 
 // ---------------------------------------------------------------- sign-in state (19)
 
