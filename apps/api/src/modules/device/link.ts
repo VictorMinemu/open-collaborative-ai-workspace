@@ -200,6 +200,16 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
             return hub.accountHandler?.onAccountsSync?.(device, frame);
           case "account.login":
             return hub.accountHandler?.onAccountLogin?.(device, frame);
+          // 07.13 (D-14, D-20, PD-16, PD-25): the work-browser module's handler; a method it lacks ignores the frame.
+          case "browser.event":
+            return hub.browserHandler?.onBrowserEvent?.(device, frame);
+          case "browser.focus":
+            return hub.browserHandler?.onFocus?.(device, frame);
+          case "browser.signin.load":
+            // The answer goes on this socket only (P7), never through Redis or the command queue.
+            return hub.browserHandler?.onSignInLoad?.(device, frame, (reply) => {
+              hub.replyOn(socket, reply);
+            });
         }
       };
 
