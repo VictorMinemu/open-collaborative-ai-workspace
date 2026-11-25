@@ -550,19 +550,22 @@ export class BrowserManager {
   private async onHeld(sessionId: string, leaseId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    // HI-03: the lease frame does not name its holder; the API grants it to the asker of the in-flight (newest
-    // dispatched) or last prompt. While a member's sign-in is loaded, the lease is applied only when every prompt that
-    // could be that one is the member's own; otherwise the input is cut off now and the page is re-sealed and closed
-    // before anyone can see or type into it (the API ends the lease on `closed`).
-    if (s.loaded && !this.onlyAskerIs(s, s.loaded.userId)) {
+    // HI-03: while a member's sign-in is loaded, the lease is applied only when its holder is that member: the one the
+    // API named (`holderUserId`), or, from an API that does not name the holder, when every prompt whose asker the API
+    // could have granted it to (the in-flight or last one) is the member's own. Otherwise the input is cut off now and
+    // the page is re-sealed and closed before anyone can see or type into it (the API ends the lease on `closed`).
+    if (s.loaded && !this.mayHold(s, s.loaded.userId)) {
       this.takeover.end(sessionId);
       await this.closePage(s, "closed", s.turn?.promptId ?? null);
       return;
     }
     const child = s.child;
     const origin = s.origin;
-    // The API lets only the asker of the running (or last) turn take control: what they type is theirs (D-25).
-    if (child && !s.loaded) s.memberPage = s.turn?.grant?.askerId ?? s.lastAskerId;
+    // The API lets only the asker of the running (or last) turn take control: what they type is theirs (D-25). The
+    // holder the API named wins over that inference.
+    if (child && !s.loaded) {
+      s.memberPage = this.takeover.holderOf(sessionId) ?? s.turn?.grant?.askerId ?? s.lastAskerId;
+    }
     const fingerprint =
       child?.state === "running" && origin
         ? child.call("fingerprint", { host: siteHostOfOrigin(origin) }).then(
@@ -571,6 +574,15 @@ export class BrowserManager {
           )
         : Promise.resolve(null);
     s.held = { leaseId, fingerprint };
+  }
+
+  /**
+   * HI-03: true when the page's lease (held now) may be `userId`'s: the holder the API named on `held`, else (an older
+   * API) `onlyAskerIs`.
+   */
+  private mayHold(s: SessionState, userId: string): boolean {
+    const holder = this.takeover.holderOf(s.id);
+    return holder !== undefined ? holder === userId : this.onlyAskerIs(s, userId);
   }
 
   /**
@@ -670,7 +682,7 @@ export class BrowserManager {
     // child still loads the state), the opt-in gone off, or the session's child changed meanwhile: the late signed-in
     // page is then re-sealed and closed now, and never becomes the session's loaded sign-in.
     // HI-03: a lease taken while the state loaded may be another person's: the page is not theirs to see.
-    const heldByOther = this.takeover.isPaused(s.id) && !this.onlyAskerIs(s, grant.askerId);
+    const heldByOther = this.takeover.isPaused(s.id) && !this.mayHold(s, grant.askerId);
     const stale = s.turn !== turn || turn.ended || !this.opts.optIn() || s.child !== child;
     if (stale || heldByOther || this.sharedWith(s, grant.askerId)) {
       await this.killChild(s, child, turn.promptId, loaded);

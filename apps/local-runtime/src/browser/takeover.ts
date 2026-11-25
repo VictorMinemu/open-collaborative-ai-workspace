@@ -35,6 +35,7 @@ export interface TakeoverHost {
   /**
    * 19: a person took control of the page (a new lease): the manager takes the site state's fingerprint. HI-03: it may
    * also end the lease (`end`) and close a page that holds another member's sign-in; awaited before `onLease` returns.
+   * The holder the API named (`holderUserId`) is readable through `holderOf` by then.
    */
   held?(sessionId: string, leaseId: string): void | Promise<void>;
   /** 19: "Done, save my sign-in": export and upload (the agent is still paused while this runs). */
@@ -44,6 +45,8 @@ export interface TakeoverHost {
 export class Takeover {
   /** sessionId → the lease id held now. */
   private readonly held = new Map<string, string>();
+  /** HI-03: sessionId → the person the API granted the held lease to (absent: an older API that does not say). */
+  private readonly holders = new Map<string, string>();
 
   constructor(private readonly host: TakeoverHost) {}
 
@@ -57,11 +60,23 @@ export class Takeover {
     return this.held.get(sessionId) ?? null;
   }
 
+  /**
+   * HI-03: the person holding the session's page, as the API named them on `held` (`browser.lease.holderUserId`).
+   * Undefined when nobody holds it, or when the API did not name the holder (older builds).
+   */
+  holderOf(sessionId: string): string | undefined {
+    return this.held.has(sessionId) ? this.holders.get(sessionId) : undefined;
+  }
+
   async onLease(frame: BrowserLeaseFrame): Promise<void> {
     const { sessionId, leaseId } = frame;
     if (frame.state === "held") {
       const before = this.held.get(sessionId);
       this.held.set(sessionId, leaseId);
+      if (before !== leaseId) {
+        if (frame.holderUserId) this.holders.set(sessionId, frame.holderUserId);
+        else this.holders.delete(sessionId);
+      }
       // A new holder (or the first): the child marks their input and reports the focus to them.
       if (before !== leaseId) {
         this.tellChild(sessionId, true);
@@ -71,7 +86,7 @@ export class Takeover {
     }
     // Only the lease held now ends; a late frame of an earlier lease changes nothing.
     if (this.held.get(sessionId) !== leaseId) return;
-    this.held.delete(sessionId);
+    this.end(sessionId);
     if (frame.state === "abandoned") {
       await this.host.abandon(sessionId);
       return;
@@ -93,7 +108,7 @@ export class Takeover {
     }
     // The save may have taken a while: only the same lease ends here.
     if (this.held.get(sessionId) !== leaseId) return;
-    this.held.delete(sessionId);
+    this.end(sessionId);
     this.tellChild(sessionId, false);
     this.host.touched(sessionId);
   }
@@ -126,6 +141,7 @@ export class Takeover {
   /** The page closed or the session ended: no input is applied afterwards. */
   end(sessionId: string): void {
     this.held.delete(sessionId);
+    this.holders.delete(sessionId);
   }
 
   private tellChild(sessionId: string, on: boolean): void {

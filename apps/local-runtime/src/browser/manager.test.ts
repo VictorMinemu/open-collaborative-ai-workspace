@@ -1356,6 +1356,85 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     );
   });
 
+  it("HI-03: a lease whose holderUserId is someone else closes the signed-in page, even in the member's own turn", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    const leaseId = randomUUID();
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId,
+      state: "held",
+      holderUserId: OTHER_MEMBER,
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(t.manager.openPages).toBe(0);
+    expect(browserEvents(t).map((e) => e.kind)).toContain("signin_unloaded");
+    await t.manager.onServerFrame({
+      type: "browser.input",
+      sessionId: t.sid,
+      leaseId,
+      events: [{ type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 }],
+    } as never);
+    expect(t.children[0]?.calls.some((c) => c.op === "input")).toBe(false);
+  });
+
+  it("HI-03: a lease whose holderUserId is the member keeps their page, even with another person's prompt queued", async () => {
+    const { put } = sequenced();
+    const t = scripted({ api: { put } }, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    await t.tools.call("open", { url: `${SITE}/account` });
+    t.manager.onPrompt(t.sid, "queued-by-other", { ...SIGNIN, askerId: OTHER_MEMBER });
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+      holderUserId: MEMBER,
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(t.manager.openPages).toBe(1);
+    expect((await t.tools.call("snapshot", {})).summary).toBe(
+      "Refused: A person is controlling the page. Try again later.",
+    );
+  });
+
+  it("HI-03: a lease held by someone else (holderUserId) while the member's state loads closes the page it opened", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const t = scripted(
+      {
+        createChild: (o) => {
+          const c = new ScriptedChild(o);
+          c.holdLoad = hold;
+          t.children.push(c);
+          return c;
+        },
+      },
+      HAS_SIGNIN,
+    );
+    t.turn(SIGNIN);
+    const opening = t.tools.call("open", { url: `${SITE}/account` });
+    for (let i = 0; i < 100 && !t.children[0]?.calls.some((c) => c.op === "openWithState"); i++)
+      await flush();
+    await t.manager.onServerFrame({
+      type: "browser.lease",
+      sessionId: t.sid,
+      leaseId: randomUUID(),
+      state: "held",
+      holderUserId: OTHER_MEMBER,
+    });
+    release();
+    expect((await opening).isError).toBe(true);
+    expect(t.children[0]?.state).toBe("closed");
+    expect(browserEvents(t).map((e) => e.kind)).not.toContain("signin_loaded");
+  });
+
   it("HI-04: after a sign-in loaded, an open to another host asks the member even in Full access, loopback too", async () => {
     const t = scripted({}, HAS_SIGNIN);
     t.turn(SIGNIN, true);
