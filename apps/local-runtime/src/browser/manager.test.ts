@@ -484,13 +484,19 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
     await t.tools.call("open", { url: "http://localhost:3000/" });
     const leaseId = randomUUID();
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
-    expect((await t.tools.call("snapshot", {})).summary).toBe("Refused: A person is controlling the page. Try again later.");
+    expect((await t.tools.call("snapshot", {})).summary).toBe(
+      "Refused: A person is controlling the page. Try again later.",
+    );
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "released" });
     expect((await t.tools.call("snapshot", {})).isError).toBe(false);
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "held" });
     await t.manager.onServerFrame({ type: "browser.lease", sessionId: t.sid, leaseId, state: "abandoned" });
     expect(t.frames).toContainEqual(
-      expect.objectContaining({ type: "browser.event", kind: "takeover_abandoned", origin: "http://localhost:3000" }),
+      expect.objectContaining({
+        type: "browser.event",
+        kind: "takeover_abandoned",
+        origin: "http://localhost:3000",
+      }),
     );
     expect(t.manager.openPages).toBe(0);
   });
@@ -528,9 +534,9 @@ describe("BrowserManager lifecycle, server frames and the shim (07.13-12 Task 3:
     expect(ok.summary).toBe("Opened localhost:3000");
 
     const wrong = "0".repeat(64);
-    await expect(t.manager.shimCall({ session: t.sid, token: wrong, tool: "snapshot", args: {} })).rejects.toThrow(
-      "not allowed",
-    );
+    await expect(
+      t.manager.shimCall({ session: t.sid, token: wrong, tool: "snapshot", args: {} }),
+    ).rejects.toThrow("not allowed");
     const other = randomUUID();
     t.manager.onPrompt(other, null, ALLOW);
     const otherToken = readFileSync(await t.manager.forSession(other).shimTokenFile(), "utf8").trim();

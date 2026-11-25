@@ -18,6 +18,7 @@ import {
   type ApprovalDecision,
   type ApprovalOutcome,
   type BrowserOrigin,
+  type BrowserServerFrame,
   canonicalBrowserTool,
   type DeviceToServerFrame,
   isLoopbackHost,
@@ -25,6 +26,7 @@ import {
   type SessionBrowserGrant,
   type SessionEvent,
   WORK_BROWSER_INPUTS,
+  WORK_BROWSER_LIMITS,
   type WorkBrowserAction,
   type WorkBrowserEventKind,
   WorkBrowserLaunchFailure,
@@ -43,6 +45,7 @@ import type {
 import { BrowserApprovalBroker } from "./approvals.js";
 import { BrowserChild, type BrowserChildEvent, sessionRunDir } from "./child.js";
 import { BrowserInstallError, installBrowser, installedBrowser } from "./install.js";
+import { ensureShimToken, SHIM_TOKEN_FILE, verifyShimToken } from "./shim-token.js";
 import {
   browserToolSummary,
   invalidResult,
@@ -157,6 +160,8 @@ interface SessionState {
   lastAvailable: boolean;
   /** Calls of one session run one after the other. */
   chain: Promise<void>;
+  /** The idle close of the open page (PD-24). */
+  idle: NodeJS.Timeout | null;
 }
 
 /** At most this many prompts' grants are kept waiting for their turn (a steady queue is far smaller). */
@@ -345,6 +350,61 @@ export class BrowserManager {
     await Promise.all([...this.sessions.keys()].map((id) => this.endSession(id)));
   }
 
+  /** `<root>/run/<sessionId>` (the child's temp dir and the shim token's home). */
+  runDir(sessionId: string): string {
+    return sessionRunDir(this.opts.root, sessionId);
+  }
+
+  /**
+   * The six ephemeral `browser.*` server frames (never queued, never acked). Here: `browser.close` closes that
+   * session's page (opt-in revoked, policy off, access lost, abandoned takeover) and `browser.lease` pauses the
+   * agent's calls while a person holds the page. Live frames, input, hand back and sign-in states are 07.13-15's and
+   * -19's; they arrive here without error.
+   */
+  async onServerFrame(frame: BrowserServerFrame): Promise<void> {
+    switch (frame.type) {
+      case "browser.close": {
+        const s = this.sessions.get(frame.sessionId);
+        if (!s) return;
+        const kind = frame.reason === "takeover_abandoned" ? "takeover_abandoned" : "closed";
+        await this.closePage(s, kind, null);
+        return;
+      }
+      case "browser.lease": {
+        const s = this.sessions.get(frame.sessionId);
+        if (!s) return;
+        if (frame.state === "held") {
+          s.leaseId = frame.leaseId;
+          return;
+        }
+        if (s.leaseId !== frame.leaseId) return;
+        s.leaseId = null;
+        if (frame.state === "abandoned") await this.closePage(s, "takeover_abandoned", null);
+        else this.armIdle(s);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /**
+   * The Codex shim's call over the control socket (PD-08): only with the session's own token, read from its 0600 file
+   * now (a removed file refuses). Throws `not allowed` otherwise; the token is never logged.
+   */
+  async shimCall(req: {
+    session: string;
+    token: string;
+    tool: WorkBrowserTool;
+    args: unknown;
+  }): Promise<WorkBrowserToolResult> {
+    const s = this.sessions.get(req.session);
+    if (!s || !UUID.test(req.session) || !(await verifyShimToken(this.runDir(req.session), req.token))) {
+      throw new Error("not allowed");
+    }
+    return s.tools.call(req.tool, req.args);
+  }
+
   // ------------------------------------------------------------------ the call
 
   private async call(
@@ -362,7 +422,14 @@ export class BrowserManager {
       const parsed = WORK_BROWSER_INPUTS[tool].safeParse(args);
       if (!parsed.success) return invalidResult(tool, parseMessage(parsed.error), s.origin);
       const body = parsed.data as Record<string, unknown>;
-      return await this.serial(s, () => this.run(s, turn, tool, body, signal));
+      return await this.serial(s, async () => {
+        this.clearIdle(s);
+        try {
+          return await this.run(s, turn, tool, body, signal);
+        } finally {
+          this.armIdle(s);
+        }
+      });
     } catch (err) {
       this.log.warn("browser call failed", { tool, error: err instanceof Error ? err.name : "error" });
       return refusedResult(tool, "browser_unavailable", s.origin);
@@ -657,7 +724,10 @@ export class BrowserManager {
       // Live frames are 07.13-15's; nothing is kept here.
       onFrame: () => {},
     };
-    child = this.opts.createChild ? this.opts.createChild(factoryOpts) : new BrowserChild(factoryOpts);
+    // The shim token outlives a child: the manager removes it with the run dir at session end.
+    child = this.opts.createChild
+      ? this.opts.createChild(factoryOpts)
+      : new BrowserChild({ ...factoryOpts, keepFiles: [SHIM_TOKEN_FILE] });
     return child;
   }
 
@@ -699,6 +769,7 @@ export class BrowserManager {
   ): Promise<void> {
     const starting = s.starting;
     if (starting) await starting.catch(() => null);
+    this.clearIdle(s);
     const child = s.child;
     if (!child) return;
     s.child = null;
@@ -734,6 +805,7 @@ export class BrowserManager {
       availableCallbacks: new Set(),
       lastAvailable: false,
       chain: Promise.resolve(),
+      idle: null,
     };
     const manager = this;
     s.tools = {
@@ -781,8 +853,29 @@ export class BrowserManager {
     }
   }
 
-  private async shimTokenFile(_s: SessionState): Promise<string> {
-    throw new Error("the shim token is not available yet");
+  private async shimTokenFile(s: SessionState): Promise<string> {
+    if (!UUID.test(s.id)) throw new Error("the session id is not a uuid");
+    return ensureShimToken(this.runDir(s.id));
+  }
+
+  /** The idle close (PD-24): a page with no call for `idleMs` closes; a held lease keeps it (a person is on it). */
+  private armIdle(s: SessionState): void {
+    this.clearIdle(s);
+    if (!s.child || this.sessions.get(s.id) !== s) return;
+    s.idle = setTimeout(
+      () => {
+        s.idle = null;
+        if (s.leaseId) return this.armIdle(s);
+        void this.serial(s, () => this.closePage(s, "closed", null));
+      },
+      this.opts.idleMs ?? WORK_BROWSER_LIMITS.idleMinutes * 60_000,
+    );
+    s.idle.unref?.();
+  }
+
+  private clearIdle(s: SessionState): void {
+    if (s.idle) clearTimeout(s.idle);
+    s.idle = null;
   }
 
   private serial<T>(s: SessionState, fn: () => Promise<T>): Promise<T> {
