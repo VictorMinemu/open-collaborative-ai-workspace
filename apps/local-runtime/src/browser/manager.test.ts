@@ -1419,6 +1419,9 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect(ask.browser).toMatchObject({ kind: "signed_in_host", origin: "https://evil.example:443" });
     t.manager.resolveApproval(t.sid, ask.approvalId, "deny");
     expect((await snap).isError).toBe(true);
+    // Closing the page sends nothing anywhere: it never asks.
+    expect((await t.tools.call("close", {})).isError).toBe(false);
+    expect(t.approvals()).toHaveLength(2);
   });
 
   it("LO-04: another person's steer into the member's running turn unloads the sign-in before it runs", async () => {

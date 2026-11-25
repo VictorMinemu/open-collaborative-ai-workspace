@@ -977,9 +977,10 @@ export class BrowserManager {
     if (!grant || !origin) return null;
     // HI-04 (D-13, D-26, the bots' sticky member data): once a member's sign-in was loaded in this turn, what the agent
     // read from it may ride any address. Going to (or acting on) a host outside the member's sites needs the member's
-    // own yes first: loopback included, never skipped by Full access. Their yes covers the host for this call.
+    // own yes first: loopback included, never skipped by Full access. Their yes covers the host for this call. Closing
+    // the page sends nothing anywhere, so it never asks.
     let memberAllowed = false;
-    if (turn.memberData && !turn.memberData.sites.has(origin)) {
+    if (tool !== "close" && turn.memberData && !turn.memberData.sites.has(origin)) {
       const refusal = await this.askMemberData(s, turn, tool, body, origin, signal);
       if (refusal) return refusal;
       memberAllowed = true;
