@@ -20,6 +20,7 @@ export { TAKEOVER_MS, TAKEOVER_WARN_MS };
  *
  * - **Who takes it** (D-20, PD-14): a person who may prompt the session (`work_session.prompt` on the session resource,
  *   the resolver's) AND asked its in-flight turn (else its last one). A bot's turn has no human asker: nobody takes it.
+ *   A page that holds another member's sign-in is nobody else's to take, whoever asked the turn (HI-03).
  * - **One holder:** `take` is one conditional UPDATE, winning only while nobody holds a lease (a lapsed lease without
  *   input is taken over; a lapsed one WITH input waits for the sweep, which closes that page first).
  * - **How it ends** (`endWorkLease`): the hand back (`released`, with or without `save`), the socket closing
@@ -99,8 +100,23 @@ export async function askerOf(tx: Tx, sessionId: string): Promise<string | null>
 }
 
 /**
+ * HI-03 (D-24, D-27): whether `userId` may take the session's page as far as its loaded sign-in goes: never while it
+ * holds another member's sign-in (`work_browsers.signin_user_id`), whoever asked the turn. Read in the caller's
+ * transaction.
+ */
+export async function pageTakeableBy(tx: Tx, sessionId: string, userId: string): Promise<boolean> {
+  const [page] = await tx
+    .select({ signinUserId: workBrowsers.signinUserId })
+    .from(workBrowsers)
+    .where(eq(workBrowsers.workSessionId, sessionId))
+    .limit(1);
+  return !page?.signinUserId || page.signinUserId === userId;
+}
+
+/**
  * What `userId` may do with the session's page (in their own tenant transaction, RLS and the audience backstop apply):
- * `prompt` = the resolver's `work_session.prompt`; `take` = that AND they asked the in-flight or last turn (D-20).
+ * `prompt` = the resolver's `work_session.prompt`; `take` = that AND they asked the in-flight or last turn (D-20) AND
+ * the page holds no other member's sign-in (HI-03).
  */
 export async function leaseRights(
   tx: Tx,
@@ -120,12 +136,15 @@ export async function leaseRights(
     await sessionFacts(tx, p.userId, row),
   );
   if (!decided.allowed) return { prompt: false, take: false, deviceId: row.deviceId };
-  return { prompt: true, take: (await askerOf(tx, p.sessionId)) === p.userId, deviceId: row.deviceId };
+  const take =
+    (await askerOf(tx, p.sessionId)) === p.userId && (await pageTakeableBy(tx, p.sessionId, p.userId));
+  return { prompt: true, take, deviceId: row.deviceId };
 }
 
 /**
  * Takes the lease of the session's open page for `userId` (in their tenant transaction): the asker rule first, then one
- * conditional UPDATE that wins only while no lease is held (or a lapsed one without input). Audited
+ * conditional UPDATE that wins only while no lease is held (or a lapsed one without input) and the page holds no other
+ * member's sign-in (HI-03: checked again in the UPDATE itself, so a load that lands meanwhile still refuses). Audited
  * `work_browser.takeover_started { origin }` in the same transaction.
  */
 export async function takeWorkLease(
@@ -151,6 +170,7 @@ export async function takeWorkLease(
       and(
         eq(workBrowsers.workSessionId, p.sessionId),
         eq(workBrowsers.state, "open"),
+        or(isNull(workBrowsers.signinUserId), eq(workBrowsers.signinUserId, p.userId)),
         or(
           isNull(workBrowsers.leaseId),
           and(lte(workBrowsers.leaseExpiresAt, iso(now)), eq(workBrowsers.leaseInput, false)),
@@ -160,11 +180,12 @@ export async function takeWorkLease(
     .returning({ origin: workBrowsers.origin, expiresAt: workBrowsers.leaseExpiresAt });
   if (!row) {
     const [open] = await tx
-      .select({ id: workBrowsers.workSessionId })
+      .select({ signinUserId: workBrowsers.signinUserId })
       .from(workBrowsers)
       .where(and(eq(workBrowsers.workSessionId, p.sessionId), eq(workBrowsers.state, "open")))
       .limit(1);
-    return { refused: open ? "someone_else" : "expired" };
+    if (!open) return { refused: "expired" };
+    return { refused: open.signinUserId && open.signinUserId !== p.userId ? "not_allowed" : "someone_else" };
   }
   await core.audit.record(tx, {
     action: WORK_BROWSER_AUDIT.takeover_started,

@@ -28,6 +28,7 @@ import {
   endWorkLease,
   keepWorkLease,
   markWorkLeaseInput,
+  pageTakeableBy,
   parseLeaseAnnouncement,
   TAKEOVER_MS,
   TAKEOVER_WARN_MS,
@@ -74,7 +75,8 @@ import type { LiveRelay } from "./live-relay";
  *
  * The privacy gate (D-20, D-27, PD-13) decides per viewer from the session's `work_browsers` row, polled every second
  * while watched, and is asked again by `FrameSlot` at the moment a frame is written (a frame that waited while the page
- * turned private is dropped):
+ * turned private is dropped). The member sign-in is decided first (HI-03): a lease never shows a member's signed-in page
+ * to anyone else.
  * - **takeover:** while `lease_id` is set, frames go only to the socket registered for that lease
  *   (`registerLeaseSocket`, 07.13-18); every other viewer, the holder's other sockets included, gets `private`
  *   (`takeover`). A lease no socket here registered (held on another instance) lets nothing through here;
@@ -395,8 +397,12 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       const read = await perms.decide(tx, user, "work_session.read", facts);
       if (!read.allowed) return none;
       const prompt = (await perms.decide(tx, user, "work_session.prompt", facts)).allowed;
-      // D-20: only the person whose turn it is (in flight, else the last one) takes control.
-      const control = prompt && (await askerOf(tx, v.entry.sessionId)) === auth.userId;
+      // D-20: only the person whose turn it is (in flight, else the last one) takes control; HI-03: never a page that
+      // holds another member's sign-in.
+      const control =
+        prompt &&
+        (await askerOf(tx, v.entry.sessionId)) === auth.userId &&
+        (await pageTakeableBy(tx, v.entry.sessionId, auth.userId));
       return { watch: true, prompt, control };
     });
   }
@@ -458,6 +464,20 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         close: LIVE_CLOSE.ended,
       };
     }
+    if (page.signinUserId && page.signinUserId !== v.auth.userId) {
+      // D-27: a member's signed-in page is theirs alone; the others learn who, not where. HI-03: decided before the
+      // lease, so a lease holder who is not that member never gets the frames of their signed-in page either.
+      return {
+        frame: {
+          ...base,
+          state: "private",
+          privateReason: "member_session",
+          ...(view.memberName ? { memberName: view.memberName.slice(0, 200) } : {}),
+        },
+        frames: false,
+        close: null,
+      };
+    }
     if (page.leaseId) {
       const lease = v.entry.lease;
       if (lease && lease.leaseId === page.leaseId && lease.viewer === v) {
@@ -475,19 +495,6 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           privateReason: "takeover",
           controller: page.controllerUserId === v.auth.userId ? "other_device" : "other",
           ...(view.controllerName ? { memberName: view.controllerName.slice(0, 200) } : {}),
-        },
-        frames: false,
-        close: null,
-      };
-    }
-    if (page.signinUserId && page.signinUserId !== v.auth.userId) {
-      // D-27: a member's signed-in page is theirs alone; the others learn who, not where.
-      return {
-        frame: {
-          ...base,
-          state: "private",
-          privateReason: "member_session",
-          ...(view.memberName ? { memberName: view.memberName.slice(0, 200) } : {}),
         },
         frames: false,
         close: null,
