@@ -31,7 +31,6 @@ let stack: TestStack;
 let su: pg.Client;
 let ada: TestClient;
 let owen: TestClient;
-let owenId: string;
 /** Mia may use Owen's device: she is in the audience of his personal sessions. */
 let mia: TestClient;
 let miaId: string;
@@ -87,7 +86,7 @@ beforeAll(async () => {
     orgName: "Autofy Labs",
   });
   expect(setup.status, JSON.stringify(setup.body)).toBe(200);
-  ({ client: owen, userId: owenId } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
+  ({ client: owen } = await invite(stack, ada, "owen@example.test", "Owen", "developer"));
   ({ client: mia, userId: miaId } = await invite(stack, ada, "mia@example.test", "Mia Lopez", "developer"));
   ({ client: nia } = await invite(stack, ada, "nia@example.test", "Nia", "developer"));
 
