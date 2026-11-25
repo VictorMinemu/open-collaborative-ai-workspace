@@ -661,7 +661,8 @@ describe("FakeRuntime browser directive (07.13 PD-28)", () => {
           await new Promise((r) => setTimeout(r, 50));
         }
         const browserTools = events.filter(
-          (e) => (e.type === "tool.started" || e.type === "tool.completed") && e.toolUseId.includes("-browser-"),
+          (e) =>
+            (e.type === "tool.started" || e.type === "tool.completed") && e.toolUseId.includes("-browser-"),
         );
         expect(browserTools.filter((e) => e.type === "tool.started")).toHaveLength(4);
         const completed = browserTools.filter((e) => e.type === "tool.completed");
@@ -697,6 +698,9 @@ describe("FakeRuntime browser directive (07.13 PD-28)", () => {
     await rt.prompt("s-nb", { promptId: "p1", text: 'browser open {"url":"http://127.0.0.1:1/"}' });
     await until(events, (e) => e.type === "prompt.completed");
     const done = events.find((e) => e.type === "tool.completed" && e.toolUseId.includes("-browser-"));
-    expect(done).toMatchObject({ ok: false, summary: "Refused: The browser is not available in this session." });
+    expect(done).toMatchObject({
+      ok: false,
+      summary: "Refused: The browser is not available in this session.",
+    });
   });
 });

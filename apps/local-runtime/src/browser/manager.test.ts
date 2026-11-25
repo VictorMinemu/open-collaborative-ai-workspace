@@ -105,7 +105,10 @@ describe.skipIf(!executable)("BrowserManager with a real Chromium (07.13-12 Task
     expect(openText.split("\n")[0]).toBe(`Opened ${site.host}`);
     expect(openText).toContain("Signed in: no");
     // The title is page content: it sits only inside the untrusted block.
-    const outside = openText.replace(/\[begin page content [0-9a-f]+\][\s\S]*\[end page content [0-9a-f]+\]/, "");
+    const outside = openText.replace(
+      /\[begin page content [0-9a-f]+\][\s\S]*\[end page content [0-9a-f]+\]/,
+      "",
+    );
     expect(outside).not.toContain("Fixture app");
     expect(pageContentOf(opened)).toContain("Fixture app");
 

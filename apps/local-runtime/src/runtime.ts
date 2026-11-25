@@ -13,6 +13,7 @@ import type {
   SessionEvent,
   SessionSettingsPatch,
 } from "@ocw/contracts";
+import type { SessionBrowserTools } from "./browser/manager.js";
 
 /**
  * A one-shot title call (D-18, P-17): the session runtime's small model names the first prompt. Never the
@@ -93,6 +94,12 @@ export interface StartSessionOptions {
   account?: RuntimeAccount | null;
   /** 07.18 (PD-05): where the adapter reports limits and usage of the session's account. */
   onAccountSignal?: (signal: AccountSignal) => void;
+  /**
+   * 07.13 (D-07, D-08, PD-07, PD-08): the session's Work Zone browser. The adapter only exposes it (Claude: the
+   * in-process `ocw_browser` MCP server; Codex: the stdio shim), and offers the tools only while `available`; every
+   * rule (opt-in, turn grant, lease, approvals, admin rules) is the manager's, decided per call. Absent = no browser.
+   */
+  browser?: SessionBrowserTools;
 }
 
 /**
