@@ -1,15 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   normalizeSessionTitle,
   RuntimeCatalog,
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
+  type SessionBrowserGrant,
   type SessionEvent,
 } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { BrowserManager } from "../browser/manager.js";
+import { TEST_BROWSER_HINT, testBrowser, testSandbox } from "../browser/test-browser.js";
+import { startTestSite } from "../browser/test-site.js";
 import { enroll } from "../enroll.js";
+import { silentLogger } from "../logger.js";
 import { RuntimeError } from "../runtime.js";
 import { FakeRuntime } from "./fake-runtime.js";
 
@@ -587,5 +594,109 @@ describe("FakeRuntime fake-CLI version (07.11, OCW_RUNTIME_FAKE_CLI=1)", () => {
     expect((await new FakeRuntime("claude-code", 1).detect()).version).toBe("fake");
     cli(dir, "claude", 'console.log("Claude Code")');
     expect((await new FakeRuntime("claude-code", 1).catalog()).runtimeVersion).toBe("fake");
+  });
+});
+
+const BROWSER_ENTRY = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "ocw-runtime");
+const browserExecutable = await testBrowser();
+if (!browserExecutable) console.warn(TEST_BROWSER_HINT);
+
+describe("FakeRuntime browser directive (07.13 PD-28)", () => {
+  it.skipIf(!browserExecutable)(
+    "runs `browser <tool> <json>` lines through the session's browser: summaries only, a yes/no for the expectation",
+    async () => {
+      const site = await startTestSite();
+      const manager = new BrowserManager({
+        root: tmp(),
+        link: { send: () => {}, sendBinary: () => false },
+        api: { put: async () => 404 },
+        optIn: () => true,
+        sandbox: () => testSandbox(),
+        emit: () => {},
+        browsers: {
+          installed: async () => ({ executable: browserExecutable as string, version: "156.0.8078.47" }),
+          install: async () => {
+            throw new Error("no install in tests");
+          },
+        },
+        childEntry: [BROWSER_ENTRY],
+        log: silentLogger,
+      });
+      try {
+        const cwd = tmp();
+        writeFileSync(join(cwd, "README.md"), "# Demo\n");
+        const sid = randomUUID();
+        const grant: SessionBrowserGrant = {
+          allowed: true,
+          reason: "ok",
+          askerId: null,
+          askerIsBot: false,
+          alwaysAsk: [],
+          whenTainted: [],
+          signinAllowed: false,
+        };
+        const events: SessionEvent[] = [];
+        const rt = new FakeRuntime("claude-code", 1);
+        manager.onPrompt(sid, null, grant);
+        await rt.start(
+          { sessionId: sid, cwd, permissionMode: "acceptEdits", browser: manager.forSession(sid) },
+          (e) => {
+            events.push(e);
+            if (e.type === "prompt.started") manager.onTurnStarted(sid, e.promptId);
+            if (e.type === "prompt.completed") manager.onTurnEnded(sid, e.promptId);
+          },
+        );
+        manager.onPrompt(sid, "p1", grant);
+        await rt.prompt(sid, {
+          promptId: "p1",
+          text: [
+            "check the page",
+            `browser open {"url":"${site.url("/")}"}`,
+            'browser snapshot {"expect":"Fixture app"}',
+            'browser snapshot {"expect":"Not on the page"}',
+            "browser screenshot {}",
+          ].join("\n"),
+        });
+        for (let i = 0; i < 1200 && !events.some((e) => e.type === "prompt.completed"); i++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        const browserTools = events.filter(
+          (e) => (e.type === "tool.started" || e.type === "tool.completed") && e.toolUseId.includes("-browser-"),
+        );
+        expect(browserTools.filter((e) => e.type === "tool.started")).toHaveLength(4);
+        const completed = browserTools.filter((e) => e.type === "tool.completed");
+        expect(completed.map((e) => (e.type === "tool.completed" ? e.summary : ""))).toEqual([
+          `Opened ${site.host}`,
+          `Read ${site.host}`,
+          `Read ${site.host}`,
+          `Took a screenshot of ${site.host}`,
+        ]);
+        for (const e of browserTools) expect(e).not.toHaveProperty("output");
+        const answer = events
+          .filter((e) => e.type === "assistant.message")
+          .map((e) => (e.type === "assistant.message" ? e.text : ""))
+          .join("\n");
+        expect(answer).toContain('Contains "Fixture app": yes');
+        expect(answer).toContain('Contains "Not on the page": no');
+        expect(answer).toContain("Signed in: no");
+        expect(answer).not.toContain("Fixture heading");
+        expect(answer).not.toContain("Welcome to the fixture app");
+      } finally {
+        await manager.stopAll();
+        await site.close();
+      }
+    },
+    120_000,
+  );
+
+  it("without a browser for the session every line is refused, and nothing is read", async () => {
+    const cwd = tmp();
+    const events: SessionEvent[] = [];
+    const rt = new FakeRuntime("codex", 1);
+    await rt.start({ sessionId: "s-nb", cwd, permissionMode: "acceptEdits" }, (e) => events.push(e));
+    await rt.prompt("s-nb", { promptId: "p1", text: 'browser open {"url":"http://127.0.0.1:1/"}' });
+    await until(events, (e) => e.type === "prompt.completed");
+    const done = events.find((e) => e.type === "tool.completed" && e.toolUseId.includes("-browser-"));
+    expect(done).toMatchObject({ ok: false, summary: "Refused: The browser is not available in this session." });
   });
 });
