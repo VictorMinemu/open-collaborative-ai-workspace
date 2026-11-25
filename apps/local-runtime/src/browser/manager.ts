@@ -640,6 +640,12 @@ export class BrowserManager {
     }
     if (!this.opts.optIn() || s.turn !== turn) return this.refuse(s, null, "signin", "not_allowed");
     if (this.takeover.isPaused(s.id)) return this.refuse(s, turn, "signin", "paused");
+    // Their sealed sign-in for the site is already loaded (the open above loaded it): nobody needs to be asked.
+    if (s.loaded?.origin === origin && s.loaded.userId === grant.askerId) {
+      return textResult(browserToolSummary("signin", body, { origin }), origin, [
+        `Signed in to ${hostPortOf(origin)}: the saved sign-in is loaded in this page.`,
+      ]);
+    }
 
     const deadline = Date.now() + WORK_BROWSER_LIMITS.signinWaitMinutes * 60_000;
     const approvalId = randomUUID();

@@ -1030,6 +1030,16 @@ describe("signin load and unload (07.13-19 Task 3: D-24 … D-26, D-32, PD-16, P
     expect(JSON.stringify([t.frames, t.events])).not.toContain(SCRIPTED_COOKIE.value);
   });
 
+  it("signin with the member's sign-in already loaded for the site asks nobody", async () => {
+    const t = scripted({}, HAS_SIGNIN);
+    t.turn(SIGNIN);
+    const res = await t.tools.call("signin", { host: SITE_HOST, reason: REASON });
+    expect(res.isError).toBe(false);
+    expect(textOf(res)).toContain(`Signed in to ${SITE_HOST}`);
+    expect(t.approvals()).toEqual([]);
+    expect(t.children[0]?.calls.some((c) => c.op === "openWithState")).toBe(true);
+  });
+
   it("signin load: no sign-in, no answer in time, or a turn that may not load opens a public page", async () => {
     for (const [grant, reply] of [
       [SIGNIN, NO_SIGNIN],
