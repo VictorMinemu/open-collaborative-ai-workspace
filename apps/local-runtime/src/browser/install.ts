@@ -454,13 +454,13 @@ const SONAME_PACKAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^libudev\.so\./, "libudev1"],
 ];
 
-/** The packages the 64-bit time_t transition renamed (`<name>t64`), measured on Ubuntu 24.04 (SPIKES A-6). */
-const T64_RENAMED: ReadonlySet<string> = new Set([
-  "libasound2",
-  "libatk-bridge2.0-0",
-  "libatk1.0-0",
-  "libatspi2.0-0",
-  "libglib2.0-0",
+/** The packages the 64-bit time_t transition renamed, measured on Ubuntu 24.04 (SPIKES A-6). */
+const T64_RENAMED: ReadonlyMap<string, string> = new Map([
+  ["libasound2", "libasound2t64"],
+  ["libatk-bridge2.0-0", "libatk-bridge2.0-0t64"],
+  ["libatk1.0-0", "libatk1.0-0t64"],
+  ["libatspi2.0-0", "libatspi2.0-0t64"],
+  ["libglib2.0-0", "libglib2.0-0t64"],
 ]);
 
 /** Ubuntu releases before the t64 transition (24.04 "noble"). */
@@ -560,7 +560,7 @@ export function aptInstallLine(sonames: readonly string[], os: OsRelease | null)
   const packages = new Set<string>();
   for (const so of sonames) {
     const pkg = SONAME_PACKAGES.find(([re]) => re.test(so))?.[1];
-    if (pkg) packages.add(t64 && T64_RENAMED.has(pkg) ? `${pkg}t64` : pkg);
+    if (pkg) packages.add((t64 && T64_RENAMED.get(pkg)) || pkg);
   }
   if (packages.size === 0) return null;
   return `sudo apt-get install -y ${[...packages].sort().join(" ")}`;
