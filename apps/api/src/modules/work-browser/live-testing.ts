@@ -22,7 +22,11 @@ export interface WorkLiveSocket {
 export const workLiveUrl = (baseUrl: string, sessionId: string) =>
   `${baseUrl.replace(/^http/, "ws")}${workLivePath(sessionId)}`;
 
-export async function workLiveSocket(baseUrl: string, token: string, sessionId: string): Promise<WorkLiveSocket> {
+export async function workLiveSocket(
+  baseUrl: string,
+  token: string,
+  sessionId: string,
+): Promise<WorkLiveSocket> {
   const socket = new WebSocket(
     workLiveUrl(baseUrl, sessionId),
     [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${token}`],

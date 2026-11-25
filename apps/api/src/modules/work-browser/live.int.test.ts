@@ -9,9 +9,9 @@ import {
   fakeJpeg,
   lastState,
   upgradeStatus,
+  type WorkLiveSocket,
   waitFor,
   waitState,
-  type WorkLiveSocket,
   workLiveSocket,
   workLiveUrl,
 } from "./live-testing";
@@ -195,4 +195,3 @@ describe("07.13-10 Task 1: a session reader watches the device's frames live (tr
     ).toBe(403);
   });
 });
-
