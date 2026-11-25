@@ -141,6 +141,8 @@ async function barrier(dev: FakeDevice, deviceId: string): Promise<void> {
 
 beforeAll(async () => {
   stack = await startTestStack();
+  // The matrix makes a sign-in expired for a moment: the timed sweep must not delete it meanwhile.
+  stack.built.workBrowser.sweeper.stop();
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   ada = new TestClient(stack.baseUrl);
@@ -245,8 +247,10 @@ describe("07.13-17 Task 2: the sign-in load, answered on the requesting socket o
   });
 
   it("the state never crossed Redis, a device command, an event or an audit row", async () => {
-    await sleep(200);
-    expect(redisSeen.length).toBeGreaterThan(0);
+    // The monitor works: a probe published after the load is seen, so everything before it was seen too.
+    const probe = `probe-${randomUUID()}`;
+    await core().bus.publish("ocw:test:probe", probe);
+    await eventually(async () => redisSeen.some((line) => line.includes(probe)) || undefined);
     expect(redisSeen.filter((line) => line.includes(CANARY))).toEqual([]);
     for (const [table, column] of [
       ["device_commands", "payload"],

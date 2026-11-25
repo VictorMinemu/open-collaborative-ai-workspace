@@ -3,10 +3,10 @@ import { WorkBrowserSignInList } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { FakeDevice } from "../../testing-device";
+import { eventually, FakeDevice } from "../../testing-device";
 import { invite, pairDevice, startSession } from "../../testing-workzone";
 import { browserSessionAad } from "../browser";
-import { workSignInAad } from "./signins";
+import { sealWorkSignIn, workSignInAad } from "./signins";
 
 /**
  * Phase 07.13-17 (D-22, D-23, D-28, D-30, PD-03, PD-15, P7) on a real PostgreSQL + Redis and the full API: a member's
@@ -32,6 +32,8 @@ let owen: TestClient; // developer, owns the device
 let owenId: string;
 let pia: TestClient; // developer
 let eve: TestClient; // admin of organization B
+let eveId: string;
+let orgB: string;
 let d: FakeDevice; // Owen's device (browser)
 let spare: FakeDevice; // Owen's second device
 let rawDeviceToken: string;
@@ -152,7 +154,8 @@ beforeAll(async () => {
   ({ client: pia } = await invite(stack, ada, "pia@example.test", "Pia", "developer"));
   const eveInvite = await invite(stack, ada, "eve@example.test", "Eve", "developer");
   eve = eveInvite.client;
-  await moveToOrgB(eveInvite.userId);
+  eveId = eveInvite.userId;
+  orgB = await moveToOrgB(eveInvite.userId);
 
   const paired = await pairDevice(stack, owen, "Owen's Mac");
   rawDeviceToken = paired.token;
@@ -362,5 +365,132 @@ describe("07.13-17 Task 1: a hand-back upload is sealed for the member and liste
       ),
     ) as Json;
     expect(sealed.cookies[0].value).toBe("second");
+  });
+});
+
+describe("07.13-17 Task 3: revoke closes a loaded page, and expired sign-ins are swept", () => {
+  const sweeper = () => stack.built.workBrowser.sweeper;
+  const SWEPT_ORIGIN = "http://127.0.0.1:4600";
+  const SWEPT_SITE = "127.0.0.1:4600";
+  let aId: string;
+  let bId: string;
+
+  /** A sign-in of `userId` in `organizationId` for `origin`, through the module's own seal (as that member). */
+  async function sealAs(
+    organizationId: string,
+    userId: string,
+    origin: string,
+    value: string,
+  ): Promise<string> {
+    const sealed = await core().db.withTenant({ organizationId, userId }, (tx) =>
+      sealWorkSignIn(tx, core(), {
+        userId,
+        origin,
+        rawState: JSON.stringify({ cookies: [cookie("127.0.0.1", value)], origins: [] }),
+        device: { deviceId: randomUUID(), sessionId: randomUUID() },
+      }),
+    );
+    if (!sealed) throw new Error("nothing sealed");
+    return sealed.signinId;
+  }
+
+  /** The session's page has `signinId` of `userId` loaded (07.13-17 Task 2 sets it; here by SQL). */
+  const loadInto = (sessionId: string, origin: string, signinId: string, userId: string) =>
+    su.query(
+      `insert into app.work_browsers (work_session_id, organization_id, state, origin, signin_id, signin_user_id)
+         values ($1, $2, 'open', $3, $4, $5)
+       on conflict (work_session_id) do update set signin_id = excluded.signin_id, signin_user_id = excluded.signin_user_id`,
+      [sessionId, orgA, origin, signinId, userId],
+    );
+
+  const signinById = async (id: string) =>
+    (await su.query("select * from app.work_browser_signins where id = $1", [id])).rows[0] as
+      | Json
+      | undefined;
+
+  it("the owner revokes a sign-in loaded in a session: row and secret gone, audited, the device closes the page", async () => {
+    const s = await startSession(owen, d, projectId);
+    const origin = "http://127.0.0.1:4500";
+    const id = await sealAs(orgA, owenId, origin, "loaded");
+    const secretId = (await signinById(id))!.secret_id as string;
+    await loadInto(s, origin, id, owenId);
+
+    const res = await owen.request("DELETE", `/api/v1/work-browser/signins/${id}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(204);
+    expect(await signinById(id)).toBeUndefined();
+    expect((await su.query("select id from app.secrets where id = $1", [secretId])).rows).toEqual([]);
+    expect(await audits("work_browser.signin_revoked", id)).toEqual([
+      {
+        actor_kind: "user",
+        actor_id: owenId,
+        user_id: owenId,
+        device_id: null,
+        session_id: expect.anything(),
+        metadata: { site: "127.0.0.1:4500" },
+      },
+    ]);
+    expect(await d.next((f) => f.type === "browser.close" && f.sessionId === s)).toEqual({
+      type: "browser.close",
+      sessionId: s,
+      reason: "revoked",
+    });
+    expect(await browserRow(s)).toMatchObject({ signin_id: null, signin_user_id: null });
+    expect(spare.frames.filter((f) => f.type === "browser.close")).toEqual([]);
+    // Gone for good: a second revoke is 404.
+    expect((await owen.request("DELETE", `/api/v1/work-browser/signins/${id}`)).status).toBe(404);
+  });
+
+  it("the sweep removes A's expired sign-in (and closes its page), audited `expired`; B's stays; a rerun does nothing", async () => {
+    const now = Date.now();
+    aId = await sealAs(orgA, owenId, SWEPT_ORIGIN, "a");
+    bId = await sealAs(orgB, eveId, SWEPT_ORIGIN, "b");
+    await su.query("update app.work_browser_signins set expires_at = $2 where id = $1", [
+      aId,
+      new Date(now + 3600_000).toISOString(),
+    ]);
+    const s = await startSession(owen, d, projectId);
+    await loadInto(s, SWEPT_ORIGIN, aId, owenId);
+    const kept = (await signinRows(owenId)).map((r) => r.id).filter((id) => id !== aId);
+
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1 });
+    expect(await signinById(aId)).toBeUndefined();
+    expect(await signinById(bId)).toBeDefined();
+    expect((await signinRows(owenId)).map((r) => r.id)).toEqual(kept);
+    const swept = (await audits("work_browser.signin_revoked", aId)).map(({ actor_id: _, ...r }) => r);
+    expect(swept).toEqual([
+      {
+        actor_kind: "system",
+        user_id: owenId,
+        device_id: null,
+        session_id: null,
+        metadata: { site: SWEPT_SITE, reason: "expired" },
+      },
+    ]);
+    expect(await d.next((f) => f.type === "browser.close" && f.sessionId === s)).toEqual({
+      type: "browser.close",
+      sessionId: s,
+      reason: "revoked",
+    });
+    await eventually(async () => (await browserRow(s)).signin_user_id === null || undefined);
+
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 0 });
+    expect(await audits("work_browser.signin_revoked", aId)).toHaveLength(1);
+  });
+
+  it("B's expired sign-in is swept in B alone: A's sign-ins are untouched", async () => {
+    const now = Date.now();
+    await su.query("update app.work_browser_signins set expires_at = $2 where id = $1", [
+      bId,
+      new Date(now + 3600_000).toISOString(),
+    ]);
+    const before = await signinRows(owenId);
+    expect(await sweeper().runOnce(now + 2 * 3600_000)).toEqual({ expired: 1 });
+    expect(await signinById(bId)).toBeUndefined();
+    expect(await signinRows(owenId)).toEqual(before);
+    const inB = await su.query(
+      "select organization_id, metadata from app.audit_events where action = 'work_browser.signin_revoked' and resource_id = $1",
+      [bId],
+    );
+    expect(inB.rows).toEqual([{ organization_id: orgB, metadata: { site: SWEPT_SITE, reason: "expired" } }]);
   });
 });

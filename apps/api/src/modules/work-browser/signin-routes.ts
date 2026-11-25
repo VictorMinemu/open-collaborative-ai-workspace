@@ -12,16 +12,18 @@ import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, conflict, gone, notFound } from "../../lib/errors";
-import { authenticateDeviceJwt, bearerValue, type DeviceRef, looksLikeJwt } from "../device";
+import { authenticateDeviceJwt, bearerValue, type DeviceHub, type DeviceRef, looksLikeJwt } from "../device";
 import type { PermissionService } from "../organization";
 import { listMine, resealWorkSignIn, revokeWorkSignIn, sealWorkSignIn } from "./signins";
+import { loadedPages, unlinkGonePages } from "./sweep";
 
 /**
  * The Work Zone sign-in routes (Phase 07.13; D-22, D-23, D-28, PD-15, P7):
  *
  * - `GET /work-browser/signins` (`authz: user`): the caller's OWN sign-ins (site, dates, status), never anything sealed;
- * - `DELETE /work-browser/signins/:id` (`authz: user`): revokes one of them. Another member's id, an admin's attempt
- *   and another organization's id are all 404: the owner-only policy hides the row;
+ * - `DELETE /work-browser/signins/:id` (`authz: user`): revokes one of them (the secret goes; a page that had it
+ *   loaded is closed on its device, `browser.close { reason: "revoked" }`, and its loaded fields cleared). Another
+ *   member's id, an admin's attempt and another organization's id are all 404: the owner-only policy hides the row;
  * - `PUT /runtime/browser-signins/uploads/:uploadId` (device JWT only): the hand-back upload (PD-15). The upload row
  *   must name a session that runs on THIS device, be unexpired and unused; it is consumed once, whatever the outcome,
  *   and the seal runs as the upload's member (owner-only policy). Sealed only when `changed` and something of the site
@@ -69,6 +71,8 @@ function parseUpload(body: unknown): WorkBrowserSignInUpload {
 export interface SignInRouteDeps {
   core: Core;
   perms: PermissionService;
+  /** Where a revoked sign-in's pages are closed (`browser.close`, ephemeral). */
+  hub: Pick<DeviceHub, "sendBrowserFrame">;
 }
 
 export function registerSignInRoutes(app: App, deps: SignInRouteDeps): void {
@@ -104,12 +108,29 @@ export function registerSignInRoutes(app: App, deps: SignInRouteDeps): void {
     async (req, reply) => {
       // Owner-only: the policy decides (anyone else's id, an admin's included, is simply missing: 404).
       markDecided(req);
-      const { userId } = authOf(req);
+      const { userId, organizationId } = authOf(req);
       const { id } = IdParams.parse(req.params);
+      // The pages that have it loaded hold its cookies: found (user-less: the page rows are the sessions', and a
+      // member may no longer read a session their sign-in is still loaded in) before the revoke unlinks them, used only
+      // once the revoke proved the sign-in is the caller's.
+      const pages = await core.db.withTenant({ organizationId, userId: null }, (tx) => loadedPages(tx, id));
       const revoked = await core.db.withTenant(tenant(req), (tx) =>
         revokeWorkSignIn(tx, core, { userId, id }),
       );
       if (!revoked) throw notFound("Sign-in not found");
+      const closed = await core.db.withTenant({ organizationId, userId: null }, (tx) =>
+        unlinkGonePages(tx, pages),
+      );
+      // D-23: the page ends on its device (ephemeral frame; an offline device simply misses it).
+      for (const page of closed) {
+        await deps.hub
+          .sendBrowserFrame(page.deviceId, {
+            type: "browser.close",
+            sessionId: page.sessionId,
+            reason: "revoked",
+          })
+          .catch(() => {});
+      }
       return reply.code(204).send();
     },
   );
