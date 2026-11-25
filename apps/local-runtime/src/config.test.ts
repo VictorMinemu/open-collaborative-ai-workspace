@@ -17,10 +17,13 @@ import {
   fullAccessOptIn,
   loadConfig,
   ProjectRegistry,
+  RuntimeConfigSchema,
+  resolveBrowser,
   resolveFullAccess,
   resolveHostKind,
   resolveIsolatedServer,
   resolveRuntimeUpdates,
+  setBrowserOptIn,
   setFullAccessOptIn,
   setIsolatedServer,
   setRuntimeUpdatesLevel,
@@ -160,6 +163,73 @@ describe("Isolated server mark (07.16, D-19)", () => {
     const broken = home();
     writeFileSync(join(broken, "runtime.json"), "{ not json");
     await expect(setIsolatedServer(broken, true)).rejects.toThrow(/runtime\.json/);
+  });
+});
+
+describe("Browser opt-in on this device (07.13, D-10, PD-18, PD-27)", () => {
+  it("is off by default; on from the file; OCW_ALLOW_BROWSER wins; the sandbox is on unless the owner says container", async () => {
+    expect(resolveBrowser({}, {})).toEqual({ optIn: false, source: "default", sandbox: "on" });
+    const parsed = await loadConfig(home(), {});
+    expect(parsed.browser).toEqual({ optIn: false, sandbox: "on" });
+    expect(resolveBrowser(parsed, {})).toEqual({ optIn: false, source: "default", sandbox: "on" });
+    const on = RuntimeConfigSchema.parse({ browser: { optIn: true } });
+    expect(resolveBrowser(on, {})).toEqual({ optIn: true, source: "config", sandbox: "on" });
+    expect(resolveBrowser(on, { OCW_ALLOW_BROWSER: "0" })).toEqual({
+      optIn: false,
+      source: "env",
+      sandbox: "on",
+    });
+    expect(resolveBrowser(on, { OCW_ALLOW_BROWSER: "false" }).optIn).toBe(false);
+    expect(resolveBrowser({}, { OCW_ALLOW_BROWSER: "1" })).toEqual({
+      optIn: true,
+      source: "env",
+      sandbox: "on",
+    });
+    expect(resolveBrowser({}, { OCW_ALLOW_BROWSER: "true" }).optIn).toBe(true);
+    // Anything else is not a decision: the file decides.
+    expect(resolveBrowser(on, { OCW_ALLOW_BROWSER: "yes" })).toEqual({
+      optIn: true,
+      source: "config",
+      sandbox: "on",
+    });
+
+    const container = RuntimeConfigSchema.parse({ browser: { optIn: true, sandbox: "container" } });
+    expect(resolveBrowser(container, {}).sandbox).toBe("container");
+    expect(resolveBrowser(on, { OCW_BROWSER_SANDBOX: "container" }).sandbox).toBe("container");
+    expect(resolveBrowser(container, { OCW_BROWSER_SANDBOX: "on" }).sandbox).toBe("on");
+    expect(resolveBrowser(on, { OCW_BROWSER_SANDBOX: "off" }).sandbox).toBe("on");
+    for (const sandbox of ["off", "none", "no-sandbox", true]) {
+      expect(
+        RuntimeConfigSchema.safeParse({ browser: { optIn: true, sandbox } }).success,
+        String(sandbox),
+      ).toBe(false);
+    }
+  });
+
+  it("setBrowserOptIn writes browser.optIn atomically (0600) and keeps every other key, the sandbox mode included", async () => {
+    const h = home();
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        fullAccess: { optIn: true },
+        browser: { sandbox: "container" },
+      }),
+    );
+    await setBrowserOptIn(h, true);
+    const file = join(h, "runtime.json");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      serverUrl: "https://ocw.example.com",
+      fullAccess: { optIn: true },
+      browser: { sandbox: "container", optIn: true },
+    });
+    expect((await loadConfig(h, {})).browser).toEqual({ optIn: true, sandbox: "container" });
+    await setBrowserOptIn(h, false);
+    expect((await loadConfig(h, {})).browser.optIn).toBe(false);
+    const broken = home();
+    writeFileSync(join(broken, "runtime.json"), "{ not json");
+    await expect(setBrowserOptIn(broken, true)).rejects.toThrow(/runtime\.json/);
   });
 });
 
