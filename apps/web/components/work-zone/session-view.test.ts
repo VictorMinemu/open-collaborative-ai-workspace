@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   accessLostCopy,
   leftProjectLine,
+  PanelTabs,
+  panelTabsOf,
   SessionAccountChip,
   SessionBackLink,
   sessionAccountLabel,
@@ -154,5 +156,37 @@ describe("session account", () => {
     );
     expect(html).not.toContain("<b>");
     expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
+  });
+});
+
+/** 07.13-16 (D-15): the Browser tab beside Queue and Changes, only while the session's browser is available. */
+describe("session panel tabs", () => {
+  const tabs = (browser: Parameters<typeof panelTabsOf>[0]) =>
+    renderToStaticMarkup(
+      createElement(PanelTabs, { tab: "queue", onTab: () => undefined, queued: 0, changesCount: 0, browser }),
+    );
+
+  it("lists Browser when the browser is available, live or not", () => {
+    expect(panelTabsOf({ status: "available", live: false })).toEqual(["queue", "changes", "browser"]);
+    const html = tabs({ status: "available", live: true });
+    expect(html).toContain('data-testid="tab-browser"');
+    expect(html).toContain("Browser");
+    expect(html).toContain('role="tab"');
+  });
+
+  it("leaves Browser out when it is off, needs an update, or an older API sends nothing", () => {
+    for (const status of ["off_policy", "off_device", "update_device"] as const) {
+      expect(panelTabsOf({ status, live: false })).toEqual(["queue", "changes"]);
+      expect(tabs({ status, live: false })).not.toContain("tab-browser");
+    }
+    expect(panelTabsOf(undefined)).toEqual(["queue", "changes"]);
+    expect(tabs(undefined)).not.toContain("Browser");
+  });
+
+  it("every tab is a keyboard-reachable button at least 44 px tall (the phone sheet's touch rule)", () => {
+    const html = tabs({ status: "available", live: false });
+    expect(html.match(/<button type="button" role="tab"/g)).toHaveLength(3);
+    expect(html.match(/ h-12 /g)?.length).toBe(3);
+    expect(html).not.toContain('tabindex="-1"');
   });
 });
