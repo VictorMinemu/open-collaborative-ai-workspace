@@ -672,7 +672,9 @@ async function recordOffline(): Promise<void> {
     }>;
     console.log(`tools offered: ${JSON.stringify(offered.map((t) => `${t.type}:${t.name ?? ""}`))}`);
     const shell = offered.find((t) => t.name === OFFLINE_SHELL_TOOL);
-    console.log(`${OFFLINE_SHELL_TOOL} parameters: ${JSON.stringify(Object.keys(shell?.parameters?.properties ?? {}))}`);
+    console.log(
+      `${OFFLINE_SHELL_TOOL} parameters: ${JSON.stringify(Object.keys(shell?.parameters?.properties ?? {}))}`,
+    );
     for (const [i, r] of responses.entries()) {
       const outputs = ((r.body?.input ?? []) as Array<{ type?: string; output?: unknown }>)
         .filter((x) => x.type === "function_call_output")

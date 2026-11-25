@@ -29,10 +29,14 @@ export interface RuntimeControlRow {
   uiKey: string | null;
 }
 
-/** The runtime versions the inventory was checked against (fixtures are recorded at these versions). */
+/**
+ * The runtime versions the inventory was checked against (fixtures are recorded at these versions). 07.13-25 moved
+ * them to the versions devices run today (Claude Code 2.1.332, codex-cli 0.172.0), recorded offline against the fake
+ * model; the compatibility floors keep the older recordings (2.1.287 / 2.1.289, 0.160.0).
+ */
 export const PINNED_RUNTIME_VERSIONS = {
-  "claude-code": { cli: "2.1.289", sdk: "0.3.282" },
-  codex: { cli: "0.160.0" },
+  "claude-code": { cli: "2.1.332", sdk: "0.3.282" },
+  codex: { cli: "0.172.0" },
 } as const;
 
 export const RUNTIME_CONTROL_INVENTORY: readonly RuntimeControlRow[] = [

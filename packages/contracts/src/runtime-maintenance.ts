@@ -155,7 +155,7 @@ export type RuntimeCompatibilityManifest = z.infer<typeof RuntimeCompatibilityMa
  * server release.
  */
 export const RUNTIME_COMPATIBILITY_MANIFEST: RuntimeCompatibilityManifest = {
-  updatedAt: "2026-10-28T00:00:00.000Z",
+  updatedAt: "2026-11-25T00:00:00.000Z",
   runtimes: {
     "claude-code": {
       recommended: { min: PINNED_RUNTIME_VERSIONS["claude-code"].cli },
