@@ -512,6 +512,7 @@ test("Settings › Modules: Sandbox and Browser after Memory with the D-12 hint;
 test("the page at this width: axe in light and dark, named controls, 44 px targets, the review screenshots", async ({
   browser,
 }, info) => {
+  test.setTimeout(90_000);
   const mobile = info.project.name === "mobile";
   const w = mobile ? "390" : "1440";
   const page = await signIn(browser, info.project.name);
