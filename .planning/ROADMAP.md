@@ -1351,9 +1351,11 @@ with no manual step on any device.
   3. Each session gets a fresh, isolated browser profile that is deleted when the session ends; the user's own browser
      profile and cookies are never read
   4. Everyone in the session's audience sees the browser live in the session view (light/dark, 1440 and 390 widths)
-  5. A team on `v0.2.x` that runs `ocw upgrade` gets the feature with no manual step on headless devices (the runtime
-     updates itself and fetches the pinned browser on first use, checksum-verified), and desktop users are told a new
-     app version is available; an older runtime shows a clear "update this device" state instead of failing
+  5. A team on v0.3.1 or newer that runs `ocw upgrade` gets the feature with no manual step on headless devices (the
+     runtime updates itself to 0.5.0 under its runtime updates level, ADR-0040, and fetches the pinned browser on
+     first use, checksum-verified); runtimes older than v0.3.1 run the install command once (Settings › Devices ›
+     Add a device › Server, ADR-0040); desktop users are told a new app version is available; an older runtime shows
+     a clear "Update this device to use the browser" state instead of failing
   6. Proven by an e2e spec (fake runtime driving the real local browser against a local page) and a container proof on
      the headless runtime; documented in `docs/SERVER.md`, the README and ADR-0035
 
