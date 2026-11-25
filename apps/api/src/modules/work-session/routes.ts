@@ -895,6 +895,7 @@ function startError(r: WorkSessionStartFailure): HttpError {
       return r.reason === "other_device" ? conflict(r.message) : notFound(r.message);
     case "device_offline":
     case "runtime_unavailable":
+    case "no_account":
       return conflict(r.message, r.code);
     case "settings_denied":
       return settingsDenied(r.field, r.reason);

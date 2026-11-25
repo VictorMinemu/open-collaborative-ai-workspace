@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SessionPoolAccountRef } from "./account-pool";
 import { Attachment } from "./attachments";
 import { Id, IsoDateTime } from "./common";
 import { DiffFile, WORK_PROMPT_MAX_IMAGES } from "./device-link";
@@ -133,6 +134,11 @@ export const WorkSession = z.object({
    * surface; null = started by a person; optional so older payloads parse.
    */
   startedByAgent: WorkSessionAgentRef.nullable().optional(),
+  /**
+   * 07.18 (D-11): the pool account the session runs on, label only (members never see a token). Null = the device's
+   * own login; absent = an older API. Viewer-neutral, so it may ride every surface.
+   */
+  poolAccount: SessionPoolAccountRef.nullable().optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 

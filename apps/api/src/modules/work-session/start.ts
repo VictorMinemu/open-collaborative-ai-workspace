@@ -5,6 +5,7 @@ import {
   type CreateWorkSessionRequest,
   compatibilityOf,
   type EffortLevel,
+  POOL_PROVIDER_OF_RUNTIME,
   type RuntimeId,
   RuntimeInfo,
   type SessionAudienceInput,
@@ -25,6 +26,7 @@ import {
 import { eq, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
+import { noAccountSentence } from "../account-pool";
 import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, orgResource, type PermissionService } from "../organization";
@@ -60,7 +62,8 @@ export type WorkSessionStartCode =
   | "prompt_not_allowed"
   | "not_in_project"
   | "audience_outside_project"
-  | "team_not_assigned";
+  | "team_not_assigned"
+  | "no_account";
 
 export type WorkSessionStartFailure =
   | {
@@ -91,7 +94,12 @@ export type WorkSessionStartFailure =
       message: string;
       ids: string[];
     }
-  | { ok: false; code: "device_offline" | "runtime_unavailable" | "prompt_not_allowed"; message: string }
+  | {
+      ok: false;
+      /** 07.18 `no_account` (PD-16): no pool account can serve and the device's own login may not (fallback off or not signed in). */
+      code: "device_offline" | "runtime_unavailable" | "prompt_not_allowed" | "no_account";
+      message: string;
+    }
   | { ok: false; code: "settings_denied"; message: string; field: string; reason: ControlDenialReason };
 
 export type WorkSessionStartResult = { ok: true; session: WorkSession } | WorkSessionStartFailure;
@@ -276,13 +284,6 @@ export async function createWorkSession(
       message: `${RUNTIME_LABEL[runtimeId]} is not installed on ${d.name}`,
     };
   }
-  if (!runtime.loggedIn) {
-    return {
-      ok: false,
-      code: "runtime_unavailable",
-      message: `${RUNTIME_LABEL[runtimeId]} is not signed in on ${d.name}. Sign in from a terminal first.`,
-    };
-  }
   // 07.11 (D-04, PD-13): a version the manifest marks `broken` refuses; `unsupported` and `unknown` still start.
   if (compatibilityOf(hub.runtimeManifest, runtimeId, runtime.version) === "broken") {
     return {
@@ -353,6 +354,33 @@ export async function createWorkSession(
     if (refused) return { ok: false, ...refused };
   }
 
+  // 07.18 (D-02, D-05, PD-04, PD-07, PD-17): a pool-capable device starts on the account the strategy chooses (sticky
+  // for the session); without one the session runs on the device's own login, which must then be signed in. Last of
+  // the checks, so a refused start never moved the pool's rotation.
+  const pool = d.accountPoolVersion !== null ? svc.pool : null;
+  const picked = pool
+    ? await pool.select(tx, {
+        provider: POOL_PROVIDER_OF_RUNTIME[runtimeId],
+        deviceId: d.id,
+        consumer: "work_zone",
+        now: new Date(),
+      })
+    : null;
+  const poolAccount = picked && "row" in picked ? picked.row : null;
+  // PD-16: no usable account → the device's own login when fallback is on and it is signed in; otherwise refused. A
+  // provider with no live account at all keeps today's answer for a device that is not signed in.
+  const none = picked && "none" in picked ? picked : null;
+  if (none && (!none.policy.fallbackToDeviceLogin || (!runtime.loggedIn && !none.poolEmpty))) {
+    return { ok: false, code: "no_account", message: noAccountSentence(none.earliestReset) };
+  }
+  if (!poolAccount && !runtime.loggedIn) {
+    return {
+      ok: false,
+      code: "runtime_unavailable",
+      message: `${RUNTIME_LABEL[runtimeId]} is not signed in on ${d.name}. Sign in from a terminal first.`,
+    };
+  }
+
   // ---- no refusal past this line: every write happens below.
   const title = input.title ?? heuristicTitle(prompt) ?? `${p.name} · ${RUNTIME_LABEL[runtimeId]}`;
   const [conv] = await tx
@@ -385,6 +413,7 @@ export async function createWorkSession(
       createdBy: actor.userId,
       visibility: audience.kind,
       startedByAgentId: opts.agent?.layer.agentId ?? null,
+      poolAccountId: poolAccount?.id ?? null,
       // D-08: sticky from the start; Full access after this needs an isolated server (the context decides it).
       ...(opts.agent?.layer.tainted ? { taintedAt: sql`now()` } : {}),
     })
@@ -415,6 +444,8 @@ export async function createWorkSession(
       worktree: s!.worktree,
       // The audience kind only, never who is in it (D-04).
       visibility: audience.kind,
+      // 07.18 (PD-20): the pool account's id only (null = the device's own login), never its token.
+      poolAccountId: poolAccount?.id ?? null,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.approvalId ? { approvalId: opts.approvalId } : {}),
       ...(opts.agent ? { startedByAgentId: opts.agent.layer.agentId } : {}),

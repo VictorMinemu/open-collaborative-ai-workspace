@@ -7,6 +7,7 @@ import {
 import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
+import { createAccountPoolPort } from "../account-pool";
 import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
@@ -163,6 +164,8 @@ export function createWorkSessionModule(
     storage: deps.storage ?? null,
     // 07.6 (AUTO-06): a finished session enqueues its memory summary job.
     jobs: core.jobs,
+    // 07.18 (D-02, D-05, PD-02): sessions on pool-capable devices start on, and switch between, pool accounts.
+    pool: createAccountPoolPort(core),
   });
   hub.setSessionHandler(service);
   // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.

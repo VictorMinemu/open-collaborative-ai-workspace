@@ -36,6 +36,7 @@ import {
   type AgentChannelPatchCard,
   AgentChannelPatchCardResponse,
   type AgentChannelPluginReport,
+  type AgentChannelPoolHealthReport,
   type AgentChannelPostCard,
   AgentChannelPostCardResponse,
   type AgentChannelPostMessage,
@@ -384,6 +385,10 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
      */
     async reportProviderAuth(report: AgentChannelProviderAuthReport, signal?: AbortSignal): Promise<void> {
       await request("POST", "/provider-auth", report, signal, 3);
+    },
+    /** 07.18-19 R2.2: the health of the Claude pool token profiles this cell holds (ids and flags, never a token). */
+    async reportPoolHealth(report: AgentChannelPoolHealthReport, signal?: AbortSignal): Promise<void> {
+      await request("POST", "/pool-health", report, signal, 3);
     },
     /**
      * The tool gate's question for one call (D-08). Single attempt, bounded by `timeoutMs` (default 10 s, under

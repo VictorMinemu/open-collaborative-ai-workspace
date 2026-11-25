@@ -322,6 +322,94 @@ describe("FakeRuntime Full access (ADR-0012, D-01)", () => {
   });
 });
 
+describe("FakeRuntime pool accounts (07.18 D-08 test seam)", () => {
+  const account = (label: string, ref = label) => ({
+    kind: "token" as const,
+    ref,
+    label,
+    oauthToken: ["sk", "ant", "oat01", "fakeAAAAAAAAAAAAAAAAAAAAAAAA"].join("-"),
+  });
+  const answers = (events: SessionEvent[]) =>
+    events
+      .filter((e) => e.type === "assistant.message")
+      .map((e) => (e.type === "assistant.message" ? e.text : ""))
+      .join("\n");
+
+  it("names the account in its answer; without one the answer is unchanged", async () => {
+    const cwd = tmp();
+    const events: SessionEvent[] = [];
+    const rt = new FakeRuntime("claude-code", 1);
+    expect(rt.capabilities.supportsAccounts).toEqual(["token", "device_slot"]);
+    await rt.start({ sessionId: "s1", cwd, permissionMode: "plan", account: account("B") }, (e) =>
+      events.push(e),
+    );
+    await rt.prompt("s1", { promptId: "p1", text: "plan it" });
+    await until(events, (e) => e.type === "prompt.completed");
+    expect(answers(events)).toContain("(account: B)");
+
+    await rt.useAccount("s1", account("C"));
+    await rt.prompt("s1", { promptId: "p2", text: "again" });
+    await until(events, (e) => e.type === "prompt.completed" && e.promptId === "p2");
+    expect(answers(events)).toContain("(account: C)");
+
+    const plain: SessionEvent[] = [];
+    await rt.start({ sessionId: "s2", cwd, permissionMode: "plan" }, (e) => plain.push(e));
+    await rt.prompt("s2", { promptId: "p1", text: "plan it" });
+    await until(plain, (e) => e.type === "prompt.completed");
+    expect(answers(plain)).not.toContain("(account:");
+  });
+
+  it("OCW_RUNTIME_FAKE_LIMIT_PREFIX limits every turn of a matching account, before the turn ends", async () => {
+    const prev = process.env.OCW_RUNTIME_FAKE_LIMIT_PREFIX;
+    process.env.OCW_RUNTIME_FAKE_LIMIT_PREFIX = "limited-";
+    try {
+      const cwd = tmp();
+      const log: string[] = [];
+      const events: SessionEvent[] = [];
+      const signals: unknown[] = [];
+      const rt = new FakeRuntime("claude-code", 1);
+      await rt.start(
+        {
+          sessionId: "s1",
+          cwd,
+          permissionMode: "plan",
+          account: account("limited-a"),
+          onAccountSignal: (sig) => {
+            signals.push(sig);
+            log.push(`signal:${sig.kind}`);
+          },
+        },
+        (e) => {
+          events.push(e);
+          log.push(e.type);
+        },
+      );
+      const before = Date.now();
+      await rt.prompt("s1", { promptId: "p1", text: "go" });
+      const done = await until(events, (e) => e.type === "prompt.completed");
+      expect(done).toMatchObject({ promptId: "p1", isError: true });
+      expect(events).toContainEqual({ type: "session.error", message: "You've hit your session limit" });
+      expect(signals).toEqual([
+        { kind: "limited", promptId: "p1", reason: "five_hour", resetsAt: expect.any(String) },
+      ]);
+      const reset = Date.parse((signals[0] as { resetsAt: string }).resetsAt);
+      expect(reset - before).toBeGreaterThanOrEqual(15 * 60_000 - 1000);
+      expect(reset - before).toBeLessThanOrEqual(15 * 60_000 + 5000);
+      expect(log.indexOf("signal:limited")).toBeLessThan(log.indexOf("prompt.completed"));
+
+      // Another account runs normally.
+      await rt.useAccount("s1", account("ok-b"));
+      await rt.prompt("s1", { promptId: "p2", text: "go" });
+      const second = await until(events, (e) => e.type === "prompt.completed" && e.promptId === "p2");
+      expect(second).not.toHaveProperty("isError");
+      expect(signals).toHaveLength(1);
+    } finally {
+      if (prev === undefined) delete process.env.OCW_RUNTIME_FAKE_LIMIT_PREFIX;
+      else process.env.OCW_RUNTIME_FAKE_LIMIT_PREFIX = prev;
+    }
+  });
+});
+
 describe("enroll", () => {
   it("writes the token (0600) and runtime.json, never echoing the token", async () => {
     const home = tmp();

@@ -19,6 +19,7 @@ export { authenticateDeviceJwt } from "./auth";
 export { listGrants, loadGrants } from "./grants";
 export {
   CommandUndeliverableError,
+  type DeviceAccountHandler,
   type DeviceCommandRow,
   DeviceHub,
   type DeviceRef,

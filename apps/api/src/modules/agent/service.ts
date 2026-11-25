@@ -2,10 +2,12 @@ import {
   type Agent,
   AgentChannelEventTypes,
   type AllowedModel,
+  CELL_CLAUDE_TOKENS,
   type CellAgent,
   type CellConfigChangedEvent,
   type CellProvider,
   type CellSubscription,
+  catalogEntry,
   cellTopic,
   DEFAULT_MODEL,
   DEFAULT_SUBSCRIPTION_MODEL,
@@ -21,6 +23,7 @@ import { agents, modelProviders, orgUnits, type Tx, tenantOf } from "@ocw/db";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { MissingSecretError } from "../../lib/secret-store";
+import { listPoolAccounts, loadPoolPolicy, servesConsumer } from "../account-pool";
 import { type AgentFacts, agentResource, createPermissionService } from "../organization";
 import {
   modelRef,
@@ -168,21 +171,60 @@ export function usable(p: ProviderRow) {
   return p.secretRef !== null && (p.provider !== "openai-compatible" || !!p.baseUrl);
 }
 
-/** Models a bot may use: enabled providers with a key, plus the mock model when the operator enabled it. */
+/**
+ * 07.18-19 R2.1 (D-15): whether the organization's Claude pool serves bots: a live, enabled token with a good credential
+ * under a scope that includes bots. Reads rows only; no token is opened here.
+ */
+export async function claudePoolServesBots(tx: Tx): Promise<boolean> {
+  if (!CELL_CLAUDE_TOKENS) return false;
+  const { scope } = await loadPoolPolicy(tx, "claude");
+  if (scope === "work_zone") return false;
+  const ctx = { consumer: "bots" as const, deviceId: null, scope };
+  return (await listPoolAccounts(tx, "claude")).some((r) => r.kind === "token" && servesConsumer(r, ctx));
+}
+
+/**
+ * The Claude models bots run on through the pool alone (no usable Anthropic key): the admin's list on Settings › Models
+ * when an `anthropic` row exists (its key missing or switched off), else the catalog's preselected models.
+ */
+function claudePoolModelIds(row: ProviderRow | undefined): string[] {
+  if (row && row.allowedModels.length > 0) return row.allowedModels;
+  return (catalogEntry("anthropic")?.models ?? []).filter((m) => m.preselected).map((m) => m.id);
+}
+
+/**
+ * Models of enabled providers with a key (and connected subscriptions), plus the mock model when the operator enabled
+ * it. The Model Gateway checks AI chats' organization keys against this list, so it never includes the account pool
+ * (ADR-0017); bots use `botModels`.
+ */
 export async function allowedModels(core: Core, tx: Tx): Promise<AllowedModel[]> {
+  return modelList(core, tx, { claudePool: false });
+}
+
+/** Models a bot may use: `allowedModels`, plus Claude when the pool serves bots without a key (07.18-19 R2.1, D-15). */
+export async function botModels(core: Core, tx: Tx): Promise<AllowedModel[]> {
+  return modelList(core, tx, { claudePool: await claudePoolServesBots(tx) });
+}
+
+async function modelList(core: Core, tx: Tx, opts: { claudePool: boolean }): Promise<AllowedModel[]> {
   const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
   const out: AllowedModel[] = [];
+  const push = (provider: ModelProviderKind, modelId: string) =>
+    out.push({
+      provider,
+      modelId,
+      label: modelLabel(provider, modelId),
+      isDefault:
+        (provider === DEFAULT_MODEL.provider && modelId === DEFAULT_MODEL.modelId) ||
+        (provider === DEFAULT_SUBSCRIPTION_MODEL.provider && modelId === DEFAULT_SUBSCRIPTION_MODEL.modelId),
+    });
   for (const p of rows.filter(usable)) {
-    for (const modelId of p.allowedModels) {
-      out.push({
-        provider: p.provider,
-        modelId,
-        label: modelLabel(p.provider, modelId),
-        isDefault:
-          (p.provider === DEFAULT_MODEL.provider && modelId === DEFAULT_MODEL.modelId) ||
-          (p.provider === DEFAULT_SUBSCRIPTION_MODEL.provider &&
-            modelId === DEFAULT_SUBSCRIPTION_MODEL.modelId),
-      });
+    for (const modelId of p.allowedModels) push(p.provider, modelId);
+  }
+  // 07.18-19 R2.1 (D-15): with no usable Anthropic key, Claude bots run on the pool's subscriptions.
+  if (opts.claudePool && !out.some((m) => m.provider === "anthropic")) {
+    for (const modelId of claudePoolModelIds(rows.find((r) => r.provider === "anthropic"))) {
+      push("anthropic", modelId);
     }
   }
   if (core.env.OCW_MODEL_PROVIDER === "mock") {
@@ -196,8 +238,9 @@ export async function allowedModels(core: Core, tx: Tx): Promise<AllowedModel[]>
   return out;
 }
 
+/** Whether a bot may use this model (`botModels`). */
 export async function isModelAllowed(core: Core, tx: Tx, provider: ModelProviderKind, modelId: string) {
-  return (await allowedModels(core, tx)).some((m) => m.provider === provider && m.modelId === modelId);
+  return (await botModels(core, tx)).some((m) => m.provider === provider && m.modelId === modelId);
 }
 
 /** Durable hint on the cell stream: the plugin refetches `GET /agent-channel/v1/cell` and reconciles. */
@@ -406,6 +449,27 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
     });
   }
   return out;
+}
+
+/**
+ * 07.18-19 R2.1 (D-15): the `anthropic` provider of a cell whose Claude pool tokens serve bots while the organization
+ * has no usable Anthropic key. It carries no key (`apiKey: null`): the cell renders the entry without one and the token
+ * profiles serve every Claude bot (A-05). Base URL and models follow the `anthropic` row when one exists.
+ */
+export async function cellPoolClaudeProvider(core: Core, tx: Tx): Promise<CellProvider | null> {
+  const [row] = await tx.select().from(modelProviders).where(eq(modelProviders.provider, "anthropic"));
+  const baseUrl = resolveBaseUrl("anthropic", row?.baseUrl, core.env.OCW_MOCK_MODEL_BASE_URL);
+  const models = claudePoolModelIds(row);
+  if (!baseUrl || models.length === 0) return null;
+  return {
+    id: OPENCLAW_PROVIDER_ID.anthropic,
+    kind: "anthropic",
+    api: PROVIDER_API.anthropic,
+    baseUrl,
+    apiKey: null,
+    models,
+    ...imageModelsOf("anthropic", models),
+  };
 }
 
 /** Connected subscription providers for the cell. No secret: the cell holds the credentials itself. */

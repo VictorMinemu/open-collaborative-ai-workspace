@@ -11,8 +11,11 @@
 // - slash commands never reach Codex as text (D-13): `/compact` runs the native `thread/compact/start`,
 //   everything else is refused with `slash_command_refused`. A readback reporting an unrestricted sandbox or
 //   the `never` policy aborts the running turn unless that turn is an authorized fullAccess turn (D-03).
-// - runs on the user's local Codex login (ChatGPT subscription); OPENAI_API_KEY / CODEX_API_KEY are
-//   stripped from the child environment unless `useApiKey` is set. OCW_* never reaches Codex.
+// - billing (07.18 D-02, D-15, PD-10): a session runs on the device's own Codex login (ChatGPT subscription), or on
+//   the account slot the platform chose: its app-server gets `CODEX_HOME` = that slot's directory, nothing else. The
+//   slot's tokens stay in its `auth.json`, written and refreshed by Codex only; this adapter never reads it.
+//   OPENAI_API_KEY / CODEX_API_KEY are stripped from the child environment unless `useApiKey` is set, and always for a
+//   slot session (subscriptions first). OCW_* never reaches Codex.
 // - approval requests (commands, patches, extra permissions) are forwarded as approval.requested
 //   and answered from approval.resolve; secret paths are declined without asking.
 // - one update authority (07.11 D-12): every app-server the daemon launches (sessions, catalog, titles) runs with
@@ -42,13 +45,18 @@ import {
   slashDisposition,
   type WorkSessionStatus,
 } from "@ocw/contracts";
+import { CodexRateLimits } from "../accounts/codex-protocol.js";
+import { KeyedLock } from "../accounts/slot-lock.js";
 import { commandTouchesSecrets, isSecretPath } from "../claude/tool-policy.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import {
+  ACCOUNT_SWITCH_FAILED_MESSAGE,
+  type AccountSignal,
   type AgentRuntime,
   type EventSink,
   type FullAccessGateOptions,
+  type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
   type StartSessionOptions,
@@ -73,6 +81,7 @@ import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.js";
 import type { UserInput } from "./generated/v2/UserInput.js";
 import { JsonRpcError, type JsonRpcNotification, JsonRpcPeer, type JsonRpcRequest } from "./jsonrpc.js";
+import { type CodexWindows, codexLimitSignal, codexUsage, mergeCodexWindows } from "./limits.js";
 import {
   type CodexEffectiveSettings,
   CodexEventMapper,
@@ -97,6 +106,18 @@ export const CODEX_APP_SERVER_ARGS: readonly string[] = [
   "check_for_update_on_startup=false",
 ];
 
+/**
+ * 07.18-19 R1.7: every app-server under an account slot's `CODEX_HOME` (sessions, catalog, sign-in) keeps the slot's
+ * credentials in its own `auth.json`. `file` is Codex 0.172's default (`AuthCredentialsStoreMode`), but a slot links
+ * the default home's `config.toml`, which may choose `keyring` or `auto`; the `-c` override beats that file. The daemon
+ * reports a slot as signed in by its `auth.json` alone.
+ */
+export const CODEX_SLOT_APP_SERVER_ARGS: readonly string[] = [
+  ...CODEX_APP_SERVER_ARGS,
+  "-c",
+  'cli_auth_credentials_store="file"',
+];
+
 export interface AppServerProcess {
   stdin: Writable;
   stdout: Readable;
@@ -108,6 +129,8 @@ export interface AppServerProcess {
 export type SpawnAppServer = (opts: {
   cwd: string;
   env: Record<string, string | undefined>;
+  /** The app-server's arguments; absent = `CODEX_APP_SERVER_ARGS` (a slot passes `CODEX_SLOT_APP_SERVER_ARGS`). */
+  args?: readonly string[];
 }) => AppServerProcess;
 
 export interface CodexRuntimeOptions extends FullAccessGateOptions {
@@ -120,7 +143,15 @@ export interface CodexRuntimeOptions extends FullAccessGateOptions {
   detect?: () => Promise<RuntimeInfo>;
   /** Observe every JSON-RPC message (fixture recording). */
   onRpcMessage?: (direction: "in" | "out", message: unknown) => void;
+  /**
+   * 07.18 (D-02): asked only when the device's own Codex login is signed out: a signed-in slot's `CODEX_HOME` to
+   * collect the model catalog under (no turn, no token copied), or null for no catalog.
+   */
+  catalogHome?: () => string | null | Promise<string | null>;
 }
+
+/** How long the one `account/rateLimits/read` after a slot app-server starts may take (PD-09). */
+const RATE_LIMITS_READ_TIMEOUT_MS = 15_000;
 
 const CODEX_API_KEY_VARS: readonly string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
 const PARENT_CODEX_VARS = /^CODEX_(SANDBOX.*|THREAD_ID|SESSION_ID|MANAGED_BY_.*)$/;
@@ -137,6 +168,30 @@ export function codexChildEnv(
 }
 
 type Outcome = ApprovalDecision | "expired";
+
+/** 07.18 (PD-10): the only pool account kind Codex runs: a ChatGPT account slot on this device. */
+type SlotAccount = Extract<RuntimeAccount, { kind: "device_slot" }>;
+
+/** Same platform account (by ref), null = the device's own login. */
+function sameAccount(a: SlotAccount | null, b: SlotAccount | null): boolean {
+  return (a?.ref ?? null) === (b?.ref ?? null);
+}
+
+/** 07.18 (A-02 fallback): the session's thread could not resume under the next account. */
+class AccountSwitchError extends RuntimeError {
+  constructor() {
+    super(ACCOUNT_SWITCH_FAILED_MESSAGE, "runtime_unavailable");
+  }
+}
+
+/** A start's or a switch's account for this adapter: a slot, or null (the device's own login). */
+function slotAccountOf(account: RuntimeAccount | null | undefined): SlotAccount | null {
+  if (!account) return null;
+  if (account.kind !== "device_slot") {
+    throw new RuntimeError(`codex cannot run a session on a ${account.kind} account`, "runtime_unavailable");
+  }
+  return account;
+}
 
 /** What the platform authorized for the session (merged `configure()` patches; null = runtime default). */
 interface ConfiguredSettings {
@@ -182,6 +237,20 @@ interface Session {
    * that resumes `threadId`.
    */
   dormant: boolean;
+  /** 07.18 (D-02): the slot the app-server runs under (its `CODEX_HOME`), or null for the device's own login. */
+  account: SlotAccount | null;
+  /**
+   * 07.18 (D-08): an account asked for while a turn was in flight, applied before the next turn (undefined = none).
+   */
+  pendingAccount: SlotAccount | null | undefined;
+  /** 07.18 (A-02): the app-server was stopped to change account; the next wake-up is the switch's resume. */
+  switching: boolean;
+  /** 07.18 (PD-23): the last rate-limit windows Codex reported for the session's account (null = none yet). */
+  windows: CodexWindows | null;
+  /** 07.18 (PD-05): this turn already reported a limit (once per turn). */
+  limitReported: boolean;
+  /** 07.18 (PD-05, PD-09): where limits and usage of the session's account go. */
+  onAccountSignal: ((signal: AccountSignal) => void) | null;
 }
 
 /** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
@@ -230,6 +299,8 @@ export class CodexRuntime implements AgentRuntime {
         ...(this.allowFullAccess() ? (["fullAccess"] as const) : []),
       ],
       supportsImages: true,
+      // 07.18 (D-02): ChatGPT account slots only; a Claude token never reaches Codex.
+      supportsAccounts: ["device_slot"],
     };
   }
 
@@ -241,6 +312,8 @@ export class CodexRuntime implements AgentRuntime {
   private readonly allowFullAccess: () => boolean;
   private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
   private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
+  /** 07.18-19 R1.7: app-servers of one slot start one at a time (`accounts/slot-lock.ts`). */
+  private readonly slotLocks = new KeyedLock();
 
   constructor(private readonly opts: CodexRuntimeOptions = {}) {
     this.log = opts.logger ?? silentLogger;
@@ -280,16 +353,30 @@ export class CodexRuntime implements AgentRuntime {
   private async collectCatalog(): Promise<RuntimeCatalog | null> {
     try {
       const info = await this.detect();
-      if (!info.installed || !info.loggedIn) return null;
-      const spawnFn: SpawnAppServer =
-        this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
-      const value = await collectCodexCatalog(spawnFn, {
-        env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
-        runtimeVersion: info.version,
-        permissionModes: [...this.capabilities.supportsPermissionModes],
-      });
-      this.catalogCache = { at: Date.now(), value };
-      return value;
+      if (!info.installed) return null;
+      // 07.18 (D-02): a device that only has pool accounts collects under a signed-in slot's home.
+      const slotHome = info.loggedIn ? null : ((await this.opts.catalogHome?.()) ?? null);
+      if (!info.loggedIn && !slotHome) return null;
+      const spawnAny: SpawnAppServer =
+        this.opts.spawnAppServer ?? (({ cwd, env, args }) => this.spawnReal(cwd, env, args));
+      const spawnFn: SpawnAppServer = slotHome
+        ? (o) => spawnAny({ ...o, args: CODEX_SLOT_APP_SERVER_ARGS })
+        : spawnAny;
+      // R1.7: `model/list` authenticates, so a slot's catalog takes its turn on the slot like a session start.
+      const release = slotHome ? await this.slotLocks.acquire(slotHome) : () => undefined;
+      try {
+        const value = await collectCodexCatalog(spawnFn, {
+          env: slotHome
+            ? { ...codexChildEnv(process.env, false), CODEX_HOME: slotHome }
+            : codexChildEnv(process.env, this.opts.useApiKey ?? false),
+          runtimeVersion: info.version,
+          permissionModes: [...this.capabilities.supportsPermissionModes],
+        });
+        this.catalogCache = { at: Date.now(), value };
+        return value;
+      } finally {
+        release();
+      }
     } catch (err) {
       this.log.warn("codex catalog unavailable", { error: redact(errorMessage(err)) });
       return null;
@@ -305,7 +392,8 @@ export class CodexRuntime implements AgentRuntime {
     const row = catalog?.models.find((m) => m.id === req.model);
     const effort =
       [...(row?.efforts ?? [])].sort((a, b) => effortRank(a.value) - effortRank(b.value))[0]?.value ?? null;
-    const spawnFn: SpawnAppServer = this.opts.spawnAppServer ?? (({ cwd, env }) => this.spawnReal(cwd, env));
+    const spawnFn: SpawnAppServer =
+      this.opts.spawnAppServer ?? (({ cwd, env, args }) => this.spawnReal(cwd, env, args));
     return generateCodexTitle(spawnFn, {
       env: codexChildEnv(process.env, this.opts.useApiKey ?? false),
       prompt: req.prompt,
@@ -333,7 +421,16 @@ export class CodexRuntime implements AgentRuntime {
       throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
 
-    const proc = this.spawnSessionServer(options.sessionId, options.cwd);
+    const account = slotAccountOf(options.account);
+    // R1.7: one app-server of a slot starts at a time; held until its first authenticated read settles.
+    const releaseSlot = account ? await this.slotLocks.acquire(account.codexHome) : () => undefined;
+    let proc: AppServerProcess;
+    try {
+      proc = this.spawnSessionServer(options.sessionId, options.cwd, account);
+    } catch (err) {
+      releaseSlot();
+      throw err;
+    }
 
     // The session object is completed once the thread exists; handlers only run after that.
     const startMode: CodexPolicyMode = mode.data;
@@ -373,6 +470,12 @@ export class CodexRuntime implements AgentRuntime {
       finished: false,
       retired: new WeakSet(),
       dormant: false,
+      account,
+      pendingAccount: undefined,
+      switching: false,
+      windows: null,
+      limitReported: false,
+      onAccountSignal: options.onAccountSignal ?? null,
     } as Omit<Session, "peer" | "exited"> as Session;
     this.attach(session, proc);
 
@@ -414,7 +517,9 @@ export class CodexRuntime implements AgentRuntime {
       };
       this.emitSettings(session, codexSettingsEvent(session.applied));
       this.emit(session, { type: "session.state", status: "idle" });
+      this.readRateLimits(session, releaseSlot);
     } catch (err) {
+      releaseSlot();
       session.stopping = true;
       session.peer.close();
       proc.kill("SIGTERM");
@@ -504,6 +609,27 @@ export class CodexRuntime implements AgentRuntime {
     });
     s.steered.push(prompt.promptId);
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
+  }
+
+  /**
+   * 07.18 (D-08, PD-03): run the session's next turns on `account` (a slot, or null = the device's own login). The
+   * same account (by the platform's ref) changes nothing. Otherwise the app-server is stopped as `retireIdle()` does
+   * (its end is not the session's end) and the session goes dormant under the new account, so the next turn wakes it
+   * there and `thread/resume`s the same thread (one spawn). Asked while a turn is in flight, the switch waits for it:
+   * it is applied right before the next turn. A resume that fails there fails that turn (A-02).
+   */
+  async useAccount(sessionId: string, account: RuntimeAccount | null): Promise<void> {
+    const s = this.get(sessionId);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    const next = slotAccountOf(account);
+    const target = s.pendingAccount !== undefined ? s.pendingAccount : s.account;
+    if (sameAccount(target, next)) return;
+    if (isBusy(s)) {
+      s.pendingAccount = next;
+      return;
+    }
+    s.pendingAccount = undefined;
+    await this.switchAccount(s, next);
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -596,13 +722,17 @@ export class CodexRuntime implements AgentRuntime {
 
   // -------------------------------------------------------------------------------------------
 
-  private spawnReal(cwd: string, env: Record<string, string | undefined>): ChildProcess & AppServerProcess {
+  private spawnReal(
+    cwd: string,
+    env: Record<string, string | undefined>,
+    args: readonly string[] = CODEX_APP_SERVER_ARGS,
+  ): ChildProcess & AppServerProcess {
     if (!this.codexPath) throw new RuntimeError("codex CLI not found on PATH", "runtime_unavailable");
     // 07.11 review ME-07: right after an update relinked it, the binary may be gone for a moment.
     if (!existsSync(this.codexPath)) {
       throw new RuntimeError("codex CLI not found where it was installed", "runtime_unavailable");
     }
-    const child = spawn(this.codexPath, [...CODEX_APP_SERVER_ARGS], {
+    const child = spawn(this.codexPath, [...args], {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -618,10 +748,19 @@ export class CodexRuntime implements AgentRuntime {
     return child as ChildProcess & AppServerProcess;
   }
 
-  /** A session's app-server (start and wake-up): the same filtered env and arguments every time. */
-  private spawnSessionServer(sessionId: string, cwd: string): AppServerProcess {
-    const env = codexChildEnv(process.env, this.opts.useApiKey ?? false);
-    const proc = this.opts.spawnAppServer ? this.opts.spawnAppServer({ cwd, env }) : this.spawnReal(cwd, env);
+  /**
+   * A session's app-server (start and wake-up): the same filtered env and arguments every time. A slot session runs
+   * with `CODEX_HOME` = the slot's directory and never with an API key (07.18 D-02, D-15); without one the env is
+   * exactly as before 07.18.
+   */
+  private spawnSessionServer(sessionId: string, cwd: string, account: SlotAccount | null): AppServerProcess {
+    const env = account
+      ? { ...codexChildEnv(process.env, false), CODEX_HOME: account.codexHome }
+      : codexChildEnv(process.env, this.opts.useApiKey ?? false);
+    const args = account ? CODEX_SLOT_APP_SERVER_ARGS : undefined;
+    const proc = this.opts.spawnAppServer
+      ? this.opts.spawnAppServer({ cwd, env, ...(args ? { args } : {}) })
+      : this.spawnReal(cwd, env, args);
     proc.stderr?.setEncoding("utf8");
     proc.stderr?.on("data", (d: string) => this.log.debug(`[codex ${sessionId}] ${redact(d.trimEnd())}`));
     return proc;
@@ -683,7 +822,15 @@ export class CodexRuntime implements AgentRuntime {
    */
   private async wake(s: Session): Promise<void> {
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
-    const proc = this.spawnSessionServer(s.id, s.cwd);
+    const releaseSlot = s.account ? await this.slotLocks.acquire(s.account.codexHome) : () => undefined;
+    let proc: AppServerProcess;
+    try {
+      if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+      proc = this.spawnSessionServer(s.id, s.cwd, s.account);
+    } catch (err) {
+      releaseSlot();
+      throw err;
+    }
     this.attach(s, proc);
     s.dormant = false;
     const { peer, exited } = s;
@@ -716,14 +863,39 @@ export class CodexRuntime implements AgentRuntime {
         sandboxPolicy: resp.sandbox ?? null,
         approvalsReviewer: resp.approvalsReviewer ?? null,
       };
+      s.switching = false;
       this.log.info("codex app-server woke a retired session", { sessionId: s.id });
+      this.readRateLimits(s, releaseSlot);
     } catch (err) {
+      releaseSlot();
       s.dormant = true;
       await this.closeProcess(s, proc, peer, exited);
+      // A-02: the thread did not resume under the new account. Never a fresh thread instead.
+      if (s.switching) throw new AccountSwitchError();
       throw err instanceof RuntimeError
         ? err
         : new RuntimeError(`codex app-server failed to resume: ${errorMessage(err)}`, "runtime_unavailable");
     }
+  }
+
+  /** Stops the current app-server (unless already dormant) and records the new account; the next turn wakes it. */
+  private async switchAccount(s: Session, next: SlotAccount | null): Promise<void> {
+    if (sameAccount(s.account, next)) return;
+    s.account = next;
+    s.switching = true;
+    s.windows = null; // the readings were the previous account's
+    if (s.dormant) return;
+    s.dormant = true; // first, as in retireIdle(): a prompt arriving meanwhile wakes a new process
+    await this.closeProcess(s, s.proc, s.peer, s.exited);
+    this.log.info("codex app-server stopped to change account", { sessionId: s.id });
+  }
+
+  /** An account asked for during the last turn is applied before this one (07.18 D-08). */
+  private async applyPendingAccount(s: Session): Promise<void> {
+    if (s.pendingAccount === undefined) return;
+    const next = s.pendingAccount;
+    s.pendingAccount = undefined;
+    await this.switchAccount(s, next);
   }
 
   private get(sessionId: string): Session {
@@ -802,18 +974,23 @@ export class CodexRuntime implements AgentRuntime {
   private async compact(s: Session, prompt: PromptPayload): Promise<void> {
     s.running = prompt;
     s.interruptRequested = false;
+    s.limitReported = false;
     s.compacting = true;
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     try {
+      await this.applyPendingAccount(s);
       if (s.dormant) await this.wake(s);
       await s.peer.request("thread/compact/start", {
         threadId: s.threadId,
       } satisfies ThreadCompactStartParams);
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
-      this.emit(s, { type: "session.error", message: `compaction failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "session.error",
+        message: err instanceof AccountSwitchError ? err.message : `compaction failed: ${errorMessage(err)}`,
+      });
       this.emit(s, {
         type: "prompt.completed",
         promptId: prompt.promptId,
@@ -829,11 +1006,14 @@ export class CodexRuntime implements AgentRuntime {
     if (this.slashCommand(prompt) === "compact") return this.compact(s, prompt);
     s.running = prompt;
     s.interruptRequested = false;
+    s.limitReported = false;
     s.mapper.currentPromptId = prompt.promptId;
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     try {
       const { mode, params } = this.turnOverrides(s, prompt);
+      // 07.18 D-08: an account asked for during the last turn moves the session before this one.
+      await this.applyPendingAccount(s);
       // 07.11 D-03a: a retired session resumes its thread on a new app-server before the turn.
       if (s.dormant) await this.wake(s);
       s.turnMode = mode;
@@ -858,7 +1038,10 @@ export class CodexRuntime implements AgentRuntime {
       this.emitSettings(s, codexSettingsEvent(s.applied));
     } catch (err) {
       if (s.running?.promptId !== prompt.promptId) return;
-      this.emit(s, { type: "session.error", message: `turn/start failed: ${errorMessage(err)}` });
+      this.emit(s, {
+        type: "session.error",
+        message: err instanceof AccountSwitchError ? err.message : `turn/start failed: ${errorMessage(err)}`,
+      });
       this.emit(s, {
         type: "prompt.completed",
         promptId: prompt.promptId,
@@ -871,6 +1054,8 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   private onNotification(s: Session, n: JsonRpcNotification): void {
+    // 07.18 (PD-05): limits and usage first, so a limit reaches the server before this turn's prompt.completed.
+    this.noteAccount(s, n);
     for (const ev of s.mapper.map(n)) {
       if (ev.type === "session.error" && s.interruptRequested) continue;
       if (ev.type === "session.settings") {
@@ -888,6 +1073,65 @@ export class CodexRuntime implements AgentRuntime {
         continue;
       }
       this.emit(s, ev);
+    }
+  }
+
+  /**
+   * 07.18 (D-07, D-09, PD-09, PD-23): a rate-limit update becomes a usage reading (merged with the windows it leaves
+   * out); a turn that ends on the account's limit or an unauthorized account is reported once per turn. The signal
+   * carries reasons, times and percentages only.
+   */
+  private noteAccount(s: Session, n: JsonRpcNotification): void {
+    if (n.method === "account/rateLimits/updated") {
+      this.noteRateLimits(s, n.params);
+      return;
+    }
+    const limit = codexLimitSignal(n, s.windows);
+    if (!limit || s.limitReported) return;
+    s.limitReported = true;
+    this.signal(s, { kind: "limited", promptId: s.running?.promptId ?? null, ...limit });
+  }
+
+  /** A rate-limit snapshot (an update or the read's answer) → remembered windows and one usage reading. */
+  private noteRateLimits(s: Session, raw: unknown): void {
+    const parsed = CodexRateLimits.safeParse(raw);
+    if (!parsed.success) return;
+    s.windows = mergeCodexWindows(s.windows, parsed.data.rateLimits);
+    const usage = codexUsage(s.windows);
+    if (usage) this.signal(s, { kind: "usage", usage });
+  }
+
+  /**
+   * PD-09: one `account/rateLimits/read` after a slot app-server starts (start and every wake-up), never polled.
+   * A session on the device's own login has no pool account to report on. A failure only costs this reading.
+   * R1.7: it is the slot app-server's first authenticated call, so `done` (the slot's start lock) runs once it settles.
+   */
+  private readRateLimits(s: Session, done: () => void = () => undefined): void {
+    if (!s.account) {
+      done();
+      return;
+    }
+    const peer = s.peer;
+    peer
+      .request("account/rateLimits/read", undefined, RATE_LIMITS_READ_TIMEOUT_MS)
+      .then((answer) => {
+        if (!s.retired.has(peer) && !s.finished) this.noteRateLimits(s, answer);
+      })
+      .catch((err: unknown) =>
+        this.log.debug("codex rate limits unavailable", {
+          sessionId: s.id,
+          error: redact(errorMessage(err)),
+        }),
+      )
+      .finally(done);
+  }
+
+  private signal(s: Session, signal: AccountSignal): void {
+    if (!s.onAccountSignal) return;
+    try {
+      s.onAccountSignal(signal);
+    } catch (err) {
+      this.log.error("account signal sink failed", { sessionId: s.id, error: errorMessage(err) });
     }
   }
 

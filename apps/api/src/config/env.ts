@@ -293,6 +293,11 @@ export const EnvSchema = z
     OCW_CHATGPT_API_BASE_URL: optionalUrl,
     /** TEST-ONLY (P-12): the ChatGPT sign-in issuer (05-05). Unset = https://auth.openai.com. Refused in production. */
     OCW_CHATGPT_AUTH_BASE_URL: optionalUrl,
+    /**
+     * TEST-ONLY (07.18-19 R3.1): the token endpoint of "Connect a Claude account" (the `claude setup-token` exchange).
+     * Unset = https://platform.claude.com/v1/oauth/token. Refused when NODE_ENV is production.
+     */
+    OCW_CLAUDE_OAUTH_TOKEN_URL: optionalUrl,
     /** The fake model as seen from the API (mock AI chat backend, 05-04); defaults to OCW_MOCK_MODEL_BASE_URL. */
     OCW_AI_MOCK_BASE_URL: optionalUrl,
     /** SearXNG as seen from the API (AI chat web search on org keys, 05-11); defaults to OCW_SEARXNG_URL. */
@@ -355,7 +360,11 @@ export const EnvSchema = z
     // The ChatGPT overrides point a member's token at another server, and the egress test hosts let outbound calls
     // reach loopback: never in production (T-05-02-07, T-07.4-03-06).
     if (v.NODE_ENV === "production") {
-      for (const name of ["OCW_CHATGPT_API_BASE_URL", "OCW_CHATGPT_AUTH_BASE_URL"] as const) {
+      for (const name of [
+        "OCW_CHATGPT_API_BASE_URL",
+        "OCW_CHATGPT_AUTH_BASE_URL",
+        "OCW_CLAUDE_OAUTH_TOKEN_URL",
+      ] as const) {
         if (v[name]) {
           ctx.addIssue({
             code: "custom",

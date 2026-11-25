@@ -26,8 +26,11 @@
 import { realpathSync } from "node:fs";
 import { arch, homedir, platform, userInfo } from "node:os";
 import {
+  AccountLoginPayload,
+  AccountLogoutPayload,
   ApprovalResolvePayload,
   type CommandFrame,
+  DEVICE_ACCOUNT_POOL_VERSION,
   DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
@@ -50,6 +53,7 @@ import {
   type RuntimeUpdatesLevel,
   type RuntimeUpdatesLevelSource,
   type ServerToDeviceFrame,
+  type SessionAccount,
   SessionConfigurePayload,
   type SessionEvent,
   SessionFileReadPayload,
@@ -60,8 +64,15 @@ import {
   TITLE_TIMEOUT_MS,
   transferDeadlineMs,
 } from "@ocw/contracts";
+import {
+  CodexLoginError,
+  codexAccountSpawner,
+  logoutCodex,
+  runCodexDeviceLogin,
+} from "./accounts/codex-login.js";
+import { CodexSlotStore } from "./accounts/codex-slots.js";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
-import { CodexRuntime } from "./codex/codex-runtime.js";
+import { CodexRuntime, type SpawnAppServer } from "./codex/codex-runtime.js";
 import {
   deviceName,
   ensureOcwHome,
@@ -82,6 +93,7 @@ import {
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { boundDiffFrame } from "./diff-frame.js";
+import { findExecutable } from "./exec-path.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
@@ -102,7 +114,7 @@ import {
 } from "./maintenance/self-update-boot.js";
 import { SelfUpdate, type SelfUpdateOptions } from "./maintenance/self-update-job.js";
 import { isSupervised, runningBuild } from "./maintenance/supervision.js";
-import type { AgentRuntime } from "./runtime.js";
+import type { AccountSignal, AgentRuntime, RuntimeAccount } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { openSessionFileForRead, SessionFileError, writeSessionFile } from "./session-files.js";
 import { runTitle } from "./title.js";
@@ -175,6 +187,24 @@ interface FullAccessGate {
   source: FullAccessSource;
 }
 
+/** What the daemon hands the adapters it builds (and a test's runtime factory). */
+export interface RuntimeFactoryContext {
+  /**
+   * 07.18 (D-02): the `CODEX_HOME` of the first signed-in Codex account slot, or null. The Codex adapter asks only when
+   * the device's own Codex login is signed out, to collect its model catalog under that slot (no turn).
+   */
+  codexCatalogHome: () => Promise<string | null>;
+}
+
+/**
+ * 07.18 (D-02): the first slot (creation order) whose `auth.json` exists. The file is only tested for existence, never
+ * read; the home stays on the device.
+ */
+async function firstSignedInSlotHome(slots: CodexSlotStore): Promise<string | null> {
+  const first = (await slots.report().catch(() => [])).find((s) => s.signedIn);
+  return first ? slots.homeOf(first.slotId) : null;
+}
+
 export interface DaemonOptions {
   /** Defaults to OCW_HOME or ~/.ocw */
   home?: string;
@@ -182,8 +212,10 @@ export interface DaemonOptions {
   config?: Partial<RuntimeConfig>;
   /** Override the token (tests); otherwise OCW_DEVICE_TOKEN or the token file. */
   token?: string | null;
-  /** Adapters to drive (tests), or a factory that receives the daemon's Full access gate. */
-  runtimes?: AgentRuntime[] | ((allowFullAccess: () => boolean) => AgentRuntime[]);
+  /** Adapters to drive (tests), or a factory that receives the daemon's Full access gate and the runtime context. */
+  runtimes?:
+    | AgentRuntime[]
+    | ((allowFullAccess: () => boolean, ctx: RuntimeFactoryContext) => AgentRuntime[]);
   logger?: Logger;
   link?: Partial<
     Pick<DeviceLinkOptions, "heartbeatMs" | "backoffMinMs" | "backoffMaxMs" | "maxOfflineFrames">
@@ -211,6 +243,11 @@ export interface DaemonOptions {
   selfUpdate?: Partial<SelfUpdateOptions>;
   /** Tests only (07.17.1.1): the waits before retrying a 503 transfer (default `FILE_TRANSFER_RETRY_DELAYS_MS`). */
   fileRetryDelaysMs?: readonly number[];
+  /**
+   * Tests only (07.18-08): how the app-servers of Codex account slots are spawned (a scripted fake) and a shorter
+   * sign-in bound. Without it the daemon spawns the configured or detected `codex` (in fake mode only a configured one).
+   */
+  codexAccounts?: { spawn?: SpawnAppServer; loginTimeoutMs?: number };
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -266,6 +303,50 @@ interface ActiveSession {
   worktreeBranch: string | null;
   /** The session mode the server last authorized here (start / configure); per-turn caps only lower it. */
   mode: PermissionMode;
+  /** 07.18 (PD-03): the pool account ref the session runs on (null = the device's own login). Never the token. */
+  accountRef: string | null;
+}
+
+/** 07.18 (D-02, T-07.18-08-05): one sign-in per slot at a time. */
+export const SIGN_IN_RUNNING_MESSAGE = "a sign-in is already running for this account slot";
+
+/** 07.18 (T-07.18-08-06): the user code never leaves in a failure message (it went to the admin in the code frame). */
+function withoutUserCode(message: string, userCode: string | null): string {
+  return userCode ? message.split(userCode).join("[code]") : message;
+}
+
+/** 07.18 (D-02): a `device_slot` account whose slot is not in this device's slot store. */
+export const ACCOUNT_SLOT_NOT_FOUND_MESSAGE = "account slot not found on this device";
+
+/**
+ * 07.18 (D-02, PD-03, PD-10): the wire account of a start or prompt → what the adapter gets. Absent or null = the
+ * device's own login. A token is passed on in memory only; the daemon keeps just the ref. A slot account resolves to
+ * that slot's `CODEX_HOME` through the store (device-local, never sent back); an unknown slot is refused.
+ */
+async function runtimeAccountOf(
+  wire: SessionAccount | null | undefined,
+  slots: CodexSlotStore,
+): Promise<RuntimeAccount | null> {
+  if (!wire) return null;
+  if (wire.kind === "device_slot") {
+    const slot = await slots.get(wire.slotId).catch(() => undefined);
+    if (!slot) throw new Error(ACCOUNT_SLOT_NOT_FOUND_MESSAGE);
+    return {
+      kind: "device_slot",
+      ref: wire.accountId,
+      label: wire.label,
+      slotId: slot.slotId,
+      codexHome: slots.homeOf(slot.slotId),
+    };
+  }
+  return { kind: "token", ref: wire.accountId, label: wire.label, oauthToken: wire.oauthToken };
+}
+
+/** 07.18 (T-07.18-06-04): an account kind the adapter cannot run is refused before the adapter sees it. */
+function refuseAccountKind(runtime: AgentRuntime, account: RuntimeAccount): void {
+  if (!runtime.capabilities.supportsAccounts?.includes(account.kind)) {
+    throw new Error(`${runtime.id} cannot run a session on a ${account.kind} account`);
+  }
 }
 
 function realpathOr(p: string): string {
@@ -314,6 +395,8 @@ export type ReloadConfigResult = {
 
 export class Daemon {
   readonly registry: ProjectRegistry;
+  /** 07.18 (D-02, PD-10): the Codex account slots on this device (shared with `ocw-runtime account`). */
+  readonly codexSlots: CodexSlotStore;
   private link: DeviceLink | null = null;
   private control: ControlSocketServer | null = null;
   private readonly runtimes = new Map<RuntimeId, AgentRuntime>();
@@ -358,6 +441,8 @@ export class Daemon {
   private hostKind: DeviceHostKind | null = null;
   /** 07.16 (D-19): the owner's local isolated-server mark, re-read on `reloadConfig`. */
   private isolated: { on: boolean; source: IsolatedServerSource } = { on: false, source: "config" };
+  /** 07.18 (T-07.18-08-05): the Codex sign-ins running now, by slot id; aborted on stop. */
+  private readonly accountLogins = new Map<string, AbortController>();
 
   private constructor(
     readonly home: string,
@@ -368,8 +453,10 @@ export class Daemon {
     private readonly opts: DaemonOptions,
     private readonly env: NodeJS.ProcessEnv,
     private readonly gate: FullAccessGate,
+    codexSlots: CodexSlotStore,
   ) {
     this.registry = new ProjectRegistry(home);
+    this.codexSlots = codexSlots;
     for (const r of runtimes) {
       this.runtimes.set(r.id, r);
       this.gates.set(r.id, new RuntimeGate());
@@ -390,7 +477,11 @@ export class Daemon {
     const fake = env.OCW_RUNTIME_FAKE === "1";
     if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
     const delay = env.OCW_RUNTIME_FAKE_DELAY_MS ? Number(env.OCW_RUNTIME_FAKE_DELAY_MS) : undefined;
-    const runtimes = (typeof opts.runtimes === "function" ? opts.runtimes(allowFullAccess) : opts.runtimes) ??
+    const codexSlots = new CodexSlotStore(home, env);
+    const ctx: RuntimeFactoryContext = { codexCatalogHome: () => firstSignedInSlotHome(codexSlots) };
+    const runtimes = (typeof opts.runtimes === "function"
+      ? opts.runtimes(allowFullAccess, ctx)
+      : opts.runtimes) ??
       (fake
         ? [
             new FakeRuntime("claude-code", delay, { allowFullAccess }),
@@ -407,10 +498,11 @@ export class Daemon {
           logger: log,
           useApiKey: config.codex.useApiKey,
           allowFullAccess,
+          catalogHome: ctx.codexCatalogHome,
           ...(config.codex.path ? { codexPath: config.codex.path } : {}),
         }),
       ];
-    const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
+    const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate, codexSlots);
     // 07.16 (PD-18): the entry is the running script; it is compared with the installed bundle here only.
     daemon.hostKind = await resolveHostKind({ env, home, entry: process.argv[1] });
     daemon.isolated = resolveIsolatedServer(config, env);
@@ -643,6 +735,8 @@ export class Daemon {
    */
   async stop(): Promise<void> {
     this.stopping = true;
+    // 07.18: a sign-in in progress is cancelled at Codex (its slot removed); the admin starts it again.
+    for (const login of this.accountLogins.values()) login.abort();
     for (const gate of this.gates.values()) gate.seal();
     await this.selfUpdate?.stop();
     if (this.selfUpdate?.holding) {
@@ -758,7 +852,10 @@ export class Daemon {
     const out: RuntimeCatalog[] = [];
     for (const r of this.runtimes.values()) {
       const info = infos.find((i) => i.id === r.id);
-      if (!info?.installed || !info.loggedIn || !r.catalog) continue;
+      if (!info?.installed || !r.catalog) continue;
+      // 07.18 (D-02): a signed-out Codex still has a catalog when one of its account slots is signed in; 07.18-19 R1.8:
+      // a signed-out Claude when a pool token is in its adapter's memory.
+      if (!info.loggedIn && !(await this.catalogWithoutOwnLogin(r))) continue;
       // 07.11 (PD-07): never while this runtime's CLI updates; the capabilities sent after the run cover it.
       const gate = this.gates.get(r.id);
       if (gate && !gate.isOpen) continue;
@@ -784,6 +881,24 @@ export class Daemon {
     return out;
   }
 
+  /** 07.18 (D-02), 07.18-19 R1.8: a runtime whose own login is signed out can still describe what a pool account offers. */
+  private async catalogWithoutOwnLogin(r: AgentRuntime): Promise<boolean> {
+    if (r.id === "codex") return (await firstSignedInSlotHome(this.codexSlots)) !== null;
+    return r.catalogReadyWithoutLogin?.() === true;
+  }
+
+  /**
+   * 07.18-19 R1.8: a pool session just made a catalog possible on a runtime signed out on this device (a pool-only
+   * device): the server hears it now, so the new-session dialog can offer models. Nothing when the device is signed in.
+   */
+  private async announcePoolCatalog(runtime: AgentRuntime): Promise<void> {
+    if (!this.isConnected || runtime.id === "codex" || !runtime.catalogReadyWithoutLogin?.()) return;
+    const info = (await this.detectRuntimes()).find((i) => i.id === runtime.id);
+    if (!info || info.loggedIn) return;
+    const frame = await this.capabilitiesFrame();
+    if (this.isConnected) this.send(frame);
+  }
+
   private async handshakeFrames(): Promise<DeviceToServerFrame[]> {
     const hello: DeviceToServerFrame = {
       type: "hello",
@@ -801,6 +916,8 @@ export class Daemon {
       fullAccessOptIn: this.gate.optIn,
       // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
       isolatedServer: this.reportedIsolated,
+      // 07.18 (PD-04): this daemon can run a session on a pool account.
+      accountPool: DEVICE_ACCOUNT_POOL_VERSION,
     };
     await this.refreshProjectsGit();
     const frames: DeviceToServerFrame[] = [
@@ -809,6 +926,8 @@ export class Daemon {
       ...(this.boot ? this.boot.report.frames : []),
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
+      // 07.18 (D-02, PD-10): every Codex slot, after capabilities; offline changes go with this frame on reconnect.
+      await this.accountsSyncFrame(),
       ...(this.maintenance ? [this.withSelf(await this.maintenance.snapshot())] : []),
     ];
     // The link writes these frames right after this resolves; once they went out on an open socket, the marker goes.
@@ -852,6 +971,25 @@ export class Daemon {
 
   private send(frame: DeviceToServerFrame): void {
     this.link?.send(frame);
+  }
+
+  /**
+   * 07.18 (D-02, P2): the slots as the server may see them: id, label, origin, signed in, plan, usage. Never a path, an
+   * e-mail or anything from `auth.json`. A slot file that cannot be read reports no slots (logged).
+   */
+  private async accountsSyncFrame(): Promise<DeviceToServerFrame> {
+    const codexSlots = await this.codexSlots.report().catch((err: unknown) => {
+      this.log.warn("account slots unreadable", { error: sanitizeString(errorMessage(err), [this.home]) });
+      return [];
+    });
+    return { type: "accounts.sync", codexSlots };
+  }
+
+  /** 07.18: a slot changed: the server hears it now while connected; offline, the next handshake carries it. */
+  private async sendAccountsSync(): Promise<void> {
+    if (!this.isConnected) return;
+    const frame = await this.accountsSyncFrame();
+    if (this.isConnected) this.send(frame);
   }
 
   private async syncProjects(): Promise<void> {
@@ -1129,6 +1267,16 @@ export class Daemon {
     };
   }
 
+  /**
+   * 07.18 (D-02, PD-11): `ocw-runtime account add|remove` changed slots.json: the slots are re-read from it and sent to
+   * the server now (`accounts.sync`, while connected; offline, the next handshake reports them). Answers the count.
+   */
+  async reloadAccounts(): Promise<{ codexSlots: number }> {
+    const slots = await this.codexSlots.list();
+    await this.sendAccountsSync();
+    return { codexSlots: slots.length };
+  }
+
   /** Lowers one session out of fullAccess after the opt-out (in session order, before any later prompt). */
   private leaveFullAccess(s: ActiveSession): Promise<void> {
     return this.inSessionOrder(s.sessionId, async () => {
@@ -1220,6 +1368,14 @@ export class Daemon {
         case "runtime.update":
           await this.requestRuntimeUpdate(cmd);
           break;
+        // 07.18 (D-02, D-10, PD-10): outside the session chains; Codex's gate holds them while its CLI updates. A
+        // sign-in acks only after its outcome frame.
+        case "account.login":
+          await this.accountLogin(cmd);
+          break;
+        case "account.logout":
+          await this.accountLogout(cmd);
+          break;
       }
       if (cmd.kind === "session.file.read" || cmd.kind === "session.file.write") {
         this.rememberFileOutcome(cmd.id, undefined);
@@ -1271,6 +1427,126 @@ export class Daemon {
     if (!answer.accepted) throw new Error(answer.reason);
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Codex account slots (07.18, D-02, D-10, PD-10, PD-25)
+
+  /** How account app-servers start: the test seam, else the configured CLI, else (not in fake mode) the detected one. */
+  private codexAccountsSpawn(): SpawnAppServer {
+    const seam = this.opts.codexAccounts?.spawn;
+    if (seam) return seam;
+    const fake = this.env.OCW_RUNTIME_FAKE === "1";
+    const path = this.config.codex.path ?? (fake ? null : findExecutable("codex", this.env));
+    return codexAccountSpawner(path, this.log);
+  }
+
+  /** Runs `fn` through Codex's gate (a sign-in never starts while its CLI updates, and holds the update meanwhile). */
+  private admitCodex<T>(fn: () => Promise<T>): Promise<T> {
+    const gate = this.gates.get("codex");
+    return gate ? gate.admit(fn) : fn();
+  }
+
+  /**
+   * `account.login` (D-02, D-10): the slot (created with `origin: "server"` unless it exists), Codex's device-code
+   * login under its `CODEX_HOME`, frames `code` then `completed` (or `failed`) with this command's id, then
+   * `accounts.sync`. A failure removes a slot this sign-in created and fails the ack with the same message, stripped of
+   * the user code (T-07.18-08-06).
+   */
+  private async accountLogin(cmd: CommandFrame): Promise<void> {
+    const payload = AccountLoginPayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const { slotId, label } = payload.data;
+    if (this.accountLogins.has(slotId)) throw new Error(SIGN_IN_RUNNING_MESSAGE);
+    const controller = new AbortController();
+    this.accountLogins.set(slotId, controller);
+    let created = false;
+    let userCode: string | null = null;
+    try {
+      if (!(await this.codexSlots.get(slotId))) {
+        await this.codexSlots.create({ label, origin: "server", slotId });
+        created = true;
+      }
+      const home = this.codexSlots.homeOf(slotId);
+      const timeoutMs = this.opts.codexAccounts?.loginTimeoutMs;
+      const result = await this.admitCodex(() =>
+        runCodexDeviceLogin({
+          spawn: this.codexAccountsSpawn(),
+          home,
+          env: this.env,
+          signal: controller.signal,
+          ...(timeoutMs ? { timeoutMs } : {}),
+          onCode: (code) => {
+            userCode = code.userCode;
+            this.send({ type: "account.login", requestId: cmd.id, slotId, phase: "code", ...code });
+          },
+        }),
+      );
+      await this.codexSlots.setPlan(slotId, result.planType);
+      this.send({
+        type: "account.login",
+        requestId: cmd.id,
+        slotId,
+        phase: "completed",
+        ...(result.planType ? { planType: result.planType } : {}),
+      });
+      this.log.info("Codex account signed in", { slotId });
+      await this.sendAccountsSync();
+    } catch (err) {
+      const code = err instanceof CodexLoginError ? err.code : "failed";
+      const message = sanitizeString(withoutUserCode(errorMessage(err), userCode), [this.home]).slice(0, 300);
+      this.send({
+        type: "account.login",
+        requestId: cmd.id,
+        slotId,
+        phase: "failed",
+        error: { code, message },
+      });
+      if (created) {
+        await this.codexSlots.remove(slotId).catch((e: unknown) =>
+          this.log.warn("could not remove the slot of a failed sign-in", {
+            slotId,
+            error: sanitizeString(errorMessage(e), [this.home]),
+          }),
+        );
+      }
+      throw new Error(message);
+    } finally {
+      this.accountLogins.delete(slotId);
+    }
+  }
+
+  /**
+   * `account.logout` (PD-25): a running sign-in of the slot is cancelled, Codex signs it out, then the slot is removed
+   * (the shared `sessions/` stays) and `accounts.sync` re-sent. Unknown slot: done already (idempotent). A sign-out
+   * Codex refuses still removes the slot: its `auth.json` goes with the directory.
+   */
+  private async accountLogout(cmd: CommandFrame): Promise<void> {
+    const payload = AccountLogoutPayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    const { slotId } = payload.data;
+    this.accountLogins.get(slotId)?.abort();
+    if (!(await this.codexSlots.get(slotId))) {
+      if (await this.codexSlots.remove(slotId)) await this.sendAccountsSync();
+      return;
+    }
+    try {
+      await this.admitCodex(() =>
+        logoutCodex({
+          spawn: this.codexAccountsSpawn(),
+          home: this.codexSlots.homeOf(slotId),
+          env: this.env,
+        }),
+      );
+    } catch (err) {
+      this.log.warn("Codex could not sign the slot out; removing it anyway", {
+        slotId,
+        error: sanitizeString(errorMessage(err), [this.home]),
+      });
+    }
+    await this.codexSlots.remove(slotId);
+    this.log.info("Codex account slot removed", { slotId });
+    await this.sendAccountsSync();
+  }
+
   /** A prompt (or steer), checked after admission so a held prompt sees the device's current gates. */
   private async runPrompt(cmd: CommandFrame): Promise<void> {
     const s = this.requireSession(cmd.sessionId);
@@ -1282,6 +1558,19 @@ export class Daemon {
     // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
     if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
       throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
+    }
+    // 07.18 (PD-03): absent = keep the current account; null or an object = this turn's account, switched only when
+    // the ref differs (the adapter applies it between turns). The daemon keeps the ref, never the token.
+    if (prompt.account !== undefined) {
+      const account = await runtimeAccountOf(prompt.account, this.codexSlots);
+      const ref = account?.ref ?? null;
+      if (ref !== s.accountRef) {
+        if (account) refuseAccountKind(s.runtime, account);
+        if (!s.runtime.useAccount)
+          throw new Error(`${s.runtime.id} cannot change accounts in a live session`);
+        await s.runtime.useAccount(cmd.sessionId, account);
+        s.accountRef = ref;
+      }
     }
     if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
       await s.runtime.steer(cmd.sessionId, prompt);
@@ -1338,6 +1627,10 @@ export class Daemon {
       throw new Error(`permission mode '${payload.permissionMode}' is not allowed on this device`);
     }
 
+    // 07.18 (PD-03, PD-04): the account is mapped and checked against the adapter before anything is created.
+    const account = await runtimeAccountOf(payload.account, this.codexSlots);
+    if (account) refuseAccountKind(runtime, account);
+
     let cwd = project.path;
     let worktreeBranch: string | null = null;
     if (payload.worktree) {
@@ -1353,6 +1646,7 @@ export class Daemon {
       cwd,
       worktreeBranch,
       mode: payload.permissionMode,
+      accountRef: account?.ref ?? null,
     });
     try {
       await runtime.start(
@@ -1360,6 +1654,8 @@ export class Daemon {
           sessionId: cmd.sessionId,
           cwd,
           permissionMode: payload.permissionMode,
+          ...(account ? { account } : {}),
+          onAccountSignal: (signal) => this.sendAccountSignal(cmd.sessionId, signal),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.effort ? { effort: payload.effort } : {}),
           ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),
@@ -1379,6 +1675,37 @@ export class Daemon {
       this.endSession(cmd.sessionId);
       throw err;
     }
+    if (account?.kind === "token") {
+      void this.announcePoolCatalog(runtime).catch((err: unknown) =>
+        this.log.warn("pool catalog not announced", {
+          error: sanitizeString(errorMessage(err), [this.home]),
+        }),
+      );
+    }
+  }
+
+  /**
+   * 07.18 (D-07, D-09, PD-05): an adapter's limit or usage report, as a frame naming the account ref the session runs
+   * on now. It goes through `send()`, so offline it waits in the same log as the events, in order (the limit before
+   * the turn's `prompt.completed`). A usage report of the device's own login has no account to name: nothing is sent.
+   */
+  private sendAccountSignal(sessionId: string, signal: AccountSignal): void {
+    const active = this.sessions.get(sessionId);
+    if (!active) return; // the session already left this device
+    const accountId = active.accountRef;
+    if (signal.kind === "limited") {
+      this.send({
+        type: "session.account_limited",
+        sessionId,
+        promptId: signal.promptId,
+        accountId,
+        reason: signal.reason,
+        resetsAt: signal.resetsAt,
+        at: new Date().toISOString(),
+      });
+      return;
+    }
+    if (accountId) this.send({ type: "account.usage", accountId, usage: signal.usage });
   }
 
   /**
@@ -1399,6 +1726,7 @@ export class Daemon {
       payload,
       roots,
       timeoutMs: this.opts.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
+      sessionId: cmd.sessionId,
       ...(active ? { sessionRuntime: active.runtime.id } : {}),
     });
     this.send({
@@ -1615,6 +1943,9 @@ export class Daemon {
       }
       case "reloadConfig":
         return this.reloadConfig();
+      // 07.18 (PD-11): `ocw-runtime account add|remove` changed the slots; local only, no value.
+      case "reloadAccounts":
+        return this.reloadAccounts();
       // 07.11 (D-09, PD-08): local only; the command still comes from the on-device table.
       case "runtimeCheck": {
         if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);

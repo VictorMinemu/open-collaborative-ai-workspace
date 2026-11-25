@@ -279,3 +279,41 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
 
   Limits: not in AI chats; no cross-conversation tasks or task list page; a turn in flight finishes after Stop
   (ADR-0042, docs/self-hosting/automations.md).
+- **07.18 Subscription account pool (Phase 07.18):** an organization keeps a pool of Claude and ChatGPT subscription
+  accounts that every Work Zone session and every bot uses by default, with no member action (D-15: pool accounts →
+  the device's own login → an API key only where one is configured).
+  - **Where:** `packages/contracts/src/account-pool.ts` (vocabulary, Device Link fields and frames, the server-only
+    `account.switched` event, `CellAccountPool` mirrored in the plugin); `app.account_pool_accounts` and
+    `app.account_pool_policies` (one additive migration, forced restrictive RLS, TRUNCATE revoked, `pool_token` secret
+    kind); the `account-pool` API module (admin routes under `provider.manage`, audited `account_pool.*` without
+    tokens, tokens sealed and opened only in `tokens.ts`, CODEOWNERS); `work-session` start, `ensureAccount` and
+    `onAccountLimited`; Settings › Account pool, the session header chip, the timeline line and the new-session line in
+    the web.
+  - **Credentials:** Claude setup-tokens (`claude setup-token`, API keys refused) are sealed per account and added only
+    to the `session.start` / `prompt` frame sent to the session's device. The daemon passes them to that session as
+    `CLAUDE_CODE_OAUTH_TOKEN`, in memory only (competing credentials stripped; base URL, proxies and CA pinned in flag
+    settings after the A-06 probe; a project's `apiKeyHelper` refused). ChatGPT accounts for Codex live on a server
+    device as `CODEX_HOME` slots (`~/.ocw/accounts/codex/<slotId>`, shared `sessions/`, Codex's own device-code
+    sign-in from Settings or `ocw-runtime account add codex`; CLI slots arrive off). ChatGPT accounts for bots are
+    OpenClaw profiles `openai:pool-<id>` in the cell. Claude tokens reach the cell as `anthropic:pool-<id>` token
+    profiles over `OCW_POOL_TOKEN_<account id hex>`, with the org key last. The pre-07.18 bot sign-in is adopted as the first
+    account.
+  - **Selection:** `failover` (default, "Use one until its limit, then the next"), `round_robin` (least recently
+    used) and `weighted` (smooth weighted round-robin), by a pure `pickAccount` under a policy row lock; sticky per
+    session, never per request. Bots get the cell's auth order from the strategy (weighted becomes round-robin).
+  - **Limits:** the daemon reports `session.account_limited` (Claude `rate_limit_event`, assistant errors, the SDK's
+    usage-limit prefixes; Codex `usageLimitExceeded`, `unauthorized`), never a credential. The API cools the account
+    (the reset, else 5 min, at most 7 days) and re-dispatches the same prompt as the same turn on the next account
+    (Claude `resume`, Codex `thread/resume` under the new slot), at most 3 switches a turn, audited
+    `account_pool.limited` / `account_pool.switched` and shown as "Switched to account B: A reached its limit until
+    15:40". Usage is stored only as the runtime reports it.
+  - **Tests:** contracts and plugin parity; schema, RLS isolation and the N-1 upgrade; the selector (exact 5/1/1
+    sequence); API integration (routes, selection, limits, slots, device sign-ins, start); daemon (pool env, redirect
+    guard, no token on disk, limits, slots, CLI); plugin (profiles, per-profile sign-out, cell pool apply); web units;
+    and the `account-pool.spec.ts` browser journey (two Claude accounts, a limit, the turn finishing on the second;
+    ChatGPT bot accounts with the fake cell; 1440 and 390, light and dark; CI only).
+
+  Limits: resuming on another account (A-01 Claude, A-02 Codex) waits for the owner's UAT with real accounts (the
+  fallback fails the turn with "This conversation could not continue on the next account. Start a new session.");
+  bots treat weighted as round-robin; a device with only pool accounts starts Claude sessions on the default model and
+  generates no automatic session title yet; AI chats stay per member (ADR-0044, docs/self-hosting/account-pool.md).

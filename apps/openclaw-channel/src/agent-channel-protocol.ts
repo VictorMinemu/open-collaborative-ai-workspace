@@ -1670,6 +1670,9 @@ export const CellConfigChangedEvent = z.object({
 });
 export type CellConfigChangedEvent = z.infer<typeof CellConfigChangedEvent>;
 
+/** 07.18: mirror of `POOL_LIMITS.accountsPerProvider` (packages/contracts account-pool.ts). */
+const POOL_ACCOUNTS_PER_PROVIDER = 20;
+
 /** Subscription providers whose sign-in runs in this cell (ChatGPT via Codex device code). */
 export const SubscriptionProviderId = z.enum(["openai-codex"]);
 export type SubscriptionProviderId = z.infer<typeof SubscriptionProviderId>;
@@ -1683,6 +1686,8 @@ export const ProviderAuthStartEvent = z.object({
   method: z.literal("device-code"),
   /** Ignore the event when seen after this instant (replay after downtime). */
   startBefore: z.string(),
+  /** 07.18 (PD-12): the profile id to sign in (`poolProfileId`); absent = the provider's default profile. */
+  profileId: z.string().max(120).optional(),
 });
 export type ProviderAuthStartEvent = z.infer<typeof ProviderAuthStartEvent>;
 
@@ -1698,8 +1703,19 @@ export const ProviderAuthRevokeEvent = z.object({
   type: z.literal(AgentChannelEventTypes.providerAuthRevoke),
   seq: z.number().int().positive(),
   provider: SubscriptionProviderId,
+  /** 07.18 (PD-25, E15): sign out only these profiles; absent = every profile of the provider. */
+  profileIds: z.array(z.string().max(120)).max(POOL_ACCOUNTS_PER_PROVIDER).optional(),
 });
 export type ProviderAuthRevokeEvent = z.infer<typeof ProviderAuthRevokeEvent>;
+
+/** 07.18 (PD-12): one sign-in this cell holds, as reported on `POST /provider-auth`. Never a token. */
+export const CellAuthProfileReport = z.object({
+  profileId: z.string().min(1).max(120),
+  email: z.string().max(320).nullable(),
+  planType: z.string().max(64).nullable(),
+  usable: z.boolean(),
+});
+export type CellAuthProfileReport = z.infer<typeof CellAuthProfileReport>;
 
 export type ProviderAuthErrorCode =
   | "expired"
@@ -1721,7 +1737,22 @@ export type AgentChannelProviderAuthReport = {
   expiresAt?: string;
   account?: { email: string | null; planType: string | null };
   error?: { code: ProviderAuthErrorCode; message: string };
+  /** 07.18 (PD-12), `connected` only: the profile id the flow stored. At most 120 characters. */
+  profileId?: string;
+  /** 07.18 (PD-12), credential state reports (flowId null): every profile of the provider, at most 20. */
+  profiles?: CellAuthProfileReport[];
 };
+
+/**
+ * 07.18-19 R2.2: POST /pool-health. The health of the Claude pool token profiles this cell holds
+ * (`anthropic:pool-<accountId>`): `usable: false` while OpenClaw holds one out for an auth failure. Never a token.
+ */
+export const AgentChannelPoolHealthReport = z.object({
+  claude: z
+    .array(z.object({ profileId: z.string().min(1).max(120), usable: z.boolean() }))
+    .max(POOL_ACCOUNTS_PER_PROVIDER),
+});
+export type AgentChannelPoolHealthReport = z.infer<typeof AgentChannelPoolHealthReport>;
 
 /** Plugin → server. `sub` without afterSeq starts LIVE (no replay). */
 export type AgentChannelClientFrame = { op: "sub"; topic: string; afterSeq?: number } | { op: "ping" };
@@ -1840,6 +1871,72 @@ export const CellConversations = z.object({
 });
 export type CellConversations = z.infer<typeof CellConversations>;
 
+/** 07.18 (PD-12): the OpenClaw profile id of a ChatGPT pool account signed in here. */
+export function poolProfileId(accountId: string): string {
+  return `openai:pool-${accountId}`;
+}
+
+/** 07.18 (D-02): the OpenClaw `anthropic` token profile id of a Claude pool account. */
+export function claudeTokenProfileId(accountId: string): string {
+  return `anthropic:pool-${accountId}`;
+}
+
+/**
+ * 07.18: the env var a Claude pool token reaches OpenClaw through (a SecretRef, never the literal in config). 07.18-19
+ * R2.3: named after the account's stable id (its 32 hex digits, upper case), never its position in the list.
+ */
+export const POOL_TOKEN_ENV_RE = /^OCW_POOL_TOKEN_[0-9A-F]{32}$/;
+/** Every env var this plugin may have written for a pool token, older names included (cleared when no longer wanted). */
+export const POOL_TOKEN_ENV_PREFIX = "OCW_POOL_TOKEN_";
+
+/** Mirror of `ClaudeSetupToken` (packages/contracts account-pool.ts): a `claude setup-token`, never an API key. */
+const ClaudeSetupToken = z
+  .string()
+  .trim()
+  .min(20)
+  .max(512)
+  .regex(/^sk-ant-[A-Za-z0-9_-]+$/, "A Claude setup-token starts with sk-ant-")
+  .refine((t) => !t.startsWith("sk-ant-api"), {
+    message: "This is an API key. Add it in Settings › Models.",
+  });
+
+/**
+ * 07.18 (D-02, D-04, PD-13): the organization's pool for bots. `order` null = OpenClaw's own least-recently-used
+ * rotation. Claude `tokens` are SECRETS: never log them; each reaches OpenClaw only as the env var `envName`. ChatGPT
+ * sign-ins stay in this cell's auth store; only their profile ids travel.
+ */
+export const CellAccountPool = z.object({
+  claude: z.object({
+    order: z
+      .array(z.string().max(120))
+      .max(POOL_ACCOUNTS_PER_PROVIDER + 1)
+      .nullable(),
+    tokens: z
+      .array(
+        z.object({
+          accountId: Id,
+          profileId: z.string().max(120),
+          envName: z.string().regex(POOL_TOKEN_ENV_RE),
+          token: ClaudeSetupToken,
+        }),
+      )
+      .max(POOL_ACCOUNTS_PER_PROVIDER),
+    apiKeyLast: z.boolean(),
+  }),
+  chatgpt: z.object({
+    order: z.array(z.string().max(120)).max(POOL_ACCOUNTS_PER_PROVIDER).nullable(),
+    profiles: z
+      .array(z.object({ accountId: Id, profileId: z.string().max(120), enabled: z.boolean() }))
+      .max(POOL_ACCOUNTS_PER_PROVIDER),
+  }),
+  /**
+   * 07.18 gap: connected subscriptions the pool keeps bots off (left out of `subscriptions`). Their stored sign-ins
+   * stay; absent on older APIs = none (an unlisted subscription is then read as disconnected, as before).
+   */
+  withheldByPool: z.array(SubscriptionProviderId).max(SubscriptionProviderId.options.length).optional(),
+});
+export type CellAccountPool = z.infer<typeof CellAccountPool>;
+
 export const CellSnapshot = z.object({
   protocolVersion: z.number().int(),
   cellId: Id,
@@ -1858,6 +1955,8 @@ export const CellSnapshot = z.object({
   plugins: z.array(CellApprovedPlugin).optional(),
   /** Quick 261113-id6: conversation summary settings; absent on older APIs = the lenient defaults. */
   conversations: CellConversations.optional(),
+  /** 07.18 (PD-12, PD-13): the account pool for bots; absent on older APIs = the stored sign-ins, no explicit order. */
+  accountPool: CellAccountPool.optional(),
 });
 export type CellSnapshot = z.infer<typeof CellSnapshot>;
 

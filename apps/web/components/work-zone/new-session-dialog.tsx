@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  type AccountSourcePreview,
+  accountSourceLabel,
   type Device,
   EFFORT_LABELS,
   type PermissionMode,
@@ -39,6 +41,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useAccountPoolPreview } from "@/lib/account-pool-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useDesktop } from "@/lib/desktop";
 import { defaultAudience, groupRepos, isStartable } from "@/lib/new-session-groups";
@@ -55,6 +58,7 @@ import {
 } from "@/lib/workzone-queries";
 import { controlReasonText, isShown, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
 import {
+  AccountLine,
   AddServerLink,
   onRadioGroupKeyDown,
   ProjectList,
@@ -67,7 +71,7 @@ import {
 import { NewSessionVisibilityLine } from "./visibility/new-session-visibility-line";
 import type { NewSessionPreselect } from "./work-zone-context";
 
-export { AddServerLink, stepRadio } from "./new-session-sections";
+export { AccountLine, AddServerLink, stepRadio } from "./new-session-sections";
 
 /** Before the device's controls load (or for a device with no catalog): the modes every runtime always had. */
 const LEGACY_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
@@ -84,14 +88,18 @@ function namesOf(names: readonly string[]): string {
 /**
  * A runtime card on the chosen device (D-04, PD-13): installed and signed in, and not a version that can't run sessions
  * (`broken`); an `unsupported` version stays usable with a warning. `whoUpdates` ends the note: "ask Owen to update".
+ * 07.18 (PD-17): a runtime the account pool serves on that device (`source`, from the preview) needs no sign-in there.
  */
 export function runtimeCardState(
   info: RuntimeInfo | undefined,
   compat: RuntimeCompatibility | undefined,
   whoUpdates: string,
+  source?: AccountSourcePreview,
 ): { ready: boolean; note: string | null; tone: "muted" | "warning" | "destructive" } {
   if (!info?.installed) return { ready: false, note: "Not installed on this device", tone: "muted" };
-  if (!info.loggedIn) return { ready: false, note: "Not signed in on this device", tone: "muted" };
+  if (!info.loggedIn && source?.source !== "pool") {
+    return { ready: false, note: "Not signed in on this device", tone: "muted" };
+  }
   const version = info.version ?? "This version";
   if (compat === "broken") {
     return { ready: false, note: `${version} can't run sessions · ${whoUpdates}`, tone: "destructive" };
@@ -101,6 +109,21 @@ export function runtimeCardState(
   }
   return { ready: true, note: null, tone: "muted" };
 }
+
+/**
+ * 07.18 (D-11): which account a new session will use, in words: "Account: pool (failover)", "This device's login", or
+ * "No pool account is ready · resets at 15:40" (the reset in the viewer's time, when known).
+ */
+export function accountLine(source: AccountSourcePreview, formatTime: (iso: string) => string): string {
+  const label = accountSourceLabel(source);
+  return source.source === "none" && source.resetsAt
+    ? `${label} · resets at ${formatTime(source.resetsAt)}`
+    : label;
+}
+
+/** The viewer's short time ("15:40"), as the session timeline shows it. */
+const shortTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
 /** Who can update a device's CLIs, as the end of the card's note. */
 export function whoUpdates(
@@ -323,8 +346,11 @@ export function NewSessionDialog({
   const me = useMe({ enabled: false });
   const ownDevice = !!device && device.ownerUserId === me.data?.user.id;
   const updater = device ? whoUpdates(device, me.data?.user.id) : "";
+  // 07.18 (D-11, PD-17): what a new session on this device would run on; while it loads, or on an error, no line.
+  const preview = useAccountPoolPreview(open ? (device?.id ?? null) : null);
+  const pool = device && preview.data ? preview.data : undefined;
   const cardState = (id: RuntimeId) =>
-    runtimeCardState(runtimeInfo(id), device?.runtimeCompatibility?.[id], updater);
+    runtimeCardState(runtimeInfo(id), device?.runtimeCompatibility?.[id], updater, pool?.[id]);
 
   // Everything below the runtime comes from the device's reported catalog as the API filtered it for the caller
   // (D-08, WZC-03): models, efforts and modes, with the reason for each refused mode.
@@ -382,6 +408,7 @@ export function NewSessionDialog({
         device?.runtimes.find((x) => x.id === id),
         device?.runtimeCompatibility?.[id],
         "",
+        pool?.[id],
       ).ready;
     if (device && !ready(runtime)) {
       const alt = RUNTIME_IDS.find(ready);
@@ -391,7 +418,7 @@ export function NewSessionDialog({
         setEffort("default");
       }
     }
-  }, [device, runtime]);
+  }, [device, runtime, pool]);
 
   // Team projects first, then Personal by device (D-01, R5); `GET /projects` is already the caller's list.
   const groups = useMemo(() => groupRepos(available), [available]);
@@ -643,6 +670,11 @@ export function NewSessionDialog({
                         `Ask ${device.ownerName ?? "its owner"} to install and sign in to Claude Code or Codex.`
                       )}
                     </p>
+                  ) : pool ? (
+                    <AccountLine text={accountLine(pool[runtime], shortTime)} />
+                  ) : device && preview.isPending ? (
+                    // The preview is loading: the line keeps its height so nothing jumps, with no words yet.
+                    <p aria-hidden className="h-[18px]" />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">{RUNTIMES[runtime].subscription}</p>
                   )}

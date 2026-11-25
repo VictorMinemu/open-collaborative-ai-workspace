@@ -1,0 +1,508 @@
+import { randomUUID } from "node:crypto";
+import pg from "pg";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { eventually, FakeDevice } from "../../testing-device";
+import { invite, pairDevice } from "../../testing-workzone";
+
+/**
+ * Phase 07.18-09, the API tracer (D-02, D-05, D-06, D-11; PD-02 … PD-07, PD-16, PD-17; E1, E5 … E9) on a real
+ * PostgreSQL + Redis and the full API: a Work Zone session on a pool-capable device starts on the account the strategy
+ * chose; the token rides only the frames its device receives, never a stored command, an audit row or a stream event;
+ * a session whose account can no longer serve moves to the next one before its turn, and says so.
+ */
+
+// biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
+type Json = Record<string, any>;
+
+/** Token-shaped values joined at runtime, so no credential-shaped literal sits whole in the repository. */
+const setupToken = (fill: string) => ["sk", "ant", "oat01", fill.repeat(48)].join("-");
+const TA = setupToken("A");
+const TB = setupToken("B");
+const TC = setupToken("C");
+const TOKENS = [TA, TB, TC];
+
+let stack: TestStack;
+let su: pg.Client;
+let victor: TestClient; // admin
+let sam: TestClient; // developer, owner of the devices
+
+interface Dev {
+  device: FakeDevice;
+  deviceId: string;
+  projectId: string;
+}
+let pool: Dev; // hello.accountPool = 1, Claude and Codex signed in
+let old: Dev; // no hello.accountPool (a pre-07.18 daemon)
+let noLogin: Dev; // hello.accountPool = 1, Claude not signed in
+
+async function ok(res: Promise<{ status: number; body: Json | null }>, status = 200): Promise<Json> {
+  const r = await res;
+  if (r.status !== status) throw new Error(`expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`);
+  return r.body as Json;
+}
+
+/** Pair a device for Sam, connect it with `opts` and announce one project. */
+async function connectDevice(
+  name: string,
+  project: string,
+  opts: Parameters<typeof FakeDevice.connect>[3],
+): Promise<Dev> {
+  const paired = await pairDevice(stack, sam, name);
+  const device = await FakeDevice.connect(stack.baseUrl, paired.token, undefined, opts);
+  device.send({
+    type: "projects.sync",
+    projects: [{ localId: `lp_${project}`, name: project, gitRemote: null, defaultBranch: "main" }],
+  });
+  await device.next((f) => f.type === "projects.ack");
+  const projects = (await ok(sam.request("GET", "/api/v1/projects"))).projects as Json[];
+  return { device, deviceId: paired.deviceId, projectId: projects.find((p) => p.name === project)!.id };
+}
+
+const addToken = async (label: string, token: string) =>
+  (await ok(victor.request("POST", "/api/v1/account-pool/claude/accounts", { label, token }))).id as string;
+
+const setPolicy = (body: Json) => ok(victor.request("PUT", "/api/v1/account-pool/claude/policy", body));
+
+/** Sam starts a session on `dev` over HTTP; the raw answer (status and body). */
+const startOn = (dev: Dev, body: Json = {}) =>
+  sam.request("POST", "/api/v1/work-sessions", { projectId: dev.projectId, runtime: "claude-code", ...body });
+
+/** Start on `dev`, take its `session.start` frame, and bring the session to idle as the daemon does. */
+async function startIdle(dev: Dev, body: Json = {}) {
+  const session = await ok(startOn(dev, body));
+  const id = session.id as string;
+  const frame = await dev.device.command("session.start", id);
+  dev.device.ack(frame.id);
+  dev.device.event(id, {
+    type: "session.started",
+    runtime: (body.runtime as string | undefined) ?? "claude-code",
+    runtimeSessionId: `rt-${id}`,
+    model: "claude-opus-5-5",
+    permissionMode: "default",
+  });
+  dev.device.event(id, { type: "session.state", status: "idle" });
+  await eventually(async () => (await sessionOf(id)).status === "idle");
+  return { id, session, frame };
+}
+
+const sessionOf = async (id: string) =>
+  (await ok(sam.request("GET", `/api/v1/work-sessions/${id}`))).session as Json;
+
+const storedCommands = async (sessionId: string, kind: string) =>
+  (
+    await su.query(
+      "select payload, payload::text as text from app.device_commands where work_session_id = $1 and kind = $2 order by created_at",
+      [sessionId, kind],
+    )
+  ).rows as Array<{ payload: Json; text: string }>;
+
+const sessionRow = async (id: string) =>
+  (await su.query("select pool_account_id, last_error from app.work_sessions where id = $1", [id]))
+    .rows[0] as Json;
+
+const accountRow = async (id: string) =>
+  (await su.query("select * from app.account_pool_accounts where id = $1", [id])).rows[0] as Json;
+
+const auditOf = async (action: string, sessionId: string) =>
+  (
+    await su.query(
+      "select metadata from app.audit_events where action = $1 and session_id = $2 order by occurred_at, id",
+      [action, sessionId],
+    )
+  ).rows as Array<{ metadata: Json }>;
+
+beforeAll(async () => {
+  stack = await startTestStack();
+  su = new pg.Client({ connectionString: stack.db.superuserUrl });
+  await su.connect();
+  victor = new TestClient(stack.baseUrl);
+  await ok(
+    victor.request("POST", "/api/v1/setup", {
+      token: TEST_SETUP_TOKEN,
+      name: "Víctor Ruiz",
+      email: "victor@example.test",
+      password: "correct-horse-battery",
+      orgName: "Autofy Labs",
+    }),
+  );
+  ({ client: sam } = await invite(stack, victor, "sam@example.test", "Sam", "developer"));
+  pool = await connectDevice("Pool Mac", "pool-repo", { accountPool: 1, codexLoggedIn: true });
+  old = await connectDevice("Old Mac", "old-repo", {});
+  noLogin = await connectDevice("Fresh Mac", "fresh-repo", { accountPool: 1, claudeLoggedIn: false });
+}, 180_000);
+
+afterAll(async () => {
+  for (const d of [pool, old, noLogin]) await d?.device.close().catch(() => {});
+  await su?.end();
+  await stack?.stop();
+});
+
+/** Every test starts from an empty pool with the default policy. */
+beforeEach(async () => {
+  await su.query("update app.account_pool_accounts set removed_at = now() where removed_at is null");
+  await su.query("delete from app.account_pool_policies");
+});
+
+describe("a session starts on a pool account (PD-02, PD-03, PD-04, PD-17)", () => {
+  it("stores devices.account_pool_version from the hello", async () => {
+    const r = await su.query("select id, account_pool_version from app.devices where id = any($1)", [
+      [pool.deviceId, old.deviceId],
+    ]);
+    const byId = new Map(r.rows.map((x) => [x.id, x.account_pool_version]));
+    expect(byId.get(pool.deviceId)).toBe(1);
+    expect(byId.get(old.deviceId)).toBeNull();
+  });
+
+  it("sends the token in the start frame only; the stored command, the row and the audit never hold it", async () => {
+    const a = await addToken("A", TA);
+    const session = await ok(startOn(pool));
+    const id = session.id as string;
+    const frame = await pool.device.command("session.start", id);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: a, label: "A", oauthToken: TA });
+
+    const [stored] = await storedCommands(id, "session.start");
+    expect(stored!.payload.account).toEqual({ kind: "token", accountId: a, label: "A" });
+    expect(stored!.text).not.toContain(TA);
+    expect((await sessionRow(id)).pool_account_id).toBe(a);
+    expect(session.poolAccount).toEqual({ id: a, label: "A", provider: "claude" });
+    expect((await sessionOf(id)).poolAccount).toEqual({ id: a, label: "A", provider: "claude" });
+    expect((await accountRow(a)).last_used_at).not.toBeNull();
+    const [created] = await auditOf("work_session.created", id);
+    expect(created!.metadata.poolAccountId).toBe(a);
+    expect(JSON.stringify(created!.metadata)).not.toContain(TA);
+    pool.device.ack(frame.id);
+  });
+
+  it("a device without accountPool gets no account and the session runs on its own login (E9)", async () => {
+    await addToken("A", TA);
+    const session = await ok(startOn(old));
+    const id = session.id as string;
+    const frame = await old.device.command("session.start", id);
+    expect("account" in frame.payload).toBe(false);
+    expect((await sessionRow(id)).pool_account_id).toBeNull();
+    expect(session.poolAccount).toBeNull();
+    const [created] = await auditOf("work_session.created", id);
+    expect(created!.metadata.poolAccountId).toBeNull();
+    old.device.ack(frame.id);
+  });
+
+  it("a pool-capable device whose Claude is not signed in starts on the pool account (PD-17)", async () => {
+    const a = await addToken("A", TA);
+    const session = await ok(startOn(noLogin));
+    const id = session.id as string;
+    const frame = await noLogin.device.command("session.start", id);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: a, label: "A", oauthToken: TA });
+    expect(session.poolAccount).toEqual({ id: a, label: "A", provider: "claude" });
+    noLogin.device.ack(frame.id);
+  });
+});
+
+const fails = async (res: Promise<{ status: number; body: Json | null }>, status: number, code: string) => {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(status);
+  expect((r.body?.error as Json | undefined)?.code, JSON.stringify(r.body)).toBe(code);
+  return (r.body!.error as Json).message as string;
+};
+
+const prompt = async (id: string, body = "Fix the rounding error") =>
+  (await ok(sam.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body }))).id as string;
+
+const promptStatus = async (id: string) =>
+  (await su.query("select status from app.work_prompts where id = $1", [id])).rows[0]?.status as string;
+
+const switchedEvents = async (id: string) =>
+  (
+    await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'work_session.event' and payload->'event'->>'type' = 'account.switched' order by seq",
+      [`ws:${id}`],
+    )
+  ).rows.map((r) => r.payload.event as Json);
+
+const disable = (id: string) =>
+  ok(victor.request("PATCH", `/api/v1/account-pool/accounts/${id}`, { enabled: false }));
+const cool = (id: string, until: Date) =>
+  su.query(
+    "update app.account_pool_accounts set cooldown_until = $2, limit_reason = 'five_hour' where id = $1",
+    [id, until.toISOString()],
+  );
+
+/** Answer the prompt's turn as the daemon does, so the session is idle again. */
+async function finishTurn(dev: Dev, id: string, frame: { id: string; payload: Json }) {
+  dev.device.ack(frame.id);
+  dev.device.event(id, { type: "prompt.started", promptId: frame.payload.promptId });
+  dev.device.event(id, {
+    type: "prompt.completed",
+    promptId: frame.payload.promptId,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+  await eventually(async () => (await promptStatus(frame.payload.promptId as string)) === "completed");
+}
+
+describe("every turn carries the session's account (PD-03)", () => {
+  it("a prompt frame carries the token; the stored prompt command does not", async () => {
+    const a = await addToken("A", TA);
+    const { id } = await startIdle(pool);
+    const p = await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.promptId).toBe(p);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: a, label: "A", oauthToken: TA });
+    const [stored] = await storedCommands(id, "prompt");
+    expect(stored!.payload.account).toEqual({ kind: "token", accountId: a, label: "A" });
+    expect(stored!.text).not.toContain(TA);
+    await finishTurn(pool, id, frame);
+  });
+
+  it("a prompt to a device without accountPool carries no account (E9)", async () => {
+    await addToken("A", TA);
+    const { id } = await startIdle(old);
+    await prompt(id);
+    const frame = await old.device.command("prompt", id);
+    expect("account" in frame.payload).toBe(false);
+    await finishTurn(old, id, frame);
+  });
+
+  it("two concurrent starts under round-robin take two different accounts (E1)", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    await setPolicy({ strategy: "round_robin" });
+    const [one, two] = await Promise.all([ok(startOn(pool)), ok(startOn(pool))]);
+    expect(new Set([one.poolAccount.id, two.poolAccount.id])).toEqual(new Set([a, b]));
+    for (const s of [one, two]) pool.device.ack((await pool.device.command("session.start", s.id)).id);
+  });
+});
+
+describe("no usable account (PD-16, E5, E6)", () => {
+  it("fallback on and the device signed in: the device's own login", async () => {
+    const a = await addToken("A", TA);
+    await disable(a);
+    const session = await ok(startOn(pool));
+    expect(session.poolAccount).toBeNull();
+    const frame = await pool.device.command("session.start", session.id);
+    expect(frame.payload.account).toBeNull();
+    pool.device.ack(frame.id);
+  });
+
+  it("fallback off: refused no_account with the earliest reset", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const soon = new Date(Date.now() + 3_600_000);
+    await cool(a, new Date(Date.now() + 7_200_000));
+    await cool(b, soon);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    const message = await fails(startOn(pool), 409, "no_account");
+    expect(message).toBe(`No account in the pool is ready. The earliest resets at ${soon.toISOString()}.`);
+  });
+
+  it("the device not signed in and no usable account: refused no_account", async () => {
+    const a = await addToken("A", TA);
+    await disable(a);
+    const message = await fails(startOn(noLogin), 409, "no_account");
+    expect(message).toBe("No account in the pool is ready. Add one in Settings › Account pool.");
+  });
+
+  it("an empty pool keeps today's answer for a device that is not signed in", async () => {
+    const message = await fails(startOn(noLogin), 409, "runtime_unavailable");
+    expect(message).toBe("Claude Code is not signed in on Fresh Mac. Sign in from a terminal first.");
+  });
+});
+
+describe("a session moves before its turn when its account can no longer serve (PD-06, E7)", () => {
+  async function onA() {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const { id } = await startIdle(pool);
+    expect((await sessionRow(id)).pool_account_id).toBe(a);
+    return { a, b, id };
+  }
+
+  async function expectSwitched(id: string, a: string, b: string, event: Json) {
+    await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.account).toEqual({ kind: "token", accountId: b, label: "B", oauthToken: TB });
+    expect(await switchedEvents(id)).toEqual([
+      { type: "account.switched", fromLabel: "A", toLabel: "B", ...event },
+    ]);
+    const [audit, ...more] = await auditOf("account_pool.switched", id);
+    expect(more).toHaveLength(0);
+    expect(audit!.metadata).toMatchObject({
+      fromAccountId: a,
+      toAccountId: b,
+      fromLabel: "A",
+      toLabel: "B",
+      reason: event.reason,
+    });
+    const s = await sessionOf(id);
+    expect(s.poolAccount).toEqual({ id: b, label: "B", provider: "claude" });
+    expect(s.lastError).toBeNull();
+    await finishTurn(pool, id, frame);
+  }
+
+  it("a disabled account: the next prompt goes out on B", async () => {
+    const { a, b, id } = await onA();
+    await disable(a);
+    await expectSwitched(id, a, b, { reason: "unavailable", until: null });
+  });
+
+  it("a removed account: the next prompt goes out on B", async () => {
+    const { a, b, id } = await onA();
+    await ok(victor.request("DELETE", `/api/v1/account-pool/accounts/${a}`));
+    await expectSwitched(id, a, b, { reason: "unavailable", until: null });
+  });
+
+  it("a cooling account: reason limit with its until", async () => {
+    const { a, b, id } = await onA();
+    const until = new Date(Date.now() + 3_600_000);
+    await cool(a, until);
+    await expectSwitched(id, a, b, { reason: "limit", until: until.toISOString() });
+  });
+
+  it("no usable account under fallback: the device's own login", async () => {
+    const { a, b, id } = await onA();
+    await disable(b);
+    await disable(a);
+    await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.account).toBeNull();
+    expect(await switchedEvents(id)).toEqual([
+      { type: "account.switched", fromLabel: "A", toLabel: null, reason: "unavailable", until: null },
+    ]);
+    expect((await sessionOf(id)).poolAccount).toBeNull();
+    await finishTurn(pool, id, frame);
+  });
+
+  it("no usable account and fallback off: the prompt is refused with the no_account sentence", async () => {
+    const { a, b, id } = await onA();
+    await disable(b);
+    await disable(a);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    const p = await prompt(id);
+    await eventually(async () => (await promptStatus(p)) === "failed");
+    expect((await sessionOf(id)).lastError).toBe(
+      "No account in the pool is ready. Add one in Settings › Account pool.",
+    );
+    const [refused] = await auditOf("work_prompt.refused", id);
+    expect(refused!.metadata.reason).toBe("no_account");
+    expect(pool.device.pending("prompt").filter((f) => f.sessionId === id)).toHaveLength(0);
+  });
+
+  it("a token that cannot be opened at send time re-queues the prompt and sends it on the next account", async () => {
+    const { a, id } = await onA();
+    await su.query(
+      "update app.secrets set tag = 'AAAAAAAAAAAAAAAAAAAAAA==' where id = (select secret_id from app.account_pool_accounts where id = $1)",
+      [a],
+    );
+    const p = await prompt(id);
+    const frame = await pool.device.command("prompt", id);
+    expect(frame.payload.promptId).toBe(p);
+    expect((frame.payload.account as Json).label).toBe("B");
+    expect((frame.payload.account as Json).oauthToken).toBe(TB);
+    expect((await accountRow(a)).credential_state).toBe("needs_sign_in");
+    expect(await promptStatus(p)).not.toBe("failed");
+    await finishTurn(pool, id, frame);
+  });
+});
+
+describe("GET /account-pool/preview: what a new session would use (D-11, PD-16, PD-19)", () => {
+  /** The raw answer (headers and text): the cache header and the no-label scan. */
+  async function preview(client: TestClient, deviceId: string) {
+    const res = await fetch(`${stack.baseUrl}/api/v1/account-pool/preview?deviceId=${deviceId}`, {
+      headers: { origin: "http://localhost:3999", cookie: client.cookieHeader },
+    });
+    const text = await res.text();
+    return {
+      status: res.status,
+      cache: res.headers.get("cache-control"),
+      text,
+      body: JSON.parse(text) as Json,
+    };
+  }
+
+  it("two ready tokens: the pool with its strategy; Codex with no slot: the device's login", async () => {
+    const a = await addToken("A", TA);
+    const b = await addToken("B", TB);
+    const r = await preview(sam, pool.deviceId);
+    expect(r.status).toBe(200);
+    expect(r.cache).toBe("no-store");
+    expect(r.body).toEqual({
+      "claude-code": { source: "pool", strategy: "failover", ready: 2 },
+      codex: { source: "device_login" },
+    });
+    for (const secret of [a, b, TA, TB, '"A"', '"B"']) expect(r.text).not.toContain(secret);
+  });
+
+  it("every account cooling and fallback off: none, with the earliest reset", async () => {
+    const a = await addToken("A", TA);
+    const soon = new Date(Date.now() + 3_600_000);
+    await cool(a, soon);
+    await setPolicy({ fallbackToDeviceLogin: false });
+    expect((await preview(sam, pool.deviceId)).body["claude-code"]).toEqual({
+      source: "none",
+      resetsAt: soon.toISOString(),
+    });
+  });
+
+  it("a device without accountPool: the device's login for both runtimes", async () => {
+    await addToken("A", TA);
+    expect((await preview(sam, old.deviceId)).body).toEqual({
+      "claude-code": { source: "device_login" },
+      codex: { source: "device_login" },
+    });
+  });
+
+  it("a member who may not use the device, another organization's member and an unknown device: 404", async () => {
+    await addToken("A", TA);
+    const { client: lee } = await invite(stack, victor, "lee@example.test", "Lee", "developer");
+    expect((await preview(lee, pool.deviceId)).status).toBe(404);
+    expect((await preview(sam, "01a20e49-0000-7000-8000-000000000000")).status).toBe(404);
+    // Eve moves into her own organization: Sam's device is not there for her.
+    const { client: eve, userId: eveId } = await invite(
+      stack,
+      victor,
+      "eve@example.test",
+      "Eve",
+      "developer",
+    );
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+      orgB,
+      `other-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    const other = await preview(eve, pool.deviceId);
+    expect(other.status).toBe(404);
+    expect(other.text).not.toContain(TA);
+  });
+});
+
+// Kept last: every scenario above has run, so the scan covers them all.
+describe("E8: the tokens never reach the database outside the secret store", () => {
+  it("no device command, audit row or stream event contains a token", async () => {
+    for (const token of TOKENS) {
+      const like = `%${token}%`;
+      const commands = await su.query(
+        "select count(*)::int as n from app.device_commands where payload::text like $1",
+        [like],
+      );
+      const audit = await su.query(
+        "select count(*)::int as n from app.audit_events where metadata::text like $1",
+        [like],
+      );
+      const events = await su.query(
+        "select count(*)::int as n from app.stream_events where payload::text like $1",
+        [like],
+      );
+      expect([commands.rows[0].n, audit.rows[0].n, events.rows[0].n]).toEqual([0, 0, 0]);
+    }
+  });
+});

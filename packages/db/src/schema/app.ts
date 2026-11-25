@@ -1330,6 +1330,7 @@ const SECRET_KINDS = [
   "vault_item",
   "browser_session",
   "webhook_secret",
+  "pool_token",
 ] as const;
 
 /** Encrypted (AES-256-GCM, OCW_ENCRYPTION_KEY) secrets. Never selected into API responses. */
@@ -1352,6 +1353,9 @@ export const secrets = appSchema.table(
      * `<orgId>:<userId>:browser:<agentId>:<siteKey>` and referenced by `browser_sessions.secret_id` (owner-only).
      * `webhook_secret` (Phase 07.6, D-02, D-07): an inbound webhook endpoint's Standard Webhooks signing secret,
      * referenced by `webhook_endpoints.secret_id` / `previous_secret_id` (never returned after creation or rotation).
+     * `pool_token` (Phase 07.18, PD-21): a Claude setup-token of the organization's account pool, sealed with AAD
+     * `<orgId>:account_pool:<accountId>` and referenced by `account_pool_accounts.secret_id`; sealed and opened only by
+     * `account-pool/tokens.ts`.
      */
     kind: text("kind", { enum: SECRET_KINDS }).notNull(),
     provider: text("provider"),
@@ -1463,9 +1467,18 @@ export const devices = appSchema.table(
      * only from the device's own frames; honoured only when `host_kind = 'service'`.
      */
     isolatedServer: boolean("isolated_server").notNull().default(false),
+    /**
+     * Phase 07.18 (PD-04): the account pool version the daemon supports (`hello.accountPool`); null = a daemon without
+     * pool support, which never gets a pool account. Written only from the device's own hello, never from a web route.
+     */
+    accountPoolVersion: integer("account_pool_version"),
   },
   (t) => [
     index("devices_org_idx").on(t.organizationId),
+    check(
+      "devices_account_pool_version_ck",
+      sql`${t.accountPoolVersion} is null or ${t.accountPoolVersion} between 1 and 100`,
+    ),
     modeCheck("devices_share_max_mode_ck", t.shareMaxMode),
     check("devices_host_kind_ck", sql`${t.hostKind} in ('desktop','service')`),
     /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
@@ -1585,6 +1598,152 @@ export const projects = appSchema.table(
   ],
 );
 
+// ---------------------------------------------------------------- subscription account pool (Phase 07.18)
+//
+// ADR-0044 (D-01, D-03, D-04, D-06, D-13): the organization's pool of subscription accounts, per provider, used by the
+// Work Zone and the bots. A Claude `token` account holds only a `secret_id` to a sealed `pool_token` secret (PD-21, never
+// a token column); a ChatGPT `device_slot` is a sign-in the daemon keeps in its own Codex home on one device; a ChatGPT
+// `cell_profile` is a sign-in in the OpenClaw cell. Removal is soft (`removed_at`, PD-25). Every reference is composite
+// with the organization (FKs bypass RLS); tenant isolation and the TRUNCATE revoke come from post-migrate.
+
+const POOL_PROVIDERS = ["claude", "chatgpt"] as const;
+const POOL_LIMIT_REASONS = [
+  "five_hour",
+  "seven_day",
+  "weekly_model",
+  "usage_limit",
+  "rate_limit",
+  "billing",
+  "auth_failed",
+  "unknown",
+] as const;
+
+/** The stored shape of `@ocw/contracts` `AccountUsageSnapshot` (the contract parses it at the API boundary). */
+type StoredAccountUsage = {
+  windows: Array<{ kind: string; usedPercent: number | null; resetsAt: string | null }>;
+  at: string;
+};
+
+export const accountPoolAccounts = appSchema.table(
+  "account_pool_accounts",
+  {
+    id: id(),
+    organizationId: orgId(),
+    provider: text("provider", { enum: POOL_PROVIDERS }).notNull(),
+    kind: text("kind", { enum: ["token", "device_slot", "cell_profile"] }).notNull(),
+    label: text("label").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** The admin's order (ascending); ties by `created_at`, then id (PD-07). */
+    priority: integer("priority").notNull().default(0),
+    weight: integer("weight").notNull().default(1),
+    /** `token` only: the sealed `pool_token` secret. Deleted with the account's removal (PD-25). */
+    secretId: uuid("secret_id"),
+    /** `device_slot` only: the device whose Codex home holds the sign-in; deleting the device deletes the row. */
+    deviceId: uuid("device_id"),
+    /** `device_slot` only: the slot's id on its device (`<ocw home>/accounts/codex/<slotId>/`, PD-10). */
+    slotId: uuid("slot_id"),
+    /** `cell_profile` only: the OpenClaw auth profile id (`openai:pool-<accountId>` or the one the flow returned, PD-12). */
+    cellProfileId: text("cell_profile_id"),
+    /** `admin` added it; `device_cli` a device reported a slot no admin started (PD-11); `adopted` from the cell. */
+    origin: text("origin", { enum: ["admin", "device_cli", "adopted"] })
+      .notNull()
+      .default("admin"),
+    credentialState: text("credential_state", { enum: ["ok", "needs_sign_in"] })
+      .notNull()
+      .default("ok"),
+    planType: text("plan_type"),
+    cooldownUntil: ts("cooldown_until"),
+    limitReason: text("limit_reason", { enum: POOL_LIMIT_REASONS }),
+    lastUsedAt: ts("last_used_at"),
+    /** Smooth weighted round-robin state (`weighted`), written with the pick (PD-07). */
+    wrrCurrent: integer("wrr_current").notNull().default(0),
+    /** The last usage the runtime reported (PD-09); never polled. */
+    usage: jsonb("usage").$type<StoredAccountUsage>(),
+    usageAt: ts("usage_at"),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    removedAt: ts("removed_at"),
+  },
+  (t) => [
+    foreignKey({
+      name: "account_pool_accounts_device_fk",
+      columns: [t.organizationId, t.deviceId],
+      foreignColumns: [devices.organizationId, devices.id],
+    }).onDelete("cascade"),
+    // Narrowed to `SET NULL ("secret_id")` in the migration (PostgreSQL 15+; no drizzle builder for the column list),
+    // so a deleted secret never nulls `organization_id`.
+    foreignKey({
+      name: "account_pool_accounts_secret_fk",
+      columns: [t.organizationId, t.secretId],
+      foreignColumns: [secrets.organizationId, secrets.id],
+    }).onDelete("set null"),
+    /** Target of the sessions' composite foreign key (FKs bypass RLS). */
+    unique("account_pool_accounts_org_id_uq").on(t.organizationId, t.id),
+    uniqueIndex("account_pool_accounts_slot_uq")
+      .on(t.organizationId, t.deviceId, t.slotId)
+      .where(sql`removed_at is null`),
+    uniqueIndex("account_pool_accounts_profile_uq")
+      .on(t.organizationId, t.cellProfileId)
+      .where(sql`removed_at is null`),
+    index("account_pool_accounts_org_provider_idx").on(t.organizationId, t.provider, t.priority),
+    check("account_pool_accounts_provider_ck", sql`${t.provider} in (${sqlList(POOL_PROVIDERS)})`),
+    check("account_pool_accounts_kind_ck", sql`${t.kind} in ('token','device_slot','cell_profile')`),
+    check("account_pool_accounts_origin_ck", sql`${t.origin} in ('admin','device_cli','adopted')`),
+    check("account_pool_accounts_credential_state_ck", sql`${t.credentialState} in ('ok','needs_sign_in')`),
+    check(
+      "account_pool_accounts_limit_reason_ck",
+      sql`${t.limitReason} is null or ${t.limitReason} in (${sqlList(POOL_LIMIT_REASONS)})`,
+    ),
+    check("account_pool_accounts_label_ck", sql`char_length(${t.label}) between 1 and 120`),
+    check("account_pool_accounts_weight_ck", sql`${t.weight} between 1 and 100`),
+    check("account_pool_accounts_priority_ck", sql`${t.priority} >= 0`),
+    check(
+      "account_pool_accounts_plan_type_ck",
+      sql`${t.planType} is null or char_length(${t.planType}) <= 64`,
+    ),
+    check(
+      "account_pool_accounts_cell_profile_id_ck",
+      sql`${t.cellProfileId} is null or char_length(${t.cellProfileId}) between 1 and 120`,
+    ),
+    // Kind ↔ provider ↔ columns. A removed token may have lost its secret (PD-25).
+    check(
+      "account_pool_accounts_shape_ck",
+      sql`case ${t.kind}
+        when 'token' then ${t.provider} = 'claude' and ${t.deviceId} is null and ${t.cellProfileId} is null and (${t.secretId} is not null or ${t.removedAt} is not null)
+        when 'device_slot' then ${t.provider} = 'chatgpt' and ${t.deviceId} is not null and ${t.slotId} is not null
+        when 'cell_profile' then ${t.provider} = 'chatgpt' and ${t.cellProfileId} is not null
+        else false end`,
+    ),
+  ],
+);
+
+/** One pool strategy per (organization, provider); an absent row means the defaults (D-04, D-06). */
+export const accountPoolPolicies = appSchema.table(
+  "account_pool_policies",
+  {
+    organizationId: orgId(),
+    provider: text("provider", { enum: POOL_PROVIDERS }).notNull(),
+    strategy: text("strategy", { enum: ["failover", "round_robin", "weighted"] })
+      .notNull()
+      .default("failover"),
+    /** Claude token accounts only (PD-18): who they serve. */
+    scope: text("scope", { enum: ["all", "work_zone", "bots"] })
+      .notNull()
+      .default("all"),
+    /** No usable account: run on the device's own login when it has one (PD-16). */
+    fallbackToDeviceLogin: boolean("fallback_to_device_login").notNull().default(true),
+    updatedBy: uuid("updated_by"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "account_pool_policies_pkey", columns: [t.organizationId, t.provider] }),
+    check("account_pool_policies_provider_ck", sql`${t.provider} in (${sqlList(POOL_PROVIDERS)})`),
+    check("account_pool_policies_strategy_ck", sql`${t.strategy} in ('failover','round_robin','weighted')`),
+    check("account_pool_policies_scope_ck", sql`${t.scope} in ('all','work_zone','bots')`),
+  ],
+);
+
 // ---------------------------------------------------------------- work sessions
 
 export const workSessions = appSchema.table(
@@ -1665,6 +1824,11 @@ export const workSessions = appSchema.table(
      * Full access turns need an isolated server.
      */
     taintedAt: ts("tainted_at"),
+    /**
+     * Phase 07.18 (D-01, PD-03, PD-06): the pool account the session runs on; null = the device's own login. Sticky,
+     * replaced at the next dispatch when the account stops being usable; a deleted account only unlinks.
+     */
+    poolAccountId: uuid("pool_account_id"),
   },
   (t) => [
     index("work_sessions_org_idx").on(t.organizationId, t.projectId),
@@ -1686,6 +1850,15 @@ export const workSessions = appSchema.table(
     index("work_sessions_started_by_agent_idx")
       .on(t.organizationId, t.startedByAgentId)
       .where(sql`started_by_agent_id is not null`),
+    // Phase 07.18: narrowed to `SET NULL ("pool_account_id")` in the migration, as the bot key above.
+    foreignKey({
+      name: "work_sessions_pool_account_fk",
+      columns: [t.organizationId, t.poolAccountId],
+      foreignColumns: [accountPoolAccounts.organizationId, accountPoolAccounts.id],
+    }).onDelete("set null"),
+    index("work_sessions_pool_account_idx")
+      .on(t.organizationId, t.poolAccountId)
+      .where(sql`pool_account_id is not null`),
   ],
 );
 
@@ -1848,9 +2021,12 @@ export const workPrompts = appSchema.table(
     authorAgentId: uuid("author_agent_id"),
     /** Phase 07.16 (D-08): the prompt carried outside content into the session (shown to people in its history). */
     tainted: boolean("tainted").notNull().default(false),
+    /** Phase 07.18 (PD-05, PD-15): how many times a limit moved this prompt to another pool account (at most 3). */
+    accountSwitches: integer("account_switches").notNull().default(0),
   },
   (t) => [
     index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position),
+    check("work_prompts_account_switches_ck", sql`${t.accountSwitches} between 0 and 3`),
     modeCheck("work_prompts_permission_mode_ck", t.permissionMode),
     // Composite with the organization (FKs bypass RLS). The migration narrows the action to
     // `SET NULL ("proposed_by_agent_id")` (PostgreSQL 15+; drizzle 1.0.0-rc.4 has no builder for the column list), so a
@@ -2200,6 +2376,9 @@ export const deviceCommands = appSchema.table(
         // 07.17.1.1 (D-04): type-level only, like the kinds above (the column has no check constraint).
         "session.file.write",
         "session.file.read",
+        // 07.18 (D-02, PD-10): Codex slot sign-in and sign-out; type-level only, as above.
+        "account.login",
+        "account.logout",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),

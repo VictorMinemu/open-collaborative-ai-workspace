@@ -43,6 +43,12 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
       runtime: RuntimeId,
     })
     .strict(),
+  /**
+   * 07.18 (D-02, PD-11): re-read the Codex account slots (`ocw-runtime account add|remove` changed slots.json) and
+   * re-send them to the server (`accounts.sync`). Local only (never reachable from the server); carries no value: the
+   * slots come from the file on this device; strict, so a forged value is refused, not ignored.
+   */
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("reloadAccounts") }).strict(),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 

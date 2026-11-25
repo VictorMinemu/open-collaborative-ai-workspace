@@ -4,6 +4,7 @@ import { DEFAULT_ACCOUNT_ID, type ResolvedOcwAccount, readSection, resolveOcwAcc
 import { claimActiveAccount, releaseActiveAccount } from "./active-account.js";
 import { createAgentChannelClient } from "./api-client.js";
 import { createBridge } from "./bridge.js";
+import { createOpenClawPoolDriver, createPoolHealthReporter } from "./cell-account-pool.js";
 import { buildOcwAccountSnapshot } from "./channel-status.js";
 import { createFileCursorStore } from "./cursor-store.js";
 import { runEventStream } from "./event-stream.js";
@@ -65,12 +66,21 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
   const client = createAgentChannelClient({ apiUrl, token: readToken });
   // The tool gate (hooks registered in index.ts) asks the API through this account's client.
   setToolGuardClient(client);
+  // 07.18 (D-02): the account pool in OpenClaw's auth store; 07.18-19 R2.2: the same store tells the API which Claude
+  // pool tokens the provider refused.
+  const poolDriver = createOpenClawPoolDriver({ runtime });
   const port = createOpenClawPort({
     runtime,
     accountId: account.accountId,
     cfg: ctx.cfg,
     log,
     stateDir: resolveStateDir(runtime),
+    poolDriver,
+  });
+  const poolHealth = createPoolHealthReporter({
+    driver: poolDriver,
+    report: (body) => client.reportPoolHealth(body, signal),
+    log,
   });
   // Subscription sign-in (ChatGPT via Codex device code) runs here, inside OpenClaw (ADR-0006).
   const subscriptions = createSubscriptionAuth({
@@ -96,7 +106,7 @@ async function startOcwAccount(ctx: ChannelGatewayContext<ResolvedOcwAccount>): 
     reportFallback: (report) => reportPluginViaChild(apiUrl, readToken(), report),
     log,
   });
-  const bridge = createBridge({ client, port, signal, log, subscriptions, plugins });
+  const bridge = createBridge({ client, port, signal, log, subscriptions, plugins, poolHealth });
   bridgeRef = bridge;
   const cursorFile = path.join(resolveStateDir(runtime), "ocw-channel", `cursor-${account.accountId}.json`);
 

@@ -1,7 +1,7 @@
 "use client";
 
 import type { Project } from "@ocw/contracts";
-import { Check, FolderGit2, FolderKanban, FolderPlus, Laptop, Lock, Server } from "lucide-react";
+import { Check, FolderGit2, FolderKanban, FolderPlus, KeyRound, Laptop, Lock, Server } from "lucide-react";
 import Link from "next/link";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -60,6 +60,23 @@ export const radioRowClass = cn(
   "disabled:cursor-not-allowed disabled:hover:bg-transparent aria-checked:bg-brand-soft/60 dark:aria-checked:bg-brand-soft/40",
   TOUCH,
 );
+
+/**
+ * 07.18 (D-11, D-15): under the agent cards, which account a new session will use ("Account: pool (failover)", "This
+ * device's login", "No pool account is ready · resets at 15:40"). Only words: the pool is the default and there is no
+ * choice to make here. Wraps on a phone rather than truncating.
+ */
+export function AccountLine({ text }: { text: string }) {
+  return (
+    <p
+      data-testid="new-session-account"
+      className="flex min-w-0 items-start gap-1.5 text-[13px] text-muted-foreground leading-snug"
+    >
+      <KeyRound aria-hidden className="mt-[3px] size-3.5 shrink-0" />
+      <span className="min-w-0 break-words">{text}</span>
+    </p>
+  );
+}
 
 export function RowCheck({ checked }: { checked: boolean }) {
   return (

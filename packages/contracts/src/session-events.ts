@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IsoDateTime } from "./common";
 
 /**
  * Unified Session Event Protocol (MVP 0 subset). Every runtime adapter maps its native events to this set
@@ -160,6 +161,16 @@ export const SessionEvent = z.discriminatedUnion("type", [
      */
     subject: z.literal("ocw-runtime").optional(),
   }),
+  /**
+   * Phase 07.18 (D-08, PD-14): the session moved to another pool account (or the device's own login, a null label).
+   * Written by the API only (`SERVER_ONLY_SESSION_EVENTS`); labels only, never a token. Old webs ignore it.
+   */
+  ev("account.switched", {
+    fromLabel: z.string().max(120).nullable(),
+    toLabel: z.string().max(120).nullable(),
+    reason: z.enum(["limit", "unavailable"]),
+    until: IsoDateTime.nullable(),
+  }),
   /** Unknown runtime event, forwarded as-is (sanitized). The runtime's own type travels as `rawType`. */
   ev("runtime.raw", { rawType: z.string().max(200), data: z.unknown() }),
 ]);
@@ -169,3 +180,9 @@ export type RuntimeRawEvent = Extract<SessionEvent, { type: "runtime.raw" }>;
 
 /** Event types that are never persisted (ephemeral `eph` frames only). */
 export const EPHEMERAL_SESSION_EVENTS: ReadonlySet<SessionEventType> = new Set(["assistant.delta"]);
+
+/**
+ * Event types only the API writes (07.18 PD-14). The API appends them to `ws:<id>` itself; one a device sends is
+ * dropped, so a device cannot fake an account switch.
+ */
+export const SERVER_ONLY_SESSION_EVENTS: ReadonlySet<SessionEventType> = new Set(["account.switched"]);

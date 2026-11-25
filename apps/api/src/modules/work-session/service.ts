@@ -1,4 +1,5 @@
 import {
+  type AccountSwitchReason,
   type Attachment,
   type DiffResultFrame,
   DiffStat,
@@ -9,6 +10,12 @@ import {
   isFullAccessReport,
   NO_GIT_WORKTREE_MESSAGE,
   onlyRelativePaths,
+  POOL_LIMITS,
+  POOL_PROVIDER_OF_RUNTIME,
+  RuntimeInfo,
+  SERVER_ONLY_SESSION_EVENTS,
+  type SessionAccount,
+  type SessionAccountLimitedFrame,
   type SessionEvent,
   SessionTitle,
   type SessionVisibilityKind,
@@ -26,6 +33,7 @@ import {
   type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
+  accountPoolAccounts,
   agents,
   conversations,
   deviceCommands,
@@ -43,10 +51,30 @@ import {
 } from "@ocw/db";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
+import { z } from "zod";
 import type { Jobs } from "../../lib/jobs";
+import {
+  type AccountPoolPort,
+  cooldownUntil,
+  earliestPoolReset,
+  everyAccountLimitedSentence,
+  markLimited,
+  markNeedsSignIn,
+  noAccountSentence,
+  type PoolAccountRow,
+  type StoredSessionAccount,
+  storedSessionAccount,
+  usableFor,
+} from "../account-pool";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
-import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
+import {
+  CommandUndeliverableError,
+  type DeviceCommandRow,
+  type DeviceHub,
+  type DeviceRef,
+  type DeviceSessionHandler,
+} from "../device";
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
@@ -129,6 +157,38 @@ const UNDELIVERED_PROMPT = new Map<string, string>([
   ["frame_too_large", "The images are too large to send to the device"],
 ]);
 
+/** 07.18 (PD-02): the hub-origin reason of a command whose pool token could not be opened at send time. */
+const ACCOUNT_UNAVAILABLE = "account_unavailable";
+
+/** `ensureAccount`'s answer: the account a command names (undefined = no pool support, null = the device's login). */
+type AccountCheck =
+  | { ok: true; account: StoredSessionAccount | null | undefined }
+  | { ok: false; message: string };
+
+/** What `prepareCommand` hands to `hydrateCommand` (memory only, never stored). */
+interface CommandPlan {
+  images: PromptImagesPlan | undefined;
+  account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
+}
+
+/** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
+function tokenAccountOf(
+  payload: Record<string, unknown>,
+): Extract<StoredSessionAccount, { kind: "token" }> | null {
+  const a = payload.account;
+  if (typeof a !== "object" || a === null) return null;
+  const { kind, accountId, label } = a as Record<string, unknown>;
+  if (
+    kind !== "token" ||
+    typeof accountId !== "string" ||
+    !UUID_RE.test(accountId) ||
+    typeof label !== "string"
+  ) {
+    return null;
+  }
+  return { kind, accountId, label };
+}
+
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
 type ApprovalRow = typeof workApprovals.$inferSelect;
@@ -168,6 +228,12 @@ export interface WorkSessionDeps {
    * summary job in the same transaction; the job decides (consent, linked team project, new work). Null = no jobs.
    */
   jobs?: Pick<Jobs, "sendInTx"> | null;
+  /**
+   * Phase 07.18 (D-02, D-05, PD-02, PD-06): the organization's account pool. A session on a pool-capable device starts
+   * on an account the strategy chose, keeps it while it serves, and its device gets the token only in the frame sent.
+   * Null = no pool (services built directly in unit tests): every session runs on its device's own login.
+   */
+  pool?: AccountPoolPort | null;
 }
 
 /**
@@ -184,6 +250,11 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   constructor(private readonly deps: WorkSessionDeps) {
     this.background = new OrgQueue({ log: deps.log, ...deps.background });
+  }
+
+  /** 07.18: the account pool `createWorkSession` selects from (null = no pool: the device's own login). */
+  get pool(): AccountPoolPort | null {
+    return this.deps.pool ?? null;
   }
 
   /** Resolves once the background work of the organization (or of every organization) is done (tests, perf). */
@@ -260,10 +331,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceOwner: devices.ownerUserId,
         unitPath: orgUnits.path,
         access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
+        poolId: accountPoolAccounts.id,
+        poolLabel: accountPoolAccounts.label,
+        poolProvider: accountPoolAccounts.provider,
       })
       .from(workSessions)
       .innerJoin(projects, eq(projects.id, workSessions.projectId))
       .innerJoin(devices, eq(devices.id, workSessions.deviceId))
+      .leftJoin(accountPoolAccounts, eq(accountPoolAccounts.id, workSessions.poolAccountId))
       .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, workSessions.projectId))
       .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
       .where(filter)
@@ -300,7 +375,19 @@ export class WorkSessionService implements DeviceSessionHandler {
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
     const since = new Map(running.map((r) => [r.id, r.since]));
     return rows.map(
-      ({ s, projectName, deviceName, deviceStatus, deviceRevoked, deviceOwner, unitPath, access }) => {
+      ({
+        s,
+        projectName,
+        deviceName,
+        deviceStatus,
+        deviceRevoked,
+        deviceOwner,
+        unitPath,
+        access,
+        poolId,
+        poolLabel,
+        poolProvider,
+      }) => {
         const effective = EffectiveSessionSettings.safeParse(s.effectiveSettings);
         const diffStat = DiffStat.safeParse(s.diffStat);
         const summary = summaries.get(s.id);
@@ -344,6 +431,11 @@ export class WorkSessionService implements DeviceSessionHandler {
           createdAt: new Date(s.createdAt).toISOString(),
           updatedAt: new Date(s.updatedAt).toISOString(),
           startedByAgent: agentRefOf(s.startedByAgentId, starters),
+          // 07.18 (D-11, PD-19): the account's label only; null = the device's own login.
+          poolAccount:
+            poolId !== null && poolLabel !== null && poolProvider !== null
+              ? { id: poolId, label: poolLabel, provider: poolProvider }
+              : null,
         };
         return {
           dto,
@@ -694,6 +786,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       .from(projects)
       .where(eq(projects.id, s.projectId));
     const requested = requestedSettings(s);
+    const account = await this.commandAccount(tx, s);
     return {
       projectLocalId: p?.localId ?? "",
       runtime: s.runtime,
@@ -704,11 +797,33 @@ export class WorkSessionService implements DeviceSessionHandler {
       ...(requested.contextWindow ? { contextWindow: requested.contextWindow } : {}),
       ...(s.worktree ? { worktree: true } : {}),
       ...(s.runtimeSessionId ? { resumeRuntimeSessionId: s.runtimeSessionId } : {}),
+      // 07.18 (PD-02, PD-03): the stored form only (no token); absent for a device without pool support.
+      ...(account !== undefined ? { account } : {}),
     };
   }
 
-  /** (Re)attach the session to a runtime on its device. */
+  /**
+   * The account a command of this session names (PD-03): undefined for a device without pool support (the key is
+   * left out, so an older daemon sees today's payload), null for the device's own login, else the stored form.
+   */
+  private async commandAccount(
+    tx: Tx,
+    s: Pick<SessionRow, "deviceId" | "poolAccountId">,
+  ): Promise<StoredSessionAccount | null | undefined> {
+    if (!this.deps.pool) return undefined;
+    const [d] = await tx
+      .select({ version: devices.accountPoolVersion })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId));
+    if (!d || d.version === null) return undefined;
+    if (s.poolAccountId === null) return null;
+    const row = await this.deps.pool.get(tx, s.poolAccountId);
+    return row ? storedSessionAccount(row) : null;
+  }
+
+  /** (Re)attach the session to a runtime on its device (07.18: on an account that can serve, PD-06). */
   async restart(tx: Tx, s: SessionRow): Promise<void> {
+    await this.ensureAccount(tx, s);
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
@@ -731,6 +846,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       .limit(1);
     if (inflight.length > 0) return null;
     let policy: WorkZonePolicy | undefined;
+    let account: AccountCheck | undefined;
     for (;;) {
       const [next] = await tx
         .select()
@@ -777,6 +893,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         await this.refusePrompt(tx, s, next, "images_not_supported");
         continue;
       }
+      // 07.18 (PD-06, PD-16): the session's account, replaced first when it can no longer serve; none at all (fallback
+      // off, or the device's own login is not signed in) refuses the turn with the no_account sentence.
+      account ??= await this.ensureAccount(tx, s);
+      if (!account.ok) {
+        await this.refusePrompt(tx, s, next, "no_account");
+        await this.setStatus(tx, s, s.status, { lastError: account.message });
+        continue;
+      }
       const [dispatched] = await tx
         .update(workPrompts)
         .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
@@ -792,6 +916,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           text: next.body,
           permissionMode: mode,
           ...(images.length > 0 ? { imageAttachmentIds: images.map((a) => a.id) } : {}),
+          // 07.18 (PD-02, PD-03): the stored form; the token is added at send time only.
+          ...(account.account !== undefined ? { account: account.account } : {}),
         },
       });
       // D-04: every turn's effective mode is audited (actor = the prompt's author, device, session, org).
@@ -821,6 +947,147 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
+   * 07.18 (D-05, PD-06, PD-16): call with the session row LOCKED, before a turn or a (re)start is enqueued. A session
+   * keeps its account while it can serve; one removed, disabled, needing a new sign-in, cooling or of another kind is
+   * replaced by the strategy's next usable account, else by the device's own login under fallback when that login is
+   * signed in, else refused. A session on the device's own login stays there (a limit moves it: plan 10). `account`
+   * is what the command names: undefined for a device without pool support (no key at all), null for the device's
+   * own login.
+   */
+  private async ensureAccount(tx: Tx, s: SessionRow): Promise<AccountCheck> {
+    const pool = this.deps.pool;
+    if (!pool) return { ok: true, account: undefined };
+    const device = await this.deviceAccountState(tx, s);
+    if (!device.pool) return { ok: true, account: undefined };
+    if (s.poolAccountId === null) return { ok: true, account: null };
+    const provider = POOL_PROVIDER_OF_RUNTIME[s.runtime];
+    const now = new Date();
+    const current = await pool.get(tx, s.poolAccountId);
+    const { scope } = await pool.policy(tx, provider);
+    const stored = current ? storedSessionAccount(current) : null;
+    if (
+      current &&
+      stored &&
+      current.provider === provider &&
+      usableFor(current, { deviceId: s.deviceId, consumer: "work_zone", scope, now })
+    ) {
+      return { ok: true, account: stored };
+    }
+    // Must change. A limit (cooling, otherwise fine) says until when; anything else is "no longer available".
+    const until =
+      current?.cooldownUntil && new Date(current.cooldownUntil).getTime() > now.getTime()
+        ? new Date(current.cooldownUntil)
+        : null;
+    const limited =
+      until !== null && current?.removedAt === null && current.enabled && current.credentialState === "ok";
+    const change = { from: current, reason: (limited ? "limit" : "unavailable") as AccountSwitchReason };
+    const picked = await pool.select(tx, {
+      provider,
+      deviceId: s.deviceId,
+      consumer: "work_zone",
+      now,
+      exclude: [s.poolAccountId],
+    });
+    if ("row" in picked) {
+      const next = storedSessionAccount(picked.row);
+      if (next) {
+        await this.switchAccount(tx, s, { ...change, to: picked.row, until: limited ? until : null });
+        return { ok: true, account: next };
+      }
+    }
+    if (picked.policy.fallbackToDeviceLogin && device.loggedIn) {
+      await this.switchAccount(tx, s, { ...change, to: null, until: limited ? until : null });
+      return { ok: true, account: null };
+    }
+    return { ok: false, message: noAccountSentence("none" in picked ? picked.earliestReset : null) };
+  }
+
+  /**
+   * 07.18 (PD-04, PD-16): whether the session's device runs sessions on pool accounts (`hello.accountPool`), and whether
+   * the session's runtime reports a login of its own there (the fallback).
+   */
+  private async deviceAccountState(
+    tx: Tx,
+    s: Pick<SessionRow, "deviceId" | "runtime">,
+  ): Promise<{ pool: boolean; loggedIn: boolean }> {
+    const [d] = await tx
+      .select({ version: devices.accountPoolVersion, runtimeInfo: devices.runtimeInfo })
+      .from(devices)
+      .where(eq(devices.id, s.deviceId));
+    if (!d || d.version === null) return { pool: false, loggedIn: false };
+    const runtime = z
+      .array(RuntimeInfo)
+      .catch([])
+      .parse(d.runtimeInfo)
+      .find((r) => r.id === s.runtime);
+    return { pool: true, loggedIn: runtime?.loggedIn === true };
+  }
+
+  /**
+   * 07.18 (D-05, D-08, PD-14): moves a LOCKED session to another account (`to` null = the device's own login): the
+   * row, one `account.switched` event on `ws:<id>` (labels only), one `account_pool.switched` audit row (ids, labels,
+   * reason, until; never a token), `lastError` cleared, the session emitted. Plan 10 calls it for limits.
+   */
+  async switchAccount(
+    tx: Tx,
+    s: SessionRow,
+    change: {
+      from: PoolAccountRow | null;
+      to: PoolAccountRow | null;
+      reason: AccountSwitchReason;
+      until: Date | null;
+    },
+  ): Promise<void> {
+    const toId = change.to?.id ?? null;
+    await tx
+      .update(workSessions)
+      .set({ poolAccountId: toId, lastError: null, updatedAt: sql`now()` })
+      .where(eq(workSessions.id, s.id));
+    const fromAccountId = s.poolAccountId;
+    s.poolAccountId = toId;
+    s.lastError = null;
+    const labels = {
+      fromLabel: change.from?.label.slice(0, 120) ?? null,
+      toLabel: change.to?.label.slice(0, 120) ?? null,
+    };
+    const until = change.until?.toISOString() ?? null;
+    const event: SessionEvent = { type: "account.switched", ...labels, reason: change.reason, until };
+    await this.deps.realtime.appendEvent(tx, wsTopic(s.id), EventTypes.workSessionEvent, {
+      at: new Date().toISOString(),
+      event,
+    });
+    await this.deps.audit.record(tx, {
+      action: "account_pool.switched",
+      resourceType: "work_session",
+      resourceId: s.id,
+      sessionId: s.id,
+      deviceId: s.deviceId,
+      metadata: {
+        provider: POOL_PROVIDER_OF_RUNTIME[s.runtime],
+        fromAccountId,
+        toAccountId: toId,
+        ...labels,
+        reason: change.reason,
+        until,
+      },
+    });
+    await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.18 (PD-02): the hub could not open the pool token a command named. A live account whose seal does not open
+   * needs its token entered again (`needs_sign_in`), so the next check moves the session on and never loops on it.
+   */
+  private async accountUnavailable(tx: Tx, cmd: DeviceCommandRow): Promise<void> {
+    const stored = tokenAccountOf(cmd.payload);
+    if (!stored) return;
+    await tx
+      .update(accountPoolAccounts)
+      .set({ credentialState: "needs_sign_in", updatedAt: sql`now()` })
+      .where(and(eq(accountPoolAccounts.id, stored.accountId), isNull(accountPoolAccounts.removedAt)));
+  }
+
+  /**
    * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them; 07.16
    * Pitfall 10, `bot_not_allowed`: the bot's profile is not active for this turn): failed, audited, never sent; the
    * arbiter moves to the next prompt.
@@ -829,7 +1096,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     tx: Tx,
     s: SessionRow,
     p: PromptRow,
-    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed",
+    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed" | "no_account",
   ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
@@ -1337,18 +1604,50 @@ export class WorkSessionService implements DeviceSessionHandler {
     });
   }
 
-  /** 06.1-02 (P-03): a prompt's images, chosen inside the hub's flush transaction (database work only). */
+  /**
+   * Inside the hub's flush transaction (database work only): 06.1-02 (P-03) a prompt's images, and 07.18 (PD-02) the
+   * token of the pool account a `session.start` or `prompt` names, opened from the secret store. The plan lives in
+   * memory only; undefined when the stored payload is sent as is.
+   */
   async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
-    return preparePromptImages(tx, cmd);
+    const images = await preparePromptImages(tx, cmd);
+    const account = await this.prepareAccount(tx, cmd);
+    if (images === undefined && account === undefined) return undefined;
+    return { images, account } satisfies CommandPlan;
   }
 
-  /** 06.1-02 (P-03): the image bytes, read after the flush transaction committed; never stored. */
+  /**
+   * 07.18 (PD-02): a command naming a token account gets its token, or `{ token: null }` when it cannot be opened
+   * (removed, no secret, a seal that does not open). Only commands of this device are flushed here, and the account is
+   * the one the API itself wrote into the stored payload.
+   */
+  private async prepareAccount(tx: Tx, cmd: DeviceCommandRow): Promise<CommandPlan["account"]> {
+    if (!this.deps.pool || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    const stored = tokenAccountOf(cmd.payload);
+    if (!stored) return undefined;
+    const row = await this.deps.pool.get(tx, stored.accountId);
+    const token = row && row.kind === "token" ? await this.deps.pool.open(tx, row) : null;
+    return { stored, token };
+  }
+
+  /**
+   * After the flush transaction committed: 06.1-02 the image bytes, then 07.18 (PD-02) the token added to the copy that
+   * is sent. Never written back. A token that could not be opened fails the command `account_unavailable`.
+   */
   async hydrateCommand(
     _device: DeviceRef,
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    return hydratePromptImages(this.deps.storage ?? null, cmd, plan as PromptImagesPlan);
+    const { images, account } = plan as CommandPlan;
+    if (account && account.token === null) {
+      throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
+    }
+    const payload = images ? await hydratePromptImages(this.deps.storage ?? null, cmd, images) : cmd.payload;
+    if (!account?.token) return payload;
+    // The sent copy only: `SessionAccount` with the token, on its way to this session's own device.
+    const sent: SessionAccount = { ...account.stored, oauthToken: account.token };
+    return { ...payload, account: sent };
   }
 
   async onCommandResult(
@@ -1374,6 +1673,12 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       }
       if (cmd.kind === "session.start") {
+        if (!ok && origin === "hub" && error === ACCOUNT_UNAVAILABLE && s.status !== "archived") {
+          // 07.18 (PD-02): never sent; start again on an account whose token opens.
+          await this.accountUnavailable(tx, cmd);
+          await this.restart(tx, s);
+          return;
+        }
         if (!ok) {
           // Quick 261119-ngw: a worktree the device refused because the project has no git teaches the API that it
           // has none (an older daemon may never have said so), so the next bot start there runs in place.
@@ -1429,6 +1734,20 @@ export class WorkSessionService implements DeviceSessionHandler {
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
+        if (origin === "hub" && error === ACCOUNT_UNAVAILABLE) {
+          // 07.18 (PD-02): the prompt was never sent. Back at its place in the queue, never failed; the arbiter's
+          // account check moves the session to the next account before it is dispatched again.
+          await this.accountUnavailable(tx, cmd);
+          const [p] = await tx
+            .update(workPrompts)
+            .set({ status: "queued", dispatchedAt: null })
+            .where(and(eq(workPrompts.id, promptId), inArray(workPrompts.status, IN_FLIGHT)))
+            .returning();
+          if (p) await this.emitPrompt(tx, p);
+          if (s.status === "running") await this.setStatus(tx, s, "idle");
+          await this.tryDispatch(tx, s);
+          return;
+        }
         const undelivered = origin === "hub" ? UNDELIVERED_PROMPT.get(error ?? "") : undefined;
         if (undelivered) {
           await this.promptUndelivered(tx, s, promptId, error as UndeliveredReason, undelivered);
@@ -1633,8 +1952,114 @@ export class WorkSessionService implements DeviceSessionHandler {
     });
   }
 
+  /**
+   * 07.18 (D-06, D-07, D-08, PD-05, PD-08, PD-15, PD-16; E4, E11, E17): the device says the account of one of its
+   * sessions reached its limit, before the turn's `prompt.completed`. The frame acts only when the session is this
+   * device's, active, and uses exactly that account (null = the device's own login); anything else changes nothing.
+   * The account cools until its reset (`auth_failed`: needs a new sign-in instead). When the frame names the turn still
+   * in flight and it has switched fewer than `POOL_LIMITS.switchesPerTurn` times, the turn goes back to its place in the
+   * queue (`account_switches + 1`) and the session moves to the strategy's next usable account (or, under fallback, to
+   * the device's own signed-in login): the device's following `prompt.completed` finds nothing in flight and the arbiter
+   * dispatches the same prompt again with the new account. Otherwise the turn fails as the device reports it and
+   * `lastError` says why, with the earliest reset. A replayed frame changes nothing more: the session no longer uses
+   * the account it names, or the account already cools until that reset.
+   */
+  async onAccountLimited(device: DeviceRef, frame: SessionAccountLimitedFrame): Promise<void> {
+    const pool = this.deps.pool;
+    if (!pool || !UUID_RE.test(frame.sessionId)) return;
+    await this.deps.db.withTenant(this.sys(device), async (tx) => {
+      const s = await this.lock(tx, frame.sessionId);
+      if (!s || s.deviceId !== device.deviceId || !ACTIVE_STATES.includes(s.status)) return;
+      // E11 (T-07.18-10-01): only the account this very session uses; another account, slot or organization is inert.
+      if (frame.accountId !== s.poolAccountId) return;
+      const state = await this.deviceAccountState(tx, s);
+      if (!state.pool) return;
+      const provider = POOL_PROVIDER_OF_RUNTIME[s.runtime];
+      const now = new Date();
+      const resetsAt = frame.resetsAt ? new Date(frame.resetsAt) : null;
+      const authFailed = frame.reason === "auth_failed";
+      let from: PoolAccountRow | null = null;
+      let until: Date | null = null;
+      if (s.poolAccountId !== null) {
+        from = await pool.get(tx, s.poolAccountId);
+        if (!from || from.provider !== provider) return;
+        const report = { account: from, now, deviceId: device.deviceId, sessionId: s.id };
+        until = authFailed
+          ? (await markNeedsSignIn(tx, this.deps.audit, report)).until
+          : (await markLimited(tx, this.deps.audit, { ...report, reason: frame.reason, resetsAt })).until;
+      } else if (!authFailed && resetsAt) {
+        // The device's own login has no row to cool; the switch line still says until when it is limited.
+        until = cooldownUntil(resetsAt, now);
+      }
+      // Only the turn still in flight is re-run; a frame for a finished or unknown prompt only cools the account.
+      if (frame.promptId === null || !UUID_RE.test(frame.promptId)) return;
+      const [p] = await tx
+        .select()
+        .from(workPrompts)
+        .where(
+          and(
+            eq(workPrompts.id, frame.promptId),
+            eq(workPrompts.workSessionId, s.id),
+            inArray(workPrompts.status, IN_FLIGHT),
+          ),
+        );
+      if (!p) return;
+      if (p.accountSwitches >= POOL_LIMITS.switchesPerTurn) {
+        // PD-15, E4: the turn already moved three times; it fails as the device reports it.
+        const earliest = await earliestPoolReset(tx, {
+          provider,
+          deviceId: s.deviceId,
+          consumer: "work_zone",
+          now,
+        });
+        await this.setStatus(tx, s, s.status, { lastError: everyAccountLimitedSentence(earliest) });
+        return;
+      }
+      const picked = await pool.select(tx, {
+        provider,
+        deviceId: s.deviceId,
+        consumer: "work_zone",
+        now,
+        exclude: from ? [from.id] : [],
+      });
+      // undefined = nowhere to go; null = the device's own login (PD-16), never when that login is what was limited.
+      let to: PoolAccountRow | null | undefined;
+      if ("row" in picked && storedSessionAccount(picked.row)) to = picked.row;
+      else if (from !== null && picked.policy.fallbackToDeviceLogin && state.loggedIn) to = null;
+      if (to === undefined) {
+        // PD-16: no account for this turn; it fails as the device reports it. A session on the device's own login in an
+        // organization without a pool keeps the runtime's own error.
+        if ("none" in picked && (from !== null || !picked.poolEmpty)) {
+          await this.setStatus(tx, s, s.status, { lastError: noAccountSentence(picked.earliestReset) });
+        }
+        return;
+      }
+      const [requeued] = await tx
+        .update(workPrompts)
+        .set({ status: "queued", dispatchedAt: null, accountSwitches: p.accountSwitches + 1 })
+        .where(and(eq(workPrompts.id, p.id), inArray(workPrompts.status, IN_FLIGHT)))
+        .returning();
+      if (requeued) await this.emitPrompt(tx, requeued);
+      await this.switchAccount(tx, s, {
+        from,
+        to,
+        reason: authFailed ? "unavailable" : "limit",
+        until: authFailed ? null : until,
+      });
+    });
+  }
+
   async onEvent(device: DeviceRef, frame: EventFrame): Promise<void> {
     const ev = frame.event;
+    // 07.18 (PD-14, E12, T-07.18-10-04): only the API writes these (e.g. `account.switched`); a device's is dropped
+    // before it reaches the session's stream. Logged with the session id and the type, never the event body.
+    if (SERVER_ONLY_SESSION_EVENTS.has(ev.type)) {
+      this.deps.log.warn(
+        { workSessionId: frame.sessionId, type: ev.type },
+        "dropped a server-only session event sent by a device",
+      );
+      return;
+    }
     if (ev.type === "assistant.delta") {
       // Ephemeral: never persisted. The device link is per-device, so only this device's sessions reach here,
       // but check ownership cheaply before fan-out.

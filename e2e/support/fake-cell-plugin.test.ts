@@ -11,6 +11,7 @@ import {
   type TaskEventPayload,
   turnAttachmentsSuffix,
 } from "./fake-cell-plugin";
+import { type FakeDeviceAuthServer, startFakeDeviceAuthServer } from "./fake-device-auth-server";
 
 /**
  * 07.8-08: the fake cell's confined tool calls, against a stub Agent Channel. A success renders the result; a refusal
@@ -1812,5 +1813,144 @@ describe("FakeCellPlugin long tasks (07.17.1.1.2-13, D-02, D-14, PD-17)", () => 
         args: { progress: "Read 1 of 4", nextStep: "Read 2 of 4", afterSeconds: 600 },
       },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------- 07.18-16: account pool profiles (PD-12, E14, E15)
+
+describe("FakeCellPlugin account pool profiles (07.18-16, PD-12, E14, E15)", () => {
+  const OWNER = { email: "owner@acme.test", planType: "pro" };
+  const POOL_PROFILE = "openai:pool-00000000-0000-4000-8000-0000000000f1";
+  const DEFAULT_PROFILE = `openai:${OWNER.email}`;
+  const CODEX_LISTED = { subscriptions: [{ id: "openai-codex", kind: "", runtimeProvider: "", models: [] }] };
+  const FLOW_1 = "00000000-0000-4000-8000-0000000001f1";
+  const FLOW_2 = "00000000-0000-4000-8000-0000000001f2";
+  let auth: FakeDeviceAuthServer;
+
+  beforeAll(async () => {
+    auth = await startFakeDeviceAuthServer(OWNER);
+    answers["/agent-channel/v1/provider-auth"] = [200, { ok: true }];
+  });
+  afterAll(async () => {
+    await auth.close();
+  });
+
+  const cellOf = (profiles: boolean) =>
+    new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      deviceAuth: { serverUrl: auth.url, pollMs: 20, ...(profiles ? { profiles: true } : {}) },
+    });
+
+  /** One device-code sign-in the API asked for (`provider.auth.start`), approved on the fake server. */
+  async function signIn(cell: FakeCellPlugin, flowId: string, profileId?: string) {
+    await cell.onEvent(
+      "provider.auth.start",
+      asEvent({
+        seq: 1,
+        type: "provider.auth.start",
+        flowId,
+        provider: "openai-codex",
+        method: "device-code",
+        startBefore: new Date(Date.now() + 60_000).toISOString(),
+        ...(profileId ? { profileId } : {}),
+      }),
+    );
+    const report = (state: string) =>
+      cell.authReports.find((r) => r.body.flowId === flowId && r.body.state === state)?.body;
+    await cell.waitUntil(() => report("pending") !== undefined, 5_000);
+    expect(auth.approve(String(report("pending")?.userCode))).toBe(true);
+    await cell.waitUntil(() => report("connected") !== undefined, 5_000);
+    return report("connected") as Record<string, unknown>;
+  }
+
+  it("a start with a profile id is reported connected with that profile id and held under it", async () => {
+    const cell = cellOf(true);
+    const connected = await signIn(cell, FLOW_1, POOL_PROFILE);
+    expect(connected).toEqual({
+      provider: "openai-codex",
+      flowId: FLOW_1,
+      state: "connected",
+      account: OWNER,
+      profileId: POOL_PROFILE,
+    });
+    expect(cell.profiles("openai-codex").map((p) => p.profileId)).toEqual([POOL_PROFILE]);
+    expect(cell.credentials.get("openai-codex")).toEqual(OWNER);
+  });
+
+  it("a start without one is held as openai:<email> and reported with it; a pre-07.18 cell reports none", async () => {
+    const cell = cellOf(true);
+    expect((await signIn(cell, FLOW_1)).profileId).toBe(DEFAULT_PROFILE);
+    expect(cell.profiles("openai-codex").map((p) => p.profileId)).toEqual([DEFAULT_PROFILE]);
+
+    // Without `profiles` the fake keeps its pre-07.18 behaviour: one sign-in per provider, no profile id, no list.
+    const old = cellOf(false);
+    const connected = await signIn(old, FLOW_2);
+    expect(connected).toEqual({
+      provider: "openai-codex",
+      flowId: FLOW_2,
+      state: "connected",
+      account: OWNER,
+    });
+    expect(old.credentials.get("openai-codex")).toEqual(OWNER);
+    expect(old.profiles("openai-codex")).toEqual([]);
+  });
+
+  it("profiles() lists every held profile in a credential state report, sent when the list changes for a listed subscription", async () => {
+    const cell = cellOf(true);
+    cell.holdProfile("openai-codex", DEFAULT_PROFILE, OWNER);
+    await signIn(cell, FLOW_1, POOL_PROFILE);
+    const both = [
+      { profileId: DEFAULT_PROFILE, email: OWNER.email, planType: OWNER.planType, usable: true },
+      { profileId: POOL_PROFILE, email: OWNER.email, planType: OWNER.planType, usable: true },
+    ];
+    expect(cell.profiles("openai-codex")).toEqual(both);
+
+    const from = cell.authReports.length;
+    // Not listed in the snapshot (no subscription row, or the pool keeps bots off it): nothing to report.
+    await cell.syncProfiles({ subscriptions: [] });
+    expect(cell.authReports).toHaveLength(from);
+    await cell.syncProfiles(CODEX_LISTED);
+    expect(cell.authReports.slice(from).map((r) => r.body)).toEqual([
+      { provider: "openai-codex", flowId: null, state: "connected", account: OWNER, profiles: both },
+    ]);
+    // Unchanged: no second report.
+    await cell.syncProfiles(CODEX_LISTED);
+    expect(cell.authReports).toHaveLength(from + 1);
+  });
+
+  it("a revoke with profile ids drops only those and reports what is left; one without drops every profile", async () => {
+    const cell = cellOf(true);
+    cell.holdProfile("openai-codex", DEFAULT_PROFILE, OWNER);
+    cell.holdProfile("openai-codex", POOL_PROFILE, OWNER);
+    const from = cell.authReports.length;
+    const revoke = (extra: Record<string, unknown>) =>
+      cell.onEvent(
+        "provider.auth.revoke",
+        asEvent({ seq: 2, type: "provider.auth.revoke", provider: "openai-codex", ...extra }),
+      );
+
+    await revoke({ profileIds: [POOL_PROFILE] });
+    expect(cell.profiles("openai-codex").map((p) => p.profileId)).toEqual([DEFAULT_PROFILE]);
+    expect(cell.revokes).toEqual([{ provider: "openai-codex", profileIds: [POOL_PROFILE] }]);
+    expect(cell.revoked).toEqual([]);
+    expect(cell.credentials.get("openai-codex")).toEqual(OWNER);
+    expect(cell.authReports.slice(from).map((r) => r.body)).toEqual([
+      {
+        provider: "openai-codex",
+        flowId: null,
+        state: "connected",
+        account: OWNER,
+        profiles: [
+          { profileId: DEFAULT_PROFILE, email: OWNER.email, planType: OWNER.planType, usable: true },
+        ],
+      },
+    ]);
+
+    await revoke({});
+    expect(cell.profiles("openai-codex")).toEqual([]);
+    expect(cell.revokes.at(-1)).toEqual({ provider: "openai-codex", profileIds: null });
+    expect(cell.revoked).toEqual(["openai-codex"]);
+    expect(cell.credentials.has("openai-codex")).toBe(false);
   });
 });

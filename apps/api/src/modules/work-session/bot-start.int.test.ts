@@ -256,6 +256,8 @@ describe("tracer: a bot-capped session through the one createWorkSession (D-02, 
       permissionMode: "default",
       worktree: false,
       visibility: "project",
+      // 07.18-09: no pool support on this daemon, so the device's own login.
+      poolAccountId: null,
     });
     const [queued] = await auditOf("work_prompt.queued", id);
     expect(Object.keys(queued!.metadata).sort()).toEqual([

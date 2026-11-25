@@ -41,13 +41,16 @@ export interface SecretsService {
        * `<orgId>:<userId>:browser:<agentId>:<siteKey>`; only `browser/sessions.ts` seals and opens it.
        * `webhook_secret`: an inbound webhook endpoint's Standard Webhooks signing secret (Phase 07.6, D-02, D-07), AAD
        * `<orgId>:webhook_endpoint:<endpointId>`; only `automation/webhooks.ts` and `webhook-routes.ts` seal and open it.
+       * `pool_token`: a Claude setup-token of the organization's account pool (Phase 07.18, PD-21, ADR-0044), AAD
+       * `<orgId>:account_pool:<accountId>`; only `account-pool/tokens.ts` seals and opens it.
        */
       kind:
         | "user_model_credential"
         | "connector_credential"
         | "vault_item"
         | "browser_session"
-        | "webhook_secret";
+        | "webhook_secret"
+        | "pool_token";
       provider?: string | null;
       value: string;
       aad: string;

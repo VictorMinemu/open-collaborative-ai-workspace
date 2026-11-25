@@ -39,6 +39,16 @@ describe("redactSecrets()", () => {
     );
   });
 
+  it("drops a Claude setup-token passed as CLAUDE_CODE_OAUTH_TOKEN (07.18 D-13), in env and JSON text", () => {
+    const token = fake("sk-", "ant-", "oat01-", "abcdefghijKLMNOPQRST0123456789_-uvwxyzAB");
+    const env = redactSecrets(`CLAUDE_CODE_OAUTH_TOKEN=${token}`);
+    expect(env).toBe("CLAUDE_CODE_OAUTH_TOKEN=[REDACTED:anthropic-key]");
+    expect(env).not.toContain("oat01-");
+    const json = redactSecrets(JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: token } }));
+    expect(json).toBe('{"env":{"CLAUDE_CODE_OAUTH_TOKEN":"[REDACTED:anthropic-key]"}}');
+    expect(json).not.toContain(token);
+  });
+
   it("returns empty and secret-free text unchanged", () => {
     expect(redactSecrets("")).toBe("");
     expect(redactSecrets("const API_KEY: z.string();")).toBe("const API_KEY: z.string();");

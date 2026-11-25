@@ -90,6 +90,126 @@ describe("planReconcile", () => {
     expect(plan.changed).toBe(false);
   });
 
+  it("07.18: with Claude pool tokens the anthropic entry drops its key (the key is the last profile)", () => {
+    const token = ["sk-ant", "oat01", "AAAAAAAAAAAAAAAAAAAAAAAA"].join("-");
+    const accountPool = {
+      claude: {
+        order: null,
+        tokens: [
+          {
+            accountId: "0199a000-0000-7000-8000-0000000000a1",
+            profileId: "anthropic:pool-0199a000-0000-7000-8000-0000000000a1",
+            envName: "OCW_POOL_TOKEN_0199A0000000700080000000000000A1",
+            token,
+          },
+        ],
+        apiKeyLast: true,
+      },
+      chatgpt: { order: null, profiles: [] },
+    };
+    const cell = { agents: [agent("a")], providers: [ANTHROPIC, FAKE], accountPool };
+    const plan = planReconcile({}, cell);
+    expect(plan.upsertProviders.anthropic).toEqual({
+      baseUrl: "https://api.anthropic.com",
+      api: "anthropic-messages",
+      apiKey: undefined,
+      models: [{ id: "claude-sonnet-5-5", name: "claude-sonnet-5-5" }],
+    });
+    // Only anthropic changes; the key still reaches the gateway env (the key profile references it).
+    expect(plan.upsertProviders.fake?.apiKey).toBe(envRef("OCW_PROVIDER_KEY_FAKE"));
+    expect(plan.env.OCW_PROVIDER_KEY_ANTHROPIC).toBe("sk-ant-SECRET");
+    expect(JSON.stringify(plan.upsertProviders)).not.toContain("sk-ant");
+
+    // Written: an existing key is removed from the entry, not merged back in.
+    const draft: MutableConfig = {
+      models: { providers: { anthropic: { ...desiredProviderEntry(ANTHROPIC), extra: 1 } } },
+    };
+    applyPlanToDraft(draft, plan);
+    expect(draft.models?.providers?.anthropic).not.toHaveProperty("apiKey");
+    expect(draft.models?.providers?.anthropic).toMatchObject({
+      extra: 1,
+      baseUrl: "https://api.anthropic.com",
+    });
+
+    // Then it matches: no further write.
+    const again = planReconcile(
+      {
+        agents: plan.upsertAgents,
+        providers: {
+          ...(draft.models?.providers as Record<string, Record<string, unknown>>),
+          ...plan.upsertProviders,
+        },
+      },
+      cell,
+    );
+    expect(again.upsertProviders).toEqual({});
+
+    // Without tokens (or without a pool): unchanged.
+    const noTokens = planReconcile(
+      {},
+      { ...cell, accountPool: { ...accountPool, claude: { ...accountPool.claude, tokens: [] } } },
+    );
+    expect(noTokens.upsertProviders.anthropic?.apiKey).toBe(envRef("OCW_PROVIDER_KEY_ANTHROPIC"));
+    expect(desiredProviderEntry(ANTHROPIC).apiKey).toBe(envRef("OCW_PROVIDER_KEY_ANTHROPIC"));
+  });
+
+  it("07.18-19 R2.1: a keyless anthropic provider with pool tokens serves Claude bots without any API key", () => {
+    const token = ["sk-ant", "oat01", "BBBBBBBBBBBBBBBBBBBBBBBB"].join("-");
+    const keyless: CellProvider = {
+      ...ANTHROPIC,
+      apiKey: null,
+      models: ["claude-sonnet-5-5", "claude-opus-5-5"],
+    };
+    const accountPool = {
+      claude: {
+        order: ["anthropic:pool-0199a000-0000-7000-8000-0000000000b1"],
+        tokens: [
+          {
+            accountId: "0199a000-0000-7000-8000-0000000000b1",
+            profileId: "anthropic:pool-0199a000-0000-7000-8000-0000000000b1",
+            envName: "OCW_POOL_TOKEN_0199A0000000700080000000000000B1",
+            token,
+          },
+        ],
+        apiKeyLast: false,
+      },
+      chatgpt: { order: null, profiles: [] },
+    };
+    const cell = { agents: [agent("a")], providers: [keyless], accountPool };
+    const plan = planReconcile({}, cell);
+    expect(plan.results).toEqual([{ agentId: "a", status: "ready" }]);
+    expect(plan.upsertAgents["ocw-a"]?.model).toEqual({
+      primary: "anthropic/claude-sonnet-5-5",
+      fallbacks: [],
+    });
+    expect(plan.upsertProviders.anthropic).toEqual({
+      baseUrl: "https://api.anthropic.com",
+      api: "anthropic-messages",
+      apiKey: undefined,
+      models: [
+        { id: "claude-sonnet-5-5", name: "claude-sonnet-5-5" },
+        { id: "claude-opus-5-5", name: "claude-opus-5-5" },
+      ],
+    });
+    // No key anywhere: not in the env, not in the entry, not as a placeholder.
+    expect(plan.env).toEqual({});
+    expect(JSON.stringify(plan.upsertProviders)).not.toContain("sk-ant");
+    expect(JSON.stringify(plan.upsertProviders)).not.toContain('"none"');
+
+    // Written once, then a no-op.
+    const draft: MutableConfig = {};
+    applyPlanToDraft(draft, plan);
+    expect(draft.models?.providers?.anthropic).not.toHaveProperty("apiKey");
+    const again = planReconcile(
+      {
+        agents: plan.upsertAgents,
+        providers: draft.models?.providers as Record<string, Record<string, unknown>>,
+      },
+      cell,
+    );
+    expect(again.changed).toBe(false);
+  });
+
   it("follows model changes and declares the model id on the provider", () => {
     const plan = planReconcile(
       { agents: { "ocw-a": desiredAgentEntry(agent("a")) } },
