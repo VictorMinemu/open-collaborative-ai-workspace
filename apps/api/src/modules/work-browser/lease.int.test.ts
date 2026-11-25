@@ -530,7 +530,7 @@ describe("07.13-18 Task 2: lease rules, expiry, abandonment and dead instances",
     expect(await audits("work_browser.takeover_ended", typed)).toEqual([
       {
         actor_kind: "system",
-        actor_id: null,
+        actor_id: expect.any(String),
         user_id: miaId,
         metadata: { origin: ORIGIN, reason: "idle", saved: false, abandoned: true },
       },

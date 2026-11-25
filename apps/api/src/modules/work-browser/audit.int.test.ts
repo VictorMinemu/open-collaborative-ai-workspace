@@ -185,9 +185,12 @@ describe("07.13-08 Task 1: a device with a browser opens a page and the Control 
   });
 });
 
-/** What the audit metadata may ever look like: the origin and enum codes, nothing else (T-07.13-08-02). */
+/**
+ * What the audit metadata may ever look like: the origin and enum codes, nothing else (T-07.13-08-02). 07.13-18 adds the
+ * takeover end's `reason` code and its `saved` / `abandoned` flags (booleans: never text).
+ */
 const METADATA_SHAPE =
-  /^\{("origin":"https?:\/\/[^/"?#]+:\d+"|"action":"[a-z]+"|"refusal":"[a-z_]+"|"failure":"[a-z_]+"|"endReason":"[a-z_]+"|,)*\}$/;
+  /^\{("origin":"https?:\/\/[^/"?#]+:\d+"|"action":"[a-z]+"|"refusal":"[a-z_]+"|"failure":"[a-z_]+"|"endReason":"[a-z_]+"|"reason":"[a-z_]+"|"saved":(true|false)|"abandoned":(true|false)|,)*\}$/;
 
 describe("07.13-08 Task 3: every browser event kind is audited with ids and the origin only", () => {
   const GITHUB = "https://github.com:443";
