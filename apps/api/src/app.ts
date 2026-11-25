@@ -359,8 +359,9 @@ export async function buildApp(
   // go to the account-pool module, next to the work-session handler the hub already has.
   deviceModule.hub.setAccountHandler(createDeviceAccountHandler(core));
   // Phase 07.13: the Work Zone browser on members' devices (beside the bots' `browser` module); its device frames
-  // (`browser.event`, live frames, sign-in loads) go to this module.
-  const workBrowser = createWorkBrowserModule(core, { hub: deviceModule.hub });
+  // (`browser.event`, live frames, sign-in loads) go to this module; 07.13-10: it serves the live view with the gateway's
+  // origins.
+  const workBrowser = createWorkBrowserModule(core, { hub: deviceModule.hub, allowedOrigins });
   deviceModule.hub.setBrowserHandler(workBrowser.deviceHandler);
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.
