@@ -284,6 +284,10 @@ Written at the end of the phase, from the decisions and every plan's SUMMARY. It
 
 ### Negative and residual risks
 
+- **One browsers folder per daemon.** At start a daemon deletes the session run folders it does not own under its
+  browsers root, so two daemons must never share one (the e2e stack gives each daemon its own folder that links the
+  pinned build from a shared cache).
+
 - **The device is the boundary (A-5, measured).** On Docker Desktop's LinuxKit kernel 6.12.76 (no Yama, so
   `ptrace_scope` is absent): `fd_open=no environ_read=yes mem_open=yes`. The CDP pipe ends are socketpairs and cannot
   be reopened through `/proc/<pid>/fd` (ENXIO). But a program running as the device's user can read the browser's
