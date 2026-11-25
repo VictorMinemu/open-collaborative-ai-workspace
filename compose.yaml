@@ -327,7 +327,8 @@ services:
   sandbox-brw-image:
     profiles: ["sandbox"]
     build:
-      context: infra/sandbox/browser
+      context: .
+      dockerfile: infra/sandbox/browser/Dockerfile
     image: ocw-sandbox-brw:${OCW_IMAGE_TAG:-local}
     scale: 0
     network_mode: none

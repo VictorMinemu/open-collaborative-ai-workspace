@@ -107,7 +107,7 @@ storage() { docker compose -p "$STORAGE_PROJECT" -f compose.yaml "$@"; }
 # variable, so the browser and egress images join once their broker plans (07.8-12/13) wire them.
 SANDBOX_IMAGES=(
   "infra/sandbox/sbx/Dockerfile infra/sandbox/sbx ocw-sandbox-sbx:e2e OCW_SANDBOX_SBX_IMAGE"
-  "infra/sandbox/browser/Dockerfile infra/sandbox/browser ocw-sandbox-brw:e2e OCW_SANDBOX_BRW_IMAGE"
+  "infra/sandbox/browser/Dockerfile . ocw-sandbox-brw:e2e OCW_SANDBOX_BRW_IMAGE"
   "infra/sandbox/egress/Dockerfile . ocw-sandbox-egress:e2e OCW_SANDBOX_EGRESS_IMAGE"
 )
 sandbox_objects() {
