@@ -2,6 +2,8 @@ import type { LiveStateFrame } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { LiveView } from "@/components/browser/live-store";
+import { LEASE_MS } from "@/components/browser/live-store";
+import type { WorkLiveView } from "@/lib/use-work-live";
 import { WorkLiveBody, workActivityOf, workPlaceholderOf } from "./work-live-panel";
 
 /**
@@ -47,8 +49,25 @@ function view(over: Partial<LiveView> = {}): LiveView {
   };
 }
 
-const render = (v: LiveView) =>
-  renderToStaticMarkup(<WorkLiveBody view={v} frames={null} deviceName="build-01" />);
+const render = (v: LiveView & Partial<Pick<WorkLiveView, "refused">>, coarse = false) =>
+  renderToStaticMarkup(<WorkLiveBody view={v} frames={null} deviceName="build-01" coarse={coarse} />);
+
+const text = (markup: string) =>
+  markup
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+
+const CONTROLLING = state({ state: "controlling", controller: "self", host: "github.com:443", secure: true });
+const controlling = (over: Partial<LiveView> = {}) =>
+  view({
+    server: CONTROLLING,
+    viewerCan: { watch: true, control: true },
+    leaseDeadline: Date.now() + LEASE_MS,
+    ...over,
+  });
 
 const PRIVATE_TAKEOVER = state({
   state: "private",
@@ -191,12 +210,21 @@ describe("WorkLivePanel on phones and in both themes", () => {
     view({ server: PRIVATE_MEMBER, hasFrame: false }),
     view({ server: ENDED_IDLE, hasFrame: false }),
     view({ server: NO_PERMISSION, hasFrame: false }),
+    view({
+      server: state({ state: "paused", pausedFor: "signin" }),
+      viewerCan: { watch: true, control: true },
+    }),
+    controlling(),
+    controlling({ leaseDeadline: Date.now() + 30_000 }),
   ];
 
-  it("every button is a 44 px target below 768 (Try again)", () => {
+  it("every button is a 44 px target below 768 (Try again, Take control, Done, Keep control, Show keyboard)", () => {
     let buttons = 0;
     for (const v of all) {
-      for (const [tag] of render(v).matchAll(/<button[^>]*>/g)) {
+      for (const [tag] of [
+        ...render(v).matchAll(/<button[^>]*>/g),
+        ...render(v, true).matchAll(/<button[^>]*>/g),
+      ]) {
         buttons++;
         expect(tag).toMatch(/max-md:h-11|max-md:min-h-11/);
       }
@@ -220,5 +248,92 @@ describe("WorkLivePanel on phones and in both themes", () => {
       expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
       expect(html).not.toMatch(/\b(bg-white|text-black|text-white)\b/);
     }
+  });
+});
+
+/** 07.13-21 (D-20, D-22, D-29, D-32): take control, the takeover bar, the two hand backs and the honest device copy. */
+describe("WorkLivePanel takeover", () => {
+  it("the person the server lets take control sees Take control on the page; nobody else does", () => {
+    const paused = state({ state: "paused", pausedFor: "signin" });
+    expect(render(view({ server: paused, viewerCan: { watch: true, control: true } }))).toContain(
+      'data-testid="work-live-take"',
+    );
+    expect(render(view({ viewerCan: { watch: true, control: true } }))).toContain("Take control");
+    expect(render(view({ server: paused }))).not.toContain('data-testid="work-live-take"');
+    // Nothing to take before the agent opens a page.
+    expect(
+      render(
+        view({
+          server: state({ state: "connecting", host: null }),
+          viewerCan: { watch: true, control: true },
+        }),
+      ),
+    ).not.toContain('data-testid="work-live-take"');
+  });
+
+  it("a pending take reads Taking control…", () => {
+    const html = render(view({ viewerCan: { watch: true, control: true }, pending: "take" }));
+    expect(text(html)).toContain("Taking control…");
+  });
+
+  it("in control: the takeover bar, Done, save my sign-in and Done", () => {
+    const html = render(controlling());
+    expect(html).toContain('data-testid="takeover-bar"');
+    expect(text(html)).toContain("You're in control. Claude Code is paused.");
+    expect(html).toContain('data-testid="work-live-save"');
+    expect(text(html)).toContain("Done, save my sign-in");
+    expect(html).toContain('data-testid="work-live-done"');
+    expect(html).not.toContain('data-testid="work-live-take"');
+  });
+
+  it("in the lease's last minute the bar asks Still there? with Keep control (warning at 9 minutes)", () => {
+    const html = render(controlling({ leaseDeadline: Date.now() + 30_000 }));
+    expect(html).toContain('data-warning="true"');
+    expect(text(html)).toMatch(/Still there\? Control goes back to Claude Code in \d+ s\./);
+    expect(html).toContain('data-testid="live-keep-control"');
+  });
+
+  it("says honestly where the sign-in is used and who controls that computer (D-29, D-32)", () => {
+    const t = text(render(controlling()));
+    expect(t).toContain(
+      "Your sign-in will be used by the agent on build-01 in your own turns only. The owner of build-01 controls that computer.",
+    );
+    expect(t).toContain("Sign-ins work only in sessions only you (and the owner of build-01) can see.");
+  });
+
+  it("the page takes input while controlled: focusable, named, described by the hint", () => {
+    const html = render(controlling());
+    expect(html).toMatch(/data-testid="work-live-frame"[^>]*role="application"/);
+    expect(html).toContain('aria-label="github.com:443, controlled by you"');
+    expect(html).toMatch(/data-testid="work-live-frame"[^>]*tabindex="0"/i);
+    expect(html).toContain('data-controlling="true"');
+  });
+
+  it("on a phone the page takes taps and a Show keyboard button focuses a hidden input", () => {
+    const html = render(controlling(), true);
+    expect(html).toContain('data-testid="work-live-show-keyboard"');
+    expect(html).toContain('data-testid="work-live-soft-input"');
+    expect(html).toContain('autoComplete="off"');
+    const masked = render(controlling({ sensitive: true }), true);
+    expect(masked).toMatch(/<input[^>]*type="password"[^>]*>/);
+  });
+
+  it("watching only: no input capture on the frame", () => {
+    const html = render(view());
+    expect(html).not.toContain('role="application"');
+    expect(html).not.toContain('data-testid="work-live-soft-input"');
+  });
+
+  it("a refused take shows its fixed sentence", () => {
+    const html = render({ ...view({ viewerCan: { watch: true, control: true } }), refused: "not_allowed" });
+    expect(html).toContain('data-testid="work-live-refused"');
+    expect(text(html)).toContain("Only the person who asked can take control here.");
+  });
+
+  it("everyone else, while someone signs in, sees only Private sign-in in progress", () => {
+    const t = text(render(view({ server: PRIVATE_TAKEOVER, hasFrame: false })));
+    expect(t).toContain("Private sign-in in progress");
+    expect(t).not.toContain("Done, save my sign-in");
+    expect(t).not.toContain("Take control");
   });
 });

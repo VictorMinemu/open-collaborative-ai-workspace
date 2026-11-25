@@ -7,7 +7,16 @@ import {
   type WorkSessionBrowserState,
   type WorkZonePolicy,
 } from "@ocw/contracts";
-import { agents, devices, orgUnits, type Tx, workBrowsers, workPrompts, workSessions } from "@ocw/db";
+import {
+  agents,
+  devices,
+  orgUnits,
+  type Tx,
+  workApprovals,
+  workBrowsers,
+  workPrompts,
+  workSessions,
+} from "@ocw/db";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { loadPrincipalFacts, type PermissionService } from "../organization";
 import { type ApprovalFacts, loadToolApprovalPolicies, resolveToolApproval } from "../tool-approval";
@@ -231,14 +240,97 @@ export async function browserApproverRule(
       )
       .orderBy(desc(workPrompts.dispatchedAt))
       .limit(1);
-    return { only: p && p.agentId === null ? p.userId : null };
+    return approverOn(request, { inFlight: p ?? null, signinUserId: null });
   }
   const [page] = await tx
     .select({ signinUserId: workBrowsers.signinUserId })
     .from(workBrowsers)
     .where(eq(workBrowsers.workSessionId, session.id))
     .limit(1);
-  if (page?.signinUserId) return { only: page.signinUserId };
+  return approverOn(request, { inFlight: null, signinUserId: page?.signinUserId ?? null });
+}
+
+/** The facts `browserApproverRule` decides on, loaded once per session. */
+interface ApproverFacts {
+  /** The session's in-flight prompt (the most recently dispatched one still running), or null. */
+  inFlight: { userId: string; agentId: string | null } | null;
+  /** `work_browsers.signin_user_id`: the member whose sign-in is loaded on the session's page. */
+  signinUserId: string | null;
+}
+
+/** `browserApproverRule` on facts already loaded (one rule for the answer route and Needs you). */
+function approverOn(request: { tool: string; browser?: unknown }, facts: ApproverFacts): BrowserApprover {
+  const browser = browserRequestOf(request.browser);
+  if (!browser && !isBrowserToolName(request.tool)) return "approve_permission";
+  if (browser?.kind === "signin") {
+    const p = facts.inFlight;
+    return { only: p && p.agentId === null ? p.userId : null };
+  }
+  if (facts.signinUserId) return { only: facts.signinUserId };
   if (browser?.kind === "signed_in_host") return { only: null };
   return "approve_permission";
+}
+
+/**
+ * Who among the people allowed `work_session.approve` may answer some pending approval of each session (07.13-21,
+ * the "Needs you" gap): `open` when one pending approval keeps the session's approve rule, `only` the people a
+ * member-only one is for (`browserApproverRule`'s rule on the same facts, batched: three queries for all sessions).
+ * A session with nothing pending is absent. "Needs you" asks a person only where the answer route would let them.
+ */
+export async function pendingApprovers(
+  tx: Tx,
+  sessionIds: readonly string[],
+): Promise<Map<string, { open: boolean; only: Set<string> }>> {
+  const out = new Map<string, { open: boolean; only: Set<string> }>();
+  if (sessionIds.length === 0) return out;
+  const ids = [...new Set(sessionIds)];
+  const [pending, pages, prompts] = await Promise.all([
+    tx
+      .select({ sessionId: workApprovals.workSessionId, request: workApprovals.request })
+      .from(workApprovals)
+      .where(and(inArray(workApprovals.workSessionId, ids), eq(workApprovals.status, "pending"))),
+    tx
+      .select({ sessionId: workBrowsers.workSessionId, signinUserId: workBrowsers.signinUserId })
+      .from(workBrowsers)
+      .where(inArray(workBrowsers.workSessionId, ids)),
+    tx
+      .select({
+        sessionId: workPrompts.workSessionId,
+        userId: workPrompts.authorUserId,
+        agentId: workPrompts.authorAgentId,
+      })
+      .from(workPrompts)
+      .where(
+        and(inArray(workPrompts.workSessionId, ids), inArray(workPrompts.status, ["dispatched", "running"])),
+      )
+      .orderBy(desc(workPrompts.dispatchedAt)),
+  ]);
+  const signin = new Map(pages.map((p) => [p.sessionId, p.signinUserId]));
+  const inFlight = new Map<string, { userId: string; agentId: string | null }>();
+  // Most recently dispatched first: the first row per session is its in-flight prompt.
+  for (const p of prompts) if (!inFlight.has(p.sessionId)) inFlight.set(p.sessionId, p);
+  for (const a of pending) {
+    const entry = out.get(a.sessionId) ?? { open: false, only: new Set<string>() };
+    const rule = approverOn(a.request, {
+      inFlight: inFlight.get(a.sessionId) ?? null,
+      signinUserId: signin.get(a.sessionId) ?? null,
+    });
+    if (rule === "approve_permission") entry.open = true;
+    else if (rule.only) entry.only.add(rule.only);
+    out.set(a.sessionId, entry);
+  }
+  return out;
+}
+
+/**
+ * Whether a person the resolver lets approve may answer one of the session's pending approvals. No pending row loaded
+ * (the count was ahead of the row) keeps the session-level decision.
+ */
+export function answersPending(
+  rules: ReadonlyMap<string, { open: boolean; only: ReadonlySet<string> }>,
+  sessionId: string,
+  userId: string,
+): boolean {
+  const r = rules.get(sessionId);
+  return !r || r.open || r.only.has(userId);
 }

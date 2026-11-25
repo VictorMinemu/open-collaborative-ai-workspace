@@ -403,6 +403,57 @@ describe("attention is decided per viewer on the list, the detail and each user:
     }
   });
 
+  it("07.13-21: a sign-in request waits on the turn's asker alone, never on the device owner or the admin", async () => {
+    // A session of its own, so Leo's last finished turn on `attn` stays the one the next case reads.
+    const sig = await startSession(leo, device, apiRepo, { title: "Sign-in run" });
+    await ok(leo.request("POST", `/api/v1/work-sessions/${sig}/prompts`, { body: "Read the PRs" }));
+    const cmd = await device.command("prompt", sig);
+    device.ack(cmd.id);
+    device.event(sig, { type: "prompt.started", promptId: cmd.payload.promptId });
+    const approvalId = randomUUID();
+    device.event(sig, {
+      type: "approval.requested",
+      approvalId,
+      tool: "mcp__ocw_browser__signin",
+      summary: "Sign in to github.com:443: to read your pull requests",
+      paths: [],
+      browser: {
+        kind: "signin",
+        origin: "https://github.com:443",
+        tool: "ocw_browser_signin",
+        reason: "to read your pull requests",
+      },
+    });
+    device.event(sig, { type: "session.state", status: "waiting_approval" });
+    await eventually(async () =>
+      ((await detail(leo, sig)).approvals as Json[]).some((a) => a.id === approvalId),
+    );
+    expect((await attentionOf(leo, sig)).approval, "Leo (asked the turn)").toBe(true);
+    for (const [name, as] of [
+      ["Dana (device owner)", dana],
+      ["Víctor (admin)", admin],
+      ["Pia (a member who may not decide)", pia],
+    ] as const) {
+      expect((await attentionOf(as, sig)).approval, name).toBe(false);
+    }
+    // The answer route agrees: the admin is refused, the asker answers.
+    const refused = await admin.request("POST", `/api/v1/work-sessions/${sig}/approvals/${approvalId}`, {
+      decision: "deny",
+    });
+    expect(refused.status).toBe(403);
+    await ok(
+      leo.request("POST", `/api/v1/work-sessions/${sig}/approvals/${approvalId}`, { decision: "deny" }),
+    );
+    for (const as of [leo, dana, admin]) expect((await attentionOf(as, sig)).approval).toBe(false);
+    device.event(sig, {
+      type: "prompt.completed",
+      promptId: cmd.payload.promptId,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    device.event(sig, { type: "session.state", status: "idle" });
+    await idle(leo, sig);
+  });
+
   it("the last finished turn waits only on the author of its prompt; a queued or running prompt changes nothing", async () => {
     const leoEnded = await endedAt("Pay the bonuses");
     expect(leoEnded, "Leo's turn has a completion time").toEqual(expect.any(String));

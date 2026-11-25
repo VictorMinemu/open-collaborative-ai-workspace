@@ -17,6 +17,11 @@ import { ProjectBadge } from "./session-rows";
  * viewer's scope with an approval the viewer may decide or the viewer's own finished turn not yet opened. Absent when
  * empty; a row leaves live with no toast and no animation. The reasons come from the API's per-viewer `attention`
  * and this browser's seen map; nothing here decides access.
+ *
+ * 07.13-21: a member-only browser approval (`request.browser.kind` `signin` or `signed_in_host`, or any while a
+ * member's sign-in is loaded) is never "Needs you" for anyone but that member: the sidebar holds no approval rows, so
+ * the API's `attention.approval` applies the answer route's own rule (`pendingApprovers`), and an admin or device owner
+ * who could not answer it is never asked.
  */
 
 /** The right slot of a one-line row with a badge: the text, its tone and an optional 12 px icon. */

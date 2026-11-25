@@ -1,6 +1,14 @@
-import type { LiveStateFrame } from "@ocw/contracts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { type LiveStateFrame, WorkLiveClientFrame } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createWorkLive, workShowsFrames, workUiStateOf } from "./use-work-live";
+import {
+  createWorkLive,
+  workCanTake,
+  workRefusalSentence,
+  workShowsFrames,
+  workUiStateOf,
+} from "./use-work-live";
 import { workLiveSocketUrl } from "./work-browser-queries";
 
 /**
@@ -26,7 +34,10 @@ class FakeSocket {
   ) {
     FakeSocket.all.push(this);
   }
-  send() {}
+  sent: unknown[] = [];
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
   close(code?: number) {
     this.closedWith = code;
     this.readyState = 3;
@@ -55,12 +66,17 @@ function state(over: Partial<LiveStateFrame> = {}): LiveStateFrame {
   } as LiveStateFrame;
 }
 
-function start() {
-  const live = createWorkLive(SID, "Claude Code", {
-    url: workLiveSocketUrl(SID, "https://api.example"),
-    getToken: async () => "jwt",
-    WebSocketCtor: FakeSocket as never,
-  });
+function start(notify?: (text: string) => void) {
+  const live = createWorkLive(
+    SID,
+    "Claude Code",
+    {
+      url: workLiveSocketUrl(SID, "https://api.example"),
+      getToken: async () => "jwt",
+      WebSocketCtor: FakeSocket as never,
+    },
+    { notify },
+  );
   live.start();
   return live;
 }
@@ -188,6 +204,134 @@ describe("workUiStateOf", () => {
     expect(workShowsFrames("reconnecting")).toBe(true);
     for (const s of ["idle", "connecting", "private", "ended", "no_permission", "error"] as const) {
       expect(workShowsFrames(s)).toBe(false);
+    }
+  });
+});
+
+/** 07.13-21 (D-20, D-22): take control, keep it, type into the page and hand it back with or without saving. */
+describe("takeover (D-20, D-22)", () => {
+  async function controllable(notify?: (text: string) => void) {
+    const live = start(notify);
+    await flush();
+    const ws = FakeSocket.all[0] as FakeSocket;
+    ws.open();
+    ws.json({ type: "viewerCan", watch: true, control: true });
+    ws.json(state({ state: "paused", pausedFor: "signin" }));
+    return { live, ws };
+  }
+
+  it("take() sends { type: take }, then a lease and the controlling state hold the countdown", async () => {
+    const { live, ws } = await controllable();
+    live.take();
+    expect(ws.sent).toEqual([{ type: "take" }]);
+    expect(live.getView().pending).toBe("take");
+    ws.json({ type: "lease", expiresAt: "2026-11-25T10:10:00.000Z" });
+    ws.json(state({ state: "controlling", controller: "self" }));
+    const v = live.getView();
+    expect(v.pending).toBeNull();
+    expect(v.leaseDeadline).not.toBeNull();
+    live.stop();
+  });
+
+  it("release(true) sends { release, save: true } and release(false) { release, save: false }; both parse", async () => {
+    const { live, ws } = await controllable();
+    live.take();
+    ws.json(state({ state: "controlling", controller: "self" }));
+    live.release(true);
+    expect(ws.sent.at(-1)).toEqual({ type: "release", save: true });
+    expect(live.getView().pending).toBe("release");
+    ws.json(state({ state: "live" }));
+    live.take();
+    ws.json(state({ state: "controlling", controller: "self" }));
+    live.release(false);
+    expect(ws.sent.at(-1)).toEqual({ type: "release", save: false });
+    for (const f of ws.sent) expect(WorkLiveClientFrame.safeParse(f).success).toBe(true);
+    live.stop();
+  });
+
+  it("a confirmed hand back says the agent continues; the lease is forgotten", async () => {
+    const notify = vi.fn();
+    const { live, ws } = await controllable(notify);
+    live.take();
+    ws.json({ type: "lease", expiresAt: "2026-11-25T10:10:00.000Z" });
+    ws.json(state({ state: "controlling", controller: "self" }));
+    live.release(true);
+    ws.json(state({ state: "live" }));
+    expect(notify).toHaveBeenCalledWith("Claude Code continues.");
+    expect(live.getView()).toMatchObject({ pending: null, leaseDeadline: null });
+    live.stop();
+  });
+
+  it("keep() and input frames go out only while this person controls the page", async () => {
+    const { live, ws } = await controllable();
+    const key = { type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 } as const;
+    live.input(key);
+    live.keep();
+    expect(ws.sent).toEqual([]);
+    live.take();
+    ws.json(state({ state: "controlling", controller: "self" }));
+    live.input(key);
+    live.input({ type: "text", text: "hunter2" });
+    live.keep();
+    expect(ws.sent).toEqual([{ type: "take" }, key, { type: "text", text: "hunter2" }, { type: "keep" }]);
+    live.stop();
+  });
+
+  it("a refused take shows the fixed sentence and keeps watching", async () => {
+    const { live, ws } = await controllable();
+    live.take();
+    ws.json({ type: "refused", op: "take", reason: "not_allowed" });
+    expect(live.getView()).toMatchObject({ pending: null, wantControl: false, refused: "not_allowed" });
+    expect(workRefusalSentence("not_allowed")).toBe("Only the person who asked can take control here.");
+    expect(workRefusalSentence("someone_else")).toBe("Someone else is in control right now.");
+    expect(workRefusalSentence("expired")).toBe("The page closed. The agent can open it again.");
+    live.stop();
+  });
+
+  it("a take asked before the socket is ready (Open and sign in) goes out once the server allows it", async () => {
+    const live = start();
+    live.take();
+    await flush();
+    const ws = FakeSocket.all[0] as FakeSocket;
+    ws.open();
+    expect(ws.sent).toEqual([]);
+    ws.json({ type: "viewerCan", watch: true, control: true });
+    ws.json(state({ state: "paused", pausedFor: "signin" }));
+    expect(ws.sent).toEqual([{ type: "take" }]);
+    expect(live.getView()).toMatchObject({ wantControl: false, pending: "take" });
+    live.stop();
+  });
+
+  it("a take asked by someone who may not control the page is refused client-side, nothing is sent", async () => {
+    const live = start();
+    live.take();
+    await flush();
+    const ws = FakeSocket.all[0] as FakeSocket;
+    ws.open();
+    ws.json({ type: "viewerCan", watch: true, control: false });
+    ws.json(state({ state: "paused", pausedFor: "signin" }));
+    expect(ws.sent).toEqual([]);
+    expect(live.getView()).toMatchObject({ wantControl: false, refused: "not_allowed" });
+    live.stop();
+  });
+
+  it("Take control is offered only with viewerCan.control on a page that is there (never idle or private)", () => {
+    const can = { viewerCan: { watch: true, control: true } };
+    expect(workCanTake(can, "live")).toBe(true);
+    expect(workCanTake(can, "paused")).toBe(true);
+    for (const s of ["idle", "connecting", "private", "controlling", "ended", "error"] as const) {
+      expect(workCanTake(can, s)).toBe(false);
+    }
+    expect(workCanTake({ viewerCan: { watch: true, control: false } }, "live")).toBe(false);
+  });
+});
+
+/** T-07.13-21-01: what a person types never reaches a log. */
+describe("no logging in the input path (P-10)", () => {
+  it("use-work-live.ts and the panel never call console", () => {
+    for (const rel of ["./use-work-live.ts", "../components/work-zone/browser/work-live-panel.tsx"]) {
+      const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+      expect(src).not.toMatch(/\bconsole\s*\./);
     }
   });
 });
