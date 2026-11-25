@@ -18,6 +18,7 @@ export {
 export { authenticateDeviceJwt } from "./auth";
 export { listGrants, loadGrants } from "./grants";
 export {
+  type BrowserSendResult,
   CommandUndeliverableError,
   type DeviceAccountHandler,
   type DeviceBrowserHandler,

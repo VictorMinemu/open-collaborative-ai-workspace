@@ -8,7 +8,7 @@ import {
 import { projects } from "@ocw/db";
 import { and, eq, isNull, notInArray, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
 import type { App, Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import { createPermissionService } from "../organization";
@@ -35,6 +35,18 @@ export function sanitizeAnnouncements(list: DeviceProjectAnnouncement[]): Device
     out.push({ ...p, gitRemote: p.gitRemote && looksAbsolute(p.gitRemote) ? null : p.gitRemote });
   }
   return out;
+}
+
+/** A `ws` message as one Buffer (it may arrive as a Buffer, an ArrayBuffer or fragments). */
+function asBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data);
+}
+
+/** An error's name only (never its message, which could echo frame bytes). */
+function errorName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
 }
 
 /**
@@ -266,8 +278,22 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
         send({ type: "projects.ack", projects: acked });
       };
 
-      socket.on("message", (data) => {
+      socket.on("message", (data, isBinary) => {
         lastFrameAt = Date.now();
+        // 07.13 (D-15, PD-12, research Pattern 6): a binary frame is a live browser frame. It never enters the JSON
+        // chain (a stream of JPEGs must never delay an ack) and is never parsed as JSON; ws `maxPayload` caps its
+        // size. Before hello it is dropped. A handler failure is logged by its error name only, never the bytes.
+        if (isBinary) {
+          if (!helloDone) return;
+          try {
+            const pending = hub.browserHandler?.onBinary?.(device, asBuffer(data));
+            if (pending)
+              pending.catch((err: unknown) => log.warn({ error: errorName(err) }, "browser frame failed"));
+          } catch (err) {
+            log.warn({ error: errorName(err) }, "browser frame failed");
+          }
+          return;
+        }
         const raw = data.toString();
         chain = chain
           .then(() => handle(raw))

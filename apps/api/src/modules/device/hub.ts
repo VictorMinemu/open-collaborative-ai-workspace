@@ -176,6 +176,8 @@ interface LocalLink {
   /** Serializes command delivery for this device. */
   sending: Promise<void>;
   stopListening: () => Promise<void>;
+  /** 07.13 (PD-20): the device's hello carried `browser`; only then may a browser frame be sent on this link. */
+  browser: boolean;
 }
 
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
@@ -208,8 +210,22 @@ export interface FileAckWaiter {
   release(): Promise<void>;
 }
 
-/** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
-type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string } | { op: "config" };
+/**
+ * `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed).
+ * `browser` (07.13, PD-12): forward one ephemeral browser frame to the device's socket (`sendBrowserFrame`).
+ */
+type ControlMessage =
+  | { op: "flush" }
+  | { op: "close"; code: number; reason: string }
+  | { op: "config" }
+  | { op: "browser"; frame: BrowserServerFrame };
+
+/**
+ * What `sendBrowserFrame` did: sent on this instance's link (or refused there: `closed`, `too_large`, `unsupported`
+ * for a device whose hello carried no `browser`), or `published` for the instance that holds the link (which applies
+ * the same checks; a device connected nowhere drops it).
+ */
+export type BrowserSendResult = SendResult | "published" | "unsupported";
 
 /** Reads the organization's runtime updates level inside its tenant transaction (07.11, D-02). */
 export type RuntimePolicySource = (tx: Tx) => Promise<RuntimeUpdatesLevel>;
@@ -492,6 +508,27 @@ export class DeviceHub {
     return this.send(socket, BrowserServerFrame.parse(frame));
   }
 
+  /**
+   * 07.13 (D-15, D-33, PD-12, PD-20): one browser frame to the device, wherever its link is. Validated as a
+   * `BrowserServerFrame` first (throws otherwise, nothing is sent). Sent on this instance's link when it holds it, else
+   * published on the device's control channel for the instance that does. Ephemeral like `runtime.config`: never
+   * written to `device_commands`, never redelivered (a device that is offline simply misses it) and never logged (an
+   * input frame carries what a person typed). The documented exception (D-33): a published frame crosses Redis.
+   * A device whose hello carried no `browser` never receives one (an older daemon would fail to parse it).
+   */
+  async sendBrowserFrame(deviceId: string, frame: BrowserServerFrame): Promise<BrowserSendResult> {
+    const parsed = BrowserServerFrame.parse(frame);
+    const local = this.links.get(deviceId);
+    if (local) return this.sendBrowserLocal(local, parsed);
+    await this.publishControl(deviceId, { op: "browser", frame: parsed });
+    return "published";
+  }
+
+  private sendBrowserLocal(link: LocalLink, frame: BrowserServerFrame): BrowserSendResult {
+    if (!link.browser) return "unsupported";
+    return this.send(link.socket, frame);
+  }
+
   // ------------------------------------------------------------------ link lifecycle (used by link.ts)
 
   /** Register a socket after a valid hello. Replaces (closes) an older socket of the same device. */
@@ -507,7 +544,13 @@ export class DeviceHub {
       previous.socket.close(4409, "replaced by a newer connection");
     }
 
-    const link: LocalLink = { device, socket, sending: Promise.resolve(), stopListening: async () => {} };
+    const link: LocalLink = {
+      device,
+      socket,
+      sending: Promise.resolve(),
+      stopListening: async () => {},
+      browser: hello.browser !== undefined,
+    };
     this.links.set(device.deviceId, link);
     link.stopListening = await this.opts.bus.subscribe(deviceChannel(device.deviceId), (msg) => {
       if (this.links.get(device.deviceId) !== link) return;
@@ -520,6 +563,11 @@ export class DeviceHub {
       if (control.op === "flush") void this.flush(device.deviceId, false);
       else if (control.op === "close") socket.close(control.code, control.reason);
       else if (control.op === "config") void this.sendRuntimeConfig(link);
+      else if (control.op === "browser") {
+        // Re-checked here: only a well-formed browser frame, and only to a device that announced a browser (PD-20).
+        const frame = BrowserServerFrame.safeParse(control.frame);
+        if (frame.success) this.sendBrowserLocal(link, frame.data);
+      }
     });
 
     const runtimes = hello.runtimes;
