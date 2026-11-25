@@ -8,6 +8,7 @@ import { createPermissionService } from "../organization";
 import { onBrowserEvent } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
+import { registerSignInRoutes } from "./signin-routes";
 
 export { onBrowserEvent } from "./events";
 export type { WorkLiveHub, WorkLiveStats } from "./live";
@@ -62,9 +63,12 @@ export function createWorkBrowserModule(
     module: {
       name: "work-browser",
       register(app) {
+        const perms = createPermissionService(core);
+        // 07.13-17: the member's own sign-ins (Keychain) and the device's hand-back upload.
+        registerSignInRoutes(app, { core, perms });
         live = registerWorkLiveView(app, {
           core,
-          perms: createPermissionService(core),
+          perms,
           hub: deps.hub,
           allowedOrigins: deps.allowedOrigins ?? new Set(),
           // D-33: this instance's frames transit (one per instance; its id only tells its own messages apart).
