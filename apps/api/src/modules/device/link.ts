@@ -219,9 +219,7 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
             return hub.browserHandler?.onFocus?.(device, frame);
           case "browser.signin.load":
             // The answer goes on this socket only (P7), never through Redis or the command queue.
-            return hub.browserHandler?.onSignInLoad?.(device, frame, (reply) => {
-              hub.replyOn(socket, reply);
-            });
+            return hub.browserHandler?.onSignInLoad?.(device, frame, (reply) => hub.replyOn(socket, reply));
         }
       };
 

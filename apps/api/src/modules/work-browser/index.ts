@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { DeviceBrowserHandler, DeviceHub, DeviceRef } from "../device";
 import { createPermissionService } from "../organization";
-import { onBrowserEvent } from "./events";
+import { onBrowserEvent, onDeviceHello } from "./events";
 import { registerWorkLiveView, type WorkLiveHub } from "./live";
 import { createLiveRelay } from "./live-relay";
 import { onSignInLoad } from "./load";
@@ -60,6 +60,8 @@ export function createWorkBrowserModule(
   const sessionDevice = sessionDeviceCheck(core);
   const deviceHandler: DeviceBrowserHandler = {
     onBrowserEvent: onBrowserEvent(core),
+    // MD-01: the device's pages reconciled with what its hello says it holds.
+    onHello: onDeviceHello(core, deps.hub),
     // 07.13-17 (D-24, D-32, PD-16, P7): decided by the API, answered on the requesting socket only.
     onSignInLoad: onSignInLoad(core, perms, (organizationId, sessionId, userId) =>
       live?.onSignInLoaded(organizationId, sessionId, userId),

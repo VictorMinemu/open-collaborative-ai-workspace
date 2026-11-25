@@ -135,7 +135,10 @@ export interface DeviceAccountHandler {
  * - `onBinary` (a live JPEG frame) runs OFF that chain: it is called as the bytes arrive and never awaited, so a stream
  *   of frames never delays an `ack` (research Pattern 6). It must not throw synchronously for long work; a rejected
  *   promise is logged by its error name only. Never log the bytes.
- * - `onSignInLoad`'s `reply` sends on the socket the request came on only (P7), never through Redis.
+ * - `onSignInLoad`'s `reply` sends on the socket the request came on only (P7), never through Redis, and says whether
+ *   it was sent (MD-01: a reply on a socket that closed meanwhile is not, and the handler undoes what it recorded).
+ * - `onHello` (MD-01) runs once the device's link is registered, after the session handler's: the device's pages are
+ *   reconciled with what its hello says it holds.
  */
 export interface DeviceBrowserHandler {
   onBrowserEvent?(device: DeviceRef, frame: BrowserEventFrame): Promise<void>;
@@ -144,8 +147,9 @@ export interface DeviceBrowserHandler {
   onSignInLoad?(
     device: DeviceRef,
     frame: BrowserSignInLoadFrame,
-    reply: (frame: BrowserServerFrame) => void,
+    reply: (frame: BrowserServerFrame) => SendResult,
   ): Promise<void>;
+  onHello?(device: DeviceRef, hello: HelloFrame): Promise<void>;
 }
 
 /**
@@ -609,6 +613,16 @@ export class DeviceHub {
     // 07.11 (PD-03, D-10): the org's level and the manifest, so the device never stays at its `notify` fallback here.
     await this.sendRuntimeConfig(link);
     await this.handler?.onHello(device, hello);
+    // 07.13 review MD-01: the device's browser pages, reconciled with what this hello says it holds. A failure leaves
+    // the rows as they were (the next hello reconciles them again); logged by its error name only.
+    await this.browsers
+      ?.onHello?.(device, hello)
+      .catch((err: unknown) =>
+        this.opts.log.warn(
+          { deviceId: device.deviceId, error: (err as Error | undefined)?.name },
+          "browser pages reconcile failed",
+        ),
+      );
     // Redeliver everything not acked yet (at-least-once), then anything new.
     await this.flush(device.deviceId, true);
   }

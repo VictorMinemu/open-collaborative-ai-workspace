@@ -8,7 +8,7 @@ import {
 import { type Tx, workBrowsers, workPrompts, workSessions } from "@ocw/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { DeviceRef } from "../device";
+import type { DeviceRef, SendResult } from "../device";
 import type { PermissionService } from "../organization";
 import { browserGrantFor } from "../work-session";
 import { announceLease } from "./lease";
@@ -107,7 +107,7 @@ export function onSignInLoad(
   return async (
     device: DeviceRef,
     frame: BrowserSignInLoadFrame,
-    reply: (frame: BrowserServerFrame) => void,
+    reply: (frame: BrowserServerFrame) => SendResult,
   ): Promise<void> => {
     const answer = (result: BrowserSignInStateFrame["result"]) =>
       reply({ type: "browser.signin.state", requestId: frame.requestId, result });
@@ -179,14 +179,25 @@ export function onSignInLoad(
     // viewers at once, every other instance on the announcement (ids only; the 1 s poll stays the backstop).
     loaded(device.organizationId, frame.sessionId, member.userId);
     await announceLease(core.bus, device.organizationId, frame.sessionId);
+    let sent: SendResult | "invalid";
     try {
-      answer({ ok: true, signinId: opened.signinId, state: opened.state, expiresAt: opened.expiresAt });
+      sent = answer({
+        ok: true,
+        signinId: opened.signinId,
+        state: opened.state,
+        expiresAt: opened.expiresAt,
+      });
     } catch (err) {
-      // Not sent (the frame did not validate): the page holds nothing, so nothing stays recorded as loaded.
       failed(err, "reply");
-      await clearLoaded(core, device, frame.sessionId, opened.signinId).catch(() => {});
-      answer({ ok: false, reason: "too_large" });
+      sent = "invalid";
     }
+    if (sent === "sent") return;
+    // Not sent (the frame did not validate or did not fit, or the socket closed meanwhile, MD-01): no device holds the
+    // state, so nothing stays recorded as loaded, and every live view reads the page again.
+    if (sent === "closed") failed(new Error("socket closed"), "reply");
+    await clearLoaded(core, device, frame.sessionId, opened.signinId).catch(() => {});
+    await announceLease(core.bus, device.organizationId, frame.sessionId);
+    if (sent !== "closed") answer({ ok: false, reason: "too_large" });
   };
 }
 

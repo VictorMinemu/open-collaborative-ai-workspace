@@ -64,6 +64,22 @@ describe("hello and capabilities carry the device's browser report (D-19, PD-20)
     ).toBe(false);
   });
 
+  it("MD-01: hello may list the open pages (session id and a signed-in flag only)", () => {
+    const sessionId = "0193a1b2-0000-7000-8000-000000000001";
+    const pages = [{ sessionId, signedIn: true }];
+    expect(HelloFrame.parse({ ...hello0718, browserPages: pages }).browserPages).toEqual(pages);
+    expect(HelloFrame.parse(hello0718).browserPages).toBeUndefined();
+    expect(
+      HelloFrame.safeParse({ ...hello0718, browserPages: [{ sessionId: "nope", signedIn: true }] }).success,
+    ).toBe(false);
+    expect(
+      HelloFrame.safeParse({
+        ...hello0718,
+        browserPages: [{ sessionId, signedIn: true, origin: "https://a.example" }],
+      }).success,
+    ).toBe(false);
+  });
+
   it("re-sends the opt-in on capabilities", () => {
     const caps = { type: "capabilities", catalogs: [], fullAccessOptIn: false } as const;
     expect(CapabilitiesFrame.safeParse(caps).success).toBe(true);

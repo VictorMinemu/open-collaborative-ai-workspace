@@ -200,6 +200,18 @@ export const HelloFrame = z.object({
    * parses (absent = no browser: the API never sends that device a grant or a browser frame).
    */
   browser: DeviceBrowserReport.optional(),
+  /**
+   * 07.13 review MD-01: the Work Zone pages open on the device as it says hello (on every link, a reconnect of the same
+   * daemon as much as a restarted one), and whether a member's sign-in is loaded in each. Ids and a flag only. The API
+   * reconciles its `work_browsers` rows of this device's sessions with it: a page not listed is closed (its lease and
+   * loaded sign-in cleared), a listed page with `signedIn: false` loses the sign-in the API recorded, and a listed page
+   * with `signedIn: true` the API recorded no sign-in for is told `browser.close { reason: "revoked" }`. Optional:
+   * without it, only the pages of sessions missing from `sessions` are closed.
+   */
+  browserPages: z
+    .array(z.strictObject({ sessionId: z.uuid(), signedIn: z.boolean() }))
+    .max(1000)
+    .optional(),
 });
 export type HelloFrame = z.infer<typeof HelloFrame>;
 

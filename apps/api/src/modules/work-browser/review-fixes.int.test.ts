@@ -362,3 +362,132 @@ describe("LO-01: pointer-only input keeps the lease's row fresh", () => {
     miaLive.close();
   });
 });
+
+/** Owen's device says hello again (a new link, or a restarted daemon), with `opts` in its hello. */
+async function reconnect(opts: { browserPages?: Array<{ sessionId: string; signedIn: boolean }> } = {}) {
+  await d.close();
+  d = await FakeDevice.connect(stack.baseUrl, dToken, undefined, {
+    browser: { version: 1, optIn: true },
+    ...opts,
+  });
+}
+
+const loadedAudit = async (sid: string) =>
+  (
+    await su.query(
+      "select 1 from app.audit_events where action = 'work_browser.signin_loaded' and session_id = $1",
+      [sid],
+    )
+  ).rowCount ?? 0;
+
+describe("MD-01: the page rows are reconciled with what the device holds", () => {
+  it("the device's close of a signed-in page clears the loaded sign-in with it", async () => {
+    const { sid, promptId } = await miasSignInSession();
+    await sealFor(miaId, sid);
+    expect((await load(sid, promptId)).ok).toBe(true);
+    expect(await browserRow(sid)).toMatchObject({ signin_user_id: miaId, signin_id: expect.any(String) });
+    d.browserEvent(sid, { kind: "closed", origin: ORIGIN, promptId });
+    await eventually(async () => (await browserRow(sid))?.state === "closed" || undefined);
+    expect(await browserRow(sid)).toMatchObject({ signin_id: null, signin_user_id: null });
+  });
+
+  it("a load answered on a socket that closed meanwhile leaves nothing recorded as loaded", async () => {
+    const { sid, promptId } = await miasSignInSession();
+    await sealFor(miaId, sid);
+    d.send({
+      type: "browser.signin.load",
+      requestId: randomUUID(),
+      sessionId: sid,
+      promptId,
+      origin: ORIGIN,
+    });
+    d.ws.close();
+    await eventually(async () => (await loadedAudit(sid)) > 0 || undefined);
+    await eventually(async () => (await browserRow(sid))?.signin_user_id === null || undefined);
+    expect(await browserRow(sid)).toMatchObject({ signin_id: null, signin_user_id: null });
+    await reconnect();
+  });
+
+  it("hello: pages the device no longer has are closed, a sign-in it no longer holds is cleared, one it holds stays", async () => {
+    const page = async (signedIn: string | null, lease = false) => {
+      const { sid } = await askedSessionWithPage(mia);
+      await su.query(
+        `update app.work_browsers set signin_user_id = $2,
+           lease_id = case when $3 then gen_random_uuid() end,
+           controller_user_id = case when $3 then $4::uuid end,
+           lease_expires_at = case when $3 then now() + interval '10 minutes' end
+         where work_session_id = $1`,
+        [sid, signedIn, lease, miaId],
+      );
+      return sid;
+    };
+    const gone = await page(null);
+    const unloaded = await page(miaId);
+    const held = await page(miaId);
+    const leased = await page(null, true);
+    const unknown = await page(null);
+    const kept = await page(null);
+    // A page of another device of the organization is never touched by this device's hello.
+    const adaDevice = await pairDevice(stack, ada, "Ada's box");
+    const a = await FakeDevice.connect(stack.baseUrl, adaDevice.token, undefined, {
+      browser: { version: 1, optIn: true },
+    });
+    a.send({
+      type: "projects.sync",
+      projects: [{ localId: "api", name: "api", gitRemote: null, defaultBranch: "main" }],
+    });
+    await a.next((f) => f.type === "projects.ack");
+    const adaProject = ((await ada.request("GET", "/api/v1/projects")).body!.projects as Json[]).find(
+      (p) => p.name === "api",
+    )!.id as string;
+    const other = await startSession(ada, a, adaProject);
+    a.browserEvent(other, { kind: "opened", origin: ORIGIN });
+    await eventually(async () => (await browserRow(other))?.state === "open" || undefined);
+
+    await reconnect({
+      browserPages: [
+        { sessionId: unloaded, signedIn: false },
+        { sessionId: held, signedIn: true },
+        { sessionId: unknown, signedIn: true },
+        { sessionId: kept, signedIn: false },
+      ],
+    });
+    await eventually(async () => (await browserRow(gone))?.state === "closed" || undefined);
+    expect(await browserRow(gone)).toMatchObject({ state: "closed", signin_user_id: null });
+    expect(await browserRow(leased)).toMatchObject({
+      state: "closed",
+      lease_id: null,
+      controller_user_id: null,
+      lease_expires_at: null,
+    });
+    expect(await browserRow(unloaded)).toMatchObject({
+      state: "open",
+      signin_user_id: null,
+      signin_id: null,
+    });
+    expect(await browserRow(held)).toMatchObject({ state: "open", signin_user_id: miaId });
+    expect(await browserRow(kept)).toMatchObject({ state: "open", signin_user_id: null });
+    expect(await browserRow(other)).toMatchObject({ state: "open" });
+    // A sign-in the device says it holds but the API never recorded: the device drops that page unsaved.
+    expect(await deviceFrame("browser.close", unknown)).toEqual({
+      type: "browser.close",
+      sessionId: unknown,
+      reason: "revoked",
+    });
+    const closedAudit = await su.query(
+      "select metadata from app.audit_events where action = 'work_browser.closed' and resource_id = $1",
+      [gone],
+    );
+    expect(closedAudit.rows.map((r) => r.metadata)).toEqual([{ origin: ORIGIN, endReason: "crashed" }]);
+    await a.close();
+  });
+
+  it("hello without a page report: the pages of sessions no longer alive on the device are closed", async () => {
+    const { sid: alive } = await askedSessionWithPage(mia);
+    const { sid: dead } = await askedSessionWithPage(mia);
+    await d.close();
+    d = await FakeDevice.connect(stack.baseUrl, dToken, [alive], { browser: { version: 1, optIn: true } });
+    await eventually(async () => (await browserRow(dead))?.state === "closed" || undefined);
+    expect(await browserRow(alive)).toMatchObject({ state: "open" });
+  });
+});

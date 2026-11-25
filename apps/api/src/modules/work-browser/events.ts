@@ -1,5 +1,6 @@
 import {
   type BrowserEventFrame,
+  type HelloFrame,
   WORK_BROWSER_AUDIT,
   type WorkBrowserAction,
   type WorkBrowserAuditAction,
@@ -9,7 +10,8 @@ import {
 import { type Tx, workBrowsers, workPrompts, workSessions } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { DeviceRef } from "../device";
+import type { DeviceHub, DeviceRef } from "../device";
+import { announceLease } from "./lease";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -204,24 +206,133 @@ async function leaseEndedWithPage(
 }
 
 /**
- * The page ended: the row is closed and any lease on it cleared (the four lease columns together, 07.13-03). Returns
- * the origin the page was last on (a `BrowserOrigin` by the row's check), null when the session had no page row.
+ * What a page that ended leaves on its row: closed, any lease cleared (the four lease columns together, 07.13-03) and
+ * no member's sign-in loaded (MD-01: a closed page holds none, so neither the live view's privacy nor the member-only
+ * approvals keep naming that member). A pending hand-back upload stays: it is one-use, bound to its member and origin,
+ * and lapses in 5 minutes (the device may PUT it right after its own close).
+ */
+const CLOSED_ROW = {
+  state: "closed" as const,
+  closedAt: sql`coalesce(${workBrowsers.closedAt}, now())`,
+  updatedAt: sql`now()`,
+  leaseId: null,
+  controllerUserId: null,
+  leaseExpiresAt: null,
+  leaseInput: false,
+  signinId: null,
+  signinUserId: null,
+};
+
+/**
+ * The page ended: its row becomes `CLOSED_ROW`. Returns the origin the page was last on (a `BrowserOrigin` by the
+ * row's check), null when the session had no page row.
  */
 async function closeRow(tx: Tx, sessionId: string): Promise<string | null> {
   const [row] = await tx
     .update(workBrowsers)
-    .set({
-      state: "closed",
-      closedAt: sql`coalesce(${workBrowsers.closedAt}, now())`,
-      updatedAt: sql`now()`,
-      leaseId: null,
-      controllerUserId: null,
-      leaseExpiresAt: null,
-      leaseInput: false,
-    })
+    .set(CLOSED_ROW)
     .where(eq(workBrowsers.workSessionId, sessionId))
     .returning({ origin: workBrowsers.origin });
   return row?.origin ?? null;
+}
+
+/**
+ * MD-01: the device's hello, reconciled with the API's page rows of the device's own sessions (in the device's tenant,
+ * every row locked). The device's word is what its link sent, never more than it: with `browserPages`, a page it does
+ * not list is closed (as a crash: `work_browser.closed { origin, endReason: crashed }`, plus `.takeover_ended
+ * { page_ended }` under a lease), a listed one it holds no sign-in in loses the one recorded, and a listed one with a
+ * sign-in the API never recorded is reported for `browser.close { revoked }` (dropped unsaved: the API cannot say whose
+ * it is). Without it (an older daemon), only the pages of sessions missing from `hello.sessions` are closed; with
+ * neither, nothing changes. Returns the sessions whose row changed and those whose page the device must drop.
+ */
+export async function reconcileHello(
+  core: Core,
+  device: DeviceRef,
+  hello: HelloFrame,
+): Promise<{ changed: string[]; drop: string[] }> {
+  const none = { changed: [], drop: [] };
+  if (!hello.browser) return none;
+  const reported = hello.browserPages
+    ? new Map(hello.browserPages.map((p) => [p.sessionId.toLowerCase(), p.signedIn]))
+    : null;
+  const alive = hello.sessions ? new Set(hello.sessions.map((s) => s.toLowerCase())) : null;
+  if (!reported && !alive) return none;
+  return core.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
+    const rows = await tx
+      .select({
+        sessionId: workBrowsers.workSessionId,
+        state: workBrowsers.state,
+        origin: workBrowsers.origin,
+        leaseId: workBrowsers.leaseId,
+        controller: workBrowsers.controllerUserId,
+        signinUserId: workBrowsers.signinUserId,
+      })
+      .from(workBrowsers)
+      .innerJoin(workSessions, eq(workSessions.id, workBrowsers.workSessionId))
+      .where(eq(workSessions.deviceId, device.deviceId))
+      .for("update", { of: workBrowsers });
+    const changed: string[] = [];
+    const drop: string[] = [];
+    for (const row of rows) {
+      const id = row.sessionId.toLowerCase();
+      const open = reported ? reported.has(id) : alive?.has(id) !== false;
+      if (!open) {
+        if (row.state !== "open" && !row.signinUserId && !row.leaseId) continue;
+        await tx.update(workBrowsers).set(CLOSED_ROW).where(eq(workBrowsers.workSessionId, row.sessionId));
+        const frame: BrowserEventFrame = {
+          type: "browser.event",
+          sessionId: row.sessionId,
+          promptId: null,
+          kind: "crashed",
+          origin: row.origin as BrowserEventFrame["origin"],
+        };
+        if (row.leaseId && row.controller) await leaseEndedWithPage(core, tx, device, frame, row);
+        if (row.state === "open") {
+          await core.audit.record(tx, {
+            action: WORK_BROWSER_AUDIT.closed,
+            resourceType: "work_session",
+            resourceId: row.sessionId,
+            actorKind: "device",
+            actorId: device.deviceId,
+            deviceId: device.deviceId,
+            sessionId: row.sessionId,
+            metadata: metadataOf({ origin: row.origin, endReason: "crashed" }),
+          });
+        }
+        changed.push(row.sessionId);
+        continue;
+      }
+      const signedIn = reported?.get(id);
+      if (signedIn === false && row.signinUserId) {
+        await tx
+          .update(workBrowsers)
+          .set({ signinId: null, signinUserId: null, updatedAt: sql`now()` })
+          .where(eq(workBrowsers.workSessionId, row.sessionId));
+        changed.push(row.sessionId);
+      } else if (signedIn === true && !row.signinUserId) {
+        drop.push(row.sessionId);
+      }
+    }
+    // A page the device holds a sign-in in with no row at all is as unknown as one with no sign-in recorded.
+    if (reported) {
+      const known = new Set(rows.map((r) => r.sessionId.toLowerCase()));
+      for (const [id, signedIn] of reported) if (signedIn && !known.has(id)) drop.push(id);
+    }
+    return { changed, drop };
+  });
+}
+
+/** The `onHello` device handler (MD-01): reconcile, then tell every instance (ids only) and the device what changed. */
+export function onDeviceHello(core: Core, hub: Pick<DeviceHub, "sendBrowserFrame">) {
+  return async (device: DeviceRef, hello: HelloFrame): Promise<void> => {
+    const { changed, drop } = await reconcileHello(core, device, hello);
+    for (const sessionId of changed) await announceLease(core.bus, device.organizationId, sessionId);
+    for (const sessionId of drop) {
+      await hub
+        .sendBrowserFrame(device.deviceId, { type: "browser.close", sessionId, reason: "revoked" })
+        .catch(() => {});
+    }
+  };
 }
 
 /** `opened` / `navigated`: the session's page is open on `origin` (a new page after a closed one restarts its clock). */
