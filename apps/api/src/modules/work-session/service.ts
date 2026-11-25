@@ -46,6 +46,7 @@ import {
   type Tx,
   tenantOf,
   workApprovals,
+  workBrowsers,
   workProjectRepos,
   workPrompts,
   workSessions,
@@ -79,7 +80,7 @@ import {
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
-import { browserGrantFor } from "./browser-grant";
+import { type BrowserAsker, browserGrantFor, browserStateOf } from "./browser-grant";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
@@ -333,6 +334,8 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceStatus: devices.status,
         deviceRevoked: devices.revokedAt,
         deviceOwner: devices.ownerUserId,
+        deviceBrowserVersion: devices.browserVersion,
+        deviceBrowserOptIn: devices.browserOptIn,
         unitPath: orgUnits.path,
         access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
         poolId: accountPoolAccounts.id,
@@ -351,7 +354,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     const rows = userId === null ? all : all.filter((r) => (r.access ?? []).length > 0);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, running, dir, summaries, starters] = await Promise.all([
+    const [queued, pending, running, dir, summaries, starters, policy, openBrowsers] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -374,7 +377,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         tx,
         rows.flatMap((r) => (r.s.startedByAgentId ? [r.s.startedByAgentId] : [])),
       ),
+      // 07.13 (D-19): the browser state of every session from one policy read and one read of the open pages.
+      loadWorkZonePolicy(tx),
+      tx
+        .select({ id: workBrowsers.workSessionId })
+        .from(workBrowsers)
+        .where(and(inArray(workBrowsers.workSessionId, ids), eq(workBrowsers.state, "open"))),
     ]);
+    const live = new Set(openBrowsers.map((r) => r.id));
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
     const since = new Map(running.map((r) => [r.id, r.since]));
@@ -386,6 +396,8 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceStatus,
         deviceRevoked,
         deviceOwner,
+        deviceBrowserVersion,
+        deviceBrowserOptIn,
         unitPath,
         access,
         poolId,
@@ -440,6 +452,12 @@ export class WorkSessionService implements DeviceSessionHandler {
             poolId !== null && poolLabel !== null && poolProvider !== null
               ? { id: poolId, label: poolLabel, provider: poolProvider }
               : null,
+          // 07.13 (D-19): viewer-neutral (no host, no member), so it rides the shared `ws:` stream as is.
+          browser: browserStateOf({
+            policy,
+            device: { browserVersion: deviceBrowserVersion, browserOptIn: deviceBrowserOptIn },
+            open: live.has(s.id),
+          }),
         };
         return {
           dto,
@@ -1629,13 +1647,17 @@ export class WorkSessionService implements DeviceSessionHandler {
   private async prepareBrowser(tx: Tx, cmd: DeviceCommandRow): Promise<SessionBrowserGrant | undefined> {
     const sessionId = cmd.workSessionId;
     if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
-    let asker: { askerId: string | null; askerIsBot: boolean } = { askerId: null, askerIsBot: false };
+    let asker: Omit<BrowserAsker, "sessionId"> = { askerId: null, askerIsBot: false };
+    const of = (userId: string, agentId: string | null): Omit<BrowserAsker, "sessionId"> =>
+      agentId === null
+        ? { askerId: userId, askerIsBot: false }
+        : { askerId: agentId, askerIsBot: true, onBehalfOf: userId };
     if (cmd.kind === "session.start") {
       const [s] = await tx
         .select({ createdBy: workSessions.createdBy, agentId: workSessions.startedByAgentId })
         .from(workSessions)
         .where(eq(workSessions.id, sessionId));
-      if (s) asker = { askerId: s.agentId ?? s.createdBy, askerIsBot: s.agentId !== null };
+      if (s) asker = of(s.createdBy, s.agentId);
     } else {
       const promptId = cmd.payload.promptId;
       const [p] =
@@ -1645,7 +1667,7 @@ export class WorkSessionService implements DeviceSessionHandler {
               .from(workPrompts)
               .where(and(eq(workPrompts.id, promptId), eq(workPrompts.workSessionId, sessionId)))
           : [];
-      if (p) asker = { askerId: p.agentId ?? p.userId, askerIsBot: p.agentId !== null };
+      if (p) asker = of(p.userId, p.agentId);
     }
     return (await browserGrantFor(tx, this.deps.perms, { sessionId, ...asker })) ?? undefined;
   }
