@@ -69,6 +69,7 @@ import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
 import { createRecordWrites, createWatchedModule } from "./modules/watched";
+import { createWorkBrowserModule, type WorkBrowserModule } from "./modules/work-browser";
 import { createWorkMemoryModule } from "./modules/work-memory";
 import {
   createWorkSessionAttachmentScope,
@@ -101,6 +102,8 @@ export interface BuiltApp {
   browser: BrowserModule;
   /** The Work Zone session module (07.16-06): tests call its `start` with a bot's agent option. */
   workSession: WorkSessionModule;
+  /** The Work Zone browser module (07.13-08): tests reach its device handler and hub. */
+  workBrowser: WorkBrowserModule;
   /** The registered modules' names, in registration order (wiring tests). */
   moduleNames: readonly string[];
   close(): Promise<void>;
@@ -355,6 +358,10 @@ export async function buildApp(
   // Phase 07.18 (D-09, PD-09): the device's account frames (usage readings now; Codex slots and sign-ins in 07.18-13)
   // go to the account-pool module, next to the work-session handler the hub already has.
   deviceModule.hub.setAccountHandler(createDeviceAccountHandler(core));
+  // Phase 07.13: the Work Zone browser on members' devices (beside the bots' `browser` module); its device frames
+  // (`browser.event`, live frames, sign-in loads) go to this module.
+  const workBrowser = createWorkBrowserModule(core, { hub: deviceModule.hub });
+  deviceModule.hub.setBrowserHandler(workBrowser.deviceHandler);
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.
   const sandbox = createSandboxModule(core);
@@ -430,6 +437,7 @@ export async function buildApp(
       onChange: (tx, change) => notifyCellOfPoolChange(core, tx, change),
     }),
     workSession, // B3 (built above)
+    workBrowser.module, // Phase 07.13: the Work Zone browser (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
@@ -470,6 +478,7 @@ export async function buildApp(
     sandbox,
     browser,
     workSession,
+    workBrowser,
     moduleNames: modules.map((m) => m.name),
     async close() {
       await app.close();

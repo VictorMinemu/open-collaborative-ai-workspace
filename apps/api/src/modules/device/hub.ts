@@ -3,6 +3,10 @@ import {
   type AccountsSyncFrame,
   type AccountUsageFrame,
   type AckFrame,
+  type BrowserEventFrame,
+  type BrowserFocusFrame,
+  BrowserServerFrame,
+  type BrowserSignInLoadFrame,
   type CapabilitiesFrame,
   type CommandKind,
   DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
@@ -123,6 +127,28 @@ export interface DeviceAccountHandler {
 }
 
 /**
+ * 07.13 (D-14, D-15, D-20, D-24, PD-12, PD-16, PD-25): the device's Work Zone browser frames, registered with
+ * `hub.setBrowserHandler` by the work-browser module. Every method is optional: a frame without its method is ignored.
+ * Called with the device the link authenticated (never an organization the frame names).
+ *
+ * - `onBrowserEvent`, `onFocus` and `onSignInLoad` run on the link's JSON chain, in frame order.
+ * - `onBinary` (a live JPEG frame) runs OFF that chain: it is called as the bytes arrive and never awaited, so a stream
+ *   of frames never delays an `ack` (research Pattern 6). It must not throw synchronously for long work; a rejected
+ *   promise is logged by its error name only. Never log the bytes.
+ * - `onSignInLoad`'s `reply` sends on the socket the request came on only (P7), never through Redis.
+ */
+export interface DeviceBrowserHandler {
+  onBrowserEvent?(device: DeviceRef, frame: BrowserEventFrame): Promise<void>;
+  onBinary?(device: DeviceRef, bytes: Buffer): void | Promise<void>;
+  onFocus?(device: DeviceRef, frame: BrowserFocusFrame): Promise<void>;
+  onSignInLoad?(
+    device: DeviceRef,
+    frame: BrowserSignInLoadFrame,
+    reply: (frame: BrowserServerFrame) => void,
+  ): Promise<void>;
+}
+
+/**
  * A command that cannot be delivered (06.1): marked `failed` with `reason` as its error and reported to
  * `onCommandResult(…, false, reason)`; the link stays up. The message must never carry payload data.
  */
@@ -150,6 +176,8 @@ interface LocalLink {
   /** Serializes command delivery for this device. */
   sending: Promise<void>;
   stopListening: () => Promise<void>;
+  /** 07.13 (PD-20): the device's hello carried `browser`; only then may a browser frame be sent on this link. */
+  browser: boolean;
 }
 
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
@@ -182,8 +210,22 @@ export interface FileAckWaiter {
   release(): Promise<void>;
 }
 
-/** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
-type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string } | { op: "config" };
+/**
+ * `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed).
+ * `browser` (07.13, PD-12): forward one ephemeral browser frame to the device's socket (`sendBrowserFrame`).
+ */
+type ControlMessage =
+  | { op: "flush" }
+  | { op: "close"; code: number; reason: string }
+  | { op: "config" }
+  | { op: "browser"; frame: BrowserServerFrame };
+
+/**
+ * What `sendBrowserFrame` did: sent on this instance's link (or refused there: `closed`, `too_large`, `unsupported`
+ * for a device whose hello carried no `browser`), or `published` for the instance that holds the link (which applies
+ * the same checks; a device connected nowhere drops it).
+ */
+export type BrowserSendResult = SendResult | "published" | "unsupported";
 
 /** Reads the organization's runtime updates level inside its tenant transaction (07.11, D-02). */
 export type RuntimePolicySource = (tx: Tx) => Promise<RuntimeUpdatesLevel>;
@@ -225,7 +267,8 @@ export function frameFits(serialized: string, limit: number): boolean {
   return Buffer.byteLength(serialized, "utf8") <= limit;
 }
 
-type SendResult = "sent" | "closed" | "too_large";
+/** What sending one frame on a local socket did. */
+export type SendResult = "sent" | "closed" | "too_large";
 
 /** 07.17.1 PD-27: why `supersedeCommands` closed a command (a restarted daemon never got to run it). */
 export const COMMAND_SUPERSEDED_RESTART = "superseded: the device restarted";
@@ -241,6 +284,7 @@ export class DeviceHub {
   private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
   private handler: DeviceSessionHandler | null = null;
   private accounts: DeviceAccountHandler | null = null;
+  private browsers: DeviceBrowserHandler | null = null;
   readonly offlineGraceMs: number;
   private readonly maxFrameBytes: number;
   /** What session start and the device DTO decide compatibility with (07.11 D-04, PD-12, PD-13). */
@@ -278,6 +322,15 @@ export class DeviceHub {
 
   get accountHandler(): DeviceAccountHandler | null {
     return this.accounts;
+  }
+
+  /** 07.13: where the device's Work Zone browser frames go (the work-browser module). */
+  setBrowserHandler(handler: DeviceBrowserHandler): void {
+    this.browsers = handler;
+  }
+
+  get browserHandler(): DeviceBrowserHandler | null {
+    return this.browsers;
   }
 
   /**
@@ -446,6 +499,36 @@ export class DeviceHub {
     return this.links.has(deviceId);
   }
 
+  /**
+   * 07.13 (PD-16, P7): a browser frame answering a request on `socket` (the `browser.signin.state` reply), sent on that
+   * socket only: validated as a `BrowserServerFrame` (throws otherwise) and size-checked like every frame. Never
+   * queued, never published, never logged (a sign-in state is the only frame carrying a storage state).
+   */
+  replyOn(socket: WebSocket, frame: BrowserServerFrame): SendResult {
+    return this.send(socket, BrowserServerFrame.parse(frame));
+  }
+
+  /**
+   * 07.13 (D-15, D-33, PD-12, PD-20): one browser frame to the device, wherever its link is. Validated as a
+   * `BrowserServerFrame` first (throws otherwise, nothing is sent). Sent on this instance's link when it holds it, else
+   * published on the device's control channel for the instance that does. Ephemeral like `runtime.config`: never
+   * written to `device_commands`, never redelivered (a device that is offline simply misses it) and never logged (an
+   * input frame carries what a person typed). The documented exception (D-33): a published frame crosses Redis.
+   * A device whose hello carried no `browser` never receives one (an older daemon would fail to parse it).
+   */
+  async sendBrowserFrame(deviceId: string, frame: BrowserServerFrame): Promise<BrowserSendResult> {
+    const parsed = BrowserServerFrame.parse(frame);
+    const local = this.links.get(deviceId);
+    if (local) return this.sendBrowserLocal(local, parsed);
+    await this.publishControl(deviceId, { op: "browser", frame: parsed });
+    return "published";
+  }
+
+  private sendBrowserLocal(link: LocalLink, frame: BrowserServerFrame): BrowserSendResult {
+    if (!link.browser) return "unsupported";
+    return this.send(link.socket, frame);
+  }
+
   // ------------------------------------------------------------------ link lifecycle (used by link.ts)
 
   /** Register a socket after a valid hello. Replaces (closes) an older socket of the same device. */
@@ -461,7 +544,13 @@ export class DeviceHub {
       previous.socket.close(4409, "replaced by a newer connection");
     }
 
-    const link: LocalLink = { device, socket, sending: Promise.resolve(), stopListening: async () => {} };
+    const link: LocalLink = {
+      device,
+      socket,
+      sending: Promise.resolve(),
+      stopListening: async () => {},
+      browser: hello.browser !== undefined,
+    };
     this.links.set(device.deviceId, link);
     link.stopListening = await this.opts.bus.subscribe(deviceChannel(device.deviceId), (msg) => {
       if (this.links.get(device.deviceId) !== link) return;
@@ -474,6 +563,11 @@ export class DeviceHub {
       if (control.op === "flush") void this.flush(device.deviceId, false);
       else if (control.op === "close") socket.close(control.code, control.reason);
       else if (control.op === "config") void this.sendRuntimeConfig(link);
+      else if (control.op === "browser") {
+        // Re-checked here: only a well-formed browser frame, and only to a device that announced a browser (PD-20).
+        const frame = BrowserServerFrame.safeParse(control.frame);
+        if (frame.success) this.sendBrowserLocal(link, frame.data);
+      }
     });
 
     const runtimes = hello.runtimes;
@@ -499,6 +593,10 @@ export class DeviceHub {
           // 07.18 (PD-04): written only from the device's own hello; a daemon without pool support stores null and
           // never gets a pool account.
           accountPoolVersion: hello.accountPool ?? null,
+          // 07.13 (D-19, PD-20): from the device's own hello only; absent (an older daemon) = no browser, and the API
+          // never sends that device a browser grant or frame. The opt-in is its owner's local switch (D-10).
+          browserVersion: hello.browser?.version ?? null,
+          browserOptIn: hello.browser?.optIn ?? false,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
@@ -560,7 +658,13 @@ export class DeviceHub {
         const isolatedServer = before.hostKind === "service" && frame.isolatedServer === true;
         const rows = await tx
           .update(devices)
-          .set({ runtimeCatalog: frame.catalogs, fullAccessOptIn: frame.fullAccessOptIn, isolatedServer })
+          .set({
+            runtimeCatalog: frame.catalogs,
+            fullAccessOptIn: frame.fullAccessOptIn,
+            isolatedServer,
+            // 07.13 (PD-20): the owner's local browser opt-in, re-sent when it changes; absent leaves it as it was.
+            ...(frame.browser ? { browserOptIn: frame.browser.optIn } : {}),
+          })
           .where(eq(devices.id, device.deviceId))
           .returning({ status: devices.status });
         await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
