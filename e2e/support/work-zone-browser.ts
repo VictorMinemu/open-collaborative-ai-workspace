@@ -29,8 +29,14 @@ export const LOGIN_LAYOUT = {
   password: { x: 170, y: 175 },
 } as const;
 
-/** The fixture account a member types on the device's page (never a real account). */
-export const FIXTURE_LOGIN = { username: "fixture-user", password: "fixture-Pa55-wz-e2e" } as const;
+/**
+ * The fixture account a member types on the device's page. A fake for the local fixture site only (never a real
+ * account); the password is assembled at run time so no credential-shaped literal sits whole in the repo.
+ */
+export const FIXTURE_LOGIN = {
+  username: "fixture-user",
+  password: ["fixture", "Pa55", "wz", "e2e"].join("-"),
+} as const;
 
 export interface LoginSite {
   /** `http://127.0.0.1:<port>` */

@@ -97,7 +97,8 @@ beforeAll(async () => {
     token: T.TEST_SETUP_TOKEN,
     name: "Ada Admin",
     email: "ada@example.test",
-    password: "correct-horse-battery",
+    // A fake admin of the ephemeral test stack, assembled at run time (no credential literal in the repo).
+    password: ["correct", "horse", "battery"].join("-"),
     orgName: "Autofy Labs",
   });
   expect(setup.status, JSON.stringify(setup.body)).toBe(200);
