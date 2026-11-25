@@ -184,3 +184,115 @@ describe("07.13-08 Task 1: a device with a browser opens a page and the Control 
     expect((await audits(s)).map((r) => r.action)).toEqual(["work_browser.opened"]);
   });
 });
+
+/** What the audit metadata may ever look like: the origin and enum codes, nothing else (T-07.13-08-02). */
+const METADATA_SHAPE =
+  /^\{("origin":"https?:\/\/[^/"?#]+:\d+"|"action":"[a-z]+"|"refusal":"[a-z_]+"|"failure":"[a-z_]+"|"endReason":"[a-z_]+"|,)*\}$/;
+
+describe("07.13-08 Task 3: every browser event kind is audited with ids and the origin only", () => {
+  const GITHUB = "https://github.com:443";
+
+  /** Send `events` for a fresh session (opened first), wait for `count` more audit rows, return them. */
+  async function run(events: Array<Record<string, unknown> & { kind: string }>, count: number) {
+    const s = await startSession(owen, d, projectId);
+    const promptId = await prompt(s);
+    d.browserEvent(s, { promptId, kind: "opened", origin: ORIGIN });
+    for (const e of events) d.browserEvent(s, { promptId, ...e });
+    await eventually(async () => (await audits(s)).length >= count + 1);
+    await barrier(d, dId);
+    return { s, rows: (await audits(s)).slice(1) };
+  }
+
+  it("navigated, acted, refused (refusal or failure) and closed are audited as the table says", async () => {
+    const { s, rows } = await run(
+      [
+        { kind: "navigated", origin: GITHUB, action: "navigate" },
+        { kind: "acted", origin: GITHUB, action: "click" },
+        { kind: "refused", origin: GITHUB, refusal: "metadata_refused" },
+        { kind: "refused", origin: null, failure: "missing_library" },
+        { kind: "closed", origin: GITHUB, action: "close" },
+      ],
+      5,
+    );
+    expect(rows.map((r) => [r.action, r.result, r.metadata])).toEqual([
+      ["work_browser.navigated", "success", { origin: GITHUB }],
+      ["work_browser.acted", "success", { origin: GITHUB, action: "click" }],
+      ["work_browser.refused", "denied", { origin: GITHUB, refusal: "metadata_refused" }],
+      ["work_browser.refused", "denied", { failure: "missing_library" }],
+      ["work_browser.closed", "success", { origin: GITHUB }],
+    ]);
+    for (const r of rows) {
+      expect(r).toMatchObject({ actor_kind: "device", actor_id: dId, user_id: owenId, device_id: dId });
+    }
+    const row = await browserRow(s);
+    expect(row).toMatchObject({ state: "closed", origin: GITHUB, lease_id: null, controller_user_id: null });
+    expect(row!.closed_at).not.toBeNull();
+  });
+
+  it("navigated updates the row's origin while the page stays open", async () => {
+    const { s } = await run([{ kind: "navigated", origin: GITHUB }], 1);
+    expect(await browserRow(s)).toMatchObject({ state: "open", origin: GITHUB, closed_at: null });
+  });
+
+  it("crashed and takeover_abandoned close the row and clear its lease, audited as closed with endReason", async () => {
+    for (const kind of ["crashed", "takeover_abandoned"] as const) {
+      const s = await startSession(owen, d, projectId);
+      const promptId = await prompt(s);
+      d.browserEvent(s, { promptId, kind: "opened", origin: ORIGIN });
+      await eventually(async () => (await browserRow(s))?.state === "open");
+      // A person held the page (the lease columns are set together, 07.13-03).
+      await su.query(
+        "update app.work_browsers set lease_id = gen_random_uuid(), controller_user_id = $2, lease_expires_at = now() + interval '1 minute', lease_input = true where work_session_id = $1",
+        [s, owenId],
+      );
+      d.browserEvent(s, { promptId, kind, origin: null });
+      const closed = await eventually(async () => {
+        const list = await audits(s, "work_browser.closed");
+        return list.length > 0 ? list : undefined;
+      });
+      // The frame carried no origin: the page's last origin is audited.
+      expect(closed.map((r) => r.metadata)).toEqual([{ origin: ORIGIN, endReason: kind }]);
+      expect(await browserRow(s)).toMatchObject({
+        state: "closed",
+        lease_id: null,
+        controller_user_id: null,
+        lease_expires_at: null,
+        lease_input: false,
+      });
+    }
+  });
+
+  it("a prompt of another session never names the audit's user", async () => {
+    const other = await startSession(owen, d, projectId);
+    const foreignPrompt = await prompt(other, "another session's turn");
+    const s = await startSession(owen, d, projectId);
+    d.browserEvent(s, { promptId: foreignPrompt, kind: "opened", origin: ORIGIN });
+    d.browserEvent(s, { promptId: "not-a-uuid", kind: "acted", origin: ORIGIN, action: "click" });
+    d.browserEvent(s, { promptId: null, kind: "acted", origin: ORIGIN, action: "scroll" });
+    const rows = await eventually(async () => {
+      const list = await audits(s);
+      return list.length >= 3 ? list : undefined;
+    });
+    expect(rows.map((r) => r.user_id)).toEqual([null, null, null]);
+    expect(rows.map((r) => r.actor_id)).toEqual([dId, dId, dId]);
+  });
+
+  it("signin_loaded and signin_unloaded are accepted and ignored here", async () => {
+    const s = await startSession(owen, d, projectId);
+    const promptId = await prompt(s);
+    d.browserEvent(s, { promptId, kind: "signin_loaded", origin: GITHUB });
+    d.browserEvent(s, { promptId, kind: "signin_unloaded", origin: GITHUB });
+    await barrier(d, dId);
+    expect(await audits(s)).toEqual([]);
+    expect(await browserRow(s)).toBeNull();
+  });
+
+  it("every work_browser.* audit row's metadata is the origin and enum codes only", async () => {
+    const res = await su.query(
+      "select action, metadata::text as m from app.audit_events where action like 'work_browser.%'",
+    );
+    const rows = res.rows as Array<{ action: string; m: string }>;
+    expect(rows.length).toBeGreaterThan(10);
+    for (const r of rows) expect(JSON.stringify(JSON.parse(r.m)), r.action).toMatch(METADATA_SHAPE);
+  });
+});
