@@ -39,6 +39,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { WorkSignInsSection } from "@/components/work-zone/browser/work-signins-section";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage, isApiError } from "@/lib/api";
 import { connectionDate } from "@/lib/connections-format";
@@ -226,6 +227,7 @@ export function KeychainSettings() {
       </p>
 
       <BrowserSessionsSection />
+      <WorkSignInsSection />
 
       <VaultItemDialog mode={dialog} units={units} onOpenChange={(o) => !o && setDialog(null)} />
       <DeleteKeyDialog item={toDelete} onDone={() => setToDelete(null)} />
