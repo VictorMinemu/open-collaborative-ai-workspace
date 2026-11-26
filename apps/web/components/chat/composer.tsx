@@ -599,7 +599,7 @@ export function MentionSuggestions({
             onMouseEnter={() => onHover(i)}
             onClick={() => onPick(x)}
             className={cn(
-              "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none",
+              "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none max-md:min-h-11",
               i === active ? "bg-accent text-accent-foreground" : "",
             )}
           >
@@ -709,7 +709,7 @@ function MemberOption({
       onMouseEnter={onHover}
       onClick={onPick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none",
+        "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none max-md:min-h-11",
         active ? "bg-accent text-accent-foreground" : "",
       )}
     >
