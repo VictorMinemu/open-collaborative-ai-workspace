@@ -905,6 +905,66 @@ describe("Control socket", () => {
   });
 });
 
+describe("07.13.1 app update hold (D-07): the desktop app holds every gate for its restart", () => {
+  const hold = (drain: boolean) => controlRequest(socketPath(), { cmd: "appUpdateHold", drain });
+  const release = () => controlRequest(socketPath(), { cmd: "appUpdateRelease" });
+  const appUpdateOf = async () =>
+    ((await controlRequest(socketPath(), { cmd: "status" })).result as { appUpdate: unknown }).appUpdate;
+  const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
+
+  async function startSession(sessionId: string): Promise<void> {
+    const localId = await addProject();
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, permissionMode: "default" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sessionId}`)).toMatchObject({
+      ok: true,
+    });
+  }
+
+  it("an idle daemon is held at once; a prompt sent meanwhile waits until the release, then runs", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    await startSession("H");
+    expect(await appUpdateOf()).toEqual({ state: "idle", running: 0 });
+    expect(await hold(false)).toEqual({ ok: true, result: { held: true, state: "held", running: 0 } });
+    expect(await appUpdateOf()).toEqual({ state: "held", running: 0 });
+
+    server.send({ id: "ph1", kind: "prompt", sessionId: "H", payload: { promptId: "h1", text: "go" } });
+    await sleep(200);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("h1");
+    expect(hasAck("ph1")).toBe(false);
+
+    expect(await release()).toEqual({ ok: true, result: { released: true } });
+    expect(await server.frame("ack", (f) => f.commandId === "ph1")).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toContain("h1");
+    expect(await appUpdateOf()).toEqual({ state: "idle", running: 0, lastEnd: "released" });
+    expect(await release()).toEqual({ ok: true, result: { released: false } });
+  });
+
+  it("both commands are strict: a missing drain, an extra key or a value on the release is an invalid request", async () => {
+    await daemon.start();
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateHold" } as never)).toMatchObject({
+      ok: false,
+      error: "invalid request",
+    });
+    expect(
+      await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: true, x: 1 } as never),
+    ).toMatchObject({ ok: false, error: "invalid request" });
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: "yes" } as never)).toMatchObject(
+      { ok: false, error: "invalid request" },
+    );
+    expect(
+      await controlRequest(socketPath(), { cmd: "appUpdateRelease", drain: false } as never),
+    ).toMatchObject({ ok: false, error: "invalid request" });
+    // Nothing was held by the refused requests.
+    expect(await appUpdateOf()).toEqual({ state: "idle", running: 0 });
+  });
+});
+
 /** Replace the default daemon with one whose runtime sees the daemon's own Full access gate (ADR-0012). */
 async function gatedDaemon(env: NodeJS.ProcessEnv): Promise<Daemon> {
   await daemon.stop();
