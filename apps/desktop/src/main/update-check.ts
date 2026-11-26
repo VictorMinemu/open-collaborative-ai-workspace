@@ -1,9 +1,11 @@
-// "Update available" (07.13, D-18, PD-21): the desktop app asks GitHub's public latest-release API at most once a day
-// and, when the latest stable release is newer than its own version, the tray and the onboarding window link to that
-// release's page. It never downloads or installs anything: the builds are unsigned until Phase 9, so the person
-// updates by hand. One unauthenticated GET, no token, no identity beyond a generic User-Agent. The answer is untrusted
-// JSON: only a stable `vX.Y.Z` tag and a page under the repository's releases are ever shown. No Electron imports
-// (unit-tested).
+// The fallback "Update available" notice (07.13 D-18, 07.13.1 D-05/D-06): for an install the app cannot update itself
+// (a `.deb`, a Mac running from the disk image, translocated or in a folder it cannot write, an unsupported platform, a
+// packaged build the release workflow did not make), the desktop app asks GitHub's public latest-release API at most
+// once a day (a click on "Check for updates…" forces a fresh look) and, when the latest stable release is newer than
+// its own version, the tray, the Runtime menu and the onboarding window link to that release's page. It never
+// downloads or installs anything; the platform updater (platform-updater.ts) does that where it can. One
+// unauthenticated GET, no token, no identity beyond a generic User-Agent. The answer is untrusted JSON: only a stable
+// `vX.Y.Z` tag and a page under the repository's releases are ever shown. No Electron imports (unit-tested).
 
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -110,20 +112,22 @@ async function fetchLatest(
 }
 
 /**
- * The update notice for `current` (`app.getVersion()`). Within a day of the last answer it uses the stored one; after
- * that it asks GitHub once. Any failure (network, refusal, rate limit, malformed answer, unreadable store) keeps the
- * previous result and never throws.
+ * The update notice for `current` (`app.getVersion()`). Within a day of the last answer it uses the stored one, unless
+ * `force` (a click on "Check for updates…"); otherwise it asks GitHub once. Any failure (network, refusal, rate limit,
+ * malformed answer, unreadable store) keeps the previous result and never throws.
  */
 export async function checkForUpdate(opts: {
   current: string;
   fetchImpl: typeof fetch;
   now: () => number;
   store: UpdateStore;
+  force?: boolean;
 }): Promise<UpdateCheckResult> {
   const cached = await opts.store.read().catch(() => null);
   const at = cached ? Date.parse(cached.checkedAt) : Number.NaN;
   const now = opts.now();
-  if (cached && Number.isFinite(at) && now >= at && now - at < UPDATE_CHECK_INTERVAL_MS) {
+  const fresh = Number.isFinite(at) && now >= at && now - at < UPDATE_CHECK_INTERVAL_MS;
+  if (cached && fresh && opts.force !== true) {
     return announce(cached, opts.current);
   }
   const latest = await fetchLatest(opts.fetchImpl);

@@ -12,8 +12,12 @@
 //   confirmation. Web content never sees or sets it.
 // - Browser opt-in (07.13, D-10, PD-27): "Allow the browser on this computer" in the Runtime menu / tray, after a
 //   native confirmation, written to runtime.json like Full access. Web content never sees or sets it.
-// - "Update available" (07.13, D-18, PD-21): a daily look at GitHub's public releases/latest (packaged builds); a
-//   newer release is linked from the tray and the onboarding window. Nothing is ever downloaded or installed.
+// - The app's own update (07.13.1, ADR-0046): the platform's one updater (NSIS, AppImage or the ad-hoc macOS updater,
+//   platform-updater.ts; release builds only) is driven by one AppUpdateController at the org ∩ device 07.11 level.
+//   "Check for updates…", progress, "Restart to update" and the wait for running sessions live in the tray and the
+//   Runtime menu (and the onboarding window), never in the web app. The install starts only from Electron's `quit`
+//   event, after `before-quit` stopped the daemon. Where the app cannot update itself (.deb, a Mac from the disk image
+//   or an unwritable folder, other builds) the daily 07.13 GitHub notice links the release page instead.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
@@ -29,6 +33,7 @@ import {
   type MenuItemConstructorOptions,
   Notification,
   nativeImage,
+  powerMonitor,
   safeStorage,
   shell,
   Tray,
@@ -58,6 +63,14 @@ import { runtimeUpdateLines, runtimeUpdatesMenuModel } from "../shared/runtime-u
 import { type DaemonProcessState, deriveStatus, sameStatus } from "../shared/status";
 import { deriveApiUrl, isSafeExternalUrl, normalizeServerUrl, UrlError } from "../shared/urls";
 import {
+  AppUpdateController,
+  type AppUpdateMenuAction,
+  appImageNameNotice,
+  appUpdateMenuModel,
+  type DaemonKind,
+} from "./app-update";
+import { RELEASE_BUILD } from "./build-flags";
+import {
   awaitChatgptCallback,
   cancelAllChatgptLoopbacks,
   cancelChatgptLoopback,
@@ -67,7 +80,9 @@ import { ConfigStore } from "./config-store";
 import { ControlError, controlRequest, controlSocketPath } from "./control-client";
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
+import { createAdhocMacUpdater, macInstallTarget, readSwapResult, sweepLeftovers } from "./mac-update";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
+import { createPlatformUpdater, type UpdaterMode, updaterMode } from "./platform-updater";
 import {
   readDaemonBrowser,
   readDaemonFullAccess,
@@ -118,8 +133,25 @@ let localUpdatesLevel: DesktopRuntimeUpdatesLevel = "automatic";
 /** What the menu last showed about runtime updates: they are not part of DesktopStatus (web content never sees them). */
 let updatesChromeKey = "";
 let status: DesktopStatus | null = null;
-/** The last "Update available" answer (07.13, D-18): tray and onboarding window only, never the web app. */
+/**
+ * The last "Update available" answer (07.13, D-18), kept only where the app has no updater of its own (07.13.1, D-05,
+ * D-06); it feeds the controller's fallback link. Tray, Runtime menu and onboarding window only, never the web app.
+ */
 let updateNotice: UpdateCheckResult = { available: false };
+/** The app's own update (07.13.1): one controller, created in main() once the supervisor exists. */
+let appUpdate: AppUpdateController | null = null;
+/** Whether this install has a platform updater; without one, "Check for updates…" forces the GitHub notice. */
+let hasPlatformUpdater = false;
+/** What the update lines last showed, so a download's progress events rebuild the menus only when a line changes. */
+let appUpdateChromeKey = "";
+/**
+ * The pid of the app's own daemon, captured before the daemon is stopped: when the restart hold is asked and again in
+ * `before-quit` right before `shutdown()`, because `shutdown()` clears the supervisor's child and reading
+ * `supervisor.pid` at install time (the `quit` event) would always give 0. The macOS swap helper waits for this pid to
+ * exit before it swaps the bundle; `0` means none of the app's own was running (paused, external or already stopped),
+ * and the helper then skips the daemon wait.
+ */
+let recordedDaemonPid = 0;
 let polling = false;
 let quitting = false;
 let cleanedUp = false;
@@ -265,7 +297,7 @@ function sendOnboardingStatus(): void {
   }
 }
 
-// ---- update notice (07.13, D-18, PD-21) -----------------------------------------------------
+// ---- app update (07.13.1, ADR-0046) and the fallback notice (07.13, D-18, PD-21) ------------
 
 /** Opens a release page in the default browser, only after both URL checks (T-07.13-11-01). */
 function openReleasePage(url: string): void {
@@ -273,18 +305,23 @@ function openReleasePage(url: string): void {
 }
 
 /**
- * Asks GitHub's public releases/latest at most once a day (the stored answer covers restarts) and refreshes the tray
- * and the onboarding window when the answer changes. Packaged builds only (a dev build's 0.1.0 is not a release);
+ * The fallback notice, only where the app has no updater of its own (`.deb`, a Mac from the disk image, translocated
+ * or unwritable, an unsupported platform, a packaged non-release build): asks GitHub's public releases/latest at most
+ * once a day (the stored answer covers restarts; `force`, a click on "Check for updates…", asks again) and hands the
+ * answer to the controller's fallback link. Packaged builds only (a dev build's 0.1.0 is not a release);
  * `OCW_DESKTOP_UPDATE_CHECK=1` turns it on in dev. Never throws, never downloads.
  */
-async function runUpdateCheck(): Promise<void> {
+async function runUpdateCheck(opts: { force?: boolean } = {}): Promise<void> {
+  if (hasPlatformUpdater) return;
   if (!app.isPackaged && process.env.OCW_DESKTOP_UPDATE_CHECK !== "1") return;
   const next = await checkForUpdate({
     current: app.getVersion(),
     fetchImpl: fetch,
     now: Date.now,
     store: fileUpdateStore(app.getPath("userData")),
+    force: opts.force === true,
   }).catch((): UpdateCheckResult => updateNotice);
+  appUpdate?.setFallbackNotice(next.available ? { version: next.version, url: next.url } : null);
   if (JSON.stringify(next) === JSON.stringify(updateNotice)) return;
   updateNotice = next;
   if (next.available) log(`update available: v${next.version}`);
@@ -292,13 +329,172 @@ async function runUpdateCheck(): Promise<void> {
   sendOnboardingStatus();
 }
 
-function updateItems(): MenuItemConstructorOptions[] {
-  if (!updateNotice.available) return [];
-  const { version, url } = updateNotice;
+/**
+ * "Move OCW to Applications to get automatic updates" (D-05): held like a restart. Electron's mover terminates and
+ * relaunches the app by itself, so the daemon is stopped here first instead of relying on `before-quit` (with
+ * `cleanedUp` already true, a `before-quit` the mover may still emit passes straight through). A cancelled move starts
+ * the daemon again and releases the hold.
+ */
+async function moveToApplications(): Promise<void> {
+  const controller = appUpdate;
+  if (!controller || process.platform !== "darwin") return;
+  await controller.holdThen(async () => {
+    quitting = true;
+    recordedDaemonPid = externalDaemon ? 0 : (supervisor.pid ?? 0);
+    await shutdown();
+    cleanedUp = true;
+    let moved = false;
+    let failed = false;
+    try {
+      moved = app.moveToApplicationsFolder();
+    } catch {
+      failed = true; // anything but the person's own cancel; the error text may carry a path, so it is not shown
+    }
+    if (moved) return;
+    quitting = false;
+    cleanedUp = false;
+    if (!paused) await startDaemon();
+    controller.cancelWait();
+    if (failed)
+      notify(
+        "OCW was not moved",
+        "Move OCW to the Applications folder in the Finder, then open it from there.",
+      );
+    void pollStatus();
+  });
+}
+
+/** The update lines' actions (tray and Runtime menu). */
+function runUpdateAction(action: AppUpdateMenuAction, url?: string): void {
+  const controller = appUpdate;
+  if (!controller) return;
+  switch (action) {
+    case "check":
+      if (hasPlatformUpdater) void controller.check("click");
+      else void runUpdateCheck({ force: true });
+      return;
+    case "restart":
+      void controller.restart();
+      return;
+    case "cancelWait":
+      controller.cancelWait();
+      return;
+    case "openRelease":
+      if (url) openReleasePage(url);
+      return;
+    case "moveToApplications":
+      void moveToApplications();
+      return;
+  }
+}
+
+/** The controller's lines followed by a separator, at the top of the tray and the Runtime menu (D-09). */
+function appUpdateItems(): MenuItemConstructorOptions[] {
+  if (!appUpdate) return [];
+  const items = appUpdateMenuModel(appUpdate.view());
+  if (items.length === 0) return [];
   return [
-    { label: `Update available (v${version})`, click: () => openReleasePage(url) },
+    ...items.map((item): MenuItemConstructorOptions => {
+      const { action, url } = item;
+      return {
+        label: item.label,
+        enabled: item.enabled,
+        ...(action ? { click: () => runUpdateAction(action, url) } : {}),
+      };
+    }),
     { type: "separator" },
   ];
+}
+
+/** The controller changed: rebuild the menus (only when a line changed) and tell the onboarding window. */
+function onAppUpdateChange(): void {
+  const key = appUpdate ? JSON.stringify(appUpdateMenuModel(appUpdate.view())) : "";
+  if (key !== appUpdateChromeKey) {
+    appUpdateChromeKey = key;
+    refreshChrome();
+  }
+  sendOnboardingStatus();
+}
+
+function appDaemonKind(): DaemonKind {
+  if (externalDaemon) return "external";
+  if (paused) return "paused";
+  return supervisor.state === "running" ? "ours" : "stopped";
+}
+
+/**
+ * The platform updater (release builds; a loopback test feed when unpackaged) and the one controller that drives it
+ * (D-01, D-02, D-08). On macOS the ad-hoc updater swaps the bundle at `app.getPath("exe")`; the test mode's dummy app
+ * replaces it only unpackaged. The test mode never installs.
+ */
+function setUpAppUpdate(mode: UpdaterMode): void {
+  const platform = createPlatformUpdater({
+    platform: process.platform,
+    env: process.env,
+    mode,
+    createMac: () =>
+      createAdhocMacUpdater({
+        exePath: app.getPath("exe"),
+        userData: app.getPath("userData"),
+        helperSource: join(__dirname, "mac-swap-helper.cjs"),
+        daemonPid: () => recordedDaemonPid,
+        ...(mode.kind === "test" && mode.macTestApp ? { installedAppOverride: mode.macTestApp } : {}),
+      }),
+  });
+  hasPlatformUpdater = platform.updater !== null;
+  appUpdate = new AppUpdateController({
+    updater: platform.updater,
+    fallback: platform.fallback,
+    installAllowed: mode.kind !== "test",
+    currentVersion: app.getVersion(),
+    hold: async (drain) => {
+      recordedDaemonPid = externalDaemon ? 0 : (supervisor.pid ?? 0);
+      return controlRequest(socketPath, { cmd: "appUpdateHold", drain }, 15_000);
+    },
+    release: () => controlRequest(socketPath, { cmd: "appUpdateRelease" }),
+    daemon: appDaemonKind,
+    quit: () => app.quit(),
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    notify,
+    onChange: onAppUpdateChange,
+  });
+  appUpdate.start();
+  log(hasPlatformUpdater ? "app updates: on" : `app updates: release page only (${platform.fallback})`);
+}
+
+/**
+ * What the person learns once after an update (D-05, Pitfall 6), versions and file names only, never a folder:
+ * - macOS (packaged, or the test mode's dummy app): a failed swap (the helper's `update-result.json`, deleted once
+ *   read) and the removal of leftover staging folders or old bundles beside the app when that folder is writable.
+ * - Linux AppImage: the file now has a new versioned name, so shortcuts to the old one break; the new name is stored.
+ */
+async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
+  try {
+    if (process.platform === "darwin") {
+      const testApp = mode.kind === "test" ? mode.macTestApp : null;
+      if (!app.isPackaged && !testApp) return;
+      const result = await readSwapResult(app.getPath("userData"));
+      if (result?.outcome === "failed") {
+        notify(
+          "OCW was not updated",
+          `The update to v${result.version} could not be installed. OCW is still on v${app.getVersion()}.`,
+        );
+      }
+      const exe = testApp ? join(testApp, "Contents", "MacOS", "OCW") : app.getPath("exe");
+      const target = macInstallTarget(exe);
+      if (target.ok) await sweepLeftovers(target.parent);
+      return;
+    }
+    const appImage = process.platform === "linux" ? process.env.APPIMAGE : undefined;
+    if (!appImage) return;
+    const name = basename(appImage);
+    const previous = store.config.lastAppImageName ?? null;
+    const notice = appImageNameNotice(previous, name);
+    if (notice) notify("OCW was updated", notice);
+    if (name !== previous) await store.update({ lastAppImageName: name });
+  } catch {
+    // Best effort: nothing here may keep the app from starting.
+  }
 }
 
 async function pollStatus(): Promise<void> {
@@ -312,6 +508,12 @@ async function pollStatus(): Promise<void> {
       externalDaemon = false;
       if (!paused) supervisor.start();
     }
+    // The org ∩ device level and the restart hold (07.13.1, D-07, D-08); no answer keeps the last known level.
+    appUpdate?.onDaemonStatus({
+      reported: lastReport !== null,
+      level: lastReport?.runtimeUpdates?.effectiveLevel ?? null,
+      appUpdate: lastReport?.appUpdate ?? null,
+    });
   } finally {
     polling = false;
     publishStatus();
@@ -853,7 +1055,7 @@ function refreshChrome(): void {
     tray.setToolTip(`OCW · ${s.label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        ...updateItems(),
+        ...appUpdateItems(),
         ...runtimeItems(s),
         { type: "separator" },
         { label: "Quit OCW", role: "quit" },
@@ -902,6 +1104,7 @@ function refreshChrome(): void {
     {
       label: "Runtime",
       submenu: [
+        ...appUpdateItems(),
         ...runtimeItems(s),
         { type: "separator" },
         {
@@ -931,7 +1134,12 @@ async function main(): Promise<void> {
     copyright: "Open Collaborative AI Workspace · AGPL-3.0",
   });
 
-  app.on("second-instance", () => (store?.config.onboarded ? openMain() : openOnboarding()));
+  app.on("second-instance", () => {
+    // During a quit (an update's restart included) a second start must not reopen windows (T-07.13.1-05-05).
+    if (quitting) return;
+    if (store?.config.onboarded) openMain();
+    else openOnboarding();
+  });
 
   await app.whenReady();
 
@@ -956,6 +1164,13 @@ async function main(): Promise<void> {
   supervisor.on("restart-scheduled", (ms: number) => log(`daemon exited; restarting in ${ms} ms`));
   supervisor.on("spawn-error", () => log("daemon failed to spawn"));
 
+  const updateMode = updaterMode({
+    isPackaged: app.isPackaged,
+    releaseBuild: RELEASE_BUILD,
+    env: process.env,
+  });
+  setUpAppUpdate(updateMode);
+
   installGlobalGuards(app, webOrigin);
   registerIpc();
 
@@ -966,6 +1181,9 @@ async function main(): Promise<void> {
   if (store.config.onboarded && store.config.webUrl) openMain();
   else openOnboarding();
 
+  // Before the daemon starts: the first automatic check waits for its first status, so the leftover sweep is done
+  // before any download can stage a new update beside the app.
+  await afterUpdateNotices(updateMode);
   await startDaemon();
   publishStatus();
   setInterval(() => void pollStatus(), STATUS_POLL_MS).unref();
@@ -984,11 +1202,16 @@ async function main(): Promise<void> {
     event.preventDefault();
     if (quitting) return;
     quitting = true;
+    // Before shutdown() clears the supervisor's child: the macOS swap helper waits for this pid (0: none ran).
+    recordedDaemonPid = externalDaemon ? 0 : (supervisor.pid ?? 0);
     void shutdown().finally(() => {
       cleanedUp = true;
       app.quit();
     });
   });
+  // The only place an update installs (07.13.1, D-07, Pitfall 3): `quit` follows the `before-quit` above, which awaited
+  // shutdown(), so the daemon is already stopped. The unpackaged test mode never installs.
+  app.on("quit", () => appUpdate?.onQuit());
   // Last resort if the app is torn down without before-quit: never orphan the daemon.
   process.on("exit", () => {
     const pid = supervisor.pid;
@@ -1002,7 +1225,11 @@ async function main(): Promise<void> {
   });
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (process.env.APPIMAGE_EXIT_AFTER_INSTALL === "true") {
+  // electron-updater runs the new AppImage once with this variable after replacing the file on a normal quit (no
+  // relaunch wanted): that instance exits at once, before any window, tray or daemon (Pitfall 6).
+  app.exit(0);
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   void main();

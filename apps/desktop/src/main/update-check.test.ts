@@ -132,6 +132,34 @@ describe("checkForUpdate (D-18, PD-21)", () => {
     expect(third).toHaveBeenCalledTimes(1);
   });
 
+  it("a forced check (a click on Check for updates…) asks even within the day, and still never throws", async () => {
+    const store = memoryStore({ checkedAt: new Date(T0).toISOString(), version: "0.5.0", url: PAGE });
+    const page6 = PAGE.replace("v0.5.0", "v0.6.0");
+    const fresh = github(release({ tag_name: "v0.6.0", html_url: page6 }));
+    expect(
+      await checkForUpdate({ current: "0.4.0", fetchImpl: fresh, now: () => T0 + 1000, store, force: true }),
+    ).toEqual({ available: true, version: "0.6.0", url: page6 });
+    expect(fresh).toHaveBeenCalledTimes(1);
+    expect(store.value?.version).toBe("0.6.0");
+    // Offline on a forced check: the stored answer stays, nothing is thrown.
+    const offline = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    expect(
+      await checkForUpdate({
+        current: "0.4.0",
+        fetchImpl: offline,
+        now: () => T0 + 2000,
+        store,
+        force: true,
+      }),
+    ).toEqual({ available: true, version: "0.6.0", url: page6 });
+    // Without force the same-day answer is used again.
+    const unused = github(release());
+    await checkForUpdate({ current: "0.4.0", fetchImpl: unused, now: () => T0 + 3000, store });
+    expect(unused).not.toHaveBeenCalled();
+  });
+
   it("the stored result is compared with the running version (an app already updated says nothing)", async () => {
     const store = memoryStore({ checkedAt: new Date(T0).toISOString(), version: "0.5.0", url: PAGE });
     const fetchImpl = github(release());
