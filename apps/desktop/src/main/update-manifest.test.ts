@@ -10,7 +10,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "check-update-manifest.mjs");
+const SCRIPT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "scripts",
+  "check-update-manifest.mjs",
+);
 const VERSION = "1.2.3";
 const APPIMAGE = `OCW-v${VERSION}-linux-x86_64.AppImage`;
 
