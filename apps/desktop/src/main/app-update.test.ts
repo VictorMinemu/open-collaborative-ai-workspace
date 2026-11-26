@@ -53,11 +53,23 @@ const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
+/** Hold ids as the daemon mints them (review CR-01). */
+const HOLD_A = "0a0a0a0a-0000-4000-8000-00000000000a";
+const HOLD_B = "0b0b0b0b-0000-4000-8000-00000000000b";
+
+/** A promise resolved from outside, for a control request still in flight. */
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
 interface Harness {
   controller: AppUpdateController;
   updater: FakeUpdater;
   hold: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
+  holdState: ReturnType<typeof vi.fn>;
   quit: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
   onChange: ReturnType<typeof vi.fn>;
@@ -70,9 +82,10 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
   const daemon = { kind: "ours" as DaemonKind };
   const idle = { seconds: 0 };
   const hold = vi.fn(
-    async (_drain: boolean): Promise<unknown> => ({ held: true, state: "held", running: 0 }),
+    async (_drain: boolean): Promise<unknown> => ({ held: true, state: "held", running: 0, holdId: HOLD_A }),
   );
-  const release = vi.fn(async () => ({ released: true }));
+  const release = vi.fn(async (_holdId: string): Promise<unknown> => ({ released: true }));
+  const holdState = vi.fn(async (): Promise<unknown> => ({ state: "idle", running: 0 }));
   const quit = vi.fn();
   const notify = vi.fn();
   const onChange = vi.fn();
@@ -83,6 +96,7 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
     currentVersion: "0.5.0",
     hold,
     release,
+    holdState,
     daemon: () => daemon.kind,
     quit,
     idleSeconds: () => idle.seconds,
@@ -95,6 +109,7 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
     updater: (updater ?? new FakeUpdater()) as FakeUpdater,
     hold: (over.hold as typeof hold) ?? hold,
     release: (over.release as typeof release) ?? release,
+    holdState: (over.holdState as typeof holdState) ?? holdState,
     quit,
     notify,
     onChange,
@@ -460,7 +475,7 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     h.controller.start();
     await h.controller.check("click");
     await flush();
-    h.hold.mockResolvedValue({ held: false, state: "draining", running: 2 });
+    h.hold.mockResolvedValue({ held: false, state: "draining", running: 2, holdId: HOLD_A });
   });
 
   it("shows the running sessions, follows the status, and quits once the daemon says held", async () => {
@@ -471,10 +486,10 @@ describe("waiting for the daemon (D-07, D-09)", () => {
       enabled: true,
       action: "cancelWait",
     });
-    h.controller.onDaemonStatus(status("notify", { state: "draining", running: 1 }));
+    h.controller.onDaemonStatus(status("notify", { state: "draining", running: 1, holdId: HOLD_A }));
     expect(labels(h.controller)[0]).toBe("Waiting for 1 session to finish…");
     expect(h.quit).not.toHaveBeenCalled();
-    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0 }));
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_A }));
     await flush();
     expect(h.quit).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
@@ -494,6 +509,7 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     await h.controller.restart();
     await vi.advanceTimersByTimeAsync(31 * MIN);
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
     expect(h.controller.view()).toMatchObject({ phase: "ready", notice: UPDATE_SENTENCES.holdTimedOut });
     expect(h.quit).not.toHaveBeenCalled();
   });
@@ -503,8 +519,9 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     h.controller.cancelWait();
     await flush();
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
     expect(labels(h.controller)).toEqual(["Restart to update to v0.5.1"]);
-    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0 }));
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_A }));
     await flush();
     expect(h.quit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(31 * MIN);
@@ -520,7 +537,7 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     await flush();
     expect(h.hold).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(9_000);
-    h.hold.mockResolvedValue({ held: true, state: "held", running: 0 });
+    h.hold.mockResolvedValue({ held: true, state: "held", running: 0, holdId: HOLD_B });
     h.controller.onDaemonStatus(status("notify", { state: "idle", running: 0 }));
     await flush();
     expect(h.hold).toHaveBeenCalledTimes(2);
@@ -530,17 +547,20 @@ describe("waiting for the daemon (D-07, D-09)", () => {
 
   it("a hold that throws goes back to ready with the runtime-unreachable sentence and reopens the gates", async () => {
     h.hold.mockRejectedValue(new Error("connect ENOENT /Users/someone/.ocw/runtime.sock"));
+    // The request may still have reached the daemon: the hold that is on there is released by its id.
+    h.holdState.mockResolvedValue({ state: "draining", running: 1, holdId: HOLD_B });
     await h.controller.restart();
     expect(h.controller.view()).toMatchObject({
       phase: "ready",
       notice: UPDATE_SENTENCES.runtimeUnreachable,
     });
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(HOLD_B);
     expect(JSON.stringify(appUpdateMenuModel(h.controller.view()))).not.toContain("ENOENT");
   });
 
   it("an action that throws returns to its previous phase and never escapes", async () => {
-    h.hold.mockResolvedValue({ held: true, state: "held", running: 0 });
+    h.hold.mockResolvedValue({ held: true, state: "held", running: 0, holdId: HOLD_A });
     await expect(
       h.controller.holdThen(async () => {
         throw new Error("mover failed");
@@ -548,6 +568,119 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     ).resolves.toBeUndefined();
     expect(h.controller.view().phase).toBe("ready");
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
+  });
+});
+
+// Review CR-01: a hold has an owner (its id), the control requests go one at a time, and only a `held` status or
+// answer for this wait's own hold lets the app quit.
+describe("hold ownership and ordering (review CR-01)", () => {
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    h = harness();
+    h.controller.start();
+    await h.controller.check("click");
+    await flush();
+  });
+
+  it("a held answer without an id (somebody else's hold) never quits", async () => {
+    h.hold.mockResolvedValue({ held: true, state: "held", running: 0 });
+    await h.controller.restart();
+    await flush();
+    expect(h.quit).not.toHaveBeenCalled();
+    expect(h.controller.view().phase).toBe("waiting");
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_B }));
+    await flush();
+    expect(h.quit).not.toHaveBeenCalled();
+  });
+
+  it("a stale held status from a cancelled wait never quits the next wait", async () => {
+    h.hold.mockResolvedValueOnce({ held: false, state: "draining", running: 1, holdId: HOLD_A });
+    await h.controller.restart();
+    h.controller.cancelWait();
+    await flush();
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
+    const second = deferred<unknown>();
+    h.hold.mockReturnValueOnce(second.promise);
+    void h.controller.restart();
+    await flush();
+    // The poll read before the cancel arrives now: it names the cancelled hold.
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_A }));
+    await flush();
+    expect(h.quit).not.toHaveBeenCalled();
+    second.resolve({ held: false, state: "draining", running: 1, holdId: HOLD_B });
+    await flush();
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_A }));
+    await flush();
+    expect(h.quit).not.toHaveBeenCalled();
+    h.controller.onDaemonStatus(status("notify", { state: "held", running: 0, holdId: HOLD_B }));
+    await flush();
+    expect(h.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("the next hold is sent only once the previous release has settled", async () => {
+    h.hold.mockResolvedValueOnce({ held: false, state: "draining", running: 1, holdId: HOLD_A });
+    await h.controller.restart();
+    const released = deferred<unknown>();
+    h.release.mockReturnValueOnce(released.promise);
+    h.controller.cancelWait();
+    void h.controller.restart();
+    await flush();
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
+    expect(h.hold).toHaveBeenCalledTimes(1);
+    released.resolve({ released: true });
+    await flush();
+    expect(h.hold).toHaveBeenCalledTimes(2);
+    expect(h.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("a hold answered after its wait was cancelled is released by its id, and nothing quits", async () => {
+    const answer = deferred<unknown>();
+    h.hold.mockReturnValueOnce(answer.promise);
+    void h.controller.restart();
+    await flush();
+    h.controller.cancelWait();
+    answer.resolve({ held: false, state: "draining", running: 1, holdId: HOLD_B });
+    await flush();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(HOLD_B);
+    expect(h.quit).not.toHaveBeenCalled();
+    expect(h.controller.view().phase).toBe("ready");
+  });
+
+  it("a re-ask in flight when the wait is cancelled releases the hold it started", async () => {
+    h.hold.mockResolvedValueOnce({ held: false, state: "idle", running: 0, blocked: "runtime_update" });
+    await h.controller.restart();
+    await vi.advanceTimersByTimeAsync(11_000);
+    const reask = deferred<unknown>();
+    h.hold.mockReturnValueOnce(reask.promise);
+    h.controller.onDaemonStatus(status("notify", { state: "idle", running: 0 }));
+    await flush();
+    expect(h.hold).toHaveBeenCalledTimes(2);
+    h.controller.cancelWait();
+    reask.resolve({ held: false, state: "draining", running: 1, holdId: HOLD_B });
+    await flush();
+    expect(h.release).toHaveBeenCalledWith(HOLD_B);
+    expect(h.quit).not.toHaveBeenCalled();
+  });
+
+  it("an unattended hold that loses to a click is released before the click's hold is sent", async () => {
+    h.controller.onDaemonStatus(status("automatic"));
+    h.idle.seconds = 4000;
+    const unattended = deferred<unknown>();
+    h.hold.mockReturnValueOnce(unattended.promise);
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(h.hold).toHaveBeenCalledWith(false);
+    h.hold.mockResolvedValueOnce({ held: true, state: "held", running: 0, holdId: HOLD_B });
+    void h.controller.restart();
+    await flush();
+    expect(h.hold).toHaveBeenCalledTimes(1);
+    unattended.resolve({ held: true, state: "held", running: 0, holdId: HOLD_A });
+    await flush();
+    expect(h.release).toHaveBeenCalledWith(HOLD_A);
+    expect(h.hold).toHaveBeenCalledTimes(2);
+    expect(h.release.mock.invocationCallOrder[0]).toBeLessThan(h.hold.mock.invocationCallOrder[1] as number);
+    expect(h.quit).toHaveBeenCalledTimes(1);
   });
 });
 

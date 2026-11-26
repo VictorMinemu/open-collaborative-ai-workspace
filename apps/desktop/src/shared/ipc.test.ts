@@ -340,6 +340,14 @@ describe("the desktop app update's daemon shapes and actions (07.13.1, D-07, D-0
         .appUpdate,
     ).toEqual({ state: "idle", running: 0, lastEnd: "timed_out" });
     expect(DaemonStatusPayload.parse(base).appUpdate).toBeUndefined();
+    // Review CR-01: the hold that is on is named, so a status can be tied to the request that started it.
+    const holdId = "0b0d1c2e-3f40-4a51-8b62-7c83d94ea5f6";
+    expect(
+      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "held", running: 0, holdId } }).appUpdate,
+    ).toEqual({ state: "held", running: 0, holdId });
+    expect(
+      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "held", running: 0, holdId: 7 } }).appUpdate,
+    ).toEqual({ state: "held", running: 0 });
     for (const odd of [
       "held",
       { state: "paused", running: 0 },
@@ -362,6 +370,11 @@ describe("the desktop app update's daemon shapes and actions (07.13.1, D-07, D-0
       AppUpdateHoldAnswer.parse({ held: false, state: "idle", running: 1, blocked: "runtime_update" })
         .blocked,
     ).toBe("runtime_update");
+    const holdId = "0b0d1c2e-3f40-4a51-8b62-7c83d94ea5f6";
+    expect(AppUpdateHoldAnswer.parse({ held: true, state: "held", running: 0, holdId }).holdId).toBe(holdId);
+    expect(
+      AppUpdateHoldAnswer.parse({ held: true, state: "held", running: 0, holdId: 7 }).holdId,
+    ).toBeUndefined();
     expect(AppUpdateHoldAnswer.safeParse({ held: false, state: "waiting", running: 1 }).success).toBe(false);
     expect(AppUpdateHoldAnswer.safeParse({ held: true, state: "held" }).success).toBe(false);
     expect(

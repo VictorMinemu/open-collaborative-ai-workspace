@@ -7,6 +7,7 @@
 // What this class never does: interrupt a turn; close a gate while a 07.11 CLI job or the runtime self-update holds
 // (`runtimeUpdateBusy`); keep the gates closed without a bound; carry or log a path.
 
+import { randomUUID } from "node:crypto";
 import type { RuntimeId } from "@ocw/contracts";
 import { allIdle, closeAll, closeAllIfIdle, openAll, runningCount } from "./all-gates.js";
 import type { RuntimeGate } from "./gate.js";
@@ -24,18 +25,24 @@ export type AppUpdateHoldState = "idle" | "draining" | "held";
 /** How the last hold ended: the app released it, the drain gave up, or nobody stopped the daemon after `held`. */
 export type AppUpdateHoldEnd = "released" | "timed_out" | "auto_released";
 
-/** The answer to `appUpdateHold`: states and counts only, never a path. */
+/**
+ * The answer to `appUpdateHold`: states and counts only, never a path. `holdId` (review CR-01) only in the answer to
+ * the request that started the hold: that caller owns it, and only its id releases it. A repeat hold while one is on
+ * answers the state without an id, so it can never be taken for the owner.
+ */
 export interface AppUpdateHoldAnswer {
   held: boolean;
   state: AppUpdateHoldState;
   running: number;
   blocked?: "runtime_update";
+  holdId?: string;
 }
 
-/** `status().appUpdate`. */
+/** `status().appUpdate`; `holdId` names the hold that is on (absent when idle), so a status is tied to its hold. */
 export interface AppUpdateHoldStatus {
   state: AppUpdateHoldState;
   running: number;
+  holdId?: string;
   lastEnd?: AppUpdateHoldEnd;
 }
 
@@ -53,12 +60,16 @@ export interface AppRestartHoldOptions {
   pollMs?: number;
   maxHoldMs?: number;
   autoReleaseMs?: number;
+  /** A new hold's id (default `randomUUID`). */
+  newHoldId?: () => string;
 }
 
 export class AppRestartHold {
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
   private state: AppUpdateHoldState = "idle";
+  /** The hold that is on (null when idle): only a release naming it ends it. */
+  private holdId: string | null = null;
   private lastEnd: AppUpdateHoldEnd | null = null;
   /** Draining: re-checks every `pollMs` whether every runtime is idle. */
   private pollTimer: TimerHandle | null = null;
@@ -90,17 +101,20 @@ export class AppRestartHold {
    * without `drain` (the automatic restart) nothing changes and the answer says how much runs; with `drain` (a click)
    * every gate closes at once, the running turns finish (never cut), new commands wait, and the hold moves to `held`
    * by itself once every runtime is idle. While draining or held a repeat answers the current state and starts
-   * nothing. While a 07.11 CLI job or the self-update holds, nothing is touched (`blocked`).
+   * nothing. While a 07.11 CLI job or the self-update holds, nothing is touched (`blocked`). Only the answer that
+   * starts a hold carries its `holdId` (review CR-01).
    */
   hold(req: { drain: boolean }): AppUpdateHoldAnswer {
     if (this.stopped || this.state !== "idle") return this.answer();
     if (this.opts.runtimeUpdateBusy()) return { ...this.answer(), blocked: "runtime_update" };
     if (closeAllIfIdle(this.opts.gates, this.opts.activeTurns)) {
+      this.holdId = this.mintHoldId();
       this.enterHeld();
-      return this.answer();
+      return { ...this.answer(), holdId: this.holdId };
     }
     if (!req.drain) return this.answer();
     closeAll(this.opts.gates);
+    this.holdId = this.mintHoldId();
     this.state = "draining";
     this.maxTimer = this.setTimer(() => {
       this.maxTimer = null;
@@ -108,7 +122,7 @@ export class AppRestartHold {
     }, this.opts.maxHoldMs ?? APP_UPDATE_MAX_HOLD_MS);
     this.schedulePoll();
     this.changed();
-    return this.answer();
+    return { ...this.answer(), holdId: this.holdId };
   }
 
   /** The daemon stops (its gates are sealed): every timer goes, nothing reopens, nobody is told. */
@@ -117,9 +131,13 @@ export class AppRestartHold {
     this.clearTimers();
   }
 
-  /** `appUpdateRelease`: a cancelled or failed install reopens every gate at once. */
-  release(): { released: boolean } {
-    if (this.stopped || this.state === "idle") return { released: false };
+  /**
+   * `appUpdateRelease`: a cancelled or failed install reopens every gate at once, only for the hold it names (review
+   * CR-01): a late release from an earlier, cancelled wait never reopens a newer hold.
+   */
+  release(req: { holdId: string }): { released: boolean } {
+    if (this.stopped || this.state === "idle" || this.holdId === null || req.holdId !== this.holdId)
+      return { released: false };
     this.end("released");
     return { released: true };
   }
@@ -128,8 +146,13 @@ export class AppRestartHold {
     return {
       state: this.state,
       running: this.running(),
+      ...(this.holdId !== null ? { holdId: this.holdId } : {}),
       ...(this.lastEnd ? { lastEnd: this.lastEnd } : {}),
     };
+  }
+
+  private mintHoldId(): string {
+    return (this.opts.newHoldId ?? randomUUID)();
   }
 
   private answer(): AppUpdateHoldAnswer {
@@ -172,6 +195,7 @@ export class AppRestartHold {
     if (this.stopped) return;
     this.clearTimers();
     this.state = "idle";
+    this.holdId = null;
     this.lastEnd = how;
     openAll(this.opts.gates);
     this.changed();

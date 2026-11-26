@@ -907,7 +907,8 @@ describe("Control socket", () => {
 
 describe("07.13.1 app update hold (D-07): the desktop app holds every gate for its restart", () => {
   const hold = (drain: boolean) => controlRequest(socketPath(), { cmd: "appUpdateHold", drain });
-  const release = () => controlRequest(socketPath(), { cmd: "appUpdateRelease" });
+  const release = (holdId: string) => controlRequest(socketPath(), { cmd: "appUpdateRelease", holdId });
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const appUpdateOf = async () =>
     ((await controlRequest(socketPath(), { cmd: "status" })).result as { appUpdate: unknown }).appUpdate;
   const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
@@ -930,19 +931,30 @@ describe("07.13.1 app update hold (D-07): the desktop app holds every gate for i
     await server.frame("hello");
     await startSession("H");
     expect(await appUpdateOf()).toEqual({ state: "idle", running: 0 });
-    expect(await hold(false)).toEqual({ ok: true, result: { held: true, state: "held", running: 0 } });
-    expect(await appUpdateOf()).toEqual({ state: "held", running: 0 });
+    const answer = await hold(false);
+    expect(answer).toEqual({
+      ok: true,
+      result: { held: true, state: "held", running: 0, holdId: expect.stringMatching(UUID) },
+    });
+    const holdId = (answer.result as { holdId: string }).holdId;
+    expect(await appUpdateOf()).toEqual({ state: "held", running: 0, holdId });
+    // Review CR-01: a repeat hold is not the owner (no id), and a release naming another hold reopens nothing.
+    expect(await hold(true)).toEqual({ ok: true, result: { held: true, state: "held", running: 0 } });
+    expect(await release("00000000-0000-4000-8000-000000000000")).toEqual({
+      ok: true,
+      result: { released: false },
+    });
 
     server.send({ id: "ph1", kind: "prompt", sessionId: "H", payload: { promptId: "h1", text: "go" } });
     await sleep(200);
     expect(runtime.prompts.map((p) => p.promptId)).not.toContain("h1");
     expect(hasAck("ph1")).toBe(false);
 
-    expect(await release()).toEqual({ ok: true, result: { released: true } });
+    expect(await release(holdId)).toEqual({ ok: true, result: { released: true } });
     expect(await server.frame("ack", (f) => f.commandId === "ph1")).toMatchObject({ ok: true });
     expect(runtime.prompts.map((p) => p.promptId)).toContain("h1");
     expect(await appUpdateOf()).toEqual({ state: "idle", running: 0, lastEnd: "released" });
-    expect(await release()).toEqual({ ok: true, result: { released: false } });
+    expect(await release(holdId)).toEqual({ ok: true, result: { released: false } });
   });
 
   it("both commands are strict: a missing drain, an extra key or a value on the release is an invalid request", async () => {
@@ -960,6 +972,14 @@ describe("07.13.1 app update hold (D-07): the desktop app holds every gate for i
     expect(
       await controlRequest(socketPath(), { cmd: "appUpdateRelease", drain: false } as never),
     ).toMatchObject({ ok: false, error: "invalid request" });
+    // Review CR-01: a release must name the hold it ends (a UUID).
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateRelease" } as never)).toMatchObject({
+      ok: false,
+      error: "invalid request",
+    });
+    expect(
+      await controlRequest(socketPath(), { cmd: "appUpdateRelease", holdId: "h1" } as never),
+    ).toMatchObject({ ok: false, error: "invalid request" });
     // Nothing was held by the refused requests.
     expect(await appUpdateOf()).toEqual({ state: "idle", running: 0 });
   });
@@ -974,7 +994,8 @@ describe("07.13.1 app update hold (D-07): the desktop app holds every gate for i
     await daemon.start();
     await server.frame("hello");
     await startSession("N");
-    expect((await hold(false)).result).toMatchObject({ held: true });
+    const held = (await hold(false)).result as { held: boolean; holdId: string };
+    expect(held).toMatchObject({ held: true });
     server.send({ id: "pn1", kind: "prompt", sessionId: "N", payload: { promptId: "n1", text: "go" } });
     server.send({ id: "pn2", kind: "prompt", sessionId: "N", payload: { promptId: "n2", text: "again" } });
     await server.waitFor(() => (updateEvents("N").length > 0 ? true : undefined));
@@ -982,7 +1003,7 @@ describe("07.13.1 app update hold (D-07): the desktop app holds every gate for i
     expect(updateEvents("N")).toEqual([{ ...RESTARTING, phase: "waiting" }]);
     expect(runtime.prompts).toEqual([]);
 
-    expect((await release()).result).toEqual({ released: true });
+    expect((await release(held.holdId)).result).toEqual({ released: true });
     expect(await server.frame("ack", (f) => f.commandId === "pn1")).toMatchObject({ ok: true });
     expect(await server.frame("ack", (f) => f.commandId === "pn2")).toMatchObject({ ok: true });
     expect(updateEvents("N")).toEqual([
@@ -2323,10 +2344,9 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
     await server.frame("runtime.maintenance", (f) => f.orgLevelReceived, 10_000);
 
     // The app holds first: an "Update now" is accepted but its job waits pending, nothing runs.
-    expect(await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: false })).toMatchObject({
-      ok: true,
-      result: { held: true, state: "held" },
-    });
+    const held = await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: false });
+    expect(held).toMatchObject({ ok: true, result: { held: true, state: "held" } });
+    const holdId = (held.result as { holdId: string }).holdId;
     expect(
       await controlRequest(socketPath(), { cmd: "runtimeUpdate", runtime: "claude-code" }),
     ).toMatchObject({ ok: true, result: { accepted: true } });
@@ -2337,7 +2357,7 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
     expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
 
     // The release lets it run; while it runs the app's hold is refused and closes nothing more.
-    expect(await controlRequest(socketPath(), { cmd: "appUpdateRelease" })).toMatchObject({
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateRelease", holdId })).toMatchObject({
       result: { released: true },
     });
     await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
@@ -2859,7 +2879,8 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     await d.start();
     await server.frame("hello");
     server.push(welcome());
-    expect(await control({ cmd: "appUpdateHold", drain: false })).toMatchObject({ held: true });
+    const held = (await control({ cmd: "appUpdateHold", drain: false })) as { held: boolean; holdId: string };
+    expect(held).toMatchObject({ held: true });
 
     const cmd = selfCmd();
     server.send(cmd);
@@ -2870,7 +2891,7 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     expect((d as unknown as { selfUpdate: { holding: boolean } }).selfUpdate.holding).toBe(false);
 
     // The app's release lets the self-update take its idle moment and switch.
-    expect(await control({ cmd: "appUpdateRelease" })).toEqual({ released: true });
+    expect(await control({ cmd: "appUpdateRelease", holdId: held.holdId })).toEqual({ released: true });
     await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(75), { timeout: 15_000, interval: 20 });
     // The self-update holds every gate into its exit: the app's hold is refused and changes nothing.
     expect(await control({ cmd: "appUpdateHold", drain: true })).toEqual({

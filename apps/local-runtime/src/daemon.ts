@@ -2349,7 +2349,7 @@ export class Daemon {
       case "appUpdateHold":
         return this.appHold.hold({ drain: req.drain });
       case "appUpdateRelease":
-        return this.appHold.release();
+        return this.appHold.release({ holdId: req.holdId });
     }
   }
 }

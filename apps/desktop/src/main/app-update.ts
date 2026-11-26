@@ -6,7 +6,9 @@
 //   itself only when the daemon holds without draining and the person has been away 30 min; `notify` checks and
 //   downloads, and installs only after "Restart to update"; `off` never checks by itself. A click works at every level.
 // - The app quits for an update only after the daemon answered `held` to `appUpdateHold` (or when no daemon of the
-//   app's own runs: paused, stopped or external), so a Work Zone turn is never cut (D-07, Pitfall 3).
+//   app's own runs: paused, stopped or external), so a Work Zone turn is never cut (D-07, Pitfall 3). Review CR-01:
+//   a hold has an owner, its `holdId`; the app quits only on `held` for its own wait's id, releases only by id, and
+//   sends its control requests one at a time, so a late answer or release never acts on a newer hold.
 // - The install itself starts only in `onQuit()`, which the app calls from Electron's `quit` event, after `before-quit`
 //   stopped the daemon.
 // - The views (tray, Runtime menu, onboarding window) carry fixed sentences, versions, percentages and counts only:
@@ -88,8 +90,13 @@ export interface AppUpdateDeps {
   currentVersion: string;
   /** `appUpdateHold { drain }` over the control socket; the answer is parsed here with `AppUpdateHoldAnswer`. */
   hold: (drain: boolean) => Promise<unknown>;
-  /** `appUpdateRelease`. */
-  release: () => Promise<unknown>;
+  /** `appUpdateRelease { holdId }`: ends only the hold it names (review CR-01). */
+  release: (holdId: string) => Promise<unknown>;
+  /**
+   * `status.appUpdate`, read when a hold answer was lost (timeout, unreadable): the request may still have started a
+   * hold, which is then released by the id the status names. Absent: nothing is released.
+   */
+  holdState?: () => Promise<unknown>;
   daemon: () => DaemonKind;
   quit: () => void;
   /** The system idle time in seconds (`powerMonitor.getSystemIdleTime()`). */
@@ -146,10 +153,15 @@ type Action = () => void | Promise<void>;
 interface PendingHold {
   action: Action;
   previous: Phase;
+  /** The hold this wait started (review CR-01); null until an answer names it. */
+  holdId: string | null;
+  /** A hold request of this wait is queued or in flight. */
+  asking: boolean;
 }
 interface Acting {
   previous: Phase;
-  held: boolean;
+  /** The hold the action runs under (null: none was needed). */
+  holdId: string | null;
 }
 
 function stableVersion(value: unknown): string | null {
@@ -210,6 +222,8 @@ export class AppUpdateController {
   private acting: Acting | null = null;
   private lastAskAt = 0;
   private unattendedAsking = false;
+  /** Review CR-01: every hold and release goes through this chain, one request at a time, in the order asked. */
+  private controlChain: Promise<unknown> = Promise.resolve();
 
   private readonly onProgress = (info: { percent: number }) => {
     if (this.phase.kind !== "downloading") return;
@@ -314,8 +328,8 @@ export class AppUpdateController {
     if (this.stopped || this.pending || this.acting) return;
     const previous = this.phase;
     this.notice = null;
-    if (this.deps.daemon() !== "ours") return this.run(action, previous, false);
-    const pending: PendingHold = { action, previous };
+    if (this.deps.daemon() !== "ours") return this.run(action, previous, null);
+    const pending: PendingHold = { action, previous, holdId: null, asking: false };
     this.pending = pending;
     this.boundTimer = this.timer(WAIT_BOUND_MS, () => {
       this.boundTimer = null;
@@ -334,7 +348,7 @@ export class AppUpdateController {
     if (!acting) return;
     this.acting = null;
     this.restartRequested = false;
-    if (acting.held) this.releaseQuietly();
+    if (acting.holdId) this.releaseHold(acting.holdId);
     this.set(acting.previous);
   }
 
@@ -386,12 +400,27 @@ export class AppUpdateController {
   };
 
   private async ask(pending: PendingHold): Promise<void> {
+    if (pending.asking) return;
+    pending.asking = true;
     this.lastAskAt = this.now();
-    const answer = await this.askHold(true);
+    const answer = await this.serial(async () => {
+      if (this.pending !== pending) return null; // cancelled before it was sent: nothing to ask
+      const got = await this.askHold(true);
+      if (this.pending !== pending) {
+        // The wait ended while the request was in flight: a hold it started is released before any next request.
+        if (got?.holdId) await this.sendRelease(got.holdId);
+        return null;
+      }
+      // No readable answer: the request may still have closed the gates, so the hold that is on is released by id.
+      if (!got) await this.releaseLostHold();
+      return got;
+    });
+    pending.asking = false;
     if (this.stopped || this.pending !== pending) return;
-    // No readable answer: the request may still have closed the gates, so they are reopened (quietly) as well.
     if (!answer) return this.endWait(pending, UPDATE_SENTENCES.runtimeUnreachable, true);
-    if (answer.held) return this.proceed(pending);
+    if (answer.holdId) pending.holdId = answer.holdId;
+    // Only this wait's own hold lets the app quit; a `held` without an id is somebody else's.
+    if (answer.held && answer.holdId) return this.proceed(pending);
     this.set({
       kind: "waiting",
       version: versionOf(pending.previous),
@@ -409,13 +438,19 @@ export class AppUpdateController {
     }
   }
 
-  /** `status.appUpdate` while a drain hold is pending: follow it, quit on `held`, ask again when it ended. */
+  /**
+   * `status.appUpdate` while a drain hold is pending: follow it, quit on `held` for this wait's own hold only (review
+   * CR-01: a status read before a cancel, or another hold, never quits), ask again when it ended.
+   */
   private onHoldStatus(hold: DaemonAppUpdate): void {
     const pending = this.pending;
     if (!pending) return;
-    if (hold.state === "held") return void this.proceed(pending);
+    if (hold.state === "held") {
+      if (pending.holdId !== null && hold.holdId === pending.holdId) void this.proceed(pending);
+      return;
+    }
     const phase = this.phase;
-    if (phase.kind !== "waiting") return; // the hold request is still in flight
+    if (phase.kind !== "waiting" || pending.asking) return; // a hold request is still queued or in flight
     if (hold.state === "draining") {
       this.set({ ...phase, running: hold.running, waitingFor: "sessions" });
       return;
@@ -434,21 +469,22 @@ export class AppUpdateController {
     this.pending = null;
     this.clear(this.boundTimer);
     this.boundTimer = null;
-    await this.run(pending.action, pending.previous, true);
+    await this.run(pending.action, pending.previous, pending.holdId);
   }
 
+  /** Ends a wait. Its known hold is released by id; a request still in flight releases the hold it started itself. */
   private endWait(pending: PendingHold, notice: string | null, release: boolean): void {
     if (this.pending !== pending) return;
     this.pending = null;
     this.clear(this.boundTimer);
     this.boundTimer = null;
-    if (release) this.releaseQuietly();
+    if (release && pending.holdId) this.releaseHold(pending.holdId);
     this.notice = notice;
     this.set(pending.previous);
   }
 
-  private async run(action: Action, previous: Phase, held: boolean): Promise<void> {
-    const acting: Acting = { previous, held };
+  private async run(action: Action, previous: Phase, holdId: string | null): Promise<void> {
+    const acting: Acting = { previous, holdId };
     this.acting = acting;
     const version = versionOf(previous);
     this.set(version ? { kind: "restarting", version } : { kind: "restarting" });
@@ -458,17 +494,44 @@ export class AppUpdateController {
       if (this.acting !== acting) return;
       this.acting = null;
       this.restartRequested = false;
-      if (held) this.releaseQuietly();
+      if (holdId) this.releaseHold(holdId);
       this.set(previous);
     }
   }
 
-  private releaseQuietly(): void {
+  /** Queues `fn` behind every earlier control request (review CR-01); `fn` never rejects. */
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.controlChain.then(fn, fn);
+    this.controlChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Releases a hold by id, in order after every earlier request; never throws. */
+  private releaseHold(holdId: string): void {
+    void this.serial(() => this.sendRelease(holdId));
+  }
+
+  private async sendRelease(holdId: string): Promise<void> {
     try {
-      void Promise.resolve(this.deps.release()).catch(() => undefined);
+      await this.deps.release(holdId);
     } catch {
-      // The runtime is gone; its gates reopen with it.
+      // The runtime is gone; its gates reopen with it (or by its own bound).
     }
+  }
+
+  /** A hold answer was lost: release the hold the daemon reports, if one is on (only this app asks for holds). */
+  private async releaseLostHold(): Promise<void> {
+    const read = this.deps.holdState;
+    if (!read || this.stopped) return;
+    let state: DaemonAppUpdate;
+    try {
+      const parsed = DaemonAppUpdate.safeParse(await read());
+      if (!parsed.success) return;
+      state = parsed.data;
+    } catch {
+      return;
+    }
+    if (state.state !== "idle" && state.holdId) await this.sendRelease(state.holdId);
   }
 
   private firstCheck(): void {
@@ -538,13 +601,23 @@ export class AppUpdateController {
       return;
     }
     if (!(idle >= AWAY_SECONDS)) return;
-    if (this.deps.daemon() !== "ours") return this.run(this.restartAction, this.phase, false);
+    if (this.deps.daemon() !== "ours") return this.run(this.restartAction, this.phase, null);
     this.unattendedAsking = true;
-    const answer = await this.askHold(false);
+    // Review CR-01: the answer is handled inside its own turn of the chain, so a click that came meanwhile sends its
+    // hold only after this one was released.
+    const holdId = await this.serial(async () => {
+      const answer = await this.askHold(false);
+      if (!answer?.held || !answer.holdId) return null;
+      if (!this.unattendedAllowed()) {
+        await this.sendRelease(answer.holdId);
+        return null;
+      }
+      return answer.holdId;
+    });
     this.unattendedAsking = false;
-    if (!answer?.held) return;
-    if (!this.unattendedAllowed()) return this.releaseQuietly();
-    await this.run(this.restartAction, this.phase, true);
+    if (!holdId) return;
+    if (!this.unattendedAllowed()) return this.releaseHold(holdId);
+    await this.run(this.restartAction, this.phase, holdId);
   }
 
   private async downloaded(event: { version: string; downloadedFile: string }): Promise<void> {

@@ -454,7 +454,10 @@ function setUpAppUpdate(mode: UpdaterMode): void {
       recordedDaemonPid = externalDaemon ? 0 : (supervisor.pid ?? 0);
       return controlRequest(socketPath, { cmd: "appUpdateHold", drain }, 15_000);
     },
-    release: () => controlRequest(socketPath, { cmd: "appUpdateRelease" }),
+    release: (holdId) => controlRequest(socketPath, { cmd: "appUpdateRelease", holdId }),
+    // Review CR-01: after a lost hold answer, the hold the daemon reports is released by its id.
+    holdState: async () =>
+      DaemonStatusPayload.parse(await controlRequest(socketPath, { cmd: "status" })).appUpdate,
     daemon: appDaemonKind,
     quit: () => app.quit(),
     idleSeconds: () => powerMonitor.getSystemIdleTime(),

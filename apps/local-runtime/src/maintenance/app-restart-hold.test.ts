@@ -48,6 +48,11 @@ function fakeClock() {
   };
 }
 
+/** The n-th hold id the fake mints (a UUID, as the daemon's own). */
+const holdIdN = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const ID1 = holdIdN(1);
+const ID2 = holdIdN(2);
+
 function setup(o: { busy?: boolean } = {}) {
   const gates = new Map<RuntimeId, RuntimeGate>([
     ["claude-code", new RuntimeGate()],
@@ -57,6 +62,7 @@ function setup(o: { busy?: boolean } = {}) {
   const state = { busy: o.busy ?? false };
   const clock = fakeClock();
   const onChange = vi.fn();
+  let minted = 0;
   const hold = new AppRestartHold({
     gates,
     activeTurns: (id) => turns[id] ?? 0,
@@ -64,6 +70,7 @@ function setup(o: { busy?: boolean } = {}) {
     onChange,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
+    newHoldId: () => holdIdN(++minted),
   });
   const allClosed = () => [...gates.values()].every((g) => !g.isOpen);
   const allOpen = () => [...gates.values()].every((g) => g.isOpen);
@@ -82,10 +89,10 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     const { hold, allClosed, onChange } = setup();
     expect(hold.status()).toEqual({ state: "idle", running: 0 });
     expect(hold.active).toBe(false);
-    expect(hold.hold({ drain: false })).toEqual({ held: true, state: "held", running: 0 });
+    expect(hold.hold({ drain: false })).toEqual({ held: true, state: "held", running: 0, holdId: ID1 });
     expect(allClosed()).toBe(true);
     expect(hold.active).toBe(true);
-    expect(hold.status()).toEqual({ state: "held", running: 0 });
+    expect(hold.status()).toEqual({ state: "held", running: 0, holdId: ID1 });
     expect(onChange).toHaveBeenCalled();
   });
 
@@ -105,13 +112,37 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     const call = gates.get("claude-code")?.admit(ran);
     await flush();
     expect(ran).not.toHaveBeenCalled();
-    expect(hold.release()).toEqual({ released: true });
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: true });
     await call;
     expect(ran).toHaveBeenCalledTimes(1);
     expect(allOpen()).toBe(true);
     expect(hold.active).toBe(false);
     expect(hold.status()).toEqual({ state: "idle", running: 0, lastEnd: "released" });
-    expect(hold.release()).toEqual({ released: false });
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: false });
+  });
+
+  // Review CR-01: a hold has an owner. Only the request that started it gets its id, and only that id releases it, so
+  // a late release (from a cancelled wait) never reopens a newer hold, and a repeat hold never looks like its owner.
+  it("only the request that starts a hold gets its id; a stale or missing id releases nothing", async () => {
+    const { hold, gates, allClosed, allOpen } = setup();
+    expect(hold.hold({ drain: false }).holdId).toBe(ID1);
+    expect(hold.hold({ drain: true })).toEqual({ held: true, state: "held", running: 0 });
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: true });
+    expect(hold.status()).not.toHaveProperty("holdId");
+    // A new hold gets a new id; the first one's (late) release changes nothing.
+    expect(hold.hold({ drain: true }).holdId).toBe(ID2);
+    const ran = vi.fn(async () => undefined);
+    const call = gates.get("codex")?.admit(ran);
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: false });
+    expect(hold.release({ holdId: "" })).toEqual({ released: false });
+    await flush();
+    expect(ran).not.toHaveBeenCalled();
+    expect(allClosed()).toBe(true);
+    expect(hold.status()).toEqual({ state: "held", running: 0, holdId: ID2, lastEnd: "released" });
+    expect(hold.release({ holdId: ID2 })).toEqual({ released: true });
+    await call;
+    expect(ran).toHaveBeenCalledTimes(1);
+    expect(allOpen()).toBe(true);
   });
 
   // ---- drain, bounds, the runtime-update exclusion, stop ----
@@ -119,22 +150,22 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
   it("drain with a turn in flight closes every gate at once; the next poll after the turn ends moves to held", () => {
     const { hold, turns, clock, onChange, allClosed } = setup();
     turns.codex = 1;
-    expect(hold.hold({ drain: true })).toEqual({ held: false, state: "draining", running: 1 });
+    expect(hold.hold({ drain: true })).toEqual({ held: false, state: "draining", running: 1, holdId: ID1 });
     expect(allClosed()).toBe(true);
     expect(hold.active).toBe(true);
     expect(onChange).toHaveBeenCalledTimes(1);
     clock.advance(APP_UPDATE_POLL_MS * 5);
-    expect(hold.status()).toEqual({ state: "draining", running: 1 });
+    expect(hold.status()).toEqual({ state: "draining", running: 1, holdId: ID1 });
     turns.codex = 0;
     clock.advance(APP_UPDATE_POLL_MS);
-    expect(hold.status()).toEqual({ state: "held", running: 0 });
+    expect(hold.status()).toEqual({ state: "held", running: 0, holdId: ID1 });
     expect(onChange).toHaveBeenCalledTimes(2);
     expect(allClosed()).toBe(true);
   });
 
   it("drain on an idle daemon is held at once", () => {
     const { hold, allClosed } = setup();
-    expect(hold.hold({ drain: true })).toEqual({ held: true, state: "held", running: 0 });
+    expect(hold.hold({ drain: true })).toEqual({ held: true, state: "held", running: 0, holdId: ID1 });
     expect(allClosed()).toBe(true);
   });
 
@@ -201,7 +232,7 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     const b = setup();
     b.hold.hold({ drain: false });
     expect(b.clock.pending).toBe(1);
-    expect(b.hold.release()).toEqual({ released: true });
+    expect(b.hold.release({ holdId: ID1 })).toEqual({ released: true });
     expect(b.clock.pending).toBe(0);
     expect(b.hold.status()).toEqual({ state: "idle", running: 0, lastEnd: "released" });
   });
@@ -211,7 +242,7 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     turns.codex = 1;
     hold.hold({ drain: true });
     expect(clock.pending).toBeGreaterThan(0);
-    expect(hold.release()).toEqual({ released: true });
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: true });
     expect(allOpen()).toBe(true);
     expect(clock.pending).toBe(0);
     expect(hold.status()).toEqual({ state: "idle", running: 1, lastEnd: "released" });
@@ -237,7 +268,7 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     expect(clock.pending).toBe(0);
     expect(onChange).not.toHaveBeenCalled();
     state.busy = false;
-    expect(hold.hold({ drain: true })).toEqual({ held: false, state: "draining", running: 1 });
+    expect(hold.hold({ drain: true })).toEqual({ held: false, state: "draining", running: 1, holdId: ID1 });
   });
 
   it("stop clears every timer, reopens nothing and calls no onChange; a later release changes nothing", () => {
@@ -250,7 +281,7 @@ describe("AppRestartHold (07.13.1 D-07)", () => {
     clock.advance(APP_UPDATE_MAX_HOLD_MS * 2);
     expect(allClosed()).toBe(true);
     expect(onChange).not.toHaveBeenCalled();
-    expect(hold.release()).toEqual({ released: false });
+    expect(hold.release({ holdId: ID1 })).toEqual({ released: false });
     expect(allClosed()).toBe(true);
     const held = setup();
     held.hold.hold({ drain: false });

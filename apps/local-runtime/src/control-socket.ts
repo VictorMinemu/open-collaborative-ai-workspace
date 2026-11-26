@@ -57,10 +57,17 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
     })
     .strict(),
   /**
-   * 07.13.1 (D-07): the app's install was cancelled or failed: every gate the hold closed reopens at once. Local only;
-   * carries no value and no host data; strict.
+   * 07.13.1 (D-07): the app's install was cancelled or failed: every gate the hold closed reopens at once. Review
+   * CR-01: names the hold it ends (`holdId`, from the answer that started it), so a late release never reopens a newer
+   * hold. Local only; no host data; strict, so a missing `holdId` or any other key is refused.
    */
-  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("appUpdateRelease") }).strict(),
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("appUpdateRelease"),
+      holdId: z.uuid(),
+    })
+    .strict(),
   /**
    * 07.18 (D-02, PD-11): re-read the Codex account slots (`ocw-runtime account add|remove` changed slots.json) and
    * re-send them to the server (`accounts.sync`). Local only (never reachable from the server); carries no value: the

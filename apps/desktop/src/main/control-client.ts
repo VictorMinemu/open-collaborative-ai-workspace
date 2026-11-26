@@ -13,8 +13,8 @@ export type ControlCommand =
   | { cmd: "reloadConfig" }
   /** 07.13.1 (D-07): hold every runtime gate for the app update's restart (`drain` closes them at once). */
   | { cmd: "appUpdateHold"; drain: boolean }
-  /** 07.13.1 (D-07): reopen the gates after a cancelled or failed restart. */
-  | { cmd: "appUpdateRelease" };
+  /** 07.13.1 (D-07): reopen the gates after a cancelled or failed restart, for the hold it names (review CR-01). */
+  | { cmd: "appUpdateRelease"; holdId: string };
 
 export class ControlError extends Error {}
 

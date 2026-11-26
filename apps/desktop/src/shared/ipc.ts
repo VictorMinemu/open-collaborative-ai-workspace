@@ -120,22 +120,29 @@ export type DaemonRuntimeUpdates = z.infer<typeof DaemonRuntimeUpdates>;
  * shape (the desktop does not depend on `@ocw/contracts`): states and counts only. A newer end reason is dropped on
  * its own, so the state still reads.
  */
+/** Review CR-01: the id the daemon gives a hold (a UUID); an unreadable one is dropped, never trusted. */
+const HoldId = z.string().min(1).max(64).optional().catch(undefined);
+
 export const DaemonAppUpdate = z.object({
   state: z.enum(["idle", "draining", "held"]),
   running: z.number().int().min(0),
+  /** The hold that is on (review CR-01): the app quits only on `held` for its own hold's id. */
+  holdId: HoldId,
   lastEnd: z.enum(["released", "timed_out", "auto_released"]).optional().catch(undefined),
 });
 export type DaemonAppUpdate = z.infer<typeof DaemonAppUpdate>;
 
 /**
  * 07.13.1 (D-07): the answer to `appUpdateHold { drain }`. The app quits for an update only on `held: true`;
- * `blocked: "runtime_update"` (a 07.11 CLI job or the runtime self-update holds) means wait and ask again.
+ * `blocked: "runtime_update"` (a 07.11 CLI job or the runtime self-update holds) means wait and ask again. Review
+ * CR-01: `holdId` only when this request started the hold; a `held` without it is somebody else's hold.
  */
 export const AppUpdateHoldAnswer = z.object({
   held: z.boolean(),
   state: z.enum(["idle", "draining", "held"]),
   running: z.number().int().min(0),
   blocked: z.literal("runtime_update").optional(),
+  holdId: HoldId,
 });
 export type AppUpdateHoldAnswer = z.infer<typeof AppUpdateHoldAnswer>;
 
