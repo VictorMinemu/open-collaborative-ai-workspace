@@ -21,6 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ElectronApplication, _electron as electron, expect, test } from "@playwright/test";
+import { UPDATE_SENTENCES } from "../src/main/app-update";
 import { RESULT_FILE, stagingDirName } from "../src/main/mac-swap";
 import { type FakeRelease, startFakeRelease } from "./support/fake-release";
 import { buildDummyMacApp, zipDummyMacApp } from "./support/mac-dummy-app";
@@ -29,6 +30,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, "..");
 const VERSION = "9.9.9";
 const RESTART = `Restart to update to v${VERSION}`;
+const CHECK = "Check for updates…";
 const platform = process.platform;
 
 interface Journey {
@@ -145,6 +147,18 @@ async function runtimeLabels(app: ElectronApplication): Promise<string[]> {
   return (await runtimeMenu(app)).map((line) => line.label);
 }
 
+/** Clicks an enabled Runtime menu item by its label; false while there is none. */
+function clickRuntimeItem(app: ElectronApplication, label: string): Promise<boolean> {
+  return app.evaluate(({ Menu }, wanted) => {
+    const item = Menu.getApplicationMenu()
+      ?.items.find((i) => i.label === "Runtime")
+      ?.submenu?.items.find((i) => i.label === wanted && i.enabled);
+    if (!item) return false;
+    item.click();
+    return true;
+  }, label);
+}
+
 /** Nothing was installed: the Mac test app is still 0.1.0, no swap result, the AppImage file unchanged. */
 function expectNothingInstalled(journey: Journey): void {
   expect(existsSync(join(journey.userData, RESULT_FILE))).toBe(false);
@@ -184,4 +198,42 @@ test("a newer release downloads, passes its checksum and is offered", async () =
   await app.close();
   expectNothingInstalled(journey);
   expect(release.payloadRequests()).toBe(1);
+});
+
+test("a corrupted download is refused", async () => {
+  test.setTimeout(300_000);
+  const journey = await launch({ corrupt: true });
+  const { app, release } = journey;
+  const offered = async () =>
+    (await runtimeLabels(app)).some((label) => label.startsWith("Restart to update"));
+
+  // The automatic check downloads once; its failure is silent (no click asked for it), and nothing is offered.
+  await expect
+    .poll(() => release.payloadRequests(), { timeout: 150_000, intervals: [500] })
+    .toBeGreaterThanOrEqual(1);
+  for (const until = Date.now() + 5000; Date.now() < until; ) {
+    expect(await offered()).toBe(false);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  // "Check for updates…" downloads again, is refused again, and now says why (D-04).
+  await expect.poll(() => clickRuntimeItem(app, CHECK), { timeout: 30_000, intervals: [500] }).toBe(true);
+  await expect
+    .poll(() => release.payloadRequests(), { timeout: 60_000, intervals: [500] })
+    .toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(
+      async () => (await runtimeMenu(app)).find((line) => line.label === UPDATE_SENTENCES.checksumMismatch),
+      {
+        timeout: 60_000,
+        intervals: [500],
+      },
+    )
+    .toEqual({ label: UPDATE_SENTENCES.checksumMismatch, enabled: false });
+  expect(await offered()).toBe(false);
+  if (journey.macTestApp)
+    expect(existsSync(join(dirname(journey.macTestApp), stagingDirName(VERSION)))).toBe(false);
+
+  await app.close();
+  expectNothingInstalled(journey);
 });
