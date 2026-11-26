@@ -131,12 +131,14 @@ jobs:
         run: pnpm --filter @ocw/desktop package
       - name: Check that the packaged daemon runs
         run: node apps/desktop/scripts/check-package.mjs
-      # A tag checks against its own version; a pull request against the package's.
+      # A tag checks against its own version; a pull request against the package's. A tag's build must also carry the
+      # release-build flag in its packaged app.asar (review WR-05): a lost OCW_RELEASE_BUILD would ship an app whose
+      # updater is off, and every device would stay on it.
       - name: Check the update manifests
         run: |
           set -euo pipefail
           if [[ -n "$TAG" ]]; then
-            node apps/desktop/scripts/check-update-manifest.mjs --version "${TAG#v}"
+            node apps/desktop/scripts/check-update-manifest.mjs --version "${TAG#v}" --release-build
           else
             node apps/desktop/scripts/check-update-manifest.mjs
           fi

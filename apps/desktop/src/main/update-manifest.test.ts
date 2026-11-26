@@ -5,6 +5,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,8 +94,30 @@ function appUpdatePath(platform: Platform): string {
   return join(release, LAYOUT[platform].resources, "app-update.yml");
 }
 
-function check(platform: Platform) {
-  const args = [SCRIPT, "--release", release, "--version", VERSION, "--platform", platform];
+/** @electron/asar, the one electron-builder packs the app with (reached through it, as the script does). */
+const asar = (() => {
+  const require = createRequire(SCRIPT);
+  const lib = createRequire(require.resolve("electron-builder")).resolve("app-builder-lib");
+  return createRequire(lib)("@electron/asar") as {
+    createPackage(src: string, dest: string): Promise<void>;
+  };
+})();
+
+/** Packs `app.asar` into the platform's resources with `dist/main/build-flags.json` (or nothing, with `null`). */
+async function packApp(platform: Platform, flags: unknown) {
+  const src = mkdtempSync(join(tmpdir(), "ocw-asar-src-"));
+  try {
+    mkdirSync(join(src, "dist", "main"), { recursive: true });
+    writeFileSync(join(src, "dist", "main", "index.cjs"), "// main\n");
+    if (flags !== null) writeFileSync(join(src, "dist", "main", "build-flags.json"), JSON.stringify(flags));
+    await asar.createPackage(src, join(release, LAYOUT[platform].resources, "app.asar"));
+  } finally {
+    rmSync(src, { recursive: true, force: true });
+  }
+}
+
+function check(platform: Platform, extra: string[] = []) {
+  const args = [SCRIPT, "--release", release, "--version", VERSION, "--platform", platform, ...extra];
   if (platform === "darwin") args.push("--no-seal");
   const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 30_000 });
   return { status: r.status, out: `${r.stdout}${r.stderr}`, stderr: r.stderr };
@@ -180,6 +203,39 @@ describe("check-update-manifest.mjs", () => {
     const r = check("linux");
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("updaterCacheDirName");
+    expectNoAbsolutePath(r.out);
+  });
+
+  // Review WR-05: a tag's build must have turned the updater on; nothing else would notice a lost OCW_RELEASE_BUILD.
+  it("--release-build passes when the packaged app was built as a release", async () => {
+    fakeRelease("linux");
+    await packApp("linux", { releaseBuild: true });
+    const r = check("linux", ["--release-build"]);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("release build");
+    expectNoAbsolutePath(r.out);
+  });
+
+  for (const [what, flags] of [
+    ["built without OCW_RELEASE_BUILD=1", { releaseBuild: false }],
+    ["without build-flags.json", null],
+    ["with a flag that is not true", { releaseBuild: "true" }],
+  ] as const) {
+    it(`--release-build fails for a packaged app ${what}`, async () => {
+      fakeRelease("win32");
+      await packApp("win32", flags);
+      const r = check("win32", ["--release-build"]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("OCW_RELEASE_BUILD");
+      expectNoAbsolutePath(r.out);
+    });
+  }
+
+  it("--release-build fails when the packaged app.asar is missing", () => {
+    fakeRelease("linux");
+    const r = check("linux", ["--release-build"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("app.asar");
     expectNoAbsolutePath(r.out);
   });
 

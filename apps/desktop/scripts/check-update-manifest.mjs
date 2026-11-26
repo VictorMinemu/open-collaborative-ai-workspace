@@ -2,6 +2,7 @@
 // every device at exactly the files this runner built, under their release names, and that the packaged app asks the
 // canonical repository for updates. The release workflow runs it on all three runners, for pull requests and tags.
 //   node scripts/check-update-manifest.mjs [--release <dir>] [--version <x.y.z>] [--platform darwin|win32|linux] [--no-seal]
+//                                          [--release-build]
 //
 // Checks, for this platform's manifest (`latest-mac.yml`, `latest.yml`, `latest-linux.yml`):
 //   - `version` is the expected one (the tag in CI, else apps/desktop/package.json);
@@ -10,7 +11,9 @@
 //   - the file the updater installs is listed (macOS zip, Windows setup, Linux AppImage), and the zip / setup
 //     blockmap exists;
 //   - the packaged `app-update.yml` names the GitHub provider, the canonical owner and repository, a plain
-//     `updaterCacheDirName` and no `publisherName` (unsigned until Phase 9).
+//     `updaterCacheDirName` and no `publisherName` (unsigned until Phase 9);
+//   - with `--release-build` (the release workflow's tag builds, review WR-05): the packaged `app.asar` holds
+//     `dist/main/build-flags.json` with `releaseBuild: true`, so the build that ships really turned its updater on.
 // On macOS (unless `--no-seal`) it also extracts the zip with `ditto` into a temporary folder, runs `codesign --verify
 // --deep --strict`, checks the bundle id `dev.ocw.desktop` and the version, and runs the extracted app's daemon the way
 // the app starts it. Every child process takes an argv array, never a shell string. Messages name files relative to
@@ -41,6 +44,7 @@ const { values } = parseArgs({
     version: { type: "string" },
     platform: { type: "string" },
     "no-seal": { type: "boolean", default: false },
+    "release-build": { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -190,6 +194,32 @@ function checkAppUpdate(rel, base = release) {
   }
 }
 
+/**
+ * Review WR-05: the packaged app was built with `OCW_RELEASE_BUILD=1` (scripts/build.mjs writes the flag beside the
+ * main bundle; electron-builder packs it into app.asar). Read with the @electron/asar electron-builder packs with.
+ */
+function checkReleaseBuild(resources) {
+  const rel = join(resources, "app.asar");
+  const file = join(release, rel);
+  if (!existsSync(file)) {
+    fail(`${rel} is missing, so the release-build flag cannot be checked`);
+    return;
+  }
+  let flags = null;
+  try {
+    const lib = createRequire(require.resolve("electron-builder")).resolve("app-builder-lib");
+    const asar = createRequire(lib)("@electron/asar");
+    flags = JSON.parse(asar.extractFile(file, "dist/main/build-flags.json").toString("utf8"));
+  } catch {
+    flags = null;
+  }
+  if (flags?.releaseBuild !== true) {
+    fail(`${rel}: the packaged app was not built with OCW_RELEASE_BUILD=1, so its updater would be off`);
+    return;
+  }
+  console.log(`${rel}: release build (the updater is on)`);
+}
+
 /** macOS: the zip the updater installs keeps its seal, its identity and a daemon that runs. */
 function checkMacZip(zipName) {
   const zip = join(release, zipName);
@@ -274,6 +304,7 @@ if (typeof version !== "string" || !VERSION.test(version)) {
 
 await checkManifest(layout);
 checkAppUpdate(join(layout.resources, "app-update.yml"));
+if (values["release-build"]) checkReleaseBuild(layout.resources);
 if (platform === "darwin" && seal) checkMacZip(layout.installs);
 
 if (problems.length > 0) {
