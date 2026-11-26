@@ -510,6 +510,48 @@ describe("the idle lease (UI-SPEC §1.3)", () => {
   });
 });
 
+describe("the takeover bar keeps its height when the page gains or loses focus", () => {
+  // 07.13 D-31 (desktop): a click on a hand back button blurs the focused page. If the keyboard hint changed lines then
+  // (2 lines in the 380 px Browser panel, 1 once blurred), everything under the bar moved before mouseup and the click
+  // was lost. Both hints share one cell; only which one shows changes, so the bar's height never depends on focus.
+  const v = view({ server: state({ state: "controlling", controller: "self" }) });
+  const bar = (frameFocused: boolean) =>
+    renderToStaticMarkup(<TakeoverBar view={v} frameFocused={frameFocused} hintId="hint" />);
+  const TYPING = "Typing goes to the page · Shift+Esc gives your keyboard back";
+  const CLICK = "Click the page to type";
+  const spanOf = (markup: string, words: string) =>
+    markup.match(new RegExp(`<span[^>]*>${words.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`))?.[0] ?? "";
+
+  it("both hints are always laid out, in one grid cell", () => {
+    for (const focused of [true, false]) {
+      const html = bar(focused);
+      expect(text(html)).toContain(TYPING);
+      expect(text(html)).toContain(CLICK);
+      for (const words of [TYPING, CLICK]) expect(spanOf(html, words)).toMatch(/col-start-1 row-start-1/);
+    }
+  });
+
+  it("the one that applies is shown and describes the page; the other is invisible and hidden from assistive tech", () => {
+    for (const [focused, shown, other] of [
+      [true, TYPING, CLICK],
+      [false, CLICK, TYPING],
+    ] as const) {
+      const html = bar(focused);
+      expect(spanOf(html, shown)).toContain('id="hint"');
+      expect(spanOf(html, shown)).not.toMatch(/invisible|aria-hidden/);
+      expect(spanOf(html, other)).toMatch(/\binvisible\b/);
+      expect(spanOf(html, other)).toContain('aria-hidden="true"');
+      expect(spanOf(html, other)).not.toContain('id="hint"');
+    }
+  });
+
+  it("on a phone the bar has no keyboard hint at all", () => {
+    const html = renderToStaticMarkup(<TakeoverBar view={v} frameFocused={false} hintId="hint" phone />);
+    expect(text(html)).not.toContain(CLICK);
+    expect(text(html)).not.toContain(TYPING);
+  });
+});
+
 describe("the small window's corners (UI-SPEC §1.1)", () => {
   const vp = { width: 1440, height: 900, rail: 240 };
   it("bottom-right by default is 16 from the right and 96 from the bottom; the left inset clears the rail", () => {

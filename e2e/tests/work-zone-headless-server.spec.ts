@@ -42,6 +42,7 @@ const DOCTOR_CHECK_IDS = [
   "claude-code",
   "codex",
   "runtimes",
+  "browser",
   "git",
   "projects",
   "updates",
@@ -256,7 +257,14 @@ test("doctor --json on the device: pairing, server and daemon ok, no service, no
     server: "ok",
     daemon: "ok",
     service: "warn",
+    // 07.13: the Work Zone browser is off by default (nobody ran `ocw-runtime browser on` here): ok, with the line
+    // that turns it on.
+    browser: "ok",
     projects: "ok",
+  });
+  expect(report.checks.find((c) => c.id === "browser")).toMatchObject({
+    summary: "Browser: off on this device",
+    fix: "To let Work Zone sessions use a browser here: `ocw-runtime browser on`",
   });
   // Exit 1 on any fail (the fake runtimes may count as signed out: `runtimes` is then a fail), else 0.
   expect(r.code).toBe(report.counts.fail > 0 ? 1 : 0);
