@@ -210,6 +210,24 @@ export function appImageNameNotice(previous: string | null, next: string | null)
   return `OCW now runs from ${next}. Shortcuts to ${previous} no longer work: point them at the new file, or rename it to OCW.AppImage so later updates keep that name.`;
 }
 
+const RELEASE_NAME_VERSION = /-v(\d{1,9}\.\d{1,9}\.\d{1,9})-/;
+
+/**
+ * Review IN-07: the rename notice says OCW was updated, so it follows a real update only: the file name and the
+ * version both changed since the last start. Without a stored version (the first start after this was added), the
+ * old file's release name says which version it was; a name without one says nothing.
+ */
+export function appImageUpdateNotice(p: {
+  previousName: string | null;
+  name: string | null;
+  previousVersion: string | null;
+  version: string;
+}): string | null {
+  const before = p.previousVersion ?? RELEASE_NAME_VERSION.exec(p.previousName ?? "")?.[1] ?? null;
+  if (!before || before === p.version) return null;
+  return appImageNameNotice(p.previousName, p.name);
+}
+
 /**
  * The one-time notice after an install that failed (the macOS swap's result, or an install that did not start; read
  * once at the next start). Versions and fixed sentences only. Review WR-04: after a failed rollback the app is no

@@ -75,6 +75,21 @@ describe("ConfigStore", () => {
     expect(third.config.lastAppImageName).toBe("OCW-v0.5.2-linux-x86_64.AppImage");
   });
 
+  // Review IN-07: the app's version at the last start, so the AppImage rename notice follows a real update only.
+  it("keeps the app's last version (a plain version only) across a reload", async () => {
+    const store = new ConfigStore(dir, cipher);
+    await store.load();
+    expect(store.config.lastAppVersion).toBeUndefined();
+    await store.update({ lastAppVersion: "0.5.3" });
+    for (const bad of ["/opt/x", "v0.5.3", "0.5", "1.2.3; rm", "x".repeat(80)]) {
+      await store.update({ lastAppVersion: bad });
+      expect(store.config.lastAppVersion, bad).toBe("0.5.3");
+    }
+    const again = new ConfigStore(dir, cipher);
+    await again.load();
+    expect(again.config.lastAppVersion).toBe("0.5.3");
+  });
+
   it("a stored AppImage name with a path is dropped on load, never the rest of the settings", async () => {
     const store = new ConfigStore(dir, cipher);
     await store.update({ webUrl: "http://localhost:3000" });

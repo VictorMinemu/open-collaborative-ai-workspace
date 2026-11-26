@@ -66,7 +66,7 @@ import { deriveApiUrl, isSafeExternalUrl, normalizeServerUrl, UrlError } from ".
 import {
   AppUpdateController,
   type AppUpdateMenuAction,
-  appImageNameNotice,
+  appImageUpdateNotice,
   appUpdateMenuModel,
   type DaemonKind,
   installFailureNotice,
@@ -575,9 +575,17 @@ async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
     if (!appImage) return;
     const name = basename(appImage);
     const previous = store.config.lastAppImageName ?? null;
-    const notice = appImageNameNotice(previous, name);
+    const version = app.getVersion();
+    // Review IN-07: only after a real update (the version changed too), never for a file the person renamed.
+    const notice = appImageUpdateNotice({
+      previousName: previous,
+      name,
+      previousVersion: store.config.lastAppVersion ?? null,
+      version,
+    });
     if (notice) notify("OCW was updated", notice);
-    if (name !== previous) await store.update({ lastAppImageName: name });
+    if (name !== previous || version !== store.config.lastAppVersion)
+      await store.update({ lastAppImageName: name, lastAppVersion: version });
   } catch {
     // Best effort: nothing here may keep the app from starting.
   }

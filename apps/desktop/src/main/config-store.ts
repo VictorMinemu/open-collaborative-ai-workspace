@@ -15,6 +15,11 @@ export interface TokenCipher {
 
 /** A plain file name (no folder, no separator), as the AppImage's file name is kept (07.13.1, Pitfall 6). */
 const FileName = z.string().regex(/^[^/\\]{1,255}$/);
+/** A plain app version (`0.5.3`, `0.5.3-rc.1`), bounded. */
+const AppVersion = z
+  .string()
+  .max(64)
+  .regex(/^\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z.-]+)?$/);
 
 const StoredConfig = z.object({
   version: z.literal(1).default(1),
@@ -31,6 +36,8 @@ const StoredConfig = z.object({
    * once. A file name only, never its folder; an unreadable value is dropped on its own, never the other settings.
    */
   lastAppImageName: FileName.optional().catch(undefined),
+  /** Review IN-07: the app's version at the last start; the AppImage rename notice follows a real update only. */
+  lastAppVersion: AppVersion.optional().catch(undefined),
 });
 export type StoredConfig = z.infer<typeof StoredConfig>;
 
@@ -66,6 +73,8 @@ export class ConfigStore {
     // A path or an over-long name is refused: the stored name stays as it was.
     if (next.lastAppImageName !== undefined && !FileName.safeParse(next.lastAppImageName).success)
       delete next.lastAppImageName;
+    if (next.lastAppVersion !== undefined && !AppVersion.safeParse(next.lastAppVersion).success)
+      delete next.lastAppVersion;
     this.data = { ...this.data, ...next };
     await this.save();
   }

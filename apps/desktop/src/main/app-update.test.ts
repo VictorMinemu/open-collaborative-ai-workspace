@@ -5,6 +5,7 @@ import {
   type AppUpdateDeps,
   type AppUpdateView,
   appImageNameNotice,
+  appImageUpdateNotice,
   appUpdateMenuModel,
   type DaemonKind,
   installFailureNotice,
@@ -966,6 +967,55 @@ describe("installFailureNotice", () => {
     expect(lost?.body).not.toContain("/");
     expect(installFailureNotice({ ...base, outcome: "installed" }, "0.5.1")).toBeNull();
     expect(installFailureNotice(null, "0.5.1")).toBeNull();
+  });
+});
+
+// Review IN-07: the rename notice says "OCW was updated", so it is shown only when the version changed too; a file the
+// person renamed or moved, or two copies used in turn, says nothing.
+describe("appImageUpdateNotice (review IN-07)", () => {
+  const old = "OCW-v0.5.2-linux-x86_64.AppImage";
+  const next = "OCW-v0.5.3-linux-x86_64.AppImage";
+
+  it("announces a new file name only after the version changed", () => {
+    expect(
+      appImageUpdateNotice({ previousName: old, name: next, previousVersion: "0.5.2", version: "0.5.3" }),
+    ).toBe(appImageNameNotice(old, next));
+    expect(
+      appImageUpdateNotice({
+        previousName: "OCW.AppImage",
+        name: "ocw.AppImage",
+        previousVersion: "0.5.3",
+        version: "0.5.3",
+      }),
+    ).toBeNull();
+    expect(
+      appImageUpdateNotice({ previousName: next, name: next, previousVersion: "0.5.2", version: "0.5.3" }),
+    ).toBeNull();
+  });
+
+  it("without a stored version, reads the old release name's version (the first start after this change)", () => {
+    expect(
+      appImageUpdateNotice({ previousName: old, name: next, previousVersion: null, version: "0.5.3" }),
+    ).toBe(appImageNameNotice(old, next));
+    expect(
+      appImageUpdateNotice({
+        previousName: "OCW-v0.5.3-linux-x86_64.AppImage",
+        name: "OCW.AppImage",
+        previousVersion: null,
+        version: "0.5.3",
+      }),
+    ).toBeNull();
+    expect(
+      appImageUpdateNotice({
+        previousName: "My OCW.AppImage",
+        name: next,
+        previousVersion: null,
+        version: "0.5.3",
+      }),
+    ).toBeNull();
+    expect(
+      appImageUpdateNotice({ previousName: null, name: next, previousVersion: null, version: "0.5.3" }),
+    ).toBeNull();
   });
 });
 
