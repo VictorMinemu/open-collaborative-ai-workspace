@@ -125,6 +125,9 @@ jobs:
         env:
           # Only a release tag's build may turn the desktop updater on (D-02); pull requests build with it off.
           OCW_RELEASE_BUILD: ${{ env.TAG != '' && '1' || '0' }}
+          # electron-builder skips signing on pull requests; the macOS build is only ever ad-hoc signed (identity "-",
+          # no secret), so a pull request signs it too and the update manifest check sees the bundle a release ships.
+          CSC_FOR_PULL_REQUEST: "true"
         run: pnpm --filter @ocw/desktop package
       - name: Check that the packaged daemon runs
         run: node apps/desktop/scripts/check-package.mjs
