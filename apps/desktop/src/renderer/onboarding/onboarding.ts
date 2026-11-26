@@ -1,6 +1,7 @@
 // Onboarding page logic (bundled local renderer, talks to main only via window.ocwOnboarding).
 
 import type { OnboardingStatus, RuntimeInfo } from "../../shared/ipc";
+import { updatePanel } from "../../shared/update-panel";
 
 interface Defaults {
   webUrl: string;
@@ -25,6 +26,8 @@ interface OnboardingApi {
   checkServer(input: { webUrl: string; apiUrl?: string }): Promise<CheckResult>;
   enroll(input: { webUrl: string; apiUrl: string; code: string; deviceName: string }): Promise<EnrollResult>;
   finish(skipPairing: boolean): Promise<unknown>;
+  /** 07.13.1 (D-09): one of `UpdateActionArgs`; main checks it again. */
+  updateAction(action: string): Promise<unknown>;
   onStatus(cb: (s: OnboardingStatus) => void): void;
 }
 
@@ -88,22 +91,52 @@ function runtimeState(r: RuntimeInfo | undefined): { tone: string; text: string 
   return { tone: "ok", text: r.version ? `Ready · v${r.version}` : "Ready" };
 }
 
+/** An update button's call is running: the button stays disabled until it returns. */
+let updateActionRunning = false;
+let lastStatus: OnboardingStatus | null = null;
+
 /**
  * 07.13 (D-18): "Update available (vX.Y.Z)" linking to the release page (main checked the URL; the click opens it in
- * the default browser through the window-open guard). Nothing is downloaded or installed.
+ * the default browser through the window-open guard). 07.13.1 (D-09): the app update's button, sent to main as the
+ * menu's action.
  */
 function renderUpdate(s: OnboardingStatus): void {
+  const panel = updatePanel(s.appUpdate);
   const link = $("update") as HTMLAnchorElement;
-  if (!s.update) {
-    link.hidden = true;
-    return;
+  const action = button("update-action");
+  const legacy = s.update;
+  if (legacy) {
+    link.href = legacy.url;
+    $("update-label").textContent = `Update available (v${legacy.version})`;
   }
-  link.href = s.update.url;
-  $("update-label").textContent = `Update available (v${s.update.version})`;
-  link.hidden = false;
+  link.hidden = !legacy;
+  if (panel?.button) {
+    action.textContent = panel.button.label;
+    action.dataset.action = panel.button.action;
+  } else delete action.dataset.action;
+  action.hidden = !panel?.button;
+  action.disabled = updateActionRunning;
+  $("update-panel").hidden = !panel && !legacy;
+}
+
+async function onUpdateAction(): Promise<void> {
+  const action = button("update-action").dataset.action;
+  if (!action || updateActionRunning) return;
+  updateActionRunning = true;
+  button("update-action").disabled = true;
+  try {
+    await api.updateAction(action);
+  } catch {
+    // Refused or failed: main shows the outcome through the next status.
+  } finally {
+    updateActionRunning = false;
+    button("update-action").disabled = false;
+    if (lastStatus) renderUpdate(lastStatus);
+  }
 }
 
 function renderStatus(s: OnboardingStatus): void {
+  lastStatus = s;
   renderUpdate(s);
   const set = (key: string, tone: string, text: string) => {
     const li = document.querySelector<HTMLElement>(`[data-check="${key}"]`);
@@ -207,7 +240,12 @@ async function init(): Promise<void> {
     void api.status().then(renderStatus);
   });
   button("open-workspace").addEventListener("click", () => void api.finish(skipped));
+  button("update-action").addEventListener("click", () => void onUpdateAction());
   api.onStatus(renderStatus);
+  // Main pushes the status only on a change: ask once, so an update that is already ready shows when the window opens.
+  void api.status().then((s) => {
+    if (!lastStatus) renderStatus(s);
+  });
 
   if (d.paired) {
     // Re-opened from the menu while already paired: start at the server step, ready to re-pair.
