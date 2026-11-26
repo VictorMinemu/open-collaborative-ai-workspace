@@ -26,7 +26,8 @@ const common = {
 await Promise.all([
   build({
     ...common,
-    entryPoints: { "main/index": "src/main/index.ts" },
+    // The macOS swap helper (07.13.1, D-05) runs detached as Electron-as-Node after the app quits; no Electron imports.
+    entryPoints: { "main/index": "src/main/index.ts", "main/mac-swap-helper": "src/main/mac-swap-helper.ts" },
     outdir: dist,
     outExtension: { ".js": ".cjs" },
     platform: "node",
