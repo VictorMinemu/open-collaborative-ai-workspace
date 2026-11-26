@@ -13,6 +13,9 @@ export interface TokenCipher {
   decrypt(cipher: Buffer): string;
 }
 
+/** A plain file name (no folder, no separator), as the AppImage's file name is kept (07.13.1, Pitfall 6). */
+const FileName = z.string().regex(/^[^/\\]{1,255}$/);
+
 const StoredConfig = z.object({
   version: z.literal(1).default(1),
   webUrl: z.string().nullable().default(null),
@@ -23,6 +26,11 @@ const StoredConfig = z.object({
   /** base64 safeStorage ciphertext of the device token. */
   encryptedToken: z.string().nullable().default(null),
   onboarded: z.boolean().default(false),
+  /**
+   * 07.13.1 (Pitfall 6): the AppImage's file name at the last start, so a renamed file after an update is announced
+   * once. A file name only, never its folder; an unreadable value is dropped on its own, never the other settings.
+   */
+  lastAppImageName: FileName.optional().catch(undefined),
 });
 export type StoredConfig = z.infer<typeof StoredConfig>;
 
@@ -54,7 +62,11 @@ export class ConfigStore {
   }
 
   async update(patch: Partial<Omit<StoredConfig, "version" | "encryptedToken">>): Promise<void> {
-    this.data = { ...this.data, ...patch };
+    const next = { ...patch };
+    // A path or an over-long name is refused: the stored name stays as it was.
+    if (next.lastAppImageName !== undefined && !FileName.safeParse(next.lastAppImageName).success)
+      delete next.lastAppImageName;
+    this.data = { ...this.data, ...next };
     await this.save();
   }
 

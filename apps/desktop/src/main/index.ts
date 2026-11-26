@@ -65,6 +65,7 @@ import { deriveApiUrl, isSafeExternalUrl, normalizeServerUrl, UrlError } from ".
 import {
   AppUpdateController,
   type AppUpdateMenuAction,
+  appImageNameNotice,
   appUpdateMenuModel,
   type DaemonKind,
 } from "./app-update";
@@ -79,7 +80,7 @@ import { ConfigStore } from "./config-store";
 import { ControlError, controlRequest, controlSocketPath } from "./control-client";
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
-import { createAdhocMacUpdater } from "./mac-update";
+import { createAdhocMacUpdater, macInstallTarget, readSwapResult, sweepLeftovers } from "./mac-update";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
 import { createPlatformUpdater, type UpdaterMode, updaterMode } from "./platform-updater";
 import {
@@ -459,6 +460,41 @@ function setUpAppUpdate(mode: UpdaterMode): void {
   });
   appUpdate.start();
   log(hasPlatformUpdater ? "app updates: on" : `app updates: release page only (${platform.fallback})`);
+}
+
+/**
+ * What the person learns once after an update (D-05, Pitfall 6), versions and file names only, never a folder:
+ * - macOS (packaged, or the test mode's dummy app): a failed swap (the helper's `update-result.json`, deleted once
+ *   read) and the removal of leftover staging folders or old bundles beside the app when that folder is writable.
+ * - Linux AppImage: the file now has a new versioned name, so shortcuts to the old one break; the new name is stored.
+ */
+async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
+  try {
+    if (process.platform === "darwin") {
+      const testApp = mode.kind === "test" ? mode.macTestApp : null;
+      if (!app.isPackaged && !testApp) return;
+      const result = await readSwapResult(app.getPath("userData"));
+      if (result?.outcome === "failed") {
+        notify(
+          "OCW was not updated",
+          `The update to v${result.version} could not be installed. OCW is still on v${app.getVersion()}.`,
+        );
+      }
+      const exe = testApp ? join(testApp, "Contents", "MacOS", "OCW") : app.getPath("exe");
+      const target = macInstallTarget(exe);
+      if (target.ok) await sweepLeftovers(target.parent);
+      return;
+    }
+    const appImage = process.platform === "linux" ? process.env.APPIMAGE : undefined;
+    if (!appImage) return;
+    const name = basename(appImage);
+    const previous = store.config.lastAppImageName ?? null;
+    const notice = appImageNameNotice(previous, name);
+    if (notice) notify("OCW was updated", notice);
+    if (name !== previous) await store.update({ lastAppImageName: name });
+  } catch {
+    // Best effort: nothing here may keep the app from starting.
+  }
 }
 
 async function pollStatus(): Promise<void> {
@@ -1098,7 +1134,12 @@ async function main(): Promise<void> {
     copyright: "Open Collaborative AI Workspace · AGPL-3.0",
   });
 
-  app.on("second-instance", () => (store?.config.onboarded ? openMain() : openOnboarding()));
+  app.on("second-instance", () => {
+    // During a quit (an update's restart included) a second start must not reopen windows (T-07.13.1-05-05).
+    if (quitting) return;
+    if (store?.config.onboarded) openMain();
+    else openOnboarding();
+  });
 
   await app.whenReady();
 
@@ -1140,6 +1181,9 @@ async function main(): Promise<void> {
   if (store.config.onboarded && store.config.webUrl) openMain();
   else openOnboarding();
 
+  // Before the daemon starts: the first automatic check waits for its first status, so the leftover sweep is done
+  // before any download can stage a new update beside the app.
+  await afterUpdateNotices(updateMode);
   await startDaemon();
   publishStatus();
   setInterval(() => void pollStatus(), STATUS_POLL_MS).unref();
@@ -1181,7 +1225,11 @@ async function main(): Promise<void> {
   });
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (process.env.APPIMAGE_EXIT_AFTER_INSTALL === "true") {
+  // electron-updater runs the new AppImage once with this variable after replacing the file on a normal quit (no
+  // relaunch wanted): that instance exits at once, before any window, tray or daemon (Pitfall 6).
+  app.exit(0);
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   void main();
