@@ -4,7 +4,16 @@
 # itself. The release stays a draft until every build is uploaded and SHA256SUMS covers them all.
 # Pull requests touching the desktop app, the daemon or this file build the apps too (nothing is uploaded).
 # No build is signed yet: macOS gets an ad-hoc signature (no Developer ID, no notarization) and Windows none (the
-# release notes say how to open them). workflow_dispatch rebuilds and re-uploads an existing tag.
+# release notes say how to open them).
+# The build names every file with its release name and writes the update manifests (latest-mac.yml, latest.yml,
+# latest-linux.yml) the desktop app's updater reads (07.13.1, D-03); this workflow uploads them unrenamed, with the mac
+# zip and the blockmaps, so every manifest points at a file of the same release. A manifest check
+# (apps/desktop/scripts/check-update-manifest.mjs: sha512, size, version, app-update.yml, on macOS the zip's seal) gates
+# every runner, for pull requests and tags. Only a tag's build sets the release-build flag, the one build that may turn
+# the updater on (D-02). Jobs that can write releases check out without persisting the token in .git/config. Turning on
+# GitHub immutable releases (published assets can no longer be replaced) is the owner's repository setting.
+# workflow_dispatch rebuilds and re-uploads an existing tag, only from v0.5.1 on: an older tag's electron-builder
+# config has neither the release names nor the update manifests, so the collect and check steps would fail on it.
 name: release
 
 on:
@@ -48,6 +57,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
           sparse-checkout: |
             docs/releases
             scripts/install.sh
@@ -93,6 +103,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
+          # This job holds contents: write and runs install scripts; gh reads GH_TOKEN, never git's credentials.
+          persist-credentials: false
           # .planning/ is most of the tree and no build reads it.
           sparse-checkout: |
             /*
@@ -109,23 +121,37 @@ jobs:
         working-directory: apps/desktop
         run: npm pkg set version="${TAG#v}"
       - name: Build the app
+        env:
+          # Only a release tag's build may turn the desktop updater on (D-02); pull requests build with it off.
+          OCW_RELEASE_BUILD: ${{ env.TAG != '' && '1' || '0' }}
         run: pnpm --filter @ocw/desktop package
       - name: Check that the packaged daemon runs
         run: node apps/desktop/scripts/check-package.mjs
+      # A tag checks against its own version; a pull request against the package's.
+      - name: Check the update manifests
+        run: |
+          set -euo pipefail
+          if [[ -n "$TAG" ]]; then
+            node apps/desktop/scripts/check-update-manifest.mjs --version "${TAG#v}"
+          else
+            node apps/desktop/scripts/check-update-manifest.mjs
+          fi
+      # The files exactly as built: the manifests name them, so a rename would break every update. An unmatched
+      # pattern stays literal and `cp` fails the step.
       - name: Collect the release files
         run: |
           set -euo pipefail
           mkdir -p out
-          name="OCW-${TAG:-pr}"
           cd apps/desktop/release
           case "${{ matrix.platform }}" in
-            macos-arm64) cp *.dmg "../../../out/$name-macos-arm64.dmg" ;;
-            windows-x64) cp "OCW Setup "*.exe "../../../out/$name-windows-x64-setup.exe" ;;
+            macos-arm64)
+              files=(OCW-v*-macos-arm64.dmg OCW-v*-macos-arm64.zip OCW-v*-macos-arm64.zip.blockmap latest-mac.yml) ;;
+            windows-x64)
+              files=(OCW-v*-windows-x64-setup.exe OCW-v*-windows-x64-setup.exe.blockmap latest.yml) ;;
             linux-x64)
-              cp *.AppImage "../../../out/$name-linux-x86_64.AppImage"
-              cp *.deb "../../../out/$name-linux-amd64.deb"
-              ;;
+              files=(OCW-v*-linux-x86_64.AppImage OCW-v*-linux-amd64.deb latest-linux.yml) ;;
           esac
+          cp -- "${files[@]}" ../../../out/
           ls -l ../../../out
       # No workflow artifact: on a public repository it would be a second, unreviewed download channel. A pull request
       # only proves the apps build and their daemon runs; a tag publishes them through the draft release.
@@ -152,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir files && cd files
-          gh release download "$TAG" --pattern 'OCW-*' --pattern 'install.sh'
+          gh release download "$TAG" --pattern 'OCW-*' --pattern 'latest*.yml' --pattern 'install.sh'
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --clobber
