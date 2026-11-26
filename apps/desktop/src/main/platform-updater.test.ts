@@ -80,6 +80,7 @@ describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
       env: { APPIMAGE: "/home/someone/OCW-v0.5.0-linux-x86_64.AppImage" },
       mode: GITHUB,
       createMac: noMac,
+      isWritable: () => true,
     });
     expect(appImage.fallback).toBeNull();
     expect(appImage.updater).toMatchObject({ kind: "appimage", feeds: [GITHUB_FEED] });
@@ -91,6 +92,25 @@ describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
     expect(
       createPlatformUpdater({ platform: "linux", env: { APPIMAGE: "" }, mode: GITHUB, createMac: noMac }),
     ).toEqual({ updater: null, fallback: "deb" });
+  });
+
+  // Review WR-01: the AppImage updater replaces the file (unlink, rename), so an AppImage this user cannot replace
+  // gets the release-page notice instead of a restart that closes the app for good.
+  it("Linux: an AppImage whose folder or file this user cannot write gets the unwritable fallback", () => {
+    const file = "/opt/OCW-v0.5.0-linux-x86_64.AppImage";
+    for (const blocked of ["/opt", file]) {
+      const isWritable = vi.fn((p: string) => p !== blocked);
+      expect(
+        createPlatformUpdater({
+          platform: "linux",
+          env: { APPIMAGE: file },
+          mode: GITHUB,
+          createMac: noMac,
+          isWritable,
+        }),
+      ).toEqual({ updater: null, fallback: "unwritable" });
+      expect(isWritable).toHaveBeenCalledWith(blocked);
+    }
   });
 
   it("macOS gets the injected ad-hoc updater, configured the same way, or its refusal as the fallback", () => {

@@ -22,7 +22,7 @@ export const stagingDirName = (version: string) => `.ocw-update-${version}`;
 export const SwapResult = z.strictObject({
   outcome: z.enum(["installed", "failed"]),
   version: z.string().regex(STABLE_VERSION),
-  reason: z.enum(["app_still_running", "swap_failed", "rollback_failed"]).optional(),
+  reason: z.enum(["app_still_running", "swap_failed", "rollback_failed", "install_failed"]).optional(),
   at: z.iso.datetime(),
 });
 export type SwapResult = z.infer<typeof SwapResult>;

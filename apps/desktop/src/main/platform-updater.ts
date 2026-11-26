@@ -6,8 +6,9 @@
 // guards the rest of apps/desktop. The feed is set in code: the canonical GitHub releases, stable only, no downgrade.
 // The loopback test feed exists only for unpackaged builds (the e2e test and development).
 
-import { isAbsolute } from "node:path";
-import { AppImageUpdater, type AppUpdater, NsisUpdater } from "electron-updater";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
+import { AppImageUpdater, type BaseUpdater, NsisUpdater } from "electron-updater";
 import type { UpdateFallbackReason } from "./app-update";
 
 const OWNER = "VictorMinemu";
@@ -19,11 +20,11 @@ export type UpdaterMode =
   | { kind: "off"; reason: "not_release" | "dev" };
 
 export type MacUpdaterResult =
-  | { ok: true; updater: AppUpdater }
+  | { ok: true; updater: BaseUpdater }
   | { ok: false; reason: "dmg" | "translocated" | "unwritable" | "not_bundle" };
 
 export interface PlatformUpdater {
-  updater: AppUpdater | null;
+  updater: BaseUpdater | null;
   /** Why there is none (the release-page notice is shown instead); null when there is one. */
   fallback: UpdateFallbackReason | null;
 }
@@ -61,7 +62,7 @@ export function updaterMode(opts: { isPackaged: boolean; releaseBuild: boolean; 
   return { kind: "test", feedUrl, configPath, macTestApp: testApp && isAbsolute(testApp) ? testApp : null };
 }
 
-function configure(updater: AppUpdater, mode: Exclude<UpdaterMode, { kind: "off" }>): void {
+function configure(updater: BaseUpdater, mode: Exclude<UpdaterMode, { kind: "off" }>): void {
   // No logger: electron-updater logs installer, cache and AppImage paths (Pitfall 8).
   updater.logger = null;
   updater.autoDownload = false;
@@ -79,16 +80,27 @@ function configure(updater: AppUpdater, mode: Exclude<UpdaterMode, { kind: "off"
   updater.setFeedURL({ provider: "generic", url: mode.feedUrl });
 }
 
+const defaultIsWritable = (path: string): boolean => {
+  try {
+    accessSync(path, fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /** The platform's one allowed updater, configured; or none and why. */
 export function createPlatformUpdater(opts: {
   platform: NodeJS.Platform;
   env: Env;
   mode: UpdaterMode;
   createMac: () => MacUpdaterResult;
+  /** Linux: whether this user may write a path (default `access(W_OK)`). */
+  isWritable?: (path: string) => boolean;
 }): PlatformUpdater {
   const { mode } = opts;
   if (mode.kind === "off") return { updater: null, fallback: mode.reason };
-  let updater: AppUpdater;
+  let updater: BaseUpdater;
   switch (opts.platform) {
     case "win32":
       updater = new NsisUpdater();
@@ -96,6 +108,14 @@ export function createPlatformUpdater(opts: {
     case "linux":
       // Outside an AppImage (the .deb) there is no self-install: the notice names the AppImage (D-06).
       if (!opts.env.APPIMAGE) return { updater: null, fallback: "deb" };
+      {
+        // Review WR-01: the AppImage updater unlinks and renames the file; where this user cannot, it would fail on
+        // every restart, after the app had already quit. The release-page notice instead.
+        const isWritable = opts.isWritable ?? defaultIsWritable;
+        const appImage = opts.env.APPIMAGE;
+        if (!isWritable(dirname(appImage)) || !isWritable(appImage))
+          return { updater: null, fallback: "unwritable" };
+      }
       updater = new AppImageUpdater();
       break;
     case "darwin": {

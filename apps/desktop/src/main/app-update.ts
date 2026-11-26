@@ -60,7 +60,11 @@ export interface UpdaterLike {
   removeListener(event: "error", listener: (error: Error) => void): unknown;
   checkForUpdates(): Promise<{ isUpdateAvailable: boolean; updateInfo: { version: string } } | null>;
   downloadUpdate(): Promise<unknown>;
-  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  /**
+   * BaseUpdater's public, synchronous install (review WR-01): true when the installer started. Called instead of
+   * `quitAndInstall`, which returns nothing and would call `app.quit()` a second time from inside the quit event.
+   */
+  install(isSilent?: boolean, isForceRunAfter?: boolean): boolean;
   prepareDownloaded?(info: { version: string; downloadedFile: string }): Promise<void>;
 }
 
@@ -99,6 +103,10 @@ export interface AppUpdateDeps {
   holdState?: () => Promise<unknown>;
   daemon: () => DaemonKind;
   quit: () => void;
+  /** `app.relaunch()`: the quit goes on and this version opens again (an install that did not start, WR-01). */
+  relaunch: () => void;
+  /** Records an install that did not start, for a one-time "OCW was not updated" notice at the next start (WR-01). */
+  recordFailure: (version: string) => void;
   /** The system idle time in seconds (`powerMonitor.getSystemIdleTime()`). */
   idleSeconds: () => number;
   notify: (title: string, body: string) => void;
@@ -365,18 +373,37 @@ export class AppUpdateController {
     this.set({ kind: "fallback", version, url: notice.url });
   }
 
-  /** Electron's `quit` event (the daemon is already stopped): the only place an install starts. */
+  /**
+   * Electron's `quit` event (the daemon is already stopped): the only place an install starts. Review WR-01: an
+   * install that does not start (no installer, an unwritable AppImage, a missing helper) is recorded for the next
+   * start's notice, and on a restart the app relaunches itself instead of staying closed.
+   */
   onQuit(): void {
     const updater = this.updater;
-    if (!updater || !this.deps.installAllowed || !this.readyVersion || this.installStarted) return;
+    const version = this.readyVersion;
+    if (!updater || !this.deps.installAllowed || !version || this.installStarted) return;
     const restart = this.restartRequested;
     if (!restart && this.level !== "automatic") return;
     this.installStarted = true;
+    let started = false;
     try {
       // Silent; relaunch only when the quit is the update's restart (a normal quit at `automatic` stays quit).
-      updater.quitAndInstall(true, restart);
+      started = updater.install(true, restart) === true;
     } catch {
-      // The app is quitting either way; the next start checks again.
+      started = false;
+    }
+    if (started) return;
+    if (restart) {
+      try {
+        this.deps.relaunch();
+      } catch {
+        // The app is quitting either way; the next start checks again.
+      }
+    }
+    try {
+      this.deps.recordFailure(version);
+    } catch {
+      // Best effort: the next start checks again.
     }
   }
 

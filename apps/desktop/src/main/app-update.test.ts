@@ -42,7 +42,8 @@ class FakeUpdater extends EventEmitter {
       this.emit("update-downloaded", { version: this.available, downloadedFile: DOWNLOADED });
     return [DOWNLOADED];
   });
-  quitAndInstall = vi.fn();
+  /** BaseUpdater's public `install`: true when the installer started (review WR-01). */
+  install = vi.fn((_isSilent?: boolean, _isForceRunAfter?: boolean): boolean => true);
 }
 
 class FakeMacUpdater extends FakeUpdater {
@@ -70,6 +71,8 @@ interface Harness {
   hold: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   holdState: ReturnType<typeof vi.fn>;
+  relaunch: ReturnType<typeof vi.fn>;
+  recordFailure: ReturnType<typeof vi.fn>;
   quit: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
   onChange: ReturnType<typeof vi.fn>;
@@ -87,6 +90,8 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
   const release = vi.fn(async (_holdId: string): Promise<unknown> => ({ released: true }));
   const holdState = vi.fn(async (): Promise<unknown> => ({ state: "idle", running: 0 }));
   const quit = vi.fn();
+  const relaunch = vi.fn();
+  const recordFailure = vi.fn();
   const notify = vi.fn();
   const onChange = vi.fn();
   const controller = new AppUpdateController({
@@ -99,6 +104,8 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
     holdState,
     daemon: () => daemon.kind,
     quit,
+    relaunch,
+    recordFailure,
     idleSeconds: () => idle.seconds,
     notify,
     onChange,
@@ -110,6 +117,8 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
     hold: (over.hold as typeof hold) ?? hold,
     release: (over.release as typeof release) ?? release,
     holdState: (over.holdState as typeof holdState) ?? holdState,
+    relaunch,
+    recordFailure,
     quit,
     notify,
     onChange,
@@ -146,13 +155,13 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
     expect(h.hold).toHaveBeenCalledWith(true);
     expect(h.quit).toHaveBeenCalledTimes(1);
     expect(h.hold.mock.invocationCallOrder[0]).toBeLessThan(h.quit.mock.invocationCallOrder[0] as number);
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
 
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).toHaveBeenCalledTimes(1);
-    expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
+    expect(h.updater.install).toHaveBeenCalledTimes(1);
+    expect(h.updater.install).toHaveBeenCalledWith(true, true);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(h.updater.install).toHaveBeenCalledTimes(1);
   });
 
   it.each(["paused", "external", "stopped"] as const)(
@@ -166,7 +175,7 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
       expect(h.hold).not.toHaveBeenCalled();
       expect(h.quit).toHaveBeenCalledTimes(1);
       h.controller.onQuit();
-      expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
+      expect(h.updater.install).toHaveBeenCalledWith(true, true);
     },
   );
 
@@ -178,7 +187,7 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
     await flush();
     expect(h.quit).not.toHaveBeenCalled();
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
   });
 
   it("a hold answer it cannot read is treated as an unreachable runtime", async () => {
@@ -192,9 +201,48 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
     expect(h.controller.view().notice).toBe(UPDATE_SENTENCES.runtimeUnreachable);
   });
 
+  // Review WR-01: an install that does not start must not leave the person with a closed app and no word.
+  it("an install that does not start on a restart relaunches the app and records the failure once", async () => {
+    h.updater.install.mockReturnValue(false);
+    await h.controller.check("click");
+    await flush();
+    await h.controller.restart();
+    await flush();
+    h.controller.onQuit();
+    expect(h.updater.install).toHaveBeenCalledWith(true, true);
+    expect(h.relaunch).toHaveBeenCalledTimes(1);
+    expect(h.recordFailure).toHaveBeenCalledTimes(1);
+    expect(h.recordFailure).toHaveBeenCalledWith("0.5.1");
+    h.controller.onQuit();
+    expect(h.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a normal quit at automatic whose install throws stays quit and records the failure", async () => {
+    h.updater.install.mockImplementation(() => {
+      throw new Error("EACCES /opt/OCW.AppImage");
+    });
+    h.controller.onDaemonStatus(status("automatic"));
+    await flush();
+    expect(h.controller.view().phase).toBe("ready");
+    h.controller.onQuit();
+    expect(h.updater.install).toHaveBeenCalledWith(true, false);
+    expect(h.relaunch).not.toHaveBeenCalled();
+    expect(h.recordFailure).toHaveBeenCalledWith("0.5.1");
+  });
+
+  it("an install that starts neither relaunches nor records anything", async () => {
+    await h.controller.check("click");
+    await flush();
+    await h.controller.restart();
+    await flush();
+    h.controller.onQuit();
+    expect(h.relaunch).not.toHaveBeenCalled();
+    expect(h.recordFailure).not.toHaveBeenCalled();
+  });
+
   it("nothing installs on quit before an update is ready", () => {
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
   });
 });
 
@@ -208,7 +256,7 @@ describe("install allowed only outside the test feed", () => {
     await flush();
     expect(h.quit).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
   });
 });
 
@@ -254,7 +302,7 @@ describe("the macOS prepare step (D-05)", () => {
     await h.controller.restart();
     expect(h.quit).not.toHaveBeenCalled();
     h.controller.onQuit();
-    expect(mac.quitAndInstall).not.toHaveBeenCalled();
+    expect(mac.install).not.toHaveBeenCalled();
   });
 });
 
@@ -311,7 +359,7 @@ describe("levels and the schedule (D-08)", () => {
     expect(h.updater.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(h.updater.downloadUpdate).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
   });
 
   it("off never checks by itself, and a click still checks and downloads", async () => {
@@ -343,7 +391,7 @@ describe("levels and the schedule (D-08)", () => {
     await flush();
     expect(h.updater.downloadUpdate).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(h.updater.install).not.toHaveBeenCalled();
   });
 
   it("level changes cancel or reschedule the checks and never drop a ready update", async () => {
@@ -413,8 +461,8 @@ describe("install on quit by level (D-08)", () => {
     await flush();
     expect(h.controller.view().phase).toBe("ready");
     h.controller.onQuit();
-    if (args) expect(h.updater.quitAndInstall).toHaveBeenCalledWith(...args);
-    else expect(h.updater.quitAndInstall).not.toHaveBeenCalled();
+    if (args) expect(h.updater.install).toHaveBeenCalledWith(...args);
+    else expect(h.updater.install).not.toHaveBeenCalled();
   });
 });
 
@@ -442,7 +490,7 @@ describe("the unattended restart (automatic only, D-08)", () => {
     expect(h.hold).toHaveBeenCalledWith(false);
     expect(h.quit).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
+    expect(h.updater.install).toHaveBeenCalledWith(true, true);
   });
 
   it("a not-held answer changes nothing and retries a minute later, never with drain", async () => {
@@ -493,7 +541,7 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     await flush();
     expect(h.quit).toHaveBeenCalledTimes(1);
     h.controller.onQuit();
-    expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
+    expect(h.updater.install).toHaveBeenCalledWith(true, true);
   });
 
   it("a timed-out drain goes back to Restart to update with the fixed sentence", async () => {

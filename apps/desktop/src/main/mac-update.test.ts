@@ -22,6 +22,7 @@ import {
   macInstallTarget,
   type RunTool,
   readSwapResult,
+  recordInstallFailure,
   type SpawnDetached,
   stageUpdate,
   sweepLeftovers,
@@ -454,6 +455,16 @@ describe("AdhocMacUpdater (D-01, D-05)", () => {
     expect(spawn.mock.calls[0]?.[1][7]).toBe("0");
   });
 
+  // Review WR-01: the detached spawn reports a missing helper only asynchronously, after the app has exited; checked
+  // first, so the install reports false and the controller relaunches the app.
+  it("refuses to install (install_failed) when the prepared helper is gone, and spawns nothing", async () => {
+    const { updater, target, spawn } = setup();
+    await updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED });
+    rmSync(join(target.parent, ".ocw-update-0.5.1", "swap-helper.cjs"));
+    expect(() => updater.installNow({ isSilent: true, isForceRunAfter: true })).toThrow(MacUpdateError);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it("installs nothing before a download was prepared", () => {
     const { updater, spawn } = setup();
     expect(updater.installNow({ isSilent: true, isForceRunAfter: true })).toBe(false);
@@ -516,6 +527,24 @@ describe("readSwapResult and sweepLeftovers (D-05)", () => {
     expect(await readSwapResult(dir)).toEqual(result);
     expect(existsSync(join(dir, "update-result.json"))).toBe(false);
     expect(await readSwapResult(dir)).toBeNull();
+  });
+
+  it("records an install that did not start, for the next start's notice (no path)", async () => {
+    const dir = temp();
+    recordInstallFailure(dir, "0.5.1", () => Date.parse("2026-11-26T10:00:00.000Z"));
+    const raw = readFileSync(join(dir, "update-result.json"), "utf8");
+    expect(raw).not.toContain(dir);
+    expect(statSync(join(dir, "update-result.json")).mode & 0o777).toBe(0o600);
+    expect(await readSwapResult(dir)).toEqual({
+      outcome: "failed",
+      version: "0.5.1",
+      reason: "install_failed",
+      at: "2026-11-26T10:00:00.000Z",
+    });
+    // Never throws: a missing folder or a bad version writes nothing.
+    expect(() => recordInstallFailure(join(dir, "missing"), "0.5.1")).not.toThrow();
+    expect(() => recordInstallFailure(dir, "../x")).not.toThrow();
+    expect(existsSync(join(dir, "update-result.json"))).toBe(false);
   });
 
   it.each([

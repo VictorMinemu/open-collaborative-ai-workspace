@@ -82,7 +82,13 @@ import { ConfigStore } from "./config-store";
 import { ControlError, controlRequest, controlSocketPath } from "./control-client";
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
-import { createAdhocMacUpdater, macInstallTarget, readSwapResult, sweepLeftovers } from "./mac-update";
+import {
+  createAdhocMacUpdater,
+  macInstallTarget,
+  readSwapResult,
+  recordInstallFailure,
+  sweepLeftovers,
+} from "./mac-update";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
 import { createPlatformUpdater, type UpdaterMode, updaterMode } from "./platform-updater";
 import {
@@ -460,6 +466,9 @@ function setUpAppUpdate(mode: UpdaterMode): void {
       DaemonStatusPayload.parse(await controlRequest(socketPath, { cmd: "status" })).appUpdate,
     daemon: appDaemonKind,
     quit: () => app.quit(),
+    // Review WR-01: an install that did not start relaunches this version and is reported once at the next start.
+    relaunch: () => app.relaunch(),
+    recordFailure: (version) => recordInstallFailure(app.getPath("userData"), version),
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
     notify,
     onChange: onAppUpdateChange,
@@ -476,9 +485,9 @@ function setUpAppUpdate(mode: UpdaterMode): void {
  */
 async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
   try {
-    if (process.platform === "darwin") {
-      const testApp = mode.kind === "test" ? mode.macTestApp : null;
-      if (!app.isPackaged && !testApp) return;
+    const testApp = process.platform === "darwin" && mode.kind === "test" ? mode.macTestApp : null;
+    // The macOS swap's result, or an install that did not start on any platform (review WR-01), read once.
+    if (app.isPackaged || testApp) {
       const result = await readSwapResult(app.getPath("userData"));
       if (result?.outcome === "failed") {
         notify(
@@ -486,6 +495,9 @@ async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
           `The update to v${result.version} could not be installed. OCW is still on v${app.getVersion()}.`,
         );
       }
+    }
+    if (process.platform === "darwin") {
+      if (!app.isPackaged && !testApp) return;
       const exe = testApp ? join(testApp, "Contents", "MacOS", "OCW") : app.getPath("exe");
       const target = macInstallTarget(exe);
       if (target.ok) await sweepLeftovers(target.parent);

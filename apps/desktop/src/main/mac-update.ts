@@ -17,7 +17,15 @@
 // tests).
 
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  existsSync,
+  constants as fsConstants,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { chmod, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
 import { BaseUpdater } from "electron-updater";
@@ -357,6 +365,11 @@ export class AdhocMacUpdater extends BaseUpdater {
   }): boolean {
     const p = this.prepared;
     if (!p) return false;
+    // Review WR-01: the detached spawn reports a missing helper or executable only after this app has exited, so
+    // nothing would install and nobody would know; checked here, so the install reports false instead.
+    if (!existsSync(p.helper) || !existsSync(process.execPath) || !existsSync(p.stagedApp)) {
+      throw new MacUpdateError("install_failed");
+    }
     const recorded = this.daemonPid();
     const daemon = Number.isSafeInteger(recorded) && recorded >= 1 ? String(recorded) : "0";
     const args = [
@@ -433,6 +446,34 @@ export async function readSwapResult(userData: string): Promise<SwapResult | nul
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Review WR-01: records an install that did not start (on any platform), synchronously because it runs in the quit
+ * event. The next start reads it with `readSwapResult` and says once that the app was not updated. Never throws; no
+ * field can hold a path.
+ */
+export function recordInstallFailure(userData: string, version: string, now: () => number = Date.now): void {
+  const parsed = SwapResult.safeParse({
+    outcome: "failed",
+    version,
+    reason: "install_failed",
+    at: new Date(now()).toISOString(),
+  });
+  if (!parsed.success) return;
+  const file = join(userData, RESULT_FILE);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(parsed.data)}\n`, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // nothing more to do
+    }
   }
 }
 
