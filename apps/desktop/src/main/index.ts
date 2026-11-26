@@ -290,11 +290,8 @@ function publishStatus(): void {
  */
 function onboardingStatus(): OnboardingStatus {
   const s = status ?? computeStatus();
-  const withNotice: OnboardingStatus = updateNotice.available
-    ? { ...s, update: { version: updateNotice.version, url: updateNotice.url } }
-    : s;
   const line = appUpdate ? onboardingUpdateView(appUpdate.view()) : undefined;
-  return line ? { ...withNotice, appUpdate: line } : withNotice;
+  return line ? { ...s, appUpdate: line } : s;
 }
 
 function sendOnboardingStatus(): void {

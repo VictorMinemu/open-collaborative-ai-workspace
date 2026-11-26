@@ -96,27 +96,38 @@ let updateActionRunning = false;
 let lastStatus: OnboardingStatus | null = null;
 
 /**
- * 07.13 (D-18): "Update available (vX.Y.Z)" linking to the release page (main checked the URL; the click opens it in
- * the default browser through the window-open guard). 07.13.1 (D-09): the app update's button, sent to main as the
- * menu's action.
+ * 07.13.1 (D-09): the app update as the tray shows it, in one slot under the header. The sentence (announced politely),
+ * the release link (main checked the URL; the click opens it in the default browser through the window-open guard;
+ * nothing is downloaded from here) and one button whose action main runs like the menu item. Nothing to say: hidden.
+ * `updatePanel` (shared/update-panel.ts, unit-tested) picks the parts per kind:
+ * - `link` → the link; `progress` and `error` → the sentence; `ready` → "Restart to update" (`restart`);
+ * - `waiting` → the sentence and "Cancel the restart" (`cancelWait`);
+ * - `move` → "Move OCW to Applications…" (`moveToApplications`), plus the link when an update is known.
  */
 function renderUpdate(s: OnboardingStatus): void {
   const panel = updatePanel(s.appUpdate);
+  const root = $("update-panel");
+  const text = $("update-text");
   const link = $("update") as HTMLAnchorElement;
   const action = button("update-action");
-  const legacy = s.update;
-  if (legacy) {
-    link.href = legacy.url;
-    $("update-label").textContent = `Update available (v${legacy.version})`;
+  root.hidden = !panel;
+  // An empty live region (collapsed by CSS) rather than a hidden one, so the next sentence is announced.
+  const sentence = panel?.text ?? "";
+  if (text.textContent !== sentence) text.textContent = sentence;
+  if (panel?.tone) text.dataset.tone = panel.tone;
+  else delete text.dataset.tone;
+  if (panel?.link) {
+    link.href = panel.link.url;
+    $("update-label").textContent = panel.link.label;
   }
-  link.hidden = !legacy;
+  link.hidden = !panel?.link;
   if (panel?.button) {
-    action.textContent = panel.button.label;
+    if (action.textContent !== panel.button.label) action.textContent = panel.button.label;
     action.dataset.action = panel.button.action;
+    action.classList.toggle("secondary", panel.button.tone === "secondary");
   } else delete action.dataset.action;
   action.hidden = !panel?.button;
   action.disabled = updateActionRunning;
-  $("update-panel").hidden = !panel && !legacy;
 }
 
 async function onUpdateAction(): Promise<void> {
