@@ -57,6 +57,7 @@ import {
   parseArgs,
   SetBadgeCountArgs,
   toPublicProject,
+  UpdateActionArgs,
 } from "../shared/ipc";
 import { ProjectPathError, validateProjectDir } from "../shared/project-path";
 import { runtimeUpdateLines, runtimeUpdatesMenuModel } from "../shared/runtime-updates";
@@ -68,6 +69,7 @@ import {
   appImageNameNotice,
   appUpdateMenuModel,
   type DaemonKind,
+  onboardingUpdateView,
 } from "./app-update";
 import { RELEASE_BUILD } from "./build-flags";
 import {
@@ -283,12 +285,13 @@ function publishStatus(): void {
   refreshChrome();
 }
 
-/** What the onboarding window shows: the status plus the update notice (the web app never gets the notice). */
+/**
+ * What the onboarding window shows: the status plus the app update's line (07.13.1, D-09). The web app never gets it.
+ */
 function onboardingStatus(): OnboardingStatus {
   const s = status ?? computeStatus();
-  return updateNotice.available
-    ? { ...s, update: { version: updateNotice.version, url: updateNotice.url } }
-    : s;
+  const line = appUpdate ? onboardingUpdateView(appUpdate.view()) : undefined;
+  return line ? { ...s, appUpdate: line } : s;
 }
 
 function sendOnboardingStatus(): void {
@@ -364,7 +367,7 @@ async function moveToApplications(): Promise<void> {
   });
 }
 
-/** The update lines' actions (tray and Runtime menu). */
+/** The update lines' actions (tray, Runtime menu and the onboarding window's update panel). */
 function runUpdateAction(action: AppUpdateMenuAction, url?: string): void {
   const controller = appUpdate;
   if (!controller) return;
@@ -773,6 +776,11 @@ function registerIpc(): void {
             : "Pairing failed. Try again.";
       return { ok: false, message };
     }
+  });
+  // 07.13.1 (D-09, T-07.13.1-06-01/02): the update panel's buttons run the menu's action, from a closed list and the
+  // onboarding page only. Its release link stays an <a> the window-open guard checks, so it is not an action.
+  handle(Channels.onboardingUpdateAction, fromOnboarding, (arg) => {
+    runUpdateAction(parseArgs(UpdateActionArgs, arg));
   });
   handle(Channels.onboardingFinish, fromOnboarding, async (arg) => {
     parseArgs(FinishArgs, arg);

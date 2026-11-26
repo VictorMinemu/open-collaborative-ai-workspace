@@ -674,7 +674,8 @@ export function onboardingUpdateView(view: AppUpdateView): OnboardingUpdate | un
     case "waiting":
       return { kind: "waiting", label: waitingLabel(view) };
     case "restarting":
-      return { kind: "waiting", label: restartingLabel(view) };
+      // A sentence only, as in the tray: cancelling now would quit without installing.
+      return { kind: "progress", label: restartingLabel(view) };
     case "fallback":
       if (view.version && view.url) {
         const link = { label: updateAvailableLabel(view, view.version), url: view.url };

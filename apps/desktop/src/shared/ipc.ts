@@ -208,13 +208,12 @@ export interface DesktopStatus {
 }
 
 /**
- * What the bundled onboarding page receives (07.13, D-18): the status plus, when GitHub's latest release is newer than
- * this app, its version and release page (already checked against the repository's releases in the main process).
- * The web app gets `DesktopStatus` only.
+ * What the bundled onboarding page receives: the status plus the app update's line (07.13.1, D-09), the same state the
+ * tray shows. The 07.13 "Update available" link (D-18) arrives here as `appUpdate` of kind `link`. The web app gets
+ * `DesktopStatus` only.
  */
 export type OnboardingStatus = DesktopStatus & {
-  update?: { version: string; url: string };
-  /** 07.13.1 (D-09): the app update's line (fixed sentences, versions, percentages and counts only; never a path). */
+  /** Fixed sentences, versions, percentages, counts and the checked release URL only; never a path. */
   appUpdate?: OnboardingUpdate;
 };
 

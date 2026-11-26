@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld(
       }),
     finish: (skipPairing: boolean): Promise<unknown> =>
       ipcRenderer.invoke(Channels.onboardingFinish, { skipPairing: skipPairing === true }),
+    updateAction: (action: string): Promise<unknown> =>
+      ipcRenderer.invoke(Channels.onboardingUpdateAction, String(action)),
     onStatus: (callback: (status: unknown) => void): void => {
       ipcRenderer.on(Channels.statusChanged, (_e, s: unknown) => callback(s));
     },
