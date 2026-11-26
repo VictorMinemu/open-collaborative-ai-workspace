@@ -16,6 +16,38 @@ describe("the onboarding window's update panel (07.13.1, D-09)", () => {
       button: { label: "Restart to update to v0.5.2", action: "restart", tone: "primary" },
     });
   });
+
+  const URL = "https://github.com/VictorMinemu/open-collaborative-ai-workspace/releases/tag/v0.5.2";
+
+  it("links the release page where the app cannot update itself (the .deb wording included)", () => {
+    const label = "Update available (v0.5.2): download the .deb, or use the AppImage, which updates itself";
+    expect(updatePanel({ kind: "link", label, url: URL })).toEqual({ link: { label, url: URL } });
+  });
+
+  it("shows progress and errors as a sentence only", () => {
+    expect(updatePanel({ kind: "progress", label: "Downloading v0.5.2… 42%" })).toEqual({
+      text: "Downloading v0.5.2… 42%",
+    });
+    expect(updatePanel({ kind: "error", label: "Could not check for updates. Try again later." })).toEqual({
+      text: "Could not check for updates. Try again later.",
+      tone: "warning",
+    });
+  });
+
+  it("waits for the sessions with Cancel the restart", () => {
+    expect(updatePanel({ kind: "waiting", label: "Waiting for 2 sessions to finish…" })).toEqual({
+      text: "Waiting for 2 sessions to finish…",
+      button: { label: "Cancel the restart", action: "cancelWait", tone: "secondary" },
+    });
+  });
+
+  it("offers Move OCW to Applications, with the release link when an update is known", () => {
+    const label = "Move OCW to Applications to get automatic updates";
+    const button = { label, action: "moveToApplications", tone: "primary" };
+    expect(updatePanel({ kind: "move", label })).toEqual({ button });
+    const link = { label: "Update available (v0.5.2)", url: URL };
+    expect(updatePanel({ kind: "move", label, link })).toEqual({ link, button });
+  });
 });
 
 describe("the update channel belongs to the onboarding window only", () => {

@@ -648,6 +648,11 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
     expect(
       onboardingUpdateView(v({ phase: "waiting", version: "0.5.1", running: 2, waitingFor: "sessions" })),
     ).toEqual({ kind: "waiting", label: "Waiting for 2 sessions to finish…" });
+    // Restarting is a sentence only, like the tray: a "Cancel the restart" now would quit without installing.
+    expect(onboardingUpdateView(v({ phase: "restarting", version: "0.5.1" }))).toEqual({
+      kind: "progress",
+      label: "Restarting to update to v0.5.1…",
+    });
     expect(onboardingUpdateView(v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL }))).toEqual({
       kind: "link",
       label: "Update available (v0.5.1)",
