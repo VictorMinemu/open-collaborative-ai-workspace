@@ -146,7 +146,13 @@ describe("checkForUpdate (D-18, PD-21)", () => {
       throw new TypeError("fetch failed");
     });
     expect(
-      await checkForUpdate({ current: "0.4.0", fetchImpl: offline, now: () => T0 + 2000, store, force: true }),
+      await checkForUpdate({
+        current: "0.4.0",
+        fetchImpl: offline,
+        now: () => T0 + 2000,
+        store,
+        force: true,
+      }),
     ).toEqual({ available: true, version: "0.6.0", url: page6 });
     // Without force the same-day answer is used again.
     const unused = github(release());
