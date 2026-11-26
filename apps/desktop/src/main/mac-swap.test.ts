@@ -49,7 +49,14 @@ function layout(version = "0.5.1") {
   writeFileSync(join(installedApp, "marker"), "old");
   writeFileSync(join(stagedApp, "marker"), "new");
   writeFileSync(join(stagingDir, "swap-helper.cjs"), "// helper");
-  return { dir, parent, installedApp, stagingDir, stagedApp, resultFile: join(userData, "update-result.json") };
+  return {
+    dir,
+    parent,
+    installedApp,
+    stagingDir,
+    stagedApp,
+    resultFile: join(userData, "update-result.json"),
+  };
 }
 
 function argv(l: ReturnType<typeof layout>, over: Partial<Record<number, string>> = {}): string[] {

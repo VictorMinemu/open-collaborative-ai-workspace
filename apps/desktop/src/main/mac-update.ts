@@ -13,13 +13,9 @@ import { execFile } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { lstat, mkdir, readdir, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
+import { APP_NAME, STABLE_VERSION, stagingDirName } from "./mac-swap";
 
 export const BUNDLE_ID = "dev.ocw.desktop";
-/** Only a stable `x.y.z` (D-02); it also names the staging folder, so nothing else may reach a path. */
-export const STABLE_VERSION = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
-const APP_NAME = "OCW.app";
-
-export const stagingDirName = (version: string) => `.ocw-update-${version}`;
 
 const MESSAGES = {
   dmg: "OCW is running from its disk image.",
