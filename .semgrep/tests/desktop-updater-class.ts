@@ -63,5 +63,7 @@ function allowed(u: AppUpdater) {
   void [nsis, appImage, electronApp, BaseUpdater];
 }
 
+// Semgrep resolves an imported name to its module, so using a forbidden import is a finding too.
+// ruleid: ocw.desktop-updater-class
 void [autoUpdater, MacUpdater, DebUpdater, Nsis, Rpm, PacmanUpdater, squirrel, app, nativeUpdater];
 void [viaRequire, Mac, nativeViaRequire, lazy, namespaces, allowed];

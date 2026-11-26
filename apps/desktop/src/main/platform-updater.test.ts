@@ -32,7 +32,9 @@ vi.mock("electron-updater", () => {
 });
 
 const { createPlatformUpdater, isLoopbackHttpUrl, updaterMode } = await import("./platform-updater");
-const fakes = (await import("electron-updater")) as unknown as { FakeUpdater: new () => Record<string, unknown> };
+const fakes = (await import("electron-updater")) as unknown as {
+  FakeUpdater: new () => Record<string, unknown>;
+};
 
 type Mode = Parameters<typeof createPlatformUpdater>[0]["mode"];
 const GITHUB: Mode = { kind: "github" };
@@ -58,7 +60,12 @@ function expectConfigured(updater: unknown) {
 
 describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
   it("Windows gets the NSIS updater on the canonical GitHub feed", () => {
-    const { updater, fallback } = createPlatformUpdater({ platform: "win32", env: {}, mode: GITHUB, createMac: noMac });
+    const { updater, fallback } = createPlatformUpdater({
+      platform: "win32",
+      env: {},
+      mode: GITHUB,
+      createMac: noMac,
+    });
     expect(fallback).toBeNull();
     expect(updater).toMatchObject({ kind: "nsis", feeds: [GITHUB_FEED] });
     expectConfigured(updater);
@@ -81,9 +88,9 @@ describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
       updater: null,
       fallback: "deb",
     });
-    expect(createPlatformUpdater({ platform: "linux", env: { APPIMAGE: "" }, mode: GITHUB, createMac: noMac })).toEqual(
-      { updater: null, fallback: "deb" },
-    );
+    expect(
+      createPlatformUpdater({ platform: "linux", env: { APPIMAGE: "" }, mode: GITHUB, createMac: noMac }),
+    ).toEqual({ updater: null, fallback: "deb" });
   });
 
   it("macOS gets the injected ad-hoc updater, configured the same way, or its refusal as the fallback", () => {
@@ -119,7 +126,12 @@ describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
       for (const platform of ["win32", "linux", "darwin"] as const) {
         const createMac = vi.fn();
         expect(
-          createPlatformUpdater({ platform, env: { APPIMAGE: "/x.AppImage" }, mode: { kind: "off", reason }, createMac }),
+          createPlatformUpdater({
+            platform,
+            env: { APPIMAGE: "/x.AppImage" },
+            mode: { kind: "off", reason },
+            createMac,
+          }),
         ).toEqual({ updater: null, fallback: reason });
         expect(createMac).not.toHaveBeenCalled();
       }
@@ -130,7 +142,12 @@ describe("createPlatformUpdater (07.13.1 D-01, D-02)", () => {
     const { updater } = createPlatformUpdater({
       platform: "win32",
       env: {},
-      mode: { kind: "test", feedUrl: "http://127.0.0.1:43123/", configPath: "/tmp/ocw-e2e/app-update.yml", macTestApp: null },
+      mode: {
+        kind: "test",
+        feedUrl: "http://127.0.0.1:43123/",
+        configPath: "/tmp/ocw-e2e/app-update.yml",
+        macTestApp: null,
+      },
       createMac: noMac,
     });
     expect(updater).toMatchObject({
@@ -173,7 +190,11 @@ describe("updaterMode (D-02, Pitfall 7)", () => {
       }),
     ).toMatchObject({ kind: "test", macTestApp: "/tmp/ocw-e2e/OCW.app" });
     expect(
-      updaterMode({ isPackaged: false, releaseBuild: false, env: { ...testEnv, OCW_DESKTOP_UPDATE_TEST_APP: "OCW.app" } }),
+      updaterMode({
+        isPackaged: false,
+        releaseBuild: false,
+        env: { ...testEnv, OCW_DESKTOP_UPDATE_TEST_APP: "OCW.app" },
+      }),
     ).toMatchObject({ kind: "test", macTestApp: null });
     const off = { kind: "off", reason: "dev" };
     expect(updaterMode({ isPackaged: false, releaseBuild: false, env: {} })).toEqual(off);
@@ -185,12 +206,20 @@ describe("updaterMode (D-02, Pitfall 7)", () => {
       "file:///tmp/feed",
       "not a url",
     ]) {
-      expect(updaterMode({ isPackaged: false, releaseBuild: false, env: { ...testEnv, OCW_DESKTOP_UPDATE_FEED: feed } })).toEqual(
-        off,
-      );
+      expect(
+        updaterMode({
+          isPackaged: false,
+          releaseBuild: false,
+          env: { ...testEnv, OCW_DESKTOP_UPDATE_FEED: feed },
+        }),
+      ).toEqual(off);
     }
     expect(
-      updaterMode({ isPackaged: false, releaseBuild: false, env: { ...testEnv, OCW_DESKTOP_UPDATE_CONFIG: "app-update.yml" } }),
+      updaterMode({
+        isPackaged: false,
+        releaseBuild: false,
+        env: { ...testEnv, OCW_DESKTOP_UPDATE_CONFIG: "app-update.yml" },
+      }),
     ).toEqual(off);
   });
 
@@ -198,7 +227,13 @@ describe("updaterMode (D-02, Pitfall 7)", () => {
     for (const ok of ["http://127.0.0.1:1/", "http://localhost:8080/feed/", "http://[::1]:9/"]) {
       expect(isLoopbackHttpUrl(ok)).toBe(true);
     }
-    for (const bad of ["https://127.0.0.1/", "http://127.0.0.2/", "http://a@localhost/", "http://localhost.evil/", ""]) {
+    for (const bad of [
+      "https://127.0.0.1/",
+      "http://127.0.0.2/",
+      "http://a@localhost/",
+      "http://localhost.evil/",
+      "",
+    ]) {
       expect(isLoopbackHttpUrl(bad)).toBe(false);
     }
   });
