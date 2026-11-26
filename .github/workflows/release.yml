@@ -14,7 +14,9 @@
 # the updater on (D-02). Jobs that can write releases check out without persisting the token in .git/config. Turning on
 # GitHub immutable releases (published assets can no longer be replaced) is the owner's repository setting.
 # workflow_dispatch rebuilds and re-uploads an existing tag, only from v0.5.2 on: an older tag's electron-builder
-# config has neither the release names nor the update manifests, so the collect and check steps would fail on it.
+# config has neither the release names nor the update manifests, so `prepare` refuses it (scripts/release-tag.mjs,
+# review WR-06). `publish` marks a release "Latest" only when it is stable and at least as new as the current latest,
+# so a rebuild of an older tag never moves /releases/latest back.
 name: release
 
 on:
@@ -65,6 +67,17 @@ jobs:
             apps/local-runtime/package.json
             scripts/check-runtime-version.mjs
           sparse-checkout-cone-mode: false
+      # Review WR-06: the tag decisions come from this workflow's own commit (an older tag does not have the script).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gate
+          persist-credentials: false
+          sparse-checkout: scripts/release-tag.mjs
+          sparse-checkout-cone-mode: false
+      # A rebuild only from v0.5.2 on: an older tag has neither the release names nor the update manifests.
+      - name: Refuse a rebuild of a tag before v0.5.2
+        if: github.event_name == 'workflow_dispatch'
+        run: node gate/scripts/release-tag.mjs dispatch "$TAG"
       # The runtime's version follows the release (ADR-0040 § 13, D-10): a tag that disagrees publishes nothing.
       - name: Check the runtime version
         run: node scripts/check-runtime-version.mjs "$TAG"
@@ -192,12 +205,26 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Review WR-06: whether this release may become "Latest" (this workflow's own commit, not the tag's).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gate
+          persist-credentials: false
+          sparse-checkout: scripts/release-tag.mjs
+          sparse-checkout-cone-mode: false
       - name: SHA256SUMS and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Marked "Latest" only when it is stable and at least as new as the current latest release: rebuilding an
+          # older tag must never move /releases/latest (what every device's updater reads) back to it.
+          if ! current="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>latest.err)"; then
+            grep -q 'HTTP 404' latest.err || { cat latest.err; exit 1; }
+            current=""
+          fi
+          mark="$(node gate/scripts/release-tag.mjs latest "$TAG" "$current")"
           mkdir files && cd files
           gh release download "$TAG" --pattern 'OCW-*' --pattern 'latest*.yml' --pattern 'install.sh'
           sha256sum -- * > SHA256SUMS
@@ -206,5 +233,5 @@ jobs:
           if [[ "$TAG" == *-* ]]; then
             gh release edit "$TAG" --draft=false --prerelease
           else
-            gh release edit "$TAG" --draft=false --latest
+            gh release edit "$TAG" --draft=false --latest="$mark"
           fi
