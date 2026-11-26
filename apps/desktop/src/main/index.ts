@@ -70,6 +70,7 @@ import {
   appUpdateMenuModel,
   type DaemonKind,
   installFailureNotice,
+  offeredAction,
   onboardingUpdateView,
 } from "./app-update";
 import { RELEASE_BUILD } from "./build-flags";
@@ -119,6 +120,8 @@ import {
 
 const DEFAULT_WEB_URL = "http://localhost:3000";
 const STATUS_POLL_MS = 2500;
+/** After Electron's mover said it moved the app, the process should exit at once; still running after this, it did not. */
+const MOVE_EXIT_BOUND_MS = 15_000;
 const BG = "#0f0f12";
 
 // Test/dev isolation: a separate profile directory (must be set before `ready`).
@@ -403,6 +406,8 @@ async function runUpdateCheck(opts: { force?: boolean } = {}): Promise<void> {
 async function moveToApplications(): Promise<void> {
   const controller = appUpdate;
   if (!controller || process.platform !== "darwin") return;
+  // Review IN-01: Electron answers true without moving or exiting for an app already in an Applications folder.
+  if (app.isInApplicationsFolder()) return;
   await controller.holdThen(async () => {
     quitting = true;
     recordedDaemonPid = externalDaemon ? 0 : (supervisor.pid ?? 0);
@@ -415,17 +420,27 @@ async function moveToApplications(): Promise<void> {
     } catch {
       failed = true; // anything but the person's own cancel; the error text may carry a path, so it is not shown
     }
-    if (moved) return;
-    quitting = false;
-    cleanedUp = false;
-    if (!paused) await startDaemon();
-    controller.cancelWait();
-    if (failed)
-      notify(
-        "OCW was not moved",
-        "Move OCW to the Applications folder in the Finder, then open it from there.",
-      );
-    void pollStatus();
+    let restored = false;
+    const restore = async (notMoved: boolean) => {
+      if (restored) return;
+      restored = true;
+      quitting = false;
+      cleanedUp = false;
+      if (!paused) await startDaemon();
+      controller.cancelWait();
+      if (notMoved)
+        notify(
+          "OCW was not moved",
+          "Move OCW to the Applications folder in the Finder, then open it from there.",
+        );
+      void pollStatus();
+    };
+    if (moved) {
+      // A real move quits and relaunches this process at once; still running after the bound, nothing moved (IN-01).
+      setTimeout(() => void restore(true), MOVE_EXIT_BOUND_MS);
+      return;
+    }
+    await restore(failed);
   });
 }
 
@@ -433,6 +448,8 @@ async function moveToApplications(): Promise<void> {
 function runUpdateAction(action: AppUpdateMenuAction, url?: string): void {
   const controller = appUpdate;
   if (!controller) return;
+  // Review IN-01: only an action the current view offers (the onboarding page's IPC included).
+  if (!offeredAction(controller.view(), action, url)) return;
   switch (action) {
     case "check":
       if (hasPlatformUpdater) void controller.check("click");

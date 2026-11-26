@@ -799,6 +799,16 @@ export function appUpdateMenuModel(view: AppUpdateView): AppUpdateMenuItem[] {
   return items;
 }
 
+/**
+ * Review IN-01: whether the current view offers `action` (an enabled menu line; `openRelease` only for its own URL).
+ * The main process runs an update action only then, whatever the tray or the onboarding page sent.
+ */
+export function offeredAction(view: AppUpdateView, action: AppUpdateMenuAction, url?: string): boolean {
+  return appUpdateMenuModel(view).some(
+    (item) => item.enabled && item.action === action && (action !== "openRelease" || item.url === url),
+  );
+}
+
 /** The onboarding window's update line (undefined: nothing to show). */
 export function onboardingUpdateView(view: AppUpdateView): OnboardingUpdate | undefined {
   switch (view.phase) {

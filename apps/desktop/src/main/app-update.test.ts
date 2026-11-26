@@ -8,6 +8,7 @@ import {
   appUpdateMenuModel,
   type DaemonKind,
   installFailureNotice,
+  offeredAction,
   onboardingUpdateView,
   UPDATE_SENTENCES,
   type UpdateFallbackReason,
@@ -914,6 +915,35 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
         expect(JSON.stringify(out ?? null).replaceAll(RELEASE_URL, "")).not.toContain("/");
       }
     }
+  });
+});
+
+// Review IN-01: the main process runs an update action (tray, Runtime menu or the onboarding page's IPC) only when the
+// current view offers it, so a buggy or compromised page cannot cancel a restart mid-quit or start a move from
+// /Applications.
+describe("offeredAction (review IN-01)", () => {
+  it("accepts exactly the enabled actions of the current view", () => {
+    const ready = v({ phase: "ready", version: "0.5.1" });
+    expect(offeredAction(ready, "restart")).toBe(true);
+    for (const a of ["check", "cancelWait", "moveToApplications", "openRelease"] as const)
+      expect(offeredAction(ready, a)).toBe(false);
+    const waiting = v({ phase: "waiting", version: "0.5.1", running: 1, waitingFor: "sessions" });
+    expect(offeredAction(waiting, "cancelWait")).toBe(true);
+    expect(offeredAction(waiting, "restart")).toBe(false);
+    const restarting = v({ phase: "restarting", version: "0.5.1" });
+    for (const a of ["check", "restart", "cancelWait", "moveToApplications", "openRelease"] as const)
+      expect(offeredAction(restarting, a)).toBe(false);
+    expect(offeredAction(v({}), "check")).toBe(true);
+    expect(offeredAction(v({}), "moveToApplications")).toBe(false);
+    expect(offeredAction(v({ fallback: "dmg" }), "moveToApplications")).toBe(true);
+    expect(offeredAction(v({ fallback: "unwritable" }), "moveToApplications")).toBe(false);
+  });
+
+  it("accepts openRelease only for the URL the view offers", () => {
+    const fallback = v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL });
+    expect(offeredAction(fallback, "openRelease", RELEASE_URL)).toBe(true);
+    expect(offeredAction(fallback, "openRelease", "https://example.com/")).toBe(false);
+    expect(offeredAction(fallback, "openRelease")).toBe(false);
   });
 });
 
