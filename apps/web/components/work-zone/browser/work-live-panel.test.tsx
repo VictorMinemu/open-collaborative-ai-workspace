@@ -337,3 +337,25 @@ describe("WorkLivePanel takeover", () => {
     expect(t).not.toContain("Take control");
   });
 });
+
+describe("the large view", () => {
+  const withToggle = (v: LiveView, large: boolean) =>
+    renderToStaticMarkup(
+      <WorkLiveBody view={v} frames={null} deviceName="build-01" large={large} onToggleLarge={() => {}} />,
+    );
+
+  it("offers Expand in the panel and Show in the panel in the large view", () => {
+    expect(withToggle(view(), false)).toContain('aria-label="Expand"');
+    expect(withToggle(controlling(), true)).toContain('aria-label="Show in the panel"');
+  });
+
+  it("has no Expand button without a toggle (touch screens)", () => {
+    expect(render(view())).not.toContain("work-live-expand");
+    expect(render(controlling(), true)).not.toContain("work-live-expand");
+  });
+
+  it("fits the page to the screen's height only in the large view", () => {
+    expect(withToggle(controlling(), true)).toContain("max-w-[calc((100dvh-18rem)*1.6)]");
+    expect(withToggle(controlling(), false)).not.toContain("100dvh-18rem");
+  });
+});
