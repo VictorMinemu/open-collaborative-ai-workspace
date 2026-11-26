@@ -78,6 +78,8 @@ export class FakeDevice {
       accountPool?: 1;
       /** 07.18 (PD-17): whether Claude Code reports a login of its own (default true). */
       claudeLoggedIn?: boolean;
+      /** ADR-0045: the daemon copies prompt files into the tree (`hello.promptFiles`); sent only when given. */
+      promptFiles?: 1;
     } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
@@ -109,6 +111,7 @@ export class FakeDevice {
       ...(sessions ? { sessions } : {}),
       ...(opts.isolatedServer !== undefined ? { isolatedServer: opts.isolatedServer } : {}),
       ...(opts.accountPool !== undefined ? { accountPool: opts.accountPool } : {}),
+      ...(opts.promptFiles !== undefined ? { promptFiles: opts.promptFiles } : {}),
     });
     await d.next((f) => f.type === "welcome");
     return d;

@@ -38,8 +38,8 @@ import {
   highestAvailableMode,
   storedSettings,
 } from "./controls";
-import { checkImageBudget } from "./images";
 import { defaultVisibilityOf } from "./projects";
+import { decidePromptAttachments } from "./prompt-files";
 import type { SessionRow, WorkSessionService } from "./service";
 import { heuristicTitle } from "./title";
 import { applyAudience, audienceTarget, checkAudience, projectAccessDenial } from "./visibility";
@@ -550,17 +550,19 @@ export async function queueWorkPrompt(
       ...(opts.tainted ? { tainted: true } : {}),
     })
     .returning();
-  // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
+  // 06.1 (P-05): the sender's own ready files of this session's conversation, or one uniform 409 (the whole
   // transaction rolls back: nothing is queued, sent or audited).
-  const images = await linkWorkPromptAttachments(tx, {
+  const linked = await linkWorkPromptAttachments(tx, {
     conversationId: s.conversationId,
     workPromptId: p!.id,
     uploaderId: actor.userId,
     ids: [...attachmentIds],
   });
-  // WZ-IMG-02 (P-01, P-03): each image as sent fits 2 MiB, from the sizes recorded at upload (no storage call
-  // while the session row is locked); otherwise 400 image_too_large and the transaction rolls back.
-  checkImageBudget(images);
+  // ADR-0045: images the model reads go inline, each fitting 2 MiB as sent (WZ-IMG-02, from the sizes recorded at
+  // upload: no storage call while the session row is locked); every other file goes into the working tree, which the
+  // device must support, under the deny list and the per-file limit. Any refusal rolls the transaction back.
+  const plan = await decidePromptAttachments(tx, s, linked, svc.promptFileCeiling());
+  const images = plan.inline;
   await core.audit.record(tx, {
     action: "work_prompt.queued",
     resourceType: "work_prompt",
@@ -577,8 +579,10 @@ export async function queueWorkPrompt(
       length: body.length,
       ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
       ...(opts.tainted ? { tainted: true } : {}),
-      // Ids and a count only, never bytes (D-03).
-      ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
+      // Ids and counts only, never bytes or names (D-03, ADR-0045).
+      ...(linked.length > 0 ? { attachmentIds: linked.map((a) => a.id) } : {}),
+      ...(images.length > 0 ? { imageCount: images.length } : {}),
+      ...(plan.files.length > 0 ? { fileCount: plan.files.length } : {}),
     },
   });
   await svc.emitPrompt(tx, p!);

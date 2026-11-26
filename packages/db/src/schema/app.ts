@@ -1472,12 +1472,22 @@ export const devices = appSchema.table(
      * pool support, which never gets a pool account. Written only from the device's own hello, never from a web route.
      */
     accountPoolVersion: integer("account_pool_version"),
+    /**
+     * ADR-0045: the prompt-files version the daemon supports (`hello.promptFiles`); null = a daemon that would drop a
+     * prompt's `files`, so it never gets one ("Update this device to attach files"). Written only from the device's
+     * own hello.
+     */
+    promptFilesVersion: integer("prompt_files_version"),
   },
   (t) => [
     index("devices_org_idx").on(t.organizationId),
     check(
       "devices_account_pool_version_ck",
       sql`${t.accountPoolVersion} is null or ${t.accountPoolVersion} between 1 and 100`,
+    ),
+    check(
+      "devices_prompt_files_version_ck",
+      sql`${t.promptFilesVersion} is null or ${t.promptFilesVersion} between 1 and 100`,
     ),
     modeCheck("devices_share_max_mode_ck", t.shareMaxMode),
     check("devices_host_kind_ck", sql`${t.hostKind} in ('desktop','service')`),
@@ -2302,9 +2312,15 @@ export const botWorkSessionFiles = appSchema.table(
     id: uuid("id").primaryKey(),
     organizationId: orgId(),
     workSessionId: uuid("work_session_id").notNull(),
-    agentId: uuid("agent_id").notNull(),
-    /** The bot turn that asked for the move. */
-    eventId: uuid("event_id").notNull(),
+    /** The bot that asked for the move; null for a person's prompt file (ADR-0045, `work_prompt_id` set). */
+    agentId: uuid("agent_id"),
+    /** The bot turn that asked for the move; null for a person's prompt file (ADR-0045). */
+    eventId: uuid("event_id"),
+    /**
+     * ADR-0045: the Work Zone prompt this file is copied in for (the transfer is listed in that prompt command's
+     * `files`); null for a bot's move. Exactly one of the two owners is set (`bot_work_session_files_owner_ck`).
+     */
+    workPromptId: uuid("work_prompt_id"),
     deviceId: uuid("device_id").notNull(),
     /** The turn's conversation (the session's origin conversation, PD-14). */
     conversationId: uuid("conversation_id").notNull(),
@@ -2335,6 +2351,11 @@ export const botWorkSessionFiles = appSchema.table(
     }).onDelete("cascade"),
     index("bot_work_session_files_agent_idx").on(t.organizationId, t.agentId, t.createdAt),
     index("bot_work_session_files_turn_idx").on(t.organizationId, t.eventId, t.direction),
+    index("bot_work_session_files_prompt_idx").on(t.organizationId, t.workPromptId),
+    check(
+      "bot_work_session_files_owner_ck",
+      sql`(${t.workPromptId} is null and ${t.agentId} is not null and ${t.eventId} is not null) or (${t.workPromptId} is not null and ${t.agentId} is null and ${t.eventId} is null and ${t.direction} = 'to_device')`,
+    ),
     check("bot_work_session_files_direction_ck", sql`${t.direction} in ('to_device','from_device')`),
     check(
       "bot_work_session_files_status_ck",

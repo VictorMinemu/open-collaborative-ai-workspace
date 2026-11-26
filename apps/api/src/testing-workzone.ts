@@ -100,8 +100,10 @@ export async function connectWithProject(
   owner: TestClient,
   token: string,
   project: { localId: string; name: string },
+  /** What the device's hello announces (`FakeDevice.connect`'s options; e.g. ADR-0045's `promptFiles`). */
+  opts: Parameters<typeof FakeDevice.connect>[3] = {},
 ): Promise<{ device: FakeDevice; projectId: string }> {
-  const device = await FakeDevice.connect(stack.baseUrl, token);
+  const device = await FakeDevice.connect(stack.baseUrl, token, undefined, opts);
   device.send({
     type: "projects.sync",
     projects: [{ localId: project.localId, name: project.name, gitRemote: null, defaultBranch: "main" }],

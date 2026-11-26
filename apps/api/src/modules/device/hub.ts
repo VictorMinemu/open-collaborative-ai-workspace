@@ -499,6 +499,8 @@ export class DeviceHub {
           // 07.18 (PD-04): written only from the device's own hello; a daemon without pool support stores null and
           // never gets a pool account.
           accountPoolVersion: hello.accountPool ?? null,
+          // ADR-0045: likewise only from the device's own hello; null never gets a prompt file.
+          promptFilesVersion: hello.promptFiles ?? null,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {

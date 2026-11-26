@@ -1,33 +1,55 @@
-import { INLINE_IMAGE_TYPES, type ModelControl } from "@ocw/contracts";
+import {
+  isInlineImageType,
+  type ModelControl,
+  PROMPT_FILES_UPDATE_DEVICE,
+  type PromptFilesControl,
+  promptFileDenySentence,
+  promptFileRefusal,
+  promptFileTooLargeSentence,
+  WORK_PROMPT_MAX_ATTACHMENTS,
+  WORK_PROMPT_MAX_IMAGES,
+} from "@ocw/contracts";
 
 /**
- * What the Work Zone composer lets a controller attach (06.1, D-05, P-06, P-08). It mirrors the API, which stays
- * authoritative (400 `images_only`, `images_not_supported`; the slash guard): only the four image types, only when the
- * session's current model does not report that it can't read images (absent = unknown = allowed, as on the server),
- * and never with a `/` command. Pure: unit-tested, re-run whenever the model or the text changes.
+ * What the Work Zone composer lets a controller attach (06.1; ADR-0045: any file). It mirrors the API, which stays
+ * authoritative. An image the session's current model reads goes inline (the first `WORK_PROMPT_MAX_IMAGES`; absent =
+ * unknown = reads them, as on the server); every other file, and an image the model can't read, is copied into the
+ * session's working tree, so it needs a device that takes files, a name off the shared deny list and a size within the
+ * per-file limit (`GET /controls`'s `files`; absent while unknown = the API decides alone). Nothing goes with a `/`
+ * command. Pure: unit-tested, re-run whenever the model, the device or the text changes.
  */
 
-export type ImageGate = { ok: true } | { ok: false; reason: string };
+export type AttachmentRoute = "inline" | "file";
+export type AttachmentGate = { ok: true; route: AttachmentRoute | null } | { ok: false; reason: string };
 
-export const IMAGES_ONLY_REASON = "Only images (PNG, JPEG, GIF, WebP) can be sent to a session";
-export const SLASH_REASON = "Images can't be sent with a / command";
+export const SLASH_REASON = "Files can't be sent with a / command";
+export const TOO_MANY_REASON = `Up to ${WORK_PROMPT_MAX_ATTACHMENTS} files per prompt`;
 
-const IMAGES = new Set<string>(INLINE_IMAGE_TYPES);
-
-export function imageGate(input: {
+export function attachmentGate(input: {
   /** `currentModelControl(session, controls)`; null or undefined while unknown. */
   model: ModelControl | null | undefined;
-  /** Omitted: may the session take images at all (the paperclip). */
-  file?: { contentType: string };
-  /** The prompt text starts with `/` (a session command, never queued with images). */
+  /** Omitted: may the session take attachments at all (the paperclip). */
+  file?: { contentType: string; name: string; size: number };
+  /** Images before this one that go inline (the first `WORK_PROMPT_MAX_IMAGES` do). */
+  inlineBefore?: number;
+  /** `GET /controls`'s `files`; null or undefined while unknown. */
+  files?: PromptFilesControl | null;
+  /** The prompt text starts with `/` (a session command, never queued with files). */
   slashCommand?: boolean;
-}): ImageGate {
-  if (input.file && !IMAGES.has(input.file.contentType.trim().toLowerCase())) {
-    return { ok: false, reason: IMAGES_ONLY_REASON };
-  }
-  if (input.model?.imageInput === false) {
-    return { ok: false, reason: `${input.model.displayName} can't read images` };
-  }
+}): AttachmentGate {
   if (input.slashCommand) return { ok: false, reason: SLASH_REASON };
-  return { ok: true };
+  const file = input.file;
+  if (!file) return { ok: true, route: null };
+  const inline =
+    isInlineImageType(file.contentType) &&
+    input.model?.imageInput !== false &&
+    (input.inlineBefore ?? 0) < WORK_PROMPT_MAX_IMAGES;
+  if (inline) return { ok: true, route: "inline" };
+  if (input.files?.supported === false) return { ok: false, reason: PROMPT_FILES_UPDATE_DEVICE };
+  const denied = promptFileRefusal(file.name);
+  if (denied) return { ok: false, reason: promptFileDenySentence(denied) };
+  if (input.files && file.size > input.files.maxBytes) {
+    return { ok: false, reason: promptFileTooLargeSentence(input.files.maxBytes) };
+  }
+  return { ok: true, route: "file" };
 }

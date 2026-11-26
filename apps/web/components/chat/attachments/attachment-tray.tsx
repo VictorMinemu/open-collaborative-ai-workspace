@@ -50,7 +50,7 @@ export interface AttachmentQueue {
   reset(): void;
 }
 
-/** Optional per-destination rules (06.1: a Work Zone session takes images only, four per prompt). */
+/** Optional per-destination rules (a Work Zone session: its device, the deny list and the per-file limit, ADR-0045). */
 export interface AttachmentQueueOptions {
   /**
    * Why the destination refuses `file` before anything is uploaded, or null. `accepted` counts the files already in
@@ -278,9 +278,10 @@ function RemoveButton({
       onClick={onRemove}
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-full outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/40",
+        // Phones: a 44 px touch target (the floating one grows and reaches out over the thumbnail).
         floating
-          ? "absolute top-1 right-1 size-5 bg-black/60 text-white hover:bg-black/80"
-          : "size-6 text-muted-foreground hover:bg-accent hover:text-foreground",
+          ? "absolute top-1 right-1 size-5 bg-black/60 text-white hover:bg-black/80 max-md:size-8 max-md:after:absolute max-md:after:-inset-1.5"
+          : "size-6 text-muted-foreground hover:bg-accent hover:text-foreground max-md:size-11",
       )}
     >
       <X className={floating ? "size-3" : "size-3.5"} strokeWidth={2.5} />
@@ -370,7 +371,7 @@ function TrayItem({
           aria-label={`Retry ${item.name}`}
           data-testid="attachment-retry"
           onClick={onRetry}
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-md:size-11"
         >
           <RotateCw className="size-3.5" />
         </button>

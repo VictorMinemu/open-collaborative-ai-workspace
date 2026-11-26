@@ -1,5 +1,6 @@
 import {
   type AccountSwitchReason,
+  ATTACHMENT_DEFAULT_MAX_BYTES,
   type Attachment,
   type DiffResultFrame,
   DiffStat,
@@ -12,6 +13,8 @@ import {
   onlyRelativePaths,
   POOL_LIMITS,
   POOL_PROVIDER_OF_RUNTIME,
+  PROMPT_FILE_FAILURE_PREFIX,
+  PROMPT_FILES_UPDATE_DEVICE,
   RuntimeInfo,
   SERVER_ONLY_SESSION_EVENTS,
   type SessionAccount,
@@ -90,14 +93,15 @@ import {
   turnMode,
 } from "./controls";
 import { type SessionFactsRow, sessionAccessSql, sessionFactsForSessions, sessionResourceOf } from "./facts";
-import {
-  currentSessionModel,
-  hydratePromptImages,
-  type PromptImagesPlan,
-  preparePromptImages,
-} from "./images";
+import { hydratePromptImages, type PromptImagesPlan, preparePromptImages } from "./images";
 import { eachBounded, OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
+import {
+  decidePromptFilesAtDispatch,
+  finishPromptFiles,
+  openPromptFileTransfers,
+  type PromptFilesDispatchRefusal,
+} from "./prompt-files";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 import {
   type DeliverySource,
@@ -156,6 +160,13 @@ const UNDELIVERED_PROMPT = new Map<string, string>([
   ["image_unavailable", "An attached image is no longer available"],
   ["frame_too_large", "The images are too large to send to the device"],
 ]);
+
+/** ADR-0045: what the session says when a queued prompt's files cannot go at dispatch (images keep 06.1's silence). */
+const PROMPT_FILES_REFUSED_SENTENCE: Partial<Record<PromptFilesDispatchRefusal, string>> = {
+  runtime_too_old: `${PROMPT_FILES_UPDATE_DEVICE} (Settings › Devices). The prompt was not run.`,
+  file_too_large: "An attached file is over the size limit now. The prompt was not run.",
+  file_unavailable: "An attached file is no longer available. The prompt was not run.",
+};
 
 /** 07.18 (PD-02): the hub-origin reason of a command whose pool token could not be opened at send time. */
 const ACCOUNT_UNAVAILABLE = "account_unavailable";
@@ -234,6 +245,11 @@ export interface WorkSessionDeps {
    * Null = no pool (services built directly in unit tests): every session runs on its device's own login.
    */
   pool?: AccountPoolPort | null;
+  /**
+   * ADR-0045: the server's attachment ceiling (`OCW_ATTACHMENT_MAX_BYTES`); a prompt file's limit is the lower of it
+   * and the organization's. Absent (services built directly in unit tests) = the chat default, 25 MiB.
+   */
+  serverFileMaxBytes?: number;
 }
 
 /**
@@ -255,6 +271,11 @@ export class WorkSessionService implements DeviceSessionHandler {
   /** 07.18: the account pool `createWorkSession` selects from (null = no pool: the device's own login). */
   get pool(): AccountPoolPort | null {
     return this.deps.pool ?? null;
+  }
+
+  /** ADR-0045: the server's ceiling for one prompt file (`OCW_ATTACHMENT_MAX_BYTES`, else the chat default). */
+  promptFileCeiling(): number {
+    return this.deps.serverFileMaxBytes ?? ATTACHMENT_DEFAULT_MAX_BYTES;
   }
 
   /** Resolves once the background work of the organization (or of every organization) is done (tests, perf). */
@@ -885,14 +906,23 @@ export class WorkSessionService implements DeviceSessionHandler {
         await this.refusePrompt(tx, s, next, revoked ? "access_revoked" : "mode_not_allowed");
         continue;
       }
-      // D-05, P-08: the model can change while an image prompt waits. A model that says it cannot read images never
-      // gets the prompt without them: refused, audited, and the arbiter moves on.
-      const images = await attachmentRowsForWorkPrompt(tx, next.id);
-      const current = currentSessionModel(author?.ctx.catalog ?? null, s);
-      if (current?.imageInput === false && images.length > 0) {
-        await this.refusePrompt(tx, s, next, "images_not_supported");
+      // D-05, P-08, ADR-0045: the model can change while a prompt with attachments waits. Images it reads go inline;
+      // every other file (an image it cannot read included) goes into the working tree. A device that cannot take
+      // them, or a file over a limit lowered since, refuses the prompt (audited) and the arbiter moves on.
+      const prepared = await decidePromptFilesAtDispatch(
+        tx,
+        s,
+        next.id,
+        await attachmentRowsForWorkPrompt(tx, next.id),
+        this.promptFileCeiling(),
+      );
+      if (!prepared.ok) {
+        await this.refusePrompt(tx, s, next, prepared.reason);
+        const lastError = PROMPT_FILES_REFUSED_SENTENCE[prepared.reason];
+        if (lastError) await this.setStatus(tx, s, s.status, { lastError });
         continue;
       }
+      const images = prepared.inline;
       // 07.18 (PD-06, PD-16): the session's account, replaced first when it can no longer serve; none at all (fallback
       // off, or the device's own login is not signed in) refuses the turn with the no_account sentence.
       account ??= await this.ensureAccount(tx, s);
@@ -906,6 +936,8 @@ export class WorkSessionService implements DeviceSessionHandler {
         .set({ status: "dispatched", dispatchedAt: sql`now()`, permissionMode: mode })
         .where(eq(workPrompts.id, next.id))
         .returning();
+      // ADR-0045: the transfers exist only for a prompt that is actually sent.
+      const files = await openPromptFileTransfers(tx, s, next.id, prepared);
       await this.deps.hub.enqueue(tx, {
         deviceId: s.deviceId,
         workSessionId: s.id,
@@ -916,6 +948,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           text: next.body,
           permissionMode: mode,
           ...(images.length > 0 ? { imageAttachmentIds: images.map((a) => a.id) } : {}),
+          // ADR-0045: transfer ids, repo-relative paths, sizes and digests; the device fetches the bytes itself.
+          ...(files.length > 0 ? { files } : {}),
           // 07.18 (PD-02, PD-03): the stored form; the token is added at send time only.
           ...(account.account !== undefined ? { account: account.account } : {}),
         },
@@ -938,6 +972,7 @@ export class WorkSessionService implements DeviceSessionHandler {
           capped: mode !== s.permissionMode,
           ...(mode === "fullAccess" ? { fullAccess: true } : {}),
           ...(images.length > 0 ? { imageCount: images.length } : {}),
+          ...(files.length > 0 ? { fileCount: files.length } : {}),
         },
       });
       await this.emitPrompt(tx, dispatched!);
@@ -1096,7 +1131,12 @@ export class WorkSessionService implements DeviceSessionHandler {
     tx: Tx,
     s: SessionRow,
     p: PromptRow,
-    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed" | "no_account",
+    reason:
+      | "access_revoked"
+      | "mode_not_allowed"
+      | PromptFilesDispatchRefusal
+      | "bot_not_allowed"
+      | "no_account",
   ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
@@ -1731,6 +1771,18 @@ export class WorkSessionService implements DeviceSessionHandler {
         await this.emitSession(tx, s.id);
         return;
       }
+      if (cmd.kind === "prompt") {
+        // ADR-0045: the device answers a prompt only after its files landed (or failed to): close their transfers.
+        const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
+        if (UUID_RE.test(promptId)) {
+          const [author] = await tx
+            .select({ userId: workPrompts.authorUserId })
+            .from(workPrompts)
+            .where(eq(workPrompts.id, promptId))
+            .limit(1);
+          await finishPromptFiles(tx, this.deps.audit, s, cmd, ok, author?.userId ?? null);
+        }
+      }
       if (cmd.kind === "prompt" && !ok) {
         const promptId = String((cmd.payload as { promptId?: unknown }).promptId ?? "");
         if (!UUID_RE.test(promptId)) return;
@@ -1753,7 +1805,9 @@ export class WorkSessionService implements DeviceSessionHandler {
           await this.promptUndelivered(tx, s, promptId, error as UndeliveredReason, undelivered);
           return;
         }
-        if (/not active/i.test(error ?? "") && s.status !== "archived") {
+        // ADR-0045: a prompt file's failure names the file ("Could not copy …"); its name never reads as a lost runtime.
+        const fileFailure = (error ?? "").startsWith(PROMPT_FILE_FAILURE_PREFIX);
+        if (/not active/i.test(error ?? "") && !fileFailure && s.status !== "archived") {
           // Daemon restarted and lost the runtime: put the prompt back at the head and re-attach.
           const [p] = await tx
             .update(workPrompts)

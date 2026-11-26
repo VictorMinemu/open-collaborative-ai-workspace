@@ -1,10 +1,8 @@
 import type { RuntimeId, WorkPrompt } from "@ocw/contracts";
-import { devices, type Tx, workPrompts } from "@ocw/db";
+import { type Tx, workPrompts } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { conflict, HttpError } from "../../lib/errors";
-import { catalogFor } from "./controls";
-import { currentSessionModel, imagesNotSupported } from "./images";
 import type { SessionRow, WorkSessionService } from "./service";
 import {
   isSessionCommand,
@@ -46,8 +44,9 @@ export function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
 
 /**
  * Queue a prompt from `actor` and dispatch it (or restart a finished session). Call with the session LOCKED and the
- * right to prompt it decided. Archived → 409 `session_archived`; a slash command → 400 `slash_command`; images for a
- * model that cannot read them → the images error; then the actor joins the conversation and the prompt is queued.
+ * right to prompt it decided. Archived → 409 `session_archived`; a slash command → 400 `slash_command`; then the actor
+ * joins the conversation and the prompt is queued with its attachments decided (ADR-0045: inline images, files into
+ * the working tree, or the file's refusal).
  */
 export async function submitWorkPrompt(
   tx: Tx,
@@ -61,15 +60,8 @@ export async function submitWorkPrompt(
   const attachmentIds = opts.attachmentIds ?? [];
   if (s.status === "archived") throw conflict("This session is archived", "session_archived");
   assertNotSlashCommand(body, s.runtime);
-  if (attachmentIds.length > 0) {
-    // D-05, P-08: a model that says it cannot read images is refused before anything is queued or linked.
-    const [d] = await tx
-      .select({ catalog: devices.runtimeCatalog })
-      .from(devices)
-      .where(eq(devices.id, s.deviceId));
-    const current = currentSessionModel(catalogFor(d?.catalog, s.runtime), s);
-    if (current?.imageInput === false) throw imagesNotSupported(current);
-  }
+  // ADR-0045 (supersedes 06.1's `images_not_supported` at submit): an image the model cannot read is copied into the
+  // working tree like any other file; `queueWorkPrompt` decides every attachment (`decidePromptAttachments`).
   await joinConversation(tx, actor, s);
   const p = await queueWorkPrompt(tx, startDeps, actor, s, body, attachmentIds, {
     ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),

@@ -17,7 +17,10 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
 - **5 AI chats:** private streaming AI chats, ChatGPT plan per member, model gateway, usage (ADR-0017, ADR-0018).
 - **6 Multiplayer AI chats and agents:** shared AI chats with structural identity, personas, Agent Cards
   (ADR-0019, ADR-0020).
-- **06.1 Work Zone image attachments.**
+- **06.1 Work Zone image attachments.** Since ADR-0045 a prompt takes any file: images the model reads go inline,
+  every other file (and an image the model can't read) is copied into the session's working tree at
+  `.ocw/uploads/` before the turn, through ADR-0041's transfer, and the runtime reads a note listing the paths.
+  Devices whose runtime predates it are asked to update ("Update this device to attach files").
 - **7 Self-hosted release:** `pnpm ocw setup` + `docker compose up`, OpenTelemetry, secrets as inputs, backups,
   release gate (ADR-0021).
 - **07.1 Board channels and record templates:** a channel can be a board whose cards are threads (moves by pointer,

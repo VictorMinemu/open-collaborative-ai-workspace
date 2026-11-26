@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { IsoDateTime } from "./common";
 import { FastModeState, PermissionMode, RuntimeId } from "./session-events";
+import { PromptFilesControl } from "./work-prompt-files";
 
 /**
  * Work Zone session settings (Phase 03.2, D-07 … D-14). Defined ONCE here: the API intersects every request
@@ -224,5 +225,12 @@ export const RuntimeControls = z.object({
 export type RuntimeControls = z.infer<typeof RuntimeControls>;
 
 /** `GET /api/v1/work-sessions/:id/controls`. */
-export const SessionControls = RuntimeControls.extend({ settings: WorkSessionSettings });
+export const SessionControls = RuntimeControls.extend({
+  settings: WorkSessionSettings,
+  /**
+   * ADR-0045: whether the session's device takes files on a prompt, and the per-file limit (min of the organization's
+   * and `OCW_ATTACHMENT_MAX_BYTES`). Optional so an older API's answer still parses (absent = the API decides alone).
+   */
+  files: PromptFilesControl.optional(),
+});
 export type SessionControls = z.infer<typeof SessionControls>;
