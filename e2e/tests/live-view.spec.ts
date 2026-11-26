@@ -259,8 +259,10 @@ test("the large view: Sam takes control, types, gets the idle warning, keeps con
   await expect(frame).toHaveAttribute("role", "application");
   await expect(frame).toHaveAttribute("aria-roledescription", "remote browser");
   await expect(frame).toBeFocused();
+  // The shown hint: both are laid out in one cell (the bar keeps its height), so read the rendered text only.
   await expect(expanded.getByTestId("takeover-bar")).toContainText(
     "Typing goes to the page · Shift+Esc gives your keyboard back",
+    { useInnerText: true },
   );
   await expect(expanded.getByTestId("live-minimize")).toHaveCount(0);
   await expect.poll(async () => (await fakePage(contextId))?.takeover).toBe(true);

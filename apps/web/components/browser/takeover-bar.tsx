@@ -3,6 +3,7 @@
 import { Keyboard, MousePointerClick } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { type LiveView, leaseWarning } from "./live-store";
 import { useOptionalLiveView } from "./live-view-provider";
 
@@ -65,15 +66,33 @@ export function TakeoverBar({
           {phone ? null : (
             <p className="flex min-w-0 items-center gap-1.5 text-xs">
               <Keyboard aria-hidden className="size-3.5 shrink-0" />
-              <span id={hintId}>
-                {frameFocused
-                  ? "Typing goes to the page · Shift+Esc gives your keyboard back"
-                  : "Click the page to type"}
+              {/* Both hints share one cell, so the bar's height never depends on focus: a click on a hand back button
+                  blurs the page, and a hint that changed lines then moved the button away before mouseup. */}
+              <span className="grid min-w-0">
+                <Hint id={hintId} shown={frameFocused}>
+                  Typing goes to the page · Shift+Esc gives your keyboard back
+                </Hint>
+                <Hint id={hintId} shown={!frameFocused}>
+                  Click the page to type
+                </Hint>
               </span>
             </p>
           )}
         </>
       )}
     </div>
+  );
+}
+
+/** One keyboard hint in the shared cell: the shown one describes the page (`id`); the other keeps its space unseen. */
+function Hint({ id, shown, children }: { id: string; shown: boolean; children: string }) {
+  return (
+    <span
+      id={shown ? id : undefined}
+      aria-hidden={shown ? undefined : true}
+      className={cn("col-start-1 row-start-1", !shown && "invisible")}
+    >
+      {children}
+    </span>
   );
 }
