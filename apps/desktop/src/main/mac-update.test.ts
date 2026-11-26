@@ -33,8 +33,15 @@ vi.mock("electron-updater", () => {
   class BaseUpdater {
     readonly httpExecutor = { download: vi.fn(async (_url: URL, dest: string, _opts: unknown) => dest) };
     readonly executeDownload = vi.fn(
-      async (t: { task: (dest: string, opts: unknown, pkg: null, rm: () => Promise<void>) => Promise<unknown> }) => {
-        await t.task("/cache/pending/OCW-v0.5.1-macos-arm64.zip", { sha512: "c2hhNTEy" }, null, async () => {});
+      async (t: {
+        task: (dest: string, opts: unknown, pkg: null, rm: () => Promise<void>) => Promise<unknown>;
+      }) => {
+        await t.task(
+          "/cache/pending/OCW-v0.5.1-macos-arm64.zip",
+          { sha512: "c2hhNTEy" },
+          null,
+          async () => {},
+        );
         return { updateFile: "/cache/pending/OCW-v0.5.1-macos-arm64.zip" };
       },
     );
@@ -459,7 +466,11 @@ describe("createAdhocMacUpdater (D-05)", () => {
 
   it("returns the target's refusal reason", () => {
     expect(
-      createAdhocMacUpdater({ ...base, exePath: "/Volumes/OCW/OCW.app/Contents/MacOS/OCW", isWritable: writable }),
+      createAdhocMacUpdater({
+        ...base,
+        exePath: "/Volumes/OCW/OCW.app/Contents/MacOS/OCW",
+        isWritable: writable,
+      }),
     ).toEqual({ ok: false, reason: "dmg" });
     expect(
       createAdhocMacUpdater({
