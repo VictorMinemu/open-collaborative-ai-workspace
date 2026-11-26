@@ -17,9 +17,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RuntimeId } from "@ocw/contracts";
+import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES, type RuntimeId } from "@ocw/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ControlRequestSchema } from "./control-socket.js";
+import { CFT_PINS, CFT_VERSION, cftPlatformOf, headlessShellRelativePath } from "./browser/pins.js";
+import {
+  type ControlRequest,
+  ControlRequestSchema,
+  ControlSocketServer,
+  controlSocketPath,
+} from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { DoctorReport } from "./doctor.js";
 import { silentLogger } from "./logger.js";
@@ -1212,4 +1218,184 @@ describe("ocw-runtime account (07.18-08, D-02, PD-11)", () => {
     expect(ControlRequestSchema.safeParse({ cmd: "reloadAccounts", slotId: "x" }).success).toBe(false);
     expect(ControlRequestSchema.safeParse({ cmd: "reloadAccounts", label: "A" }).success).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.13-06 `ocw-runtime browser on|off|status|install` (D-05, D-10, PD-19, PD-27): the device owner's local opt-in,
+// written to runtime.json and announced to a running daemon with the value-less reloadConfig (a fake control socket
+// here); `install --from-zip` goes through the real installer, which verifies the pinned sha256 (no network).
+
+describe("ocw-runtime browser (07.13-06, D-10, PD-27)", () => {
+  function browserHome(): { home: string; env: Record<string, string>; browsers: string } {
+    const userHome = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(userHome);
+    const home = join(userHome, ".ocw");
+    mkdirSync(home, { mode: 0o700 });
+    const browsers = join(userHome, "browsers");
+    return { home, browsers, env: { HOME: userHome, OCW_BROWSERS_DIR: browsers } };
+  }
+
+  /** A daemon stand-in on the control socket that answers every request with `{}` and records it. */
+  async function fakeDaemon(
+    home: string,
+  ): Promise<{ requests: ControlRequest[]; close: () => Promise<void> }> {
+    const requests: ControlRequest[] = [];
+    const server = new ControlSocketServer(controlSocketPath(home), async (req) => {
+      requests.push(req);
+      return {};
+    });
+    await server.listen();
+    return { requests, close: () => server.close() };
+  }
+
+  it("daemon stopped: off by default, on and off write runtime.json (other keys kept), OCW_ALLOW_BROWSER wins", async () => {
+    const { home, env } = browserHome();
+    writeFileSync(join(home, "runtime.json"), JSON.stringify({ fullAccess: { optIn: true } }));
+    const status = await cliAsync(home, ["browser", "status"], env);
+    expect(status.code, status.stderr).toBe(0);
+    expect(status.stdout).toBe("Browser: off (default) · not installed\n");
+
+    const on = await cliAsync(home, ["browser", "on"], env);
+    expect(on.code, on.stderr).toBe(0);
+    expect(on.stdout).toBe("Browser: on (config) · not installed\n");
+    const file = join(home, "runtime.json");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      fullAccess: { optIn: true },
+      browser: { optIn: true },
+    });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    const forced = await cliAsync(home, ["browser", "status"], { ...env, OCW_ALLOW_BROWSER: "0" });
+    expect(forced.stdout).toBe("Browser: off (env) · not installed\n");
+    const overridden = await cliAsync(home, ["browser", "on"], { ...env, OCW_ALLOW_BROWSER: "0" });
+    expect(overridden.stderr).toContain("OCW_ALLOW_BROWSER");
+
+    const off = await cliAsync(home, ["browser", "off"], env);
+    expect(off.code).toBe(0);
+    expect(off.stdout).toBe("Browser: off (default) · not installed\n");
+    expect(JSON.parse(readFileSync(file, "utf8")).browser).toEqual({ optIn: false });
+  }, 60_000);
+
+  it("daemon running: on and off send the strict, value-less reloadConfig; status only reads", async () => {
+    const { home, env } = browserHome();
+    const daemon = await fakeDaemon(home);
+    try {
+      expect((await cliAsync(home, ["browser", "on"], env)).code).toBe(0);
+      expect((await cliAsync(home, ["browser", "off"], env)).code).toBe(0);
+      expect((await cliAsync(home, ["browser", "status"], env)).code).toBe(0);
+      expect(daemon.requests).toEqual([{ cmd: "reloadConfig" }, { cmd: "reloadConfig" }]);
+      expect(ControlRequestSchema.safeParse({ cmd: "reloadConfig", browser: { optIn: true } }).success).toBe(
+        false,
+      );
+    } finally {
+      await daemon.close();
+    }
+  }, 60_000);
+
+  it("status names an installed pinned build; install --from-zip verifies the pin and prints a home-relative path", async () => {
+    const { home, env, browsers } = browserHome();
+    const platform = cftPlatformOf(process.platform, process.arch);
+    if (!platform) return; // no pinned build for this host
+    const tampered = join(home, "shell.zip");
+    writeFileSync(tampered, "not the pinned archive");
+    const refused = await cliAsync(home, ["browser", "install", "--from-zip", tampered], env);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("does not match the pinned Chrome for Testing");
+    expect(existsSync(join(browsers, CFT_VERSION))).toBe(false);
+    expect(refused.stderr).not.toContain(home);
+
+    // A pre-seeded verified install (what CI's cache holds): the marker of the pinned zip and the executable.
+    const dir = join(browsers, CFT_VERSION);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, ".ocw-browser.json"),
+      JSON.stringify({ version: CFT_VERSION, platform, zipSha256: CFT_PINS[platform].sha256 }),
+    );
+    writeFileSync(join(dir, headlessShellRelativePath(platform)), "#!/bin/sh\n", { mode: 0o755 });
+    const status = await cliAsync(home, ["browser", "status"], env);
+    expect(status.stdout).toBe(`Browser: off (default) · installed ${CFT_VERSION}\n`);
+    const again = await cliAsync(home, ["browser", "install", "--from-zip", tampered], env);
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stdout).toBe(
+      `Chrome for Testing ${CFT_VERSION} is installed at ~/browsers/${CFT_VERSION}/${headlessShellRelativePath(platform)}\n`,
+    );
+  }, 60_000);
+
+  it("an unknown sub-command or a bare --from-zip prints the usage line and exits 2", async () => {
+    const { home, env } = browserHome();
+    for (const args of [["browser"], ["browser", "maybe"], ["browser", "install", "--from-zip"]]) {
+      const res = await cliAsync(home, args, env);
+      expect(res.code, args.join(" ")).toBe(2);
+      expect(res.stderr).toContain("usage: ocw-runtime browser on|off|status|install [--from-zip <zip>]");
+    }
+    expect(existsSync(join(home, "runtime.json"))).toBe(false);
+  }, 60_000);
+});
+
+describe("ocw-runtime browser-agent (07.13-09, D-02)", () => {
+  it("is hidden from the usage text and answers framed JSON lines over its pipes, without launching anything", async () => {
+    const usage = readFileSync(join(import.meta.dirname, "cli.ts"), "utf8").split("\nimport ")[0] ?? "";
+    expect(usage).not.toContain("browser-agent");
+
+    const child = spawn(process.execPath, [BIN, "browser-agent"], {
+      // The browser child's own allowlist: no executable is needed to refuse these.
+      env: { PATH: process.env.PATH ?? "", HOME: tmpdir(), OCW_BROWSER_SANDBOX: "on" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    let buf = Buffer.alloc(0);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        const header = decodeFrameHeader(buf);
+        if (!header || buf.length < FRAME_HEADER_BYTES + header.length) break;
+        expect(header.type).toBe(FRAME_TYPES.control);
+        messages.push(
+          JSON.parse(buf.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + header.length).toString()),
+        );
+        buf = buf.subarray(FRAME_HEADER_BYTES + header.length);
+      }
+    });
+    const exited = new Promise<number | null>((r) => child.once("exit", (code) => r(code)));
+    child.stdin.write(`${JSON.stringify({ id: 1, op: "evaluate", expression: "document.cookie" })}\n`);
+    child.stdin.write("not json\n");
+    child.stdin.write(`${JSON.stringify({ id: 2, op: "snapshot" })}\n`);
+    for (let i = 0; i < 150 && messages.length < 4; i++) await new Promise((r) => setTimeout(r, 100));
+    child.stdin.end();
+    expect(await exited).toBe(0);
+    expect(messages[0]).toEqual({ event: "ready" });
+    expect(messages).toContainEqual({
+      id: 1,
+      ok: false,
+      error: { code: "invalid_request", message: "The browser has no such operation." },
+    });
+    expect(messages).toContainEqual(expect.objectContaining({ id: null, ok: false }));
+    expect(messages).toContainEqual(
+      expect.objectContaining({ id: 2, ok: false, error: expect.objectContaining({ code: "no_context" }) }),
+    );
+  }, 60_000);
+
+  it("--check loads the engine and playwright-core and prints its version without launching a browser (07.13-20, PD-22)", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocw-bac-"));
+    dirs.push(home);
+    // No executable anywhere: a launch would fail, the check never launches.
+    const out = cli(home, ["browser-agent", "--check"], { OCW_BROWSERS_DIR: join(home, "none") });
+    expect(out).toBe("browser-agent ok 1.64.1\n");
+    expect(existsSync(join(home, "none"))).toBe(false);
+  }, 60_000);
+
+  it("refuses any other argument with a usage error (exit 2)", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocw-bau-"));
+    dirs.push(home);
+    let code = 0;
+    let stderr = "";
+    try {
+      cli(home, ["browser-agent", "--nope"]);
+    } catch (err) {
+      code = (err as { status: number }).status;
+      stderr = String((err as { stderr: string }).stderr);
+    }
+    expect(code).toBe(2);
+    expect(stderr).toContain("usage: ocw-runtime browser-agent [--check]");
+  }, 60_000);
 });

@@ -9,6 +9,8 @@ import {
   type RuntimeInfo,
 } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
+import { appArmorFixLine } from "./browser/install.js";
+import { CFT_VERSION } from "./browser/pins.js";
 import { ProjectRegistry, RuntimeConfigSchema } from "./config.js";
 import {
   createDoctorDeps,
@@ -182,6 +184,13 @@ function deps(
     homeDir: () => HOME,
     now: () => new Date("2026-10-29T10:00:00.000Z"),
     selfUpdateMarker: async () => null,
+    browser: async () => ({ optIn: false, source: "default", sandbox: "on" }),
+    browserPlatform: () => "linux64",
+    installedBrowser: async () => null,
+    missingLibraries: async () => [],
+    osRelease: async () => ({ id: "ubuntu", versionId: "24.04", idLike: ["debian"] }),
+    appArmorFix: async () => null,
+    inContainer: () => false,
   };
   return { ...base, ...over, fetch: over.fetch ?? fetch, requests };
 }
@@ -325,11 +334,11 @@ function brokenAround(version: string): RuntimeCompatibilityManifest {
 }
 
 describe("ocw-runtime doctor: every other check with its fix line (07.12, D-05, D-12, PD-12)", () => {
-  it("reports all thirteen checks in the PD-12 order, all ok on a ready server", async () => {
+  it("reports all fourteen checks in the PD-12 order (07.13 adds browser), all ok on a ready server", async () => {
     const report = await runDoctor(deps());
     expect(report.checks.map((c) => c.id)).toEqual([...DOCTOR_CHECK_IDS]);
     expect(report.checks.filter((c) => c.status !== "ok")).toEqual([]);
-    expect(report.counts).toEqual({ ok: 13, warn: 0, fail: 0 });
+    expect(report.counts).toEqual({ ok: 14, warn: 0, fail: 0 });
   });
 
   it("daemon: connected ok, not connected warn, not running fail with a service and warn without", async () => {
@@ -807,6 +816,7 @@ describe("ocw-runtime doctor names an update that did not come back (07.17.1, D-
       "claude-code",
       "codex",
       "runtimes",
+      "browser",
       "git",
       "projects",
       "updates",
@@ -921,5 +931,115 @@ describe("doctor output is safe to paste (07.12, D-05, principle 7, T-07.12-05-0
     expect(once).toContain("/etc/systemd/system/ocw-runtime.service");
     expect(once).not.toContain(JWT);
     expect(safeLine(once, HOME)).toBe(once);
+  });
+});
+
+// ---------------------------------------------------------------- 07.13-06 (D-06, D-10, PD-18, Pitfall 4)
+
+describe("doctor browser: what the Work Zone browser needs, with one fix line (07.13-06)", () => {
+  const EXE = `${HOME}/.ocw/browsers/${CFT_VERSION}/chrome-headless-shell`;
+  const installed: DoctorDeps["installedBrowser"] = async () => ({
+    version: CFT_VERSION,
+    platform: "linux64",
+    dir: `${HOME}/.ocw/browsers/${CFT_VERSION}`,
+    executable: EXE,
+  });
+  const on: DoctorDeps["browser"] = async () => ({ optIn: true, source: "config", sandbox: "on" });
+  const container: DoctorDeps["browser"] = async () => ({
+    optIn: true,
+    source: "config",
+    sandbox: "container",
+  });
+  const browserCheck = async (over: Partial<DoctorDeps>) => {
+    const report = await runDoctor(deps(over));
+    for (const out of [formatDoctorText(report), formatDoctorJson(report)]) {
+      expect(out).not.toContain(`${HOME}/`);
+    }
+    return check(report, "browser");
+  };
+
+  it("off: ok, with the line that turns it on", async () => {
+    expect(await browserCheck({})).toEqual({
+      id: "browser",
+      status: "ok",
+      summary: "Browser: off on this device",
+      fix: "To let Work Zone sessions use a browser here: `ocw-runtime browser on`",
+    });
+  });
+
+  it("on and not installed: warn, it installs on first use (or now)", async () => {
+    const c = await browserCheck({ browser: on });
+    expect(c.status).toBe("warn");
+    expect(c.summary).toContain("installs on first use");
+    expect(c.fix).toBe("To fetch it now: `ocw-runtime browser install`");
+  });
+
+  it("installed with missing Linux libraries: fail with the apt line for this distribution", async () => {
+    const c = await browserCheck({
+      browser: on,
+      installedBrowser: installed,
+      missingLibraries: async () => ["libasound.so.2", "libnss3.so"],
+    });
+    expect(c.status).toBe("fail");
+    expect(c.summary).toContain("libasound.so.2, libnss3.so");
+    expect(c.fix).toBe("sudo apt-get install -y libasound2t64 libnss3");
+    const debian = await browserCheck({
+      browser: on,
+      installedBrowser: installed,
+      missingLibraries: async () => ["libasound.so.2", "libnss3.so"],
+      osRelease: async () => ({ id: "debian", versionId: "12", idLike: [] }),
+    });
+    expect(debian.fix).toBe("sudo apt-get install -y libasound2 libnss3");
+    const fedora = await browserCheck({
+      browser: on,
+      installedBrowser: installed,
+      missingLibraries: async () => ["libnss3.so"],
+      osRelease: async () => ({ id: "fedora", versionId: "41", idLike: [] }),
+    });
+    expect(fedora.status).toBe("fail");
+    expect(fedora.fix).toBe("Install the packages that provide libnss3.so with your package manager");
+  });
+
+  it("Ubuntu's AppArmor user-namespace restriction: fail with the profile line, home-relative", async () => {
+    const reader = async (path: string) =>
+      path === "/proc/sys/kernel/apparmor_restrict_unprivileged_userns" ? "1\n" : null;
+    const c = await browserCheck({
+      browser: on,
+      installedBrowser: installed,
+      appArmorFix: (exe) => appArmorFixLine(exe, reader, HOME),
+    });
+    expect(c.status).toBe("fail");
+    expect(c.summary).toContain("AppArmor");
+    expect(c.fix).toContain(`"@{HOME}/.ocw/browsers/${CFT_VERSION}/chrome-headless-shell"`);
+    expect(c.fix).toContain("sudo tee /etc/apparmor.d/ocw-chrome-headless-shell");
+    expect(c.fix).toContain("sudo apparmor_parser -r /etc/apparmor.d/ocw-chrome-headless-shell");
+  });
+
+  it("sandbox container: fail outside a container, warn inside one (never an automatic fallback)", async () => {
+    const outside = await browserCheck({ browser: container, installedBrowser: installed });
+    expect(outside.status).toBe("fail");
+    expect(outside.summary).toContain("not running in a container");
+    expect(outside.fix).toContain("OCW_BROWSER_SANDBOX");
+    const inside = await browserCheck({
+      browser: container,
+      installedBrowser: installed,
+      inContainer: () => true,
+      // The AppArmor restriction does not apply: Chromium's sandbox is off here.
+      appArmorFix: async () => "printf … | sudo tee /etc/apparmor.d/ocw-chrome-headless-shell",
+    });
+    expect(inside.status).toBe("warn");
+    expect(inside.summary).toContain("Chromium sandbox off inside this container");
+  });
+
+  it("everything fine: ok with the version; no pinned build for this machine: fail", async () => {
+    expect(await browserCheck({ browser: on, installedBrowser: installed })).toEqual({
+      id: "browser",
+      status: "ok",
+      summary: `Browser: on · Chrome for Testing ${CFT_VERSION}`,
+      fix: null,
+    });
+    const unsupported = await browserCheck({ browser: on, browserPlatform: () => null });
+    expect(unsupported.status).toBe("fail");
+    expect(unsupported.summary).toContain("no Chrome for Testing build");
   });
 });

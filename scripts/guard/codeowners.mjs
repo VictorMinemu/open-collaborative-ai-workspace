@@ -33,6 +33,8 @@ export const REQUIRED_AREAS = [
   { area: "sandbox egress proxy", file: "apps/sandboxd/src/egress/proxy.ts" },
   { area: "egress policy rules", file: "packages/egress-policy/src/index.ts" },
   { area: "browser agent (redaction, site lock)", file: "infra/sandbox/browser/agent.mjs" },
+  // Phase 07.13 (D-04, PD-02): the one redaction the bots' browser and the Work Zone browser share.
+  { area: "shared browser redaction (bots and Work Zone)", file: "packages/browser-engine/src/redact.mjs" },
   { area: "browser live view and takeover", file: "apps/api/src/modules/browser/live-view.ts" },
   { area: "sealed browser sessions", file: "apps/api/src/modules/browser/sessions.ts" },
   { area: "confined sandbox and browser calls", file: "apps/api/src/modules/agent-channel/sandbox.ts" },

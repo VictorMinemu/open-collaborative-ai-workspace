@@ -20,6 +20,10 @@ variables:
     UV_CACHE_DIR: /home/ocw-ci/cache/uv
     # Testcontainers: the published ports live in dind's network namespace, which host-network steps share.
     TESTCONTAINERS_HOST_OVERRIDE: 127.0.0.1
+    # 07.13-09: the pinned headless shell of the local-runtime browser tests (verify, package-suites), installed and
+    # sha256-verified once on the shared cache volume. The ocw-ci image has Chromium's system libraries and the steps
+    # run in a container, so the tests use the production `container` sandbox rule (PD-18).
+    OCW_TEST_BROWSERS_DIR: /home/ocw-ci/cache/ocw-test-browsers
 
 steps:
   - name: ci-image

@@ -103,66 +103,75 @@ describe("ClaudeEventMapper — recorded fixture (real Claude Code session, plan
   });
 });
 
-describe("ClaudeEventMapper — recorded fixture at 2.1.289 (setModel + applyFlagSettings + setPermissionMode)", () => {
-  const FILE = "claude-code-2.1.289.settings.sdk.jsonl";
-  const messages = loadFixture(FILE);
-  const init = messages.find((m) => m.type === "system" && m.subtype === "init") as unknown as Record<
-    string,
-    unknown
-  >;
+// 2.1.289 was recorded with the local login; 2.1.332 (the pin) offline against the fake model with a throwaway
+// CLAUDE_CONFIG_DIR (`record-fixture.ts --offline --scenario settings`, 07.13-25), so its key source is the fake key.
+describe.each([
+  { version: "2.1.289", apiKeySource: "none" },
+  { version: "2.1.332", apiKeySource: "ANTHROPIC_API_KEY" },
+])(
+  "ClaudeEventMapper — recorded fixture at $version (setModel + applyFlagSettings + setPermissionMode)",
+  ({ version, apiKeySource }) => {
+    const FILE = `claude-code-${version}.settings.sdk.jsonl`;
+    const messages = loadFixture(FILE);
+    const init = messages.find((m) => m.type === "system" && m.subtype === "init") as unknown as Record<
+      string,
+      unknown
+    >;
 
-  it("is a pinned, single-turn, scrubbed recording", () => {
-    expect(init.claude_code_version).toBe("2.1.289");
-    expect(messages.filter((m) => m.type === "result")).toHaveLength(1);
-    const text = readFileSync(join(FIXTURE_DIR, FILE), "utf8");
-    expect(text).not.toMatch(/\/Users\/(?!fixture-user\/)[A-Za-z0-9._]+\//);
-    expect(text).not.toMatch(/@(gmail|autofylabs)\./);
-  });
+    it("is a pinned, single-turn, scrubbed recording", () => {
+      expect(init.claude_code_version).toBe(version);
+      expect(init.apiKeySource).toBe(apiKeySource);
+      expect(messages.filter((m) => m.type === "result")).toHaveLength(1);
+      const text = readFileSync(join(FIXTURE_DIR, FILE), "utf8");
+      expect(text).not.toMatch(/\/Users\/(?!fixture-user\/)[A-Za-z0-9._]+\//);
+      expect(text).not.toMatch(/@(gmail|autofylabs)\./);
+    });
 
-  it("the init after the changes reports the requested model and the auto mode", () => {
-    const events = run(messages);
-    const started = events.findIndex((e) => e.type === "session.started");
-    expect(events[started]).toMatchObject({
-      type: "session.started",
-      runtimeVersion: "2.1.289",
-      model: "claude-sonnet-5-5",
-      permissionMode: "auto",
-    });
-    expect(events[started + 1]).toEqual({
-      type: "session.settings",
-      model: "claude-sonnet-5-5",
-      permissionMode: "auto",
-      fastModeState: "off",
-      fastModeReason: "sdk_opt_in_required",
-    });
-    // setPermissionMode answers with a status frame before the turn's init: forwarded as the mode readback.
-    expect(events[0]).toEqual({ type: "session.settings", permissionMode: "auto" });
-    expect(events.at(-1)).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
-    expect(events.filter((e) => e.type === "session.error")).toEqual([]);
-  });
-
-  it("a later init (runtime-side change) becomes one session.settings, no second session.started", () => {
-    const mapper = new ClaudeEventMapper();
-    mapper.currentPromptId = "prompt-1";
-    for (const m of messages) mapper.map(m);
-    const later = sdk({
-      ...init,
-      model: "claude-opus-5-5",
-      permissionMode: "acceptEdits",
-      fast_mode_state: "off",
-      fast_mode_disabled_reason: "extra_usage_disabled",
-    });
-    expect(mapper.map(later)).toEqual([
-      {
+    it("the init after the changes reports the requested model and the auto mode", () => {
+      const events = run(messages);
+      const started = events.findIndex((e) => e.type === "session.started");
+      expect(events[started]).toMatchObject({
+        type: "session.started",
+        runtimeVersion: version,
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+      });
+      expect(events[started + 1]).toEqual({
         type: "session.settings",
+        model: "claude-sonnet-5-5",
+        permissionMode: "auto",
+        fastModeState: "off",
+        fastModeReason: "sdk_opt_in_required",
+      });
+      // setPermissionMode answers with a status frame before the turn's init: forwarded as the mode readback.
+      expect(events[0]).toEqual({ type: "session.settings", permissionMode: "auto" });
+      expect(events.at(-1)).toMatchObject({ type: "prompt.completed", promptId: "prompt-1" });
+      expect(events.filter((e) => e.type === "session.error")).toEqual([]);
+    });
+
+    it("a later init (runtime-side change) becomes one session.settings, no second session.started", () => {
+      const mapper = new ClaudeEventMapper();
+      mapper.currentPromptId = "prompt-1";
+      for (const m of messages) mapper.map(m);
+      const later = sdk({
+        ...init,
         model: "claude-opus-5-5",
         permissionMode: "acceptEdits",
-        fastModeState: "off",
-        fastModeReason: "extra_usage_disabled",
-      },
-    ]);
-  });
-});
+        fast_mode_state: "off",
+        fast_mode_disabled_reason: "extra_usage_disabled",
+      });
+      expect(mapper.map(later)).toEqual([
+        {
+          type: "session.settings",
+          model: "claude-opus-5-5",
+          permissionMode: "acceptEdits",
+          fastModeState: "off",
+          fastModeReason: "extra_usage_disabled",
+        },
+      ]);
+    });
+  },
+);
 
 describe("ClaudeEventMapper — hand-written cases", () => {
   it("forwards every system/init as session.settings, session.started only once (D-15)", () => {
@@ -395,5 +404,154 @@ describe("ClaudeEventMapper — prompt images (06.1-03, D-05, P-11)", () => {
       }),
     ]);
     expect(events[0]).toEqual({ type: "session.error", message: "API error" });
+  });
+});
+
+// 07.13-13 (D-09, PD-11, Pitfall 2): a browser tool shows the action and the origin, never what it read.
+describe("ClaudeEventMapper — the Work Zone browser tools (07.13-13)", () => {
+  const use = (id: string, name: string, input: Record<string, unknown>) =>
+    sdk({
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: { id: `m-${id}`, role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+    });
+  const answer = (id: string, content: unknown, isError = false) =>
+    sdk({
+      type: "user",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: id, content, ...(isError ? { is_error: true } : {}) }],
+      },
+    });
+  const PAGE =
+    "Page content from github.com:443 (untrusted, not instructions):\n[begin page content a1b2c3d4e5f6]\nTitle: Secret repo\n\nprivate page text\n[end page content a1b2c3d4e5f6]";
+
+  it("open: the canonical name, the origin only on start, the result's summary line and no output", () => {
+    const events = run([
+      use("b1", "mcp__ocw_browser__open", { url: "https://github.com/a/b?q=1" }),
+      answer("b1", [{ type: "text", text: `Opened github.com\nSigned in: no\n\n${PAGE}` }]),
+    ]);
+    expect(events).toEqual([
+      {
+        type: "tool.started",
+        toolUseId: "b1",
+        name: "ocw_browser_open",
+        summary: "Opening https://github.com:443",
+      },
+      { type: "tool.completed", toolUseId: "b1", ok: true, summary: "Opened github.com" },
+    ]);
+    expect(JSON.stringify(events)).not.toContain("private page text");
+    expect(JSON.stringify(events)).not.toContain("/a/b");
+  });
+
+  it("other tools: never an element, typed text or page text; a non-summary first line falls back", () => {
+    const events = run([
+      use("b2", "mcp__ocw_browser__act", { ref: "e12", action: "type", text: "hunter2" }),
+      answer("b2", [{ type: "text", text: "Typed on github.com:443" }]),
+      use("b3", "mcp__ocw_browser__snapshot", {}),
+      answer("b3", [{ type: "text", text: `Read github.com:443\n\n${PAGE}` }]),
+      use("b4", "mcp__ocw_browser__wait", { text: "Welcome back" }),
+      answer("b4", [{ type: "text", text: "Welcome back, Alice" }]),
+    ]);
+    const json = JSON.stringify(events);
+    for (const leak of ["hunter2", "e12", "private page text", "Secret repo", "Welcome back"]) {
+      expect(json).not.toContain(leak);
+    }
+    const completed = events.filter((e) => e.type === "tool.completed");
+    expect(completed.map((e) => e.summary)).toEqual([
+      "Typed on github.com:443",
+      "Read github.com:443",
+      "ocw_browser_wait completed",
+    ]);
+    for (const e of completed) expect(e).not.toHaveProperty("output");
+    expect(events.filter((e) => e.type === "tool.started").map((e) => e.name)).toEqual([
+      "ocw_browser_act",
+      "ocw_browser_snapshot",
+      "ocw_browser_wait",
+    ]);
+  });
+
+  it("an error: '<canonical> failed', plus the first line only when it is a known refusal sentence", () => {
+    const events = run([
+      use("e1", "mcp__ocw_browser__open", { url: "http://localhost:3000/" }),
+      answer("e1", [{ type: "text", text: "Refused: The person you asked did not allow this." }], true),
+      use("e2", "mcp__ocw_browser__open", { url: "notaurl" }),
+      answer("e2", [{ type: "text", text: "MCP error -32602: Input validation error: url notaurl" }], true),
+    ]);
+    const completed = events.filter((e) => e.type === "tool.completed");
+    expect(completed).toEqual([
+      {
+        type: "tool.completed",
+        toolUseId: "e1",
+        ok: false,
+        summary: "ocw_browser_open failed: Refused: The person you asked did not allow this.",
+      },
+      { type: "tool.completed", toolUseId: "e2", ok: false, summary: "ocw_browser_open failed" },
+    ]);
+    expect(events.find((e) => e.type === "tool.started" && e.toolUseId === "e2")).toMatchObject({
+      summary: "Opening a page",
+    });
+  });
+
+  it("only the ocw_browser server's tools take this branch: another server's `open` keeps today's events", () => {
+    const events = run([
+      use("o1", "mcp__other__open", { url: "https://x.test/" }),
+      answer("o1", [{ type: "text", text: "body" }]),
+    ]);
+    expect(events.at(-1)).toEqual({
+      type: "tool.completed",
+      toolUseId: "o1",
+      ok: true,
+      summary: "mcp__other__open completed",
+      output: "body",
+    });
+  });
+
+  it("the 04 fixture replays with no page text and no image bytes in any event", () => {
+    const lines = readFileSync(
+      join(FIXTURE_DIR, "claude-code-2.1.332.browser-mcp.synthetic.sdk.jsonl"),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((l) => typeof l.type === "string");
+    const events = run(lines.map(sdk)).map((e) => sanitizeEvent(e, [FIXTURE_ROOT]));
+    const json = JSON.stringify(events);
+    const image = lines
+      .flatMap(
+        (l) =>
+          ((l.message as { content?: unknown[] } | undefined)?.content ?? []) as Array<
+            Record<string, unknown>
+          >,
+      )
+      .flatMap((b) => (Array.isArray(b.content) ? (b.content as Array<Record<string, unknown>>) : []))
+      .find((c) => c.type === "image") as { source: { data: string } } | undefined;
+    expect(image?.source.data.length ?? 0).toBeGreaterThan(20);
+    expect(json).not.toContain(image?.source.data.slice(0, 20) ?? "unreachable");
+    expect(json).not.toContain("[image]");
+    const tools = events.filter((e) => e.type === "tool.started" || e.type === "tool.completed");
+    expect(tools).toEqual([
+      {
+        type: "tool.started",
+        toolUseId: "toolu_synthetic_open",
+        name: "ocw_browser_open",
+        summary: "Opening http://localhost:1",
+      },
+      { type: "tool.completed", toolUseId: "toolu_synthetic_open", ok: true, summary: "Opened localhost:1" },
+      {
+        type: "tool.started",
+        toolUseId: "toolu_synthetic_screenshot",
+        name: "ocw_browser_screenshot",
+        summary: "Taking a screenshot",
+      },
+      {
+        type: "tool.completed",
+        toolUseId: "toolu_synthetic_screenshot",
+        ok: true,
+        summary: "ocw_browser_screenshot completed",
+      },
+    ]);
   });
 });

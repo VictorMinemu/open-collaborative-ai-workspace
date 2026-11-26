@@ -19,6 +19,13 @@ import { ADMIN } from "../tests/env";
  *      own-supervisor line, since the container has no systemd (D-04);
  *   d. the owner revokes the device.
  *
+ * 07.13-23 (WZB-07, D-05, D-06, PD-18, PD-28): the script has already turned the device's browser on, installed the
+ * pinned build from a copied, checksum-verified zip, run the doctor's apt line as root and started a page on the
+ * container's own 127.0.0.1:8099 (under the brw seccomp profile). Between b and c the owner turns the organization's
+ * browser policy on and Sam's next prompt opens that page and reads it through the fake runtime's `browser <tool>
+ * <json>` lines: the answer says `Contains "Proof page": yes` (never page text); every Chromium process in the
+ * container runs with its sandbox (no `--no-sandbox`); in c the doctor's `browser` line is ok. The policy is put back.
+ *
  * Opt-in only: skipped unless PROOF_PAIR_URL is set, so it never runs outside the script.
  */
 
@@ -79,14 +86,43 @@ interface DoctorCheck {
   summary: string;
 }
 
+/** The page the script serves on the container's own loopback (07.13-23). */
+const PROOF_PAGE_URL = "http://127.0.0.1:8099/";
+const PROOF_PAGE_TEXT = "Proof page";
+
+/**
+ * The container's Chromium processes (the pinned headless shell and its zygote/renderers), read from `/proc` as the
+ * user that runs them, and how many carry `--no-sandbox`. Only counts leave the container, never a command line.
+ */
+function chromiumSandbox(): { processes: number; noSandbox: number } {
+  const r = inContainer([
+    "node",
+    "-e",
+    `const fs = require("node:fs");
+let processes = 0, noSandbox = 0;
+for (const pid of fs.readdirSync("/proc").filter((p) => /^\\d+$/.test(p))) {
+  let argv;
+  try { argv = fs.readFileSync("/proc/" + pid + "/cmdline", "utf8").split("\\0"); } catch { continue; }
+  if (!argv[0] || !argv[0].endsWith("chrome-headless-shell")) continue;
+  processes++;
+  if (argv.includes("--no-sandbox")) noSandbox++;
+}
+console.log(JSON.stringify({ processes, noSandbox }));`,
+  ]);
+  expect(r.status, `reading /proc in the container (stderr: ${r.stderr})`).toBe(0);
+  return JSON.parse(r.stdout) as { processes: number; noSandbox: number };
+}
+
 test("A clean Linux server becomes a shared Work Zone device from the web", async ({ page, browser }) => {
   test.skip(!PAIR_URL, "run through scripts/headless-server-proof.sh (PROOF_PAIR_URL)");
-  test.setTimeout(240_000);
+  test.setTimeout(420_000);
   const facts: string[] = [];
   const adminApi = await apiAs(ADMIN);
   let deviceId: string | null = null;
   let sessionId: string | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let policyChanged = false;
+  let browserWasAllowed = false;
 
   try {
     // ---- a. the owner approves the link the container's setup printed; the device comes online with its repo
@@ -134,6 +170,43 @@ test("A clean Linux server becomes a shared Work Zone device from the web", asyn
     });
     facts.push("Sam's Claude Code session on the container: assistant reply, idle");
 
+    // ---- b2. 07.13-23: the organization's browser policy on; Sam's next prompt reads the container's own localhost
+    const policyBefore = (await (await adminApi.get("/api/v1/work-zone-policy")).json()) as {
+      allowBrowser?: boolean;
+    };
+    browserWasAllowed = policyBefore.allowBrowser === true;
+    const put = await adminApi.put("/api/v1/work-zone-policy", { data: { allowBrowser: true } });
+    expect(put.ok(), `PUT /api/v1/work-zone-policy allowBrowser: ${put.status()}`).toBe(true);
+    policyChanged = true;
+    await sam.page
+      .getByTestId("composer")
+      .fill(
+        [
+          "Check the app on this server's localhost",
+          `browser open {"url":"${PROOF_PAGE_URL}"}`,
+          `browser snapshot {"expect":"${PROOF_PAGE_TEXT}"}`,
+        ].join("\n"),
+      );
+    await sam.page.getByTestId("send-prompt").click();
+    await expect(sam.page.getByTestId("prompt-bubble")).toHaveCount(2, { timeout: 15_000 });
+    await expect(sam.page.getByTestId("assistant-message").last()).toContainText(
+      `Contains "${PROOF_PAGE_TEXT}": yes`,
+      { timeout: 120_000 },
+    );
+    await expect(sam.page.getByTestId("session-view")).toHaveAttribute("data-status", "idle", {
+      timeout: 60_000,
+    });
+    // The session's page is still open (idle 10 min): its processes show how Chromium was started.
+    const sandbox = chromiumSandbox();
+    expect(sandbox.processes, "the session's browser runs in the container").toBeGreaterThan(0);
+    expect(sandbox.noSandbox, "no Chromium process runs without its sandbox").toBe(0);
+    facts.push(
+      `browser: Sam's session opened ${PROOF_PAGE_URL} on the container and read "${PROOF_PAGE_TEXT}"`,
+    );
+    facts.push(
+      `chromium_sandbox on (${sandbox.processes} chrome-headless-shell processes, none with --no-sandbox; brw seccomp profile)`,
+    );
+
     // ---- c. the container's doctor and the no-systemd refusal
     const doctor = inContainer([RUNTIME, "doctor", "--json"]);
     expect(doctor.status, `doctor --json exit (stderr: ${doctor.stderr})`).toBe(0);
@@ -143,7 +216,17 @@ test("A clean Linux server becomes a shared Work Zone device from the web", asyn
       report.checks.filter((c) => c.status === "fail"),
       "no doctor check fails",
     ).toEqual([]);
-    expect(status).toMatchObject({ pairing: "ok", server: "ok", daemon: "ok", service: "warn" });
+    expect(status).toMatchObject({
+      pairing: "ok",
+      server: "ok",
+      daemon: "ok",
+      service: "warn",
+      browser: "ok",
+    });
+    const browserLine = report.checks.find((c) => c.id === "browser")?.summary ?? "";
+    expect(browserLine, "the doctor names the installed build, sandbox on").toMatch(
+      /^Browser: on · Chrome for Testing [0-9.]+$/,
+    );
     const token = inContainer(["cat", `${HOME_IN}/.ocw/device-token`]).stdout.trim();
     expect(token.length, "the device token is on disk").toBeGreaterThan(16);
     expect(doctor.stdout.includes(token), "the doctor's JSON carries no device token").toBe(false);
@@ -153,6 +236,7 @@ test("A clean Linux server becomes a shared Work Zone device from the web", asyn
         report.checks.map((c) => `${c.id}=${c.status}`).join(" "),
     );
     facts.push(`doctor service: ${report.checks.find((c) => c.id === "service")?.summary ?? "?"}`);
+    facts.push(`doctor browser: ${browserLine}`);
 
     const service = inContainer([RUNTIME, "service", "install"]);
     const serviceOut = `${service.stdout}${service.stderr}`;
@@ -162,6 +246,9 @@ test("A clean Linux server becomes a shared Work Zone device from the web", asyn
   } finally {
     await sam?.context.close();
     if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    if (policyChanged) {
+      await adminApi.put("/api/v1/work-zone-policy", { data: { allowBrowser: browserWasAllowed } });
+    }
     // ---- d. the owner revokes the device
     if (deviceId) {
       const res = await adminApi.delete(`/api/v1/devices/${deviceId}`);

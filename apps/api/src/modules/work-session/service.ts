@@ -19,6 +19,7 @@ import {
   SERVER_ONLY_SESSION_EVENTS,
   type SessionAccount,
   type SessionAccountLimitedFrame,
+  type SessionBrowserGrant,
   type SessionEvent,
   SessionTitle,
   type SessionVisibilityKind,
@@ -27,6 +28,7 @@ import {
   TitleFailureCode,
   type TitleResultFrame,
   type WorkApproval,
+  type WorkBrowserApprovalRequest,
   type WorkPrompt,
   type WorkSession,
   type WorkSessionAgentRef,
@@ -48,6 +50,7 @@ import {
   type Tx,
   tenantOf,
   workApprovals,
+  workBrowsers,
   workProjectRepos,
   workPrompts,
   workSessions,
@@ -81,6 +84,7 @@ import {
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { botLayerForSession } from "./bot-profile";
+import { type BrowserAsker, browserGrantFor, browserRequestOf, browserStateOf } from "./browser-grant";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
@@ -180,6 +184,8 @@ type AccountCheck =
 interface CommandPlan {
   images: PromptImagesPlan | undefined;
   account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
+  /** 07.13 (PD-09, PD-20): the turn's browser grant, decided at send time; undefined for a device without a browser. */
+  browser?: SessionBrowserGrant;
 }
 
 /** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
@@ -203,6 +209,8 @@ function tokenAccountOf(
 export type SessionRow = typeof workSessions.$inferSelect;
 type PromptRow = typeof workPrompts.$inferSelect;
 type ApprovalRow = typeof workApprovals.$inferSelect;
+/** 07.13 (PD-10): `work_approvals.request` with the optional browser part (absent on every other approval). */
+export type StoredApprovalRequest = ApprovalRow["request"] & { browser?: WorkBrowserApprovalRequest };
 
 /** States in which the session is attached (or attaching) to a runtime on its device. */
 export const ACTIVE_STATES: WorkSessionStatus[] = [
@@ -350,6 +358,8 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceStatus: devices.status,
         deviceRevoked: devices.revokedAt,
         deviceOwner: devices.ownerUserId,
+        deviceBrowserVersion: devices.browserVersion,
+        deviceBrowserOptIn: devices.browserOptIn,
         unitPath: orgUnits.path,
         access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
         poolId: accountPoolAccounts.id,
@@ -368,7 +378,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     const rows = userId === null ? all : all.filter((r) => (r.access ?? []).length > 0);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, running, dir, summaries, starters] = await Promise.all([
+    const [queued, pending, running, dir, summaries, starters, policy, openBrowsers] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -391,7 +401,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         tx,
         rows.flatMap((r) => (r.s.startedByAgentId ? [r.s.startedByAgentId] : [])),
       ),
+      // 07.13 (D-19): the browser state of every session from one policy read and one read of the open pages.
+      loadWorkZonePolicy(tx),
+      tx
+        .select({ id: workBrowsers.workSessionId })
+        .from(workBrowsers)
+        .where(and(inArray(workBrowsers.workSessionId, ids), eq(workBrowsers.state, "open"))),
     ]);
+    const live = new Set(openBrowsers.map((r) => r.id));
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
     const since = new Map(running.map((r) => [r.id, r.since]));
@@ -403,6 +420,8 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceStatus,
         deviceRevoked,
         deviceOwner,
+        deviceBrowserVersion,
+        deviceBrowserOptIn,
         unitPath,
         access,
         poolId,
@@ -457,6 +476,12 @@ export class WorkSessionService implements DeviceSessionHandler {
             poolId !== null && poolLabel !== null && poolProvider !== null
               ? { id: poolId, label: poolLabel, provider: poolProvider }
               : null,
+          // 07.13 (D-19): viewer-neutral (no host, no member), so it rides the shared `ws:` stream as is.
+          browser: browserStateOf({
+            policy,
+            device: { browserVersion: deviceBrowserVersion, browserOptIn: deviceBrowserOptIn },
+            open: live.has(s.id),
+          }),
         };
         return {
           dto,
@@ -1652,8 +1677,42 @@ export class WorkSessionService implements DeviceSessionHandler {
   async prepareCommand(tx: Tx, _device: DeviceRef, cmd: DeviceCommandRow): Promise<unknown> {
     const images = await preparePromptImages(tx, cmd);
     const account = await this.prepareAccount(tx, cmd);
-    if (images === undefined && account === undefined) return undefined;
-    return { images, account } satisfies CommandPlan;
+    const browser = await this.prepareBrowser(tx, cmd);
+    if (images === undefined && account === undefined && browser === undefined) return undefined;
+    return { images, account, ...(browser ? { browser } : {}) } satisfies CommandPlan;
+  }
+
+  /**
+   * 07.13 (D-10, PD-09, PD-20): the browser grant of a `session.start` (asker = the session's creator, or the bot that
+   * started it) or a `prompt` (asker = the prompt's author, or the bot that wrote it), decided now from the live policy,
+   * the device's opt-in and capability. Undefined for any other command and for a device without a browser version.
+   */
+  private async prepareBrowser(tx: Tx, cmd: DeviceCommandRow): Promise<SessionBrowserGrant | undefined> {
+    const sessionId = cmd.workSessionId;
+    if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    let asker: Omit<BrowserAsker, "sessionId"> = { askerId: null, askerIsBot: false };
+    const of = (userId: string, agentId: string | null): Omit<BrowserAsker, "sessionId"> =>
+      agentId === null
+        ? { askerId: userId, askerIsBot: false }
+        : { askerId: agentId, askerIsBot: true, onBehalfOf: userId };
+    if (cmd.kind === "session.start") {
+      const [s] = await tx
+        .select({ createdBy: workSessions.createdBy, agentId: workSessions.startedByAgentId })
+        .from(workSessions)
+        .where(eq(workSessions.id, sessionId));
+      if (s) asker = of(s.createdBy, s.agentId);
+    } else {
+      const promptId = cmd.payload.promptId;
+      const [p] =
+        typeof promptId === "string" && UUID_RE.test(promptId)
+          ? await tx
+              .select({ userId: workPrompts.authorUserId, agentId: workPrompts.authorAgentId })
+              .from(workPrompts)
+              .where(and(eq(workPrompts.id, promptId), eq(workPrompts.workSessionId, sessionId)))
+          : [];
+      if (p) asker = of(p.userId, p.agentId);
+    }
+    return (await browserGrantFor(tx, this.deps.perms, { sessionId, ...asker })) ?? undefined;
   }
 
   /**
@@ -1679,15 +1738,18 @@ export class WorkSessionService implements DeviceSessionHandler {
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    const { images, account } = plan as CommandPlan;
+    const { images, account, browser } = plan as CommandPlan;
     if (account && account.token === null) {
       throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
     }
     const payload = images ? await hydratePromptImages(this.deps.storage ?? null, cmd, images) : cmd.payload;
-    if (!account?.token) return payload;
     // The sent copy only: `SessionAccount` with the token, on its way to this session's own device.
-    const sent: SessionAccount = { ...account.stored, oauthToken: account.token };
-    return { ...payload, account: sent };
+    const sent: SessionAccount | undefined = account?.token
+      ? { ...account.stored, oauthToken: account.token }
+      : undefined;
+    // 07.13 (PD-09): then the turn's browser grant, on the sent copy only too (never written back).
+    if (!sent && !browser) return payload;
+    return { ...payload, ...(sent ? { account: sent } : {}), ...(browser ? { browser } : {}) };
   }
 
   async onCommandResult(
@@ -2229,13 +2291,22 @@ export class WorkSessionService implements DeviceSessionHandler {
         return;
       }
       case "approval.requested": {
+        // 07.13 (PD-10, T-07.13-07-05): the browser part only when it parses (else dropped, never stored as text). It is
+        // shown, never trusted: who may answer comes from the API's own state (`browserApproverRule`).
+        const browser = browserRequestOf(ev.browser);
+        const request: StoredApprovalRequest = {
+          tool: ev.tool,
+          summary: ev.summary,
+          paths: ev.paths,
+          ...(browser ? { browser } : {}),
+        };
         const [row] = await tx
           .insert(workApprovals)
           .values({
             id: ev.approvalId,
             organizationId: device.organizationId,
             workSessionId: s.id,
-            request: { tool: ev.tool, summary: ev.summary, paths: ev.paths },
+            request,
           })
           .onConflictDoNothing()
           .returning();
@@ -2248,7 +2319,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           actorId: device.deviceId,
           deviceId: device.deviceId,
           sessionId: s.id,
-          metadata: { tool: ev.tool, paths: ev.paths },
+          // 07.13: the origin (`scheme://host:port`) only, never a path or page content.
+          metadata: { tool: ev.tool, paths: ev.paths, ...(browser ? { origin: browser.origin } : {}) },
         });
         await this.emitApproval(tx, row);
         if (s.status !== "waiting_approval") await this.setStatus(tx, s, "waiting_approval");
@@ -2364,7 +2436,12 @@ export class WorkSessionService implements DeviceSessionHandler {
 
 /** Server-side defence in depth: only repo-relative paths are stored and fanned out. */
 export function normalizeEvent(ev: SessionEvent): SessionEvent {
-  if (ev.type === "approval.requested") return { ...ev, paths: onlyRelativePaths(ev.paths) };
+  if (ev.type === "approval.requested") {
+    // 07.13 (T-07.13-07-05): a browser part that does not parse never reaches the stream or the table.
+    const { browser: hint, ...rest } = ev;
+    const browser = browserRequestOf(hint);
+    return { ...rest, paths: onlyRelativePaths(ev.paths), ...(browser ? { browser } : {}) };
+  }
   return ev;
 }
 
@@ -2483,6 +2560,7 @@ async function visibilitySummaries(
 }
 
 export function toApproval(r: ApprovalRow, decidedByName: string | null): WorkApproval {
+  const browser = browserRequestOf((r.request as StoredApprovalRequest).browser);
   return {
     id: r.id,
     workSessionId: r.workSessionId,
@@ -2490,6 +2568,7 @@ export function toApproval(r: ApprovalRow, decidedByName: string | null): WorkAp
       tool: r.request.tool,
       summary: r.request.summary,
       paths: onlyRelativePaths(r.request.paths ?? []),
+      ...(browser ? { browser } : {}),
     },
     status: r.status,
     decidedBy: r.decidedBy,

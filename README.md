@@ -15,7 +15,9 @@ coding agents keep running on people's own machines.
 - **Chats.** Slack-style channels, threads and DMs where people and bots are peers. AI chats are multiplayer:
   share one with a colleague and the model knows who is speaking.
 - **Work Zone.** Claude Code and Codex sessions run on a developer's machine or a team server, but the platform owns
-  them. Teammates can watch, prompt, queue, steer and approve from the browser.
+  them. Teammates can watch, prompt, queue, steer and approve from the browser. The agent can drive a browser on the
+  session's own device (its `localhost` included) that the team watches live, and the person who asked can take
+  control to sign in to a site and keep that sign-in for their own later turns.
 - **Agents.** Persistent server-side bots (on OpenClaw) with their own identity,
   memory, approvals, sandboxes, automations and Agent Cards. Bots can consult each other within admin-set rules.
 - **One control plane.** Organization, departments, teams and projects, intersected permissions (deny wins), model
@@ -40,7 +42,9 @@ Everything runs with `docker compose` on your own server. No essential feature d
 - **AI chats:** multiplayer, with org keys or each member's own ChatGPT plan.
 - **Bots:** OpenClaw bots, personas, Agent Cards, memory, per-tool approvals, sandboxes and a browser, automations and
   bot-to-bot consultations.
-- **Work Zone:** the Work Zone with the desktop app (macOS, Windows, Linux) or a headless Linux/macOS server.
+- **Work Zone:** the Work Zone with the desktop app (macOS, Windows, Linux) or a headless Linux/macOS server, with a
+  browser on the session's device (live view, take control, saved sign-ins per member; off until an admin and the
+  device's owner turn it on).
 - **Bots in the Work Zone:** a bot starts and drives Work Zone sessions itself through its profile (device or server,
   projects, runtime, model, permissions). Full access needs the organization policy, the device's opt-in for that bot
   and the profile. A live card in the conversation opens the session, and the session links back.

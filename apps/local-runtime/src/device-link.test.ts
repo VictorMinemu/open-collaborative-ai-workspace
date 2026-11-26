@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import {
   type CommandFrame,
   DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
+  DEVICE_LINK_MAX_DEVICE_FRAME_BYTES,
   RUNTIME_COMPATIBILITY_MANIFEST,
   type ServerToDeviceFrame,
 } from "@ocw/contracts";
@@ -213,5 +214,30 @@ describe("DeviceLink offline log (07.11 review ME-05)", () => {
     link.start();
     await server.waitFor(() => (received.length >= 3 ? true : undefined));
     expect(received.map((f) => f.type)).toEqual(["runtime.update.run", "projects.sync", "projects.sync"]);
+  });
+});
+
+describe("DeviceLink binary frames (07.13 D-15, PD-12)", () => {
+  it("sends bytes only while connected and within the device frame limit; nothing is kept offline", async () => {
+    const binary: Buffer[] = [];
+    server.wss.on("connection", (ws) => {
+      ws.on("message", (data, isBinary) => {
+        if (isBinary) binary.push(data as Buffer);
+      });
+    });
+    const l = startLink();
+    // Not open yet: refused, and not queued for later.
+    expect(l.sendBinary(new Uint8Array([1, 2, 3]))).toBe(false);
+    expect(l.queuedFrames).toBe(0);
+    await server.waitFor(() => (l.connected ? true : undefined));
+    expect(l.sendBinary(new Uint8Array([1, 2, 3]))).toBe(true);
+    expect(l.sendBinary(new Uint8Array(DEVICE_LINK_MAX_DEVICE_FRAME_BYTES))).toBe(true);
+    expect(l.sendBinary(new Uint8Array(DEVICE_LINK_MAX_DEVICE_FRAME_BYTES + 1))).toBe(false);
+    await server.waitFor(() => (binary.length >= 2 ? true : undefined));
+    expect(binary.map((b) => b.length)).toEqual([3, DEVICE_LINK_MAX_DEVICE_FRAME_BYTES]);
+    expect([...(binary[0] ?? [])]).toEqual([1, 2, 3]);
+    await l.stop();
+    expect(l.sendBinary(new Uint8Array([4]))).toBe(false);
+    expect(l.queuedFrames).toBe(0);
   });
 });

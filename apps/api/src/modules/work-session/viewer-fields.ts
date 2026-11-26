@@ -8,6 +8,7 @@ import {
 import { type Tx, workPrompts } from "@ocw/db";
 import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { type ResourceFacts, type UsersDecider, uuidArray, workProjectResource } from "../organization";
+import { answersPending, pendingApprovers } from "./browser-grant";
 
 /**
  * Per-viewer session fields (Phase 07.10, PD-03, PD-04, PD-05; UI-SPEC R2).
@@ -207,16 +208,17 @@ export async function loadViewerFields(
     ),
     openProjects(tx, { viewerId: a.viewerId, projects: toDecide, filter: a.filter }),
   ]);
-  // PD-05: the session-level approve decision on the viewer's own facts, only where something is pending.
-  const approves = new Set(
-    (
-      await a.filter(
-        a.sessions.filter((s) => s.dto.pendingApprovals > 0),
-        "work_session.approve",
-        (s) => s.facts,
-      )
-    ).map((s) => s.dto.id),
-  );
+  // PD-05: the session-level approve decision on the viewer's own facts, only where something is pending; 07.13-21:
+  // and only where one pending approval is not another member's alone (a sign-in request, a signed-in page's host).
+  const mayApprove = (
+    await a.filter(
+      a.sessions.filter((s) => s.dto.pendingApprovals > 0),
+      "work_session.approve",
+      (s) => s.facts,
+    )
+  ).map((s) => s.dto.id);
+  const rules = await pendingApprovers(tx, mayApprove);
+  const approves = new Set(mayApprove.filter((id) => answersPending(rules, id, a.viewerId)));
   const out = new Map<string, ViewerFields>();
   for (const s of a.sessions) {
     const named = s.dto.createdBy === a.viewerId || (s.project !== null && open.has(s.project.id));
@@ -287,16 +289,21 @@ export async function loadViewerFieldsForRecipients(
       for (const uid of allowed) open.add(key(project.id, uid));
     }
   }
-  // PD-05: who among each session's recipients may decide its pending approvals, on the facts the delivery built.
+  // PD-05: who among each session's recipients may decide its pending approvals, on the facts the delivery built;
+  // 07.13-21: a member-only pending approval (a sign-in request, a signed-in page's host) waits on that member alone.
+  const withPending = deliveries.filter((d) => d.dto.pendingApprovals > 0 && d.recipients.length > 0);
+  const rules = await pendingApprovers(
+    tx,
+    withPending.map((d) => d.dto.id),
+  );
   const approves = new Set<string>();
-  for (const d of deliveries) {
-    if (d.dto.pendingApprovals === 0 || d.recipients.length === 0) continue;
+  for (const d of withPending) {
     const allowed = decider.allowed([...d.recipients], "work_session.approve", (uid) => {
       const f = d.facts.get(uid);
       if (!f) throw new Error("session facts missing for a recipient");
       return f;
     });
-    for (const uid of allowed) approves.add(key(d.dto.id, uid));
+    for (const uid of allowed) if (answersPending(rules, d.dto.id, uid)) approves.add(key(d.dto.id, uid));
   }
   const out = new Map<string, Map<string, ViewerFields>>();
   for (const d of deliveries) {

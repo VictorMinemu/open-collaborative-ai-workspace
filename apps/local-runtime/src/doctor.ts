@@ -6,7 +6,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,18 @@ import {
   type RuntimeUpdatesLevelSource,
 } from "@ocw/contracts";
 import { z } from "zod";
+import {
+  APPARMOR_PROFILE_PATH,
+  appArmorFixLine,
+  aptInstallLine,
+  browsersRoot,
+  type InstalledBrowser,
+  installedBrowser,
+  missingLinuxLibraries,
+  type OsRelease,
+  readOsRelease,
+} from "./browser/install.js";
+import { CFT_VERSION, type CftPlatform, cftPlatformOf } from "./browser/pins.js";
 import { detectClaudeCode } from "./claude/detect.js";
 import { detectCodex } from "./codex/detect.js";
 import {
@@ -30,6 +42,7 @@ import {
   loadDeviceToken,
   ProjectRegistry,
   type RuntimeConfig,
+  resolveBrowser,
   resolveRuntimeUpdates,
 } from "./config.js";
 import { controlRequest, controlSocketPath } from "./control-socket.js";
@@ -55,6 +68,7 @@ export const DOCTOR_CHECK_IDS = [
   "claude-code",
   "codex",
   "runtimes",
+  "browser",
   "git",
   "projects",
   "updates",
@@ -71,7 +85,7 @@ export const DoctorCheck = z.strictObject({
   status: DoctorStatus,
   /** What was found, one line. */
   summary: z.string(),
-  /** What to run or do about it, one line; null when the check is ok. */
+  /** What to run or do about it, one line; null when there is nothing to do (an ok may still name an option). */
   fix: z.string().nullable(),
 });
 export type DoctorCheck = z.infer<typeof DoctorCheck>;
@@ -172,6 +186,20 @@ export interface DoctorDeps {
   selfUpdateMarker: () => Promise<SelfUpdateMarker | null>;
   /** Review IN-02: this runtime's `OCW_HOME` (default `~/.ocw`), so the way back names the right directory. */
   ocwHome?: () => string;
+  /** 07.13 (D-10, PD-18): the device owner's browser opt-in and sandbox mode (`resolveBrowser`). */
+  browser: () => Promise<ReturnType<typeof resolveBrowser>>;
+  /** This machine's Chrome for Testing platform; null when no build is pinned for it. */
+  browserPlatform: () => CftPlatform | null;
+  /** The pinned headless shell under `browsersRoot`, or null. */
+  installedBrowser: () => Promise<InstalledBrowser | null>;
+  /** Linux: the sonames `ldd` cannot find for the executable; empty elsewhere. */
+  missingLibraries: (executable: string) => Promise<string[]>;
+  /** Linux: `/etc/os-release`; null elsewhere. */
+  osRelease: () => Promise<OsRelease | null>;
+  /** Linux: the AppArmor profile line when user namespaces are restricted (Pitfall 4); null otherwise. */
+  appArmorFix: (executable: string) => Promise<string | null>;
+  /** Whether this daemon runs in a container (`/.dockerenv` or `/run/.containerenv`, PD-18). */
+  inContainer: () => boolean;
 }
 
 // ---------------------------------------------------------------- the checks
@@ -619,6 +647,73 @@ async function checkRuntimes(ctx: Context): Promise<Finding> {
   );
 }
 
+/**
+ * 07.13 (D-06, D-10, PD-18, Pitfall 4): the Work Zone browser on this device. Off is fine (it is the default); on, the
+ * pinned build installs on first use (a warning until then); installed, every condition that keeps it from starting is
+ * a fail with the one line the owner runs (an apt line built from `ldd`'s missing sonames, the AppArmor profile, the
+ * sandbox mode). The runtime never runs these lines itself (P5).
+ */
+async function checkBrowser(ctx: Context): Promise<Finding> {
+  const state = await ctx.deps.browser();
+  if (!state.optIn) {
+    return {
+      status: "ok",
+      summary:
+        state.source === "env"
+          ? "Browser: off on this device (OCW_ALLOW_BROWSER)"
+          : "Browser: off on this device",
+      fix:
+        state.source === "env"
+          ? "OCW_ALLOW_BROWSER=0 in the runtime's environment keeps it off"
+          : "To let Work Zone sessions use a browser here: `ocw-runtime browser on`",
+    };
+  }
+  if (!ctx.deps.browserPlatform()) {
+    return fail(
+      `There is no Chrome for Testing build for this machine (${process.platform} ${process.arch})`,
+      "The Work Zone browser runs on macOS, Windows x64 and Linux x64 or arm64: `ocw-runtime browser off`",
+    );
+  }
+  const inContainer = ctx.deps.inContainer();
+  if (state.sandbox === "container" && !inContainer) {
+    return fail(
+      "browser.sandbox is `container`, but this runtime is not running in a container, so the browser will not start",
+      "Remove `sandbox` from the `browser` section of ~/.ocw/runtime.json (and OCW_BROWSER_SANDBOX from the environment): Chromium's sandbox stays on outside a container",
+    );
+  }
+  const installed = await ctx.deps.installedBrowser();
+  if (!installed) {
+    return warn(
+      `Browser: on; Chrome for Testing ${CFT_VERSION} installs on first use (about 100 MB)`,
+      "To fetch it now: `ocw-runtime browser install`",
+    );
+  }
+  const missing = await ctx.deps.missingLibraries(installed.executable);
+  if (missing.length > 0) {
+    const apt = aptInstallLine(missing, await ctx.deps.osRelease());
+    return fail(
+      `Chrome for Testing ${installed.version} is missing ${missing.length === 1 ? "a Linux library" : `${missing.length} Linux libraries`}: ${missing.join(", ")}`,
+      apt ?? `Install the packages that provide ${missing.join(", ")} with your package manager`,
+    );
+  }
+  if (state.sandbox === "on") {
+    const appArmor = await ctx.deps.appArmorFix(installed.executable);
+    if (appArmor) {
+      return fail(
+        "Ubuntu's AppArmor restricts unprivileged user namespaces, so Chromium's sandbox cannot start",
+        appArmor,
+      );
+    }
+  }
+  if (state.sandbox === "container") {
+    return warn(
+      `Browser: on · Chrome for Testing ${installed.version}; Chromium sandbox off inside this container (browser.sandbox: container)`,
+      "Keep this container dedicated to the runtime; outside a container the sandbox is always on",
+    );
+  }
+  return ok(`Browser: on · Chrome for Testing ${installed.version}`);
+}
+
 async function checkGit(ctx: Context): Promise<Finding> {
   const version = await ctx.deps.git();
   if (!version) {
@@ -731,6 +826,7 @@ const CHECKS: ReadonlyArray<readonly [DoctorCheckId, CheckFn]> = [
   ["claude-code", (ctx) => checkCodingRuntime(ctx, "claude-code")],
   ["codex", (ctx) => checkCodingRuntime(ctx, "codex")],
   ["runtimes", checkRuntimes],
+  ["browser", checkBrowser],
   ["git", checkGit],
   ["projects", checkProjects],
   ["updates", checkUpdates],
@@ -793,7 +889,11 @@ const DEVICE_TOKEN_RE = /\bocwd_[A-Za-z0-9_-]{8,}/g;
  */
 const ABSOLUTE_PATH_RE = /(^|[\s"'`(=:,[<{])(\/[A-Za-z0-9._~@+%-][^\s"'`()<>,;\]}]*)/g;
 /** Fixed system paths that say nothing about this host (the system unit's documented location). */
-const PUBLIC_ABSOLUTE_PATHS: ReadonlySet<string> = new Set(["/etc/systemd/system/ocw-runtime.service"]);
+const PUBLIC_ABSOLUTE_PATHS: ReadonlySet<string> = new Set([
+  "/etc/systemd/system/ocw-runtime.service",
+  // 07.13 (Pitfall 4): the AppArmor profile the browser check's fix line writes.
+  APPARMOR_PROFILE_PATH,
+]);
 
 /**
  * One line made safe to paste: secrets redacted (`redact()` plus device tokens), paths under `home` shown as `~/…`
@@ -917,6 +1017,13 @@ export function createDoctorDeps(
     now: () => new Date(),
     selfUpdateMarker: () => readSelfUpdateMarker(home),
     ocwHome: () => home,
+    browser: async () => resolveBrowser(await config(), env),
+    browserPlatform: () => cftPlatformOf(process.platform, process.arch),
+    installedBrowser: () => installedBrowser(browsersRoot({ ...env, OCW_HOME: home })),
+    missingLibraries: async (exe) => (process.platform === "linux" ? missingLinuxLibraries(exe) : []),
+    osRelease: async () => (process.platform === "linux" ? readOsRelease() : null),
+    appArmorFix: async (exe) => (process.platform === "linux" ? appArmorFixLine(exe) : null),
+    inContainer: () => existsSync("/.dockerenv") || existsSync("/run/.containerenv"),
   };
   return { ...base, ...probes };
 }

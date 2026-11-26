@@ -17,6 +17,7 @@ The workspace itself is installed with [INSTALL.md](INSTALL.md). This guide is a
 | curl or wget | To download the installer and the runtime |
 | A user account | A normal, non-root account that owns the runtime, the repositories and the Claude Code / Codex sign-ins |
 | Network | Outbound HTTPS to your workspace, and to the npm registry the machine already uses (or a mirror) |
+| Browser (optional) | Linux x64 or arm64, or macOS; about 126 MB downloaded on first use ([Browser](#browser-for-work-zone-sessions)) |
 
 Use a dedicated account (for example `ocw`) on a shared machine. The runtime never needs root: `install.sh` warns when
 run as root, and no `ocw-runtime service` command runs as root.
@@ -344,6 +345,72 @@ ocw-runtime isolated-server off
   sponsor's Full access on this device, "Allow Full access for this bot" and a profile whose highest mode is Full
   access. Without the mark, a session that once followed outside content never runs in Full access here again.
 
+## Browser for Work Zone sessions
+
+Claude Code and Codex sessions on this server can drive a browser that runs **on this server** (Phase 07.13,
+[ADR-0035](adr/0035-work-zone-local-browser.md)), so an agent can open the app it is building on the server's own
+`localhost` (or anything this server reaches), read the page, click and type, wait and take screenshots. The page is
+the pinned Chrome for Testing headless shell, one page per session, in a throwaway profile deleted when the page
+closes. People who can see the session watch it live in its Browser tab, and the person who asked can take control to
+sign in to a site. That sign-in is saved for them only.
+
+**Three switches, all off by default.** A session gets the browser only when all three say yes, decided by the server
+for each turn and checked again here before every call:
+
+1. **The organization:** an admin turns on **Allow the browser in Work Zone sessions** in Settings › Work Zone policy.
+2. **This server:** the device's owner runs `ocw-runtime browser on` here (the server can never turn it on).
+3. **This runtime's version:** 0.5.0 or later. An older runtime shows "Update this device to use the browser" in the
+   session ([Updates](#updates)).
+
+```bash
+ocw-runtime browser on                    # this server's opt-in, in ~/.ocw/runtime.json (the running runtime reloads it)
+ocw-runtime browser off                   # off again: every open page closes
+ocw-runtime browser status                # Browser: on (config) · installed 156.0.8078.47
+ocw-runtime browser install               # fetch the pinned build now instead of on first use
+ocw-runtime browser install --from-zip <zip>   # install from a zip you copied here (offline hosts); same checksum check
+```
+
+- **First use downloads it.** The runtime fetches the pinned build for its platform from Google's Chrome for Testing
+  storage (about 126 MB on Linux), checks its SHA-256 against the value pinned in the runtime, and installs it under
+  `~/.ocw/browsers/<version>/`. `OCW_BROWSERS_DIR` moves that folder (a location only; the checksum still applies). A
+  wrong checksum is a hard refusal. The system's own Chrome is never used.
+- **`OCW_ALLOW_BROWSER`** (`1`/`true` or `0`/`false`) in the daemon's environment, for example in
+  `~/.ocw/service.env`, overrides `runtime.json`. `status` shows the source.
+- **Missing Linux libraries.** A slim server lacks the shared libraries the browser links. The doctor's `browser` line
+  names them and prints one line to run as root, for example on Debian bookworm:
+  `sudo apt-get install -y libasound2 libatk-bridge2.0-0 libatk1.0-0 … libxrandr2` (Ubuntu 24.04 gets its `t64`
+  names). Fonts are not needed to start it; install `fonts-liberation` if pages show empty boxes in screenshots.
+- **Ubuntu 23.10 and later** restrict unprivileged user namespaces, which Chromium's sandbox needs. The doctor then
+  prints the line that writes an AppArmor profile for this one binary (`/etc/apparmor.d/ocw-chrome-headless-shell`).
+  Prefer that over turning the restriction off for the whole machine.
+- **The runtime never runs `sudo`** and never installs a system package itself: you run the doctor's line.
+- **Approvals.** Opening a host the session has not used yet asks once in the session (it shows `host:port`);
+  `localhost`, `127.0.0.1` and `[::1]` never ask. Full access skips these prompts. Cloud metadata addresses
+  (`169.254.169.254`, `metadata.google.internal` and the like) are always refused, but only by name and address: on a
+  cloud VM, also block the metadata address for the runtime's account in the host firewall, because a public name that
+  resolves to it is not refused by name.
+- **What reaches the workspace.** The audit and the session timeline carry the action and `scheme://host:port` only,
+  never a path, page text or what anyone typed. Frames stream only while someone watches.
+
+**Running the runtime in a container.** Keep Chromium's sandbox on: start the container with the bots' seccomp profile,
+which is Docker's default plus what the sandbox needs:
+
+```bash
+docker run --security-opt seccomp=infra/sandbox/browser/seccomp.json …   # the file from this repository
+```
+
+The headless server proof does exactly this in a clean `node:24.22.1-bookworm-slim` container
+(`bash scripts/e2e-isolated.sh --cmd "bash scripts/headless-server-proof.sh"`). Only when the container cannot allow
+that, and the container runs nothing but the runtime, set `"browser": { "sandbox": "container" }` in
+`~/.ocw/runtime.json` (or `OCW_BROWSER_SANDBOX=container`): the browser then runs without its own sandbox, inside the
+container's. It is never automatic, it works only inside a container (outside one the doctor fails it and the browser
+does not start), and the doctor reports it as a warning.
+
+**Sign-ins and this machine.** A member's saved sign-in loads only in that member's own turns of a session only they
+(and this server's owner) can see, and is closed again at the end of each of their turns. While it is loaded, this
+server's owner, and programs running as the runtime's account, can reach the browser. Members are told so; give the
+runtime's account to nobody else.
+
 ## Behind a proxy
 
 The pairing and download routes are rate limited per client IP, per route and per API instance:
@@ -384,6 +451,7 @@ token, no service.env value and no path outside the home, so you can paste it in
 | `service` | The service is installed and active (and lingering is on, on Linux) |
 | `claude-code`, `codex` | Installed, a supported version, signed in as the service's account |
 | `runtimes` | At least one of them is installed and signed in |
+| `browser` | The Work Zone browser: off (ok), on and not yet downloaded (warn), or on and ready; a fail names the one line that fixes it ([Browser](#browser-for-work-zone-sessions)) |
 | `git` | git is installed |
 | `projects` | Each registered repository exists and is a git repository |
 | `updates` | The runtime CLI updates level of the running runtime |
@@ -399,6 +467,10 @@ Other common cases:
   Linux, check lingering; on a Mac, automatic login.
 - **"This device is paired with <A>".** Revoke it in Settings › Devices on A, then run `setup --server <B>`.
 - **A session cannot start a runtime.** The doctor's `claude-code` and `codex` lines say what is missing.
+- **The browser does not start.** The doctor's `browser` line says why, with one fix: the `apt-get install` line for
+  missing libraries, the AppArmor profile line on Ubuntu, or `browser.sandbox: container` set outside a container
+  (remove it). A session that shows no browser at all is off in the organization's policy, off on this server
+  (`ocw-runtime browser status`), or on a runtime older than 0.5.0.
 - **"The runtime did not come back after updating to …".** A new build crash-loops: see the way back in
   [Updates](#updates).
 

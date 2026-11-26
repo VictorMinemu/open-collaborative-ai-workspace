@@ -1,6 +1,6 @@
 // Onboarding page logic (bundled local renderer, talks to main only via window.ocwOnboarding).
 
-import type { DesktopStatus, RuntimeInfo } from "../../shared/ipc";
+import type { OnboardingStatus, RuntimeInfo } from "../../shared/ipc";
 
 interface Defaults {
   webUrl: string;
@@ -21,11 +21,11 @@ interface EnrollResult {
 
 interface OnboardingApi {
   defaults(): Promise<Defaults>;
-  status(): Promise<DesktopStatus>;
+  status(): Promise<OnboardingStatus>;
   checkServer(input: { webUrl: string; apiUrl?: string }): Promise<CheckResult>;
   enroll(input: { webUrl: string; apiUrl: string; code: string; deviceName: string }): Promise<EnrollResult>;
   finish(skipPairing: boolean): Promise<unknown>;
-  onStatus(cb: (s: DesktopStatus) => void): void;
+  onStatus(cb: (s: OnboardingStatus) => void): void;
 }
 
 const api = (window as unknown as { ocwOnboarding: OnboardingApi }).ocwOnboarding;
@@ -88,7 +88,23 @@ function runtimeState(r: RuntimeInfo | undefined): { tone: string; text: string 
   return { tone: "ok", text: r.version ? `Ready · v${r.version}` : "Ready" };
 }
 
-function renderStatus(s: DesktopStatus): void {
+/**
+ * 07.13 (D-18): "Update available (vX.Y.Z)" linking to the release page (main checked the URL; the click opens it in
+ * the default browser through the window-open guard). Nothing is downloaded or installed.
+ */
+function renderUpdate(s: OnboardingStatus): void {
+  const link = $("update") as HTMLAnchorElement;
+  if (!s.update) {
+    link.hidden = true;
+    return;
+  }
+  link.href = s.update.url;
+  $("update-label").textContent = `Update available (v${s.update.version})`;
+  link.hidden = false;
+}
+
+function renderStatus(s: OnboardingStatus): void {
+  renderUpdate(s);
   const set = (key: string, tone: string, text: string) => {
     const li = document.querySelector<HTMLElement>(`[data-check="${key}"]`);
     if (!li) return;

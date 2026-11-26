@@ -18,8 +18,10 @@ export {
 export { authenticateDeviceJwt } from "./auth";
 export { listGrants, loadGrants } from "./grants";
 export {
+  type BrowserSendResult,
   CommandUndeliverableError,
   type DeviceAccountHandler,
+  type DeviceBrowserHandler,
   type DeviceCommandRow,
   DeviceHub,
   type DeviceRef,
@@ -29,6 +31,7 @@ export {
   type FileCommandAck,
   frameFits,
   type RuntimePolicySource,
+  type SendResult,
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
 export { deviceFacts, normalizePairingCode, toDevice } from "./routes";

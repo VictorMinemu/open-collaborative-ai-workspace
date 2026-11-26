@@ -28,8 +28,8 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
       expect(new Set(keys).size, area).toBe(keys.length);
     }
     expect(PINNED_RUNTIME_VERSIONS).toEqual({
-      "claude-code": { cli: "2.1.289", sdk: "0.3.282" },
-      codex: { cli: "0.160.0" },
+      "claude-code": { cli: "2.1.332", sdk: "0.3.282" },
+      codex: { cli: "0.172.0" },
     });
   });
 
@@ -69,19 +69,19 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     expect(isExposed("claude-code", "session.title")).toBe(true);
     expect(isExposed("codex", "session.title")).toBe(true);
     expect(claude?.control).toMatch(/Haiku/);
-    expect(claude?.evidence).toMatch(/claude-code-2\.1\.289\.title\.sdk\.jsonl/);
+    expect(claude?.evidence).toMatch(/claude-code-2\.1\.332\.title\.sdk\.jsonl/);
     expect(claude?.reason).toMatch(/D-18/);
     expect(codex?.control).toMatch(/GPT-6-Luna/);
-    expect(codex?.evidence).toMatch(/codex-0\.160\.0\.title\.rpc\.jsonl/);
+    expect(codex?.evidence).toMatch(/codex-0\.172\.0\.title\.rpc\.jsonl/);
     expect(codex?.reason).toMatch(/D-18/);
   });
 
-  it("Claude rows confirmed by the 2.1.289 fixtures (Plan 02)", () => {
+  it("Claude rows confirmed by the fixtures (Plan 02 at 2.1.289; settings re-recorded at 2.1.332 by 07.13-25)", () => {
     const row = (key: string) => rows("claude-code").find((r) => r.uiKey === key);
     expect(controlStatus("claude-code", "mode.auto")).toBe("exposed");
-    expect(row("mode.auto")?.evidence).toMatch(/claude-code-2\.1\.289\.settings/);
+    expect(row("mode.auto")?.evidence).toMatch(/claude-code-2\.1\.332\.settings/);
     expect(controlStatus("claude-code", "effort")).toBe("exposed");
-    expect(row("effort")?.evidence).toMatch(/2\.1\.289/);
+    expect(row("effort")?.evidence).toMatch(/2\.1\.332/);
     expect(controlStatus("claude-code", "effort.ultracode")).toBe("deferred");
     expect(controlStatus("claude-code", "effort.ultrathink")).toBe("deferred");
     expect(controlStatus("claude-code", "context.window")).toBe("exposed");
@@ -118,7 +118,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     );
   });
 
-  it("Codex rows say what the 0.160.0 fixtures confirmed (Plan 03)", () => {
+  it("Codex rows say what the fixtures confirmed (Plan 03 at 0.160.0; 07.13-25 at 0.172.0)", () => {
     const row = (k: string) => rows("codex").find((r) => r.uiKey === k);
     expect(row("mode.default")).toMatchObject({ status: "exposed" });
     expect(row("mode.default")?.evidence).toContain("codex-0.160.0.supervised-write.rpc.jsonl");
@@ -135,6 +135,20 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     expect(row("slash.passthrough")?.reason).toMatch(/\/compact/);
     expect(row("model.list")?.evidence).toContain("codex-0.160.0.model-list.json");
     expect(rows("codex").some((r) => r.control.toLowerCase().includes("readback"))).toBe(true);
+    // 07.13-25: rows the offline 0.172.0 recordings show the same way name them.
+    expect(row("mode.plan")?.evidence).toContain("codex-0.172.0.plan-read.rpc.jsonl");
+    expect(row("mode.default")?.evidence).toContain("codex-0.172.0.supervised-write.rpc.jsonl");
+    expect(row("context.window")?.evidence).toContain("codex-0.172.0.plan-read.rpc.jsonl");
+    expect(row("model.list")?.evidence).toContain("codex-0.172.0.model-list.json");
+  });
+
+  it("07.13-25 moves only evidence: no fixture of the old pins is named where the new one shows the same", () => {
+    const evidence = RUNTIME_CONTROL_INVENTORY.map((r) => r.evidence).join("\n");
+    // Kept on purpose: the catalog (2.1.289 is a login catalog), the plan-read floor (2.1.287), auto_review (0.160.0
+    // plan-read is the only recording with it), the 0.160.0 file-change approval and model list (an account's list).
+    expect(evidence).not.toMatch(/claude-code-2\.1\.289\.(settings|title)/);
+    expect(evidence).not.toMatch(/codex-0\.160\.0\.title/);
+    expect(evidence).toMatch(/claude-code-2\.1\.287\.plan-read/);
   });
 
   it("lists every D-17 layout element, deferring those that need new data", () => {

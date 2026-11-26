@@ -237,6 +237,66 @@ describe("generateCodexTitle over the 0.160.0 recording", () => {
   });
 });
 
+/**
+ * The title turn at the pinned codex-cli 0.172.0, recorded OFFLINE (07.13-25, PD-29): the real binary against the fake
+ * model with a throwaway CODEX_HOME (`record-codex-fixture.ts --offline --scenario title`). The fake forces the title
+ * with its `[[title:…]]` rule, so the prompt carries the directive and the answer is the fake's.
+ */
+const FIXTURE_172 = readFileSync(
+  join(import.meta.dirname, "__fixtures__", "codex-0.172.0.title.rpc.jsonl"),
+  "utf8",
+)
+  .trim()
+  .split("\n")
+  .map((l) => JSON.parse(l) as Line);
+const OFFLINE_PROMPT = `${RECORDED_PROMPT} [[title:Fix settings page login redirect]]`;
+
+describe("generateCodexTitle over the 0.172.0 offline recording", () => {
+  it("sends the recorded requests with today's instructions and returns a valid title", async () => {
+    const h = harness(FIXTURE_172, OFFLINE_PROMPT);
+    const raw = await h.run;
+    expect(raw).toBe(STORED_TITLE);
+    expect(normalizeSessionTitle(raw)).toBe(STORED_TITLE);
+    const s = h.servers[0]!;
+    const recorded = (method: string) =>
+      FIXTURE_172.find((l) => l.dir === "out" && l.msg.method === method)!.msg.params as Record<
+        string,
+        unknown
+      >;
+    expect(s.received.filter((m) => m.method).map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start",
+    ]);
+    expect(sent(s, "initialize")?.params).toEqual(recorded("initialize"));
+    const { cwd: _a, ...thread } = sent(s, "thread/start")!.params as Record<string, unknown>;
+    const { cwd: _b, ...recordedThread } = recorded("thread/start");
+    // Recorded with the current TITLE_INSTRUCTIONS: the whole thread/start matches.
+    expect(thread).toEqual(recordedThread);
+    expect(recordedThread).toMatchObject({ model: "gpt-6-luna", baseInstructions: TITLE_INSTRUCTIONS });
+    expect(sent(s, "turn/start")?.params).toEqual(recorded("turn/start"));
+    expect(s.extra).toEqual([]);
+  });
+
+  it("the recording is one turn on an ephemeral read-only gpt-6-luna thread with no tool item", () => {
+    const thread = FIXTURE_172.find((l) => l.dir === "in" && (l.msg.result as { thread?: unknown })?.thread)!
+      .msg.result as Record<string, unknown>;
+    expect(thread).toMatchObject({
+      model: "gpt-6-luna",
+      modelProvider: "ocw_fake",
+      approvalPolicy: "untrusted",
+      sandbox: { type: "readOnly" },
+      thread: { ephemeral: true, cliVersion: "0.172.0" },
+    });
+    expect(FIXTURE_172.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+    const items = FIXTURE_172.filter((l) => l.msg.method === "item/started").map(
+      (l) => (l.msg.params as { item: { type: string } }).item.type,
+    );
+    expect(new Set(items)).toEqual(new Set(["userMessage", "agentMessage"]));
+  });
+});
+
 describe("generateCodexTitle", () => {
   it("starts an ephemeral read-only gpt-6-luna thread and returns the final agent message", async () => {
     const h = harness(

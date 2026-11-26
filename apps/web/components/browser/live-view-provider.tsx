@@ -82,7 +82,8 @@ export interface LiveActions {
   windowRef: { current: HTMLElement | null };
 }
 
-const LiveContext = createContext<LiveActions | null>(null);
+/** Exported for the Work Zone's own live view (07.13-21), which provides its socket's actions to the reused pieces. */
+export const LiveContext = createContext<LiveActions | null>(null);
 
 export function useLiveView(): LiveActions {
   const ctx = useContext(LiveContext);

@@ -1,6 +1,9 @@
 # OCW bot browser (`brw`, 07.8-07, D-05, D-11, D-14): one Chromium per bot, driven by agent.mjs over a pipe (no
-# debugging port) and spoken to only by sandboxd over the container's stdio. Build from this directory:
-#   docker build -t ocw-sandbox-brw:local infra/sandbox/browser
+# debugging port) and spoken to only by sandboxd over the container's stdio. Build from the repository root (the root
+# .dockerignore keeps node_modules, .git and .env files out of the context):
+#   docker build -f infra/sandbox/browser/Dockerfile -t ocw-sandbox-brw:local .
+# The redaction, isolated world, capture, zip extraction and site filter are the shared engine's files, copied from
+# packages/browser-engine/src (07.13 D-04), so bots and Work Zone sessions read pages through the same code.
 # Run it only with sandboxd's spec (or run-browser-smoke.sh): user 10001, read-only root, CapDrop ALL,
 # no-new-privileges, Docker init, pids/memory/CPU limits, tmpfs /tmp, ShmSize 512 MiB, a per-bot internal network, no
 # published port, no host IPC. Under runsc, Chromium keeps its own sandbox; on hardened runc, seccomp.json (Docker's
@@ -33,12 +36,12 @@ FROM chromium-${TARGETARCH} AS chromium-zip
 
 FROM base AS agent
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY infra/sandbox/browser/package.json infra/sandbox/browser/package-lock.json ./
 # Exact pin, sha512 integrity per tarball, no lifecycle scripts, no dev dependencies; network at build time only.
 RUN grep -q '"integrity": "sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ=="' package-lock.json \
  && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && rm -rf node_modules/.package-lock.json /root/.npm
-COPY unzip.mjs ./
+COPY packages/browser-engine/src/unzip.mjs ./
 RUN --mount=type=bind,from=chromium-zip,source=/chromium.zip,target=/tmp/chromium.zip \
     node unzip.mjs /tmp/chromium.zip /opt/chromium \
  && test "$(node -p 'JSON.parse(require("fs").readFileSync("node_modules/playwright-core/browsers.json", "utf8")).browsers.find((b) => b.name === "chromium-headless-shell").browserVersion.split(".").slice(0, 3).join(".")')" = 156.0.8078
@@ -70,7 +73,9 @@ RUN set -eu \
 
 COPY --from=agent /opt/chromium /opt/chromium
 COPY --from=agent /app/node_modules /app/node_modules
-COPY package.json agent.mjs redact.mjs capture.mjs world.mjs /app/
+COPY infra/sandbox/browser/package.json infra/sandbox/browser/agent.mjs /app/
+COPY packages/browser-engine/src/redact.mjs packages/browser-engine/src/capture.mjs packages/browser-engine/src/world.mjs \
+     packages/browser-engine/src/site.mjs /app/
 ENV NODE_ENV=production \
     HOME=/tmp \
     OCW_BROWSER_EXECUTABLE=/opt/chromium/chrome-headless-shell \

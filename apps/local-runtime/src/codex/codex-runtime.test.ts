@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import type { SessionBrowserTools } from "../browser/manager.js";
 import {
   ACCOUNT_SWITCH_FAILED_MESSAGE,
   type AccountSignal,
@@ -16,6 +17,7 @@ import {
   CODEX_APP_SERVER_ARGS,
   CODEX_SLOT_APP_SERVER_ARGS,
   CodexRuntime,
+  codexBrowserArgs,
   codexChildEnv,
 } from "./codex-runtime.js";
 import { parseCodexLogin } from "./detect.js";
@@ -461,8 +463,11 @@ describe("CodexRuntime — turns and approvals", () => {
   it("answers unsupported server requests with a JSON-RPC error", async () => {
     const { start } = setup();
     const server = await start();
-    const resp = await server.request("item/tool/requestUserInput", {});
+    // 07.13 (PD-08): `item/tool/requestUserInput` is answered now (empty for any server but ours); others still fail.
+    const resp = await server.request("item/tool/call", {});
     expect(resp.error).toMatchObject({ code: -32601 });
+    const question = await server.request("item/tool/requestUserInput", {});
+    expect(question.result).toEqual({ answers: {} });
   });
 
   it("interrupts the running turn via turn/interrupt", async () => {
@@ -705,85 +710,168 @@ class ReplayAppServer extends EventEmitter implements AppServerProcess {
   }
 }
 
-describe("CodexRuntime — recorded Supervised write (codex-cli 0.160.0, read-only + untrusted)", () => {
-  const lines = loadFixture("codex-0.160.0.supervised-write.rpc.jsonl");
-  const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+/** The recorded prompt text of a fixture's first `turn/start` (an offline recording carries the fake's directive). */
+function recordedPrompt(lines: RpcLine[]): string {
+  const params = lines.find((l) => l.dir === "out" && l.msg.method === "turn/start")?.msg.params as
+    | { input?: Array<{ text?: string }> }
+    | undefined;
+  return params?.input?.[0]?.text ?? "";
+}
 
-  it("the recording asked for a read-only sandbox with untrusted approvals reviewed by the user", () => {
-    expect(out("thread/start")[0]?.msg.params).toMatchObject({
-      cwd: FIXTURE_ROOT,
-      sandbox: "read-only",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-    });
-    expect(out("turn/start")[0]?.msg.params).toMatchObject({
-      effort: "low",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-      sandboxPolicy: { type: "readOnly" },
-    });
-    expect(lines.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+/** Runs one prompt through CodexRuntime over a replay of `lines`; every approval is declined. */
+async function replayTurn(
+  lines: RpcLine[],
+  permissionMode: "plan" | "default",
+  configure?: { effort: string },
+): Promise<{ events: SessionEvent[]; replay: ReplayAppServer }> {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
+  let server: ReplayAppServer | null = null;
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({
+    spawnAppServer: () => {
+      server = new ReplayAppServer(lines);
+      return server;
+    },
   });
-
-  it("no file change completed with a write", () => {
-    const writes = lines.filter(
-      (l) =>
-        l.msg.method === "item/completed" &&
-        (l.msg.params as { item?: { type?: string; status?: string } }).item?.type === "fileChange" &&
-        (l.msg.params as { item?: { status?: string } }).item?.status === "completed",
-    );
-    expect(writes).toEqual([]);
+  const completed = new Promise<void>((resolve) => {
+    void runtime
+      .start({ sessionId: "fixture-session", cwd, permissionMode }, (ev) => {
+        events.push(ev);
+        if (ev.type === "approval.requested")
+          runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
+        if (ev.type === "prompt.completed") resolve();
+      })
+      .then(() => (configure ? runtime.configure("fixture-session", configure) : undefined))
+      .then(() => runtime.prompt("fixture-session", { promptId: "prompt-1", text: recordedPrompt(lines) }));
   });
+  await completed;
+  return { events, replay: server as unknown as ReplayAppServer };
+}
 
-  it("replays through the adapter: the same requests, an approval before any write, declined", async () => {
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
-    let server: ReplayAppServer | null = null;
-    const events: SessionEvent[] = [];
-    const runtime = new CodexRuntime({
-      spawnAppServer: () => {
-        server = new ReplayAppServer(lines);
-        return server;
-      },
-    });
-    const completed = new Promise<void>((resolve) => {
-      void runtime
-        .start({ sessionId: "fixture-session", cwd, permissionMode: "default" }, (ev) => {
-          events.push(ev);
-          if (ev.type === "approval.requested")
-            runtime.resolveApproval("fixture-session", ev.approvalId, "deny");
-          if (ev.type === "prompt.completed") resolve();
-        })
-        .then(() => runtime.configure("fixture-session", { effort: "low" }))
-        .then(() =>
-          runtime.prompt("fixture-session", {
-            promptId: "prompt-1",
-            text: "Create a file named note.txt containing the word hi.",
-          }),
-        );
-    });
-    await completed;
-    const replay = server as unknown as ReplayAppServer;
-    // The adapter sends the same client requests, in the same order, as the recording.
-    const recordedMethods = lines.filter((l) => l.dir === "out" && l.msg.method).map((l) => l.msg.method);
-    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(
-      recordedMethods.filter((m) => m !== "turn/interrupt"),
-    );
-    expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
-      ...out("turn/start")[0]?.msg.params,
-      sandboxPolicy: expect.any(Object),
-    });
+/** The client methods of a recording, in order (an interrupt the recorder sent is not part of the turn). */
+const recordedMethods = (lines: RpcLine[]) =>
+  lines
+    .filter((l) => l.dir === "out" && l.msg.method)
+    .map((l) => l.msg.method)
+    .filter((m) => m !== "turn/interrupt");
 
-    const types = events.map((e) => e.type);
-    const firstApproval = types.indexOf("approval.requested");
-    expect(firstApproval).toBeGreaterThan(-1);
-    expect(events.find((e) => e.type === "approval.resolved")).toMatchObject({ decision: "deny" });
-    const approvedWrites = events.filter(
-      (e) => e.type === "tool.completed" && e.ok && e.summary.startsWith("Edited"),
-    );
-    expect(approvedWrites).toEqual([]);
-    expect(events.at(-1)?.type === "prompt.completed" || types.includes("prompt.completed")).toBe(true);
+// 0.160.0 is the compatibility floor (a ChatGPT-login recording); 0.172.0 is the pin, recorded offline against the
+// fake model (`record-codex-fixture.ts --offline`, 07.13-25): the fake calls `exec_command` through `[[call]]`.
+describe.each([
+  { version: "0.160.0", file: "codex-0.160.0.plan-read.rpc.jsonl" },
+  { version: "0.172.0", file: "codex-0.172.0.plan-read.rpc.jsonl" },
+])("CodexRuntime — recorded plan-read replay (codex-cli $version, read-only)", ({ file }) => {
+  const lines = loadFixture(file);
+
+  it("replays through the adapter: the same requests, one command, the reply and a completed prompt", async () => {
+    const { events, replay } = await replayTurn(lines, "plan");
+    expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(recordedMethods(lines));
+    const kinds = events
+      .map((e) => e.type)
+      .filter((t) =>
+        ["session.started", "prompt.started", "tool.started", "tool.completed", "assistant.message"].includes(
+          t,
+        ),
+      );
+    expect(kinds).toEqual([
+      "session.started",
+      "prompt.started",
+      "tool.started",
+      "tool.completed",
+      "assistant.message",
+    ]);
+    expect(events.find((e) => e.type === "tool.started")).toMatchObject({
+      name: "Bash",
+      summary: expect.stringContaining("cat hello.txt"),
+    });
+    expect(events.find((e) => e.type === "tool.completed")).toMatchObject({ ok: true });
+    expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+    expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-1" });
   });
 });
+
+describe.each([
+  {
+    version: "0.160.0",
+    file: "codex-0.160.0.supervised-write.rpc.jsonl",
+    approval: "item/fileChange/requestApproval",
+  },
+  {
+    version: "0.172.0",
+    file: "codex-0.172.0.supervised-write.rpc.jsonl",
+    approval: "item/commandExecution/requestApproval",
+  },
+])(
+  "CodexRuntime — recorded Supervised write (codex-cli $version, read-only + untrusted)",
+  ({ file, approval }) => {
+    const lines = loadFixture(file);
+    const out = (method: string) => lines.filter((l) => l.dir === "out" && l.msg.method === method);
+
+    it("the recording asked for a read-only sandbox with untrusted approvals reviewed by the user", () => {
+      expect(out("thread/start")[0]?.msg.params).toMatchObject({
+        cwd: FIXTURE_ROOT,
+        sandbox: "read-only",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+      });
+      expect(out("turn/start")[0]?.msg.params).toMatchObject({
+        effort: "low",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "readOnly" },
+      });
+      expect(lines.filter((l) => l.msg.method === "turn/completed")).toHaveLength(1);
+    });
+
+    it("the write was asked for through an approval request, which the recorder declined", () => {
+      const requests = lines.filter((l) => l.dir === "in" && l.msg.method && l.msg.id !== undefined);
+      expect(requests.map((l) => l.msg.method)).toEqual([approval]);
+      const id = requests[0]?.msg.id;
+      expect(
+        lines.find((l) => l.dir === "out" && l.msg.id === id && !l.msg.method)?.msg.result,
+      ).toMatchObject({
+        decision: "decline",
+      });
+    });
+
+    it("no file change and no command completed with a write", () => {
+      const writes = lines.filter((l) => {
+        const item = (
+          l.msg.params as { item?: { type?: string; status?: string; command?: string } } | undefined
+        )?.item;
+        if (l.msg.method !== "item/completed" || item?.status !== "completed") return false;
+        return (
+          item.type === "fileChange" ||
+          (item.type === "commandExecution" && /note\.txt/.test(item.command ?? ""))
+        );
+      });
+      expect(writes).toEqual([]);
+    });
+
+    it("replays through the adapter: the same requests, an approval before any write, declined", async () => {
+      const { events, replay } = await replayTurn(lines, "default", { effort: "low" });
+      // The adapter sends the same client requests, in the same order, as the recording.
+      expect(replay.sent.filter((m) => m.method).map((m) => m.method)).toEqual(recordedMethods(lines));
+      expect(replay.sent.find((m) => m.method === "turn/start")?.params).toEqual({
+        ...out("turn/start")[0]?.msg.params,
+        sandboxPolicy: expect.any(Object),
+      });
+
+      const types = events.map((e) => e.type);
+      const firstApproval = types.indexOf("approval.requested");
+      expect(firstApproval).toBeGreaterThan(-1);
+      expect(events.find((e) => e.type === "approval.resolved")).toMatchObject({ decision: "deny" });
+      const approvedWrites = events.filter(
+        (e) =>
+          e.type === "tool.completed" &&
+          e.ok &&
+          (e.summary.startsWith("Edited") || /note\.txt/.test(e.summary)),
+      );
+      expect(approvedWrites).toEqual([]);
+      expect(types).toContain("prompt.completed");
+    });
+  },
+);
 
 // ------------------------------------------------------------------------------------------------
 // Prompt images at codex app-server 0.160.0 (06.1-03, D-05, D-07, P-07). No real Codex runs: the FakeAppServer
@@ -2119,4 +2207,325 @@ describe("CodexRuntime.catalog() — under a slot when the default home is signe
     expect(asked).toEqual([]);
     expect(servers[0]?.env.CODEX_HOME).toBe("/parent/codex-home");
   });
+});
+
+// ------------------------------------------------------------------------------------------------
+// 07.13-14 (D-08, PD-08, PD-23, A-1 … A-3): a browser-enabled session's app-server starts the `ocw-runtime browser-mcp`
+// shim through `-c mcp_servers.ocw_browser.*`; Codex's requests about our own server are answered, any other server's
+// declined. The shim and the manager are tested in browser/; here the browser tools are a scripted stand-in.
+
+const BROWSER_SID = "33333333-3333-4333-8333-333333333333";
+const SHIM = { command: "/opt/node/bin/node", entry: ["/opt/ocw/ocw-runtime.mjs"], home: "/home/u/.ocw" };
+
+interface ScriptedBrowser extends SessionBrowserTools {
+  setAvailable(on: boolean): void;
+  readonly imageInput: boolean[];
+  readonly tokenFile: string;
+  readonly token: string;
+}
+
+/** A `SessionBrowserTools` with a real 0600 token file and a switch for `available`. */
+function scriptedBrowser(available: boolean): ScriptedBrowser {
+  const dir = mkdtempSync(join(tmpdir(), "ocw-codex-browser-"));
+  const token = "ab".repeat(32);
+  const tokenFile = join(dir, "shim-token");
+  writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+  let on = available;
+  const callbacks = new Set<(a: boolean) => void>();
+  const imageInput: boolean[] = [];
+  return {
+    get available() {
+      return on;
+    },
+    call: async () => {
+      throw new Error("the adapter never calls the tools itself");
+    },
+    markUnavailable: () => {
+      on = false;
+    },
+    onAvailableChange: (cb) => {
+      callbacks.add(cb);
+      return () => callbacks.delete(cb);
+    },
+    setImageInput: (v) => imageInput.push(v),
+    shimTokenFile: async () => tokenFile,
+    setAvailable(v) {
+      on = v;
+      for (const cb of callbacks) cb(v);
+    },
+    imageInput,
+    tokenFile,
+    token,
+  };
+}
+
+function browserSetup(over: { catalog?: boolean } = {}) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
+  const servers: CatalogAppServer[] = [];
+  const events: SessionEvent[] = [];
+  const runtime = new CodexRuntime({
+    codexPath: "/usr/local/bin/codex",
+    browserShim: SHIM,
+    detect: async () => ({ id: "codex", installed: true, version: "0.172.0", loggedIn: true }),
+    spawnAppServer: ({ env, args }) => {
+      const s = new CatalogAppServer(env);
+      s.args = args ?? [];
+      servers.push(s);
+      return s;
+    },
+  });
+  const start = async (
+    browser: SessionBrowserTools | undefined,
+    extra: { account?: RuntimeAccount; model?: string } = {},
+  ) => {
+    if (over.catalog) await runtime.catalog();
+    await runtime.start(
+      {
+        sessionId: BROWSER_SID,
+        cwd,
+        permissionMode: "default",
+        ...(browser ? { browser } : {}),
+        ...extra,
+      },
+      (e) => events.push(e),
+    );
+    return servers[servers.length - 1] as CatalogAppServer;
+  };
+  return { cwd, runtime, servers, events, start };
+}
+
+const toml = (s: string) => JSON.stringify(s);
+const browserOverrides = (tokenFile: string, shim = SHIM) => [
+  "-c",
+  `mcp_servers.ocw_browser.command=${toml(shim.command)}`,
+  "-c",
+  `mcp_servers.ocw_browser.args=[${[...shim.entry, "browser-mcp"].map(toml).join(",")}]`,
+  "-c",
+  `mcp_servers.ocw_browser.env={OCW_BROWSER_SESSION=${toml(BROWSER_SID)},OCW_BROWSER_TOKEN_FILE=${toml(tokenFile)},OCW_HOME=${toml(shim.home)}}`,
+  "-c",
+  'mcp_servers.ocw_browser.default_tools_approval_mode="approve"',
+  "-c",
+  "mcp_servers.ocw_browser.tool_timeout_sec=960",
+];
+
+describe("CodexRuntime — the Work Zone browser through the stdio shim (07.13-14, PD-08)", () => {
+  it("a session with the browser available starts the shim with -c overrides; the token is never in argv", async () => {
+    const { start, runtime } = browserSetup();
+    const browser = scriptedBrowser(true);
+    const server = await start(browser);
+    expect(server.args).toEqual([...CODEX_APP_SERVER_ARGS, ...browserOverrides(browser.tokenFile)]);
+    expect(server.args.join(" ")).not.toContain(browser.token);
+    expect(Object.values(server.env).join(" ")).not.toContain(browser.token);
+    await runtime.stopAll();
+  });
+
+  it("a slot session gets the slot's arguments plus the same overrides", async () => {
+    const { start, runtime } = browserSetup();
+    const browser = scriptedBrowser(true);
+    const server = await start(browser, { account: slotAccount(SLOT_A) });
+    expect(server.args).toEqual([...CODEX_SLOT_APP_SERVER_ARGS, ...browserOverrides(browser.tokenFile)]);
+    await runtime.stopAll();
+  });
+
+  it("without the browser, or with it unavailable, the arguments are today's", async () => {
+    const none = browserSetup();
+    expect((await none.start(undefined)).args).toEqual([]);
+    const off = browserSetup();
+    expect((await off.start(scriptedBrowser(false))).args).toEqual([]);
+    const slot = browserSetup();
+    expect((await slot.start(scriptedBrowser(false), { account: slotAccount(SLOT_A) })).args).toEqual(
+      CODEX_SLOT_APP_SERVER_ARGS,
+    );
+    await Promise.all([none.runtime.stopAll(), off.runtime.stopAll(), slot.runtime.stopAll()]);
+  });
+
+  it("codexBrowserArgs quotes every value as TOML (a Windows path keeps its backslashes)", () => {
+    const shim = {
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      entry: ['C:\\Users\\Ana "A"\\ocw\\ocw-runtime.mjs'],
+      home: "C:\\Users\\Ana\\.ocw",
+    };
+    const args = codexBrowserArgs(shim, { sessionId: BROWSER_SID, tokenFile: "C:\\o\\run\\x\\shim-token" });
+    expect(args).toEqual(browserOverrides("C:\\o\\run\\x\\shim-token", shim));
+    expect(args[1]).toBe('mcp_servers.ocw_browser.command="C:\\\\Program Files\\\\nodejs\\\\node.exe"');
+    const withDir = codexBrowserArgs(
+      { ...SHIM, browsersDir: "/srv/browsers" },
+      { sessionId: BROWSER_SID, tokenFile: "/t" },
+    );
+    expect(withDir[5]).toContain('OCW_BROWSERS_DIR="/srv/browsers"');
+  });
+
+  it("accepts an elicitation from ocw_browser and declines any other server's, or ours without the overrides", async () => {
+    const { start, runtime } = browserSetup();
+    const server = await start(scriptedBrowser(true));
+    const ask = (serverName: string) =>
+      server.request("mcpServer/elicitation/request", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName,
+        mode: "form",
+        message: `Allow the ${serverName} MCP server to run tool "open"?`,
+        requestedSchema: { type: "object", properties: {} },
+        _meta: { codex_approval_kind: "mcp_tool_call", tool_name: "open", tool_params: { url: "x" } },
+      });
+    expect((await ask("ocw_browser")).result).toEqual({ action: "accept", content: {}, _meta: null });
+    expect((await ask("other")).result).toEqual({ action: "decline", content: null, _meta: null });
+    await runtime.stopAll();
+
+    const off = browserSetup();
+    const plain = await off.start(undefined);
+    const r = await plain.request("mcpServer/elicitation/request", {
+      serverName: "ocw_browser",
+      mode: "form",
+    });
+    expect(r.result).toEqual({ action: "decline", content: null, _meta: null });
+    await off.runtime.stopAll();
+  });
+
+  it("answers item/tool/requestUserInput only for an ocw_browser tool call; unknown methods stay -32601", async () => {
+    const { start, runtime } = browserSetup();
+    const server = await start(scriptedBrowser(true));
+    const item = (id: string, srv: string) =>
+      server.notify("item/started", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { type: "mcpToolCall", id, server: srv, tool: "open", status: "inProgress", arguments: {} },
+      });
+    item("call_ours", "ocw_browser");
+    item("call_theirs", "other");
+    await wait();
+    const questions = [
+      { id: "q1", header: "Approve", question: "Run it?", options: [{ label: "Deny" }, { label: "Allow" }] },
+      { id: "q2", header: "Free", question: "Why?", options: null },
+    ];
+    const ours = await server.request("item/tool/requestUserInput", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "call_ours",
+      questions,
+    });
+    expect(ours.result).toEqual({ answers: { q1: { answers: ["Allow"] } } });
+    const theirs = await server.request("item/tool/requestUserInput", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "call_theirs",
+      questions,
+    });
+    expect(theirs.result).toEqual({ answers: {} });
+    const unknown = await server.request("item/tool/somethingElse", {});
+    expect(unknown.error).toMatchObject({ code: -32601 });
+    await runtime.stopAll();
+  });
+
+  it("a browser that becomes available later is offered from the next turn: restart + thread/resume of the same thread", async () => {
+    const { start, runtime, servers, events } = browserSetup();
+    const browser = scriptedBrowser(false);
+    const first = await start(browser);
+    expect(first.args).toEqual([]);
+    browser.setAvailable(true);
+    await runtime.prompt(BROWSER_SID, { promptId: "p1", text: "open the app" });
+    await wait(20);
+    expect(servers).toHaveLength(2);
+    const second = servers[1] as CatalogAppServer;
+    expect(first.killed).toContain("SIGTERM");
+    expect(second.args).toEqual([...CODEX_APP_SERVER_ARGS, ...browserOverrides(browser.tokenFile)]);
+    expect(second.received.map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "turn/start",
+    ]);
+    expect(second.received[2]?.params).toMatchObject({ threadId: "thread-1" });
+    // The restart is not the session's end.
+    expect(events.some((e) => e.type === "session.state" && e.status === "completed")).toBe(false);
+    second.completeTurn();
+    await wait();
+
+    // Withdrawn: the next turn runs on an app-server without the overrides.
+    browser.setAvailable(false);
+    await runtime.prompt(BROWSER_SID, { promptId: "p2", text: "again" });
+    await wait(20);
+    expect(servers).toHaveLength(3);
+    expect(servers[2]?.args).toEqual([]);
+    await runtime.stopAll();
+  });
+
+  it("never restarts inside a turn: a change while a turn runs waits for the next one", async () => {
+    const { start, runtime, servers } = browserSetup();
+    const browser = scriptedBrowser(false);
+    const server = await start(browser);
+    await runtime.prompt(BROWSER_SID, { promptId: "p1", text: "work" });
+    await wait();
+    browser.setAvailable(true);
+    await runtime.steer(BROWSER_SID, { promptId: "p1b", text: "steer" });
+    await wait();
+    expect(servers).toHaveLength(1);
+    server.completeTurn();
+    await wait();
+    await runtime.prompt(BROWSER_SID, { promptId: "p2", text: "next" });
+    await wait(20);
+    expect(servers).toHaveLength(2);
+    await runtime.stopAll();
+  });
+
+  it("passes the model's imageInput from the catalog to setImageInput (unknown model = false)", async () => {
+    const withCatalog = browserSetup({ catalog: true });
+    const browser = scriptedBrowser(true);
+    await withCatalog.start(browser, { model: "gpt-6-sol" });
+    expect(browser.imageInput.at(-1)).toBe(true);
+    await withCatalog.runtime.stopAll();
+
+    const unknown = browserSetup({ catalog: true });
+    const other = scriptedBrowser(true);
+    await unknown.start(other); // the fake reports gpt-test, which the catalog does not list
+    expect(other.imageInput.at(-1)).toBe(false);
+    await unknown.runtime.stopAll();
+  });
+});
+
+describe("CodexRuntime — the recorded browser-mcp turns replay through the adapter (codex-cli 0.172.0, 07.13-04)", () => {
+  /** One prompt over a replay of `file` with the browser available; returns the events and what the adapter sent. */
+  async function replayBrowser(file: string) {
+    const lines = loadFixture(file);
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-replay-")));
+    let server: ReplayAppServer | null = null;
+    const events: SessionEvent[] = [];
+    const runtime = new CodexRuntime({
+      browserShim: SHIM,
+      spawnAppServer: () => {
+        server = new ReplayAppServer(lines);
+        return server;
+      },
+    });
+    await new Promise<void>((resolve) => {
+      void runtime
+        .start(
+          { sessionId: BROWSER_SID, cwd, permissionMode: "default", browser: scriptedBrowser(true) },
+          (ev) => {
+            events.push(ev);
+            if (ev.type === "prompt.completed") resolve();
+          },
+        )
+        .then(() => runtime.prompt(BROWSER_SID, { promptId: "prompt-1", text: recordedPrompt(lines) }));
+    });
+    await runtime.stopAll();
+    return { lines, events, sent: (server as unknown as ReplayAppServer).sent };
+  }
+
+  it.each(["codex-0.172.0.browser-mcp.rpc.jsonl", "codex-0.172.0.browser-mcp.prompt-mode.rpc.jsonl"])(
+    "%s: both browser calls complete, every server request answered as recorded",
+    async (file) => {
+      const { lines, events, sent } = await replayBrowser(file);
+      const requests = lines.filter((l) => l.dir === "in" && l.msg.method && l.msg.id !== undefined);
+      for (const req of requests) {
+        const recorded = lines.find((l) => l.dir === "out" && l.msg.id === req.msg.id && !l.msg.method);
+        const answered = sent.find((m) => m.id === req.msg.id && !m.method);
+        expect(answered?.result).toEqual(recorded?.msg.result);
+      }
+      const completed = events.filter((e) => e.type === "tool.completed");
+      expect(completed).toHaveLength(2);
+      expect(completed.every((e) => e.type === "tool.completed" && e.ok)).toBe(true);
+      expect(events.find((e) => e.type === "prompt.completed")).toMatchObject({ promptId: "prompt-1" });
+    },
+  );
 });

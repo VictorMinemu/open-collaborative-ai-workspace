@@ -72,6 +72,15 @@ export const RuntimeConfigSchema = z.object({
    * only on this device (`ocw-runtime isolated-server on|off`, or `OCW_ISOLATED_SERVER`), never by the server or the web.
    */
   isolatedServer: z.object({ on: z.boolean().default(false) }).default({ on: false }),
+  /**
+   * Phase 07.13 (D-10): the device owner's LOCAL Work Zone browser opt-in (default off). Set only on this device: the
+   * desktop tray, `ocw-runtime browser on|off`, or `OCW_ALLOW_BROWSER` for a headless daemon; never by the server or
+   * the web. `sandbox` (PD-18): Chromium's sandbox is always on; `container` turns it off only when the daemon itself
+   * runs in a container (`/.dockerenv` or `/run/.containerenv`), never as an automatic fallback (`OCW_BROWSER_SANDBOX`).
+   */
+  browser: z
+    .object({ optIn: z.boolean().default(false), sandbox: z.enum(["on", "container"]).default("on") })
+    .default({ optIn: false, sandbox: "on" }),
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
@@ -120,6 +129,35 @@ export function resolveIsolatedServer(
   if (raw === "1" || raw === "true") return { on: true, source: "env" };
   if (raw === "0" || raw === "false") return { on: false, source: "env" };
   return { on: config.isolatedServer?.on === true, source: "config" };
+}
+
+/** Where the effective browser opt-in comes from: the environment, runtime.json, or nothing (off, the default). */
+export type BrowserOptInSource = "env" | "config" | "default";
+export type BrowserSandboxMode = "on" | "container";
+
+/**
+ * Phase 07.13 (D-10, PD-18, PD-27): the effective browser opt-in and sandbox mode. `OCW_ALLOW_BROWSER` = "1"/"true" →
+ * on, "0"/"false" → off; any other value is ignored and runtime.json decides (`config` when it says on; off is the
+ * default, so an absent or false value reads `default`). `OCW_BROWSER_SANDBOX` = `on` | `container` wins over the
+ * file's `browser.sandbox`; any other value is ignored (the sandbox stays on).
+ */
+export function resolveBrowser(
+  config: { browser?: { optIn?: boolean; sandbox?: BrowserSandboxMode } | undefined },
+  env: NodeJS.ProcessEnv = process.env,
+): { optIn: boolean; source: BrowserOptInSource; sandbox: BrowserSandboxMode } {
+  const rawSandbox = env.OCW_BROWSER_SANDBOX?.trim().toLowerCase();
+  const sandbox: BrowserSandboxMode =
+    rawSandbox === "on" || rawSandbox === "container"
+      ? rawSandbox
+      : config.browser?.sandbox === "container"
+        ? "container"
+        : "on";
+  const raw = env.OCW_ALLOW_BROWSER?.trim().toLowerCase();
+  if (raw === "1" || raw === "true") return { optIn: true, source: "env", sandbox };
+  if (raw === "0" || raw === "false") return { optIn: false, source: "env", sandbox };
+  return config.browser?.optIn === true
+    ? { optIn: true, source: "config", sandbox }
+    : { optIn: false, source: "default", sandbox };
 }
 
 /**
@@ -180,10 +218,19 @@ export async function setIsolatedServer(home: string, on: boolean): Promise<void
   await patchRuntimeJsonSection(home, "isolatedServer", { on });
 }
 
+/**
+ * Phase 07.13 (D-10, PD-27): writes `browser.optIn` into `<home>/runtime.json` (atomic, 0600), keeping every other key
+ * (the sandbox mode included), exactly like `setFullAccessOptIn`. Local callers only (the CLI, tests; the desktop app
+ * has its own writer). A running daemon applies it on the value-less `reloadConfig`; `OCW_ALLOW_BROWSER` still wins.
+ */
+export async function setBrowserOptIn(home: string, on: boolean): Promise<void> {
+  await patchRuntimeJsonSection(home, "browser", { optIn: on });
+}
+
 /** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
 async function patchRuntimeJsonSection(
   home: string,
-  section: "fullAccess" | "runtimeUpdates" | "isolatedServer",
+  section: "fullAccess" | "runtimeUpdates" | "isolatedServer" | "browser",
   patch: Record<string, unknown>,
 ): Promise<void> {
   await ensureOcwHome(home);

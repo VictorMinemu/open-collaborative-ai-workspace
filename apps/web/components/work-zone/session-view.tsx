@@ -5,6 +5,7 @@ import {
   type Permission,
   WORK_PROMPT_MAX_IMAGES,
   type WorkSession,
+  type WorkSessionBrowserState,
   type WorkSessionChanges,
   type WorkSessionOrigin,
 } from "@ocw/contracts";
@@ -12,6 +13,7 @@ import {
   Archive,
   ArrowLeft,
   FileDiff,
+  Globe,
   Info,
   KeyRound,
   ListOrdered,
@@ -47,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { useArchiveSession, useDevices, useDiff, useWorkSessions } from "@/lib/workzone-queries";
 import { AgentBar } from "./agent-bar";
 import { ApprovalBanner } from "./approval-banner";
+import { WorkLivePanel } from "./browser/work-live-panel";
 import { ChangesCard } from "./changes-card";
 import { ChangesPanel } from "./changes-panel";
 import { Composer, type ComposerApi } from "./composer";
@@ -59,7 +62,22 @@ import { SessionMemoryStrip } from "./session-memory-strip";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
-type PanelTab = "queue" | "changes";
+type PanelTab = "queue" | "changes" | "browser";
+
+/**
+ * The session's panel tabs (07.13-16, D-15): Browser joins Queue and Changes only while the session's browser is
+ * available (policy, device opt-in and capability all on); an older API sends no `browser` and gets no tab.
+ */
+export function panelTabsOf(browser: WorkSessionBrowserState | undefined): PanelTab[] {
+  return browser?.status === "available" ? ["queue", "changes", "browser"] : ["queue", "changes"];
+}
+
+const PANEL_TITLE: Record<PanelTab, string> = { queue: "Queue", changes: "Changes", browser: "Browser" };
+const PANEL_ICON: Record<PanelTab, ReactNode> = {
+  queue: <ListOrdered />,
+  changes: <FileDiff />,
+  browser: <Globe />,
+};
 
 /**
  * The live view's words after access was lost: taken away by a change of who can see it (`visibility`, 07.9 R7), the
@@ -333,9 +351,15 @@ function LoadedSession({
 
   const setPanel = useCallback((t: PanelTab | null) => {
     setPanelState(t);
+    // Browser is never remembered: an open Browser panel streams the device's page, so it opens only on request.
+    if (t === "browser") return;
     if (t) window.localStorage.setItem(PANEL_KEY, t);
     else window.localStorage.removeItem(PANEL_KEY);
   }, []);
+  // The browser went off (policy, device opt-out, an older runtime): its panel closes, and with it the socket.
+  const browserOn = session.browser?.status === "available";
+  const openTab = panel === "browser" && !browserOn ? null : panel;
+  const sheetTab = sheet === "browser" && !browserOn ? null : sheet;
   const openPanel = useCallback(
     (t: PanelTab) => {
       if (wide) setPanel(t);
@@ -379,6 +403,20 @@ function LoadedSession({
   );
   // Decided by the API resolver (creator, device owner or admin, minus Tool and Device layer denials).
   const canDecide = viewerCan.includes("work_session.approve");
+  // 07.13-21 (D-21, D-26): a member-only browser request is for the in-flight turn's human author; a bot's turn has
+  // nobody. A hint for the web's actions only: the API decides who may answer.
+  const viewerId = useMe({ enabled: false }).data?.user.id ?? null;
+  const inFlight = state.prompts
+    .filter((p) => p.status === "running" || p.status === "dispatched")
+    .sort((a, b) => (b.dispatchedAt ?? "").localeCompare(a.dispatchedAt ?? ""))[0];
+  const asker =
+    inFlight && !inFlight.authorAgent ? { id: inFlight.authorUserId, name: inFlight.authorName } : null;
+  // "Open and sign in": the Browser tab opens and takes control as soon as the server allows it.
+  const [takeRequest, setTakeRequest] = useState(0);
+  const openSignIn = useCallback(() => {
+    openPanel("browser");
+    setTakeRequest((n) => n + 1);
+  }, [openPanel]);
   const deciderHint = `Waiting for ${session.createdByName ?? "the session owner"}${
     device?.ownerName && device.ownerUserId !== session.createdBy ? ` or ${device.ownerName}` : ""
   } to decide.`;
@@ -396,9 +434,9 @@ function LoadedSession({
       <SessionHeader
         session={session}
         state={state}
-        panel={wide ? panel : null}
+        panel={wide ? openTab : null}
         wide={wide}
-        onPanel={(t) => (wide ? setPanel(panel === t ? null : t) : setSheet(t))}
+        onPanel={(t) => (wide ? setPanel(openTab === t ? null : t) : setSheet(t))}
         queued={queued}
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
@@ -444,6 +482,10 @@ function LoadedSession({
                 canDecide={canDecide}
                 agentLabel={RUNTIMES[session.runtime].label}
                 deciderHint={deciderHint}
+                viewerId={viewerId}
+                asker={asker}
+                deviceName={session.deviceName}
+                onOpenSignIn={openSignIn}
               />
             ) : null}
             {leftProject ? (
@@ -473,50 +515,41 @@ function LoadedSession({
             )}
           </div>
         </DropZone>
-        {wide && panel ? (
+        {wide && openTab ? (
           <aside
             className="flex w-[380px] shrink-0 flex-col border-l bg-sidebar/30"
             data-testid="session-panel"
+            data-panel={openTab}
+            aria-label={PANEL_TITLE[openTab]}
           >
             <div className="flex h-12 shrink-0 items-center gap-2 border-b pr-2 pl-4">
               <h2 className="flex flex-1 items-center gap-1.5 font-medium text-[13px] [&_svg]:size-4">
-                {panel === "queue" ? <ListOrdered /> : <FileDiff />}
-                {panel === "queue" ? "Queue" : "Changes"}
+                {PANEL_ICON[openTab]}
+                {PANEL_TITLE[openTab]}
               </h2>
               <Button size="icon-xs" variant="ghost" aria-label="Close panel" onClick={() => setPanel(null)}>
                 <X />
               </Button>
             </div>
             <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
-              {panel === "queue" ? (
-                <QueuePanel sessionId={session.id} prompts={state.prompts} />
-              ) : (
-                <ChangesPanel
-                  sessionId={session.id}
-                  live={state.changes}
-                  deviceOnline={session.deviceOnline}
-                />
-              )}
+              <PanelBody tab={openTab} session={session} state={state} takeRequest={takeRequest} />
             </div>
           </aside>
         ) : null}
       </div>
-      <Sheet open={sheet !== null} onOpenChange={(o) => !o && setSheet(null)}>
+      <Sheet open={sheetTab !== null} onOpenChange={(o) => !o && setSheet(null)}>
         <SheetContent side="right" className="w-[30rem] max-w-[100vw]">
-          <SheetTitle className="sr-only">{sheet === "changes" ? "Changes" : "Queue"}</SheetTitle>
+          <SheetTitle className="sr-only">{PANEL_TITLE[sheetTab ?? "queue"]}</SheetTitle>
           <PanelTabs
-            tab={sheet ?? "queue"}
+            tab={sheetTab ?? "queue"}
             onTab={(t) => setSheet(t)}
             queued={queued}
             changesCount={changesCount}
+            browser={session.browser}
             className="pr-12"
           />
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4">
-            {sheet === "changes" ? (
-              <ChangesPanel sessionId={session.id} live={state.changes} deviceOnline={session.deviceOnline} />
-            ) : (
-              <QueuePanel sessionId={session.id} prompts={state.prompts} />
-            )}
+            <PanelBody tab={sheetTab ?? "queue"} session={session} state={state} takeRequest={takeRequest} />
           </div>
         </SheetContent>
       </Sheet>
@@ -524,21 +557,46 @@ function LoadedSession({
   );
 }
 
-function PanelTabs({
+/** One panel's content: the side panel on wide screens and the sheet below share it. */
+function PanelBody({
+  tab,
+  session,
+  state,
+  takeRequest,
+}: {
+  tab: PanelTab;
+  session: WorkSession;
+  state: LiveSession;
+  /** 07.13-21: bumped by "Open and sign in", so the Browser panel takes control once the server allows it. */
+  takeRequest: number;
+}) {
+  if (tab === "browser")
+    return <WorkLivePanel key={session.id} session={session} takeRequest={takeRequest} />;
+  if (tab === "changes") {
+    return <ChangesPanel sessionId={session.id} live={state.changes} deviceOnline={session.deviceOnline} />;
+  }
+  return <QueuePanel sessionId={session.id} prompts={state.prompts} />;
+}
+
+export function PanelTabs({
   tab,
   onTab,
   queued,
   changesCount,
+  browser,
   className,
 }: {
   tab: PanelTab;
   onTab: (t: PanelTab) => void;
   queued: number;
   changesCount: number;
+  /** The session's browser: its tab shows only while it is available. */
+  browser: WorkSessionBrowserState | undefined;
   className?: string;
 }) {
   const item = (t: PanelTab, label: string, icon: ReactNode, count: number) => (
     <button
+      key={t}
       type="button"
       role="tab"
       aria-selected={tab === t}
@@ -557,10 +615,10 @@ function PanelTabs({
       {tab === t ? <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-primary" /> : null}
     </button>
   );
+  const counts: Record<PanelTab, number> = { queue: queued, changes: changesCount, browser: 0 };
   return (
     <div role="tablist" className={cn("flex shrink-0 gap-5 border-b px-4", className)}>
-      {item("queue", "Queue", <ListOrdered />, queued)}
-      {item("changes", "Changes", <FileDiff />, changesCount)}
+      {panelTabsOf(browser).map((t) => item(t, PANEL_TITLE[t], PANEL_ICON[t], counts[t]))}
     </div>
   );
 }
@@ -624,6 +682,7 @@ function SessionHeader({
   // Below 768 (the 44 px touch rule) the header has two rows: the project and the controls, then the title on its
   // own line, so the 44 px controls never squeeze the title (07.9 polish).
   const md = useMediaQuery("(min-width: 768px)", true);
+  const browserOn = session.browser?.status === "available";
 
   useEffect(() => {
     document.title = `${session.title} · Work Zone`;
@@ -735,6 +794,8 @@ function SessionHeader({
           <div className="flex items-center">
             {panelButton("queue", "Queue", <ListOrdered />, queued)}
             {panelButton("changes", "Changes", <FileDiff />, changesCount)}
+            {/* Below 768 a fourth 44 px button would push the row off a 390 px screen: Browser is in the menu there. */}
+            {md && browserOn ? panelButton("browser", "Browser", <Globe />, 0) : null}
           </div>
           <Menu.Root>
             <Menu.Trigger
@@ -750,6 +811,15 @@ function SessionHeader({
               <MoreHorizontal />
             </Menu.Trigger>
             <DropdownMenuContent align="end">
+              {!md && browserOn ? (
+                <DropdownMenuItem
+                  data-testid="open-browser"
+                  className="max-md:min-h-11"
+                  onClick={() => onPanel("browser")}
+                >
+                  <Globe /> Browser
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem
                 disabled={session.status === "archived" || !canArchive}
                 onClick={() =>

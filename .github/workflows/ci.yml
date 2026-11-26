@@ -30,6 +30,16 @@ jobs:
       - name: Enable pnpm (packageManager pin)
         run: corepack enable && pnpm --version
       - run: pnpm install --frozen-lockfile
+      # 07.13-09: the local-runtime browser tests drive the pinned headless shell; installed (sha256-verified) once
+      # into this cache by the tests themselves, keyed on the pins.
+      - name: Cache the pinned test browser
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ocw-test-browsers
+          key: ocw-test-browsers-${{ runner.os }}-${{ hashFiles('apps/local-runtime/src/browser/pins.ts') }}
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Integration tests start real PostgreSQL 18 / Redis 8 / Garage containers (testcontainers).
       - run: pnpm verify
       # setup-env (Garage/S3 keys, --add-missing); infra/**/*.test.mjs (incl. infra/garage) run in cell-smoke.
@@ -66,6 +76,8 @@ jobs:
       OCW_SANDBOX_URL: http://127.0.0.1:4291/__sandboxd
       OCW_SANDBOX_TOKEN: e2e-sandbox-token-0123456789abcdef0123456789
       OCW_E2E_SANDBOX: fake
+      # 07.13-22 (PD-19): the Work Zone browser journey's pinned headless shell (cached below, keyed on the pins).
+      OCW_E2E_BROWSERS_DIR: /home/runner/.cache/ocw-e2e-browsers
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -73,6 +85,17 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - name: Cache the pinned Work Zone browser
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ocw-e2e-browsers
+          key: ocw-e2e-browsers-${{ runner.os }}-${{ hashFiles('apps/local-runtime/src/browser/pins.ts') }}
+      # Downloaded (on a cache miss) and verified against the sha256 in pins.ts; never a hash skip.
+      - name: Pre-seed the pinned Work Zone browser
+        run: OCW_BROWSERS_DIR="$OCW_E2E_BROWSERS_DIR" apps/local-runtime/bin/ocw-runtime browser install
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Garage (attachments, ADR-0015) comes from compose with the keys setup:env generated; the API runs on the host
       # and reaches it on 127.0.0.1:3900 (OCW_S3_ENDPOINT in .env), browsers on localhost:3900 (OCW_S3_PUBLIC_URL).
       - name: Environment, database and object storage
@@ -146,7 +169,7 @@ jobs:
       - run: docker build -t ocw-sandbox-sbx:ci infra/sandbox/sbx
       # The document toolkit's image tests (07.17.1.1.1, D-07): hardened like a bot's shell, no network, size gate.
       - run: sh infra/sandbox/test/run-sbx-image-tests.sh ocw-sandbox-sbx:ci
-      - run: docker build -t ocw-sandbox-brw:ci infra/sandbox/browser
+      - run: docker build -f infra/sandbox/browser/Dockerfile -t ocw-sandbox-brw:ci .
       - run: docker build -f infra/sandbox/egress/Dockerfile -t ocw-sandbox-egress:ci .
 
   cell-smoke:

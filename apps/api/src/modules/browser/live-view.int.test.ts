@@ -176,11 +176,12 @@ describe("nobody else sees a frame (D-06, T-07.8-16-05, tenant isolation)", () =
     expect(await upgradeStatus(url, { token })).toBe(101);
   });
 
-  it("the live view is the registry's one live route, declared `user`", () => {
+  it("the live views are the registry's only live routes, each declared `user`", () => {
     const routes = l.s.stack.built.authz.routes;
-    const live = [...routes.keys()].filter((k) => k.startsWith("GET /api/v1/live/"));
-    expect(live).toEqual(["GET /api/v1/live/browser/:contextId"]);
-    expect(routes.get("GET /api/v1/live/browser/:contextId")).toBe("user");
+    const live = [...routes.keys()].filter((k) => k.startsWith("GET /api/v1/live/")).sort();
+    // 07.13-10: the Work Zone session's live view sits beside the bots' one.
+    expect(live).toEqual(["GET /api/v1/live/browser/:contextId", "GET /api/v1/live/work-browser/:sessionId"]);
+    for (const route of live) expect(routes.get(route)).toBe("user");
   });
 });
 

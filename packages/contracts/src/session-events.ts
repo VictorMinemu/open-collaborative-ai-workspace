@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { IsoDateTime } from "./common";
+import { WorkBrowserApprovalRequest } from "./work-browser";
 
 /**
  * Unified Session Event Protocol (MVP 0 subset). Every runtime adapter maps its native events to this set
@@ -134,6 +135,12 @@ export const SessionEvent = z.discriminatedUnion("type", [
     summary: z.string(),
     /** Repo-relative paths (the server drops anything else). */
     paths: z.array(z.string().max(1024)).max(200),
+    /**
+     * 07.13 (PD-10): a browser approval's kind, origin and tool, filled by the device. The API stores and shows it but
+     * never trusts it to decide who may answer: that comes from its own state (the session's grant, the loaded
+     * sign-in's member, the in-flight prompt's author). Absent on every other approval.
+     */
+    browser: WorkBrowserApprovalRequest.optional(),
   }),
   ev("approval.resolved", { approvalId: z.uuid(), decision: ApprovalOutcome }),
   ev("prompt.completed", {

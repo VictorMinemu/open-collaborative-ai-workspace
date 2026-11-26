@@ -106,6 +106,55 @@ describe("buildClaudeCatalog — recorded initializationResult + context probe a
   });
 });
 
+/**
+ * The pinned 2.1.332, recorded OFFLINE (07.13-25, PD-29): `initializationResult()` and the context probe of the real
+ * CLI against the fake model with a throwaway CLAUDE_CONFIG_DIR and the fake key (`record-fixture.ts --offline
+ * --scenario catalog`, no turn). It is the catalog an API-key CLI reports: the aliases only, no explicit versions.
+ */
+describe("buildClaudeCatalog — offline initializationResult + context probe at 2.1.332", () => {
+  const rec = JSON.parse(
+    readFileSync(join(import.meta.dirname, "__fixtures__", "claude-code-2.1.332.catalog.json"), "utf8"),
+  ) as typeof recorded;
+  const catalog = build({
+    models: rec.models,
+    contextWindows: rec.contextWindows,
+    runtimeVersion: rec.cliVersion,
+  });
+  const byId = new Map(catalog.models.map((m) => [m.id, m]));
+  const raw = new Map(rec.models.map((m) => [m.value, m]));
+
+  it("parses as a RuntimeCatalog at 2.1.332 with the default alias dropped and one default row", () => {
+    expect(rec.cliVersion).toBe("2.1.332");
+    expect(RuntimeCatalog.parse(catalog)).toEqual(catalog);
+    expect(catalog).toMatchObject({ runtime: "claude-code", runtimeVersion: "2.1.332" });
+    expect(byId.has("default")).toBe(false);
+    expect(catalog.models.map((m) => m.id)).toEqual(["opus", "fable", "sonnet", "haiku"]);
+    expect(catalog.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(["opus"]);
+    for (const m of catalog.models) expect(m.legacy).toBe(false);
+  });
+
+  it("each alias carries the id it resolves to (Haiku moves to 5.5)", () => {
+    expect(byId.get("opus")?.resolvedModel).toBe("claude-opus-5-5");
+    expect(byId.get("sonnet")?.resolvedModel).toBe("claude-sonnet-5-5");
+    expect(byId.get("haiku")?.resolvedModel).toBe("claude-haiku-5-5");
+  });
+
+  it("efforts, windows, fast and auto mode follow the same rules as 2.1.289", () => {
+    for (const m of catalog.models) {
+      const info = raw.get(m.id);
+      expect(m.efforts.map((e) => e.value)).toEqual(
+        (info?.supportedEffortLevels ?? []).filter((e) => !DEFERRED_EFFORTS.includes(e)),
+      );
+      expect(m.fastMode).toEqual({ supported: info?.supportsFastMode === true, reason: null });
+      expect(m.supportsAutoMode).toBe(info?.supportsAutoMode === true);
+      expect(m.badge).toBeNull();
+    }
+    // Every probed base is already 1M: no model offers a choice of windows.
+    expect(catalog.models.filter((m) => m.contextWindows.length > 0)).toEqual([]);
+    expect(byId.get("haiku")).toMatchObject({ defaultContextWindow: 1_000_000 });
+  });
+});
+
 describe("buildClaudeCatalog — hand-written edges", () => {
   it("trims names and descriptions to the contract bounds and survives an empty probe", () => {
     const catalog = buildClaudeCatalog({

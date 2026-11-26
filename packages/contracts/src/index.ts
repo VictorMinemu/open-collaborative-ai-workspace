@@ -45,6 +45,7 @@ export * from "./session-title";
 export * from "./slash-commands";
 export * from "./tool-approvals";
 export * from "./watched-records";
+export * from "./work-browser";
 export * from "./work-projects";
 export * from "./work-prompt-files";
 export * from "./work-session";

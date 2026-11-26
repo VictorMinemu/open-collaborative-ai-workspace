@@ -1,7 +1,13 @@
 // Semgrep fixtures for `ocw.live-input-logging` (.semgrep/rules.yml, 07.8-16; `node scripts/guard/run.mjs --rule-tests`).
 // Never compiled, linted or scanned by the main guard run: each `ruleid:` line must match on the next line, each `ok:`
 // line must not. What a person types while controlling a bot's browser never reaches a logger (D-07, P-10).
-import type { LiveClientFrame, LiveInputFrame, SandboxdContextInput } from "@ocw/contracts";
+import type {
+  BrowserInputFrame,
+  LiveClientFrame,
+  LiveInputFrame,
+  SandboxdContextInput,
+  WorkLiveClientFrame,
+} from "@ocw/contracts";
 
 declare const log: {
   info(...args: unknown[]): void;
@@ -63,6 +69,29 @@ function idsOnly(contextId: string, err: Error) {
   core.log.warn({ contextId, error: err.name }, "live view input not delivered");
   // ok: ocw.live-input-logging
   log.info({ contextId, state: "controlling" }, "lease taken");
+}
+
+// 07.13-18: the Work Zone browser (the API's live socket and the device's browser): a person's input during a takeover
+// of a session's page, as a client frame or as the device link's input batch.
+function workClientFrameLogged(frame: WorkLiveClientFrame) {
+  // ruleid: ocw.live-input-logging
+  core.log.warn({ frame }, "work live view message");
+  // ruleid: ocw.live-input-logging
+  log.debug(frame);
+}
+
+function deviceInputLogged(input: BrowserInputFrame, sessionId: string) {
+  // ruleid: ocw.live-input-logging
+  log.info({ sessionId, events: input.events }, "browser input");
+  // ruleid: ocw.live-input-logging
+  core.log.error("input", input);
+  // ok: ocw.live-input-logging
+  core.log.warn({ sessionId }, "work live view input not delivered");
+}
+
+function workIdsOnly(sessionId: string, err: Error) {
+  // ok: ocw.live-input-logging
+  core.log.warn({ sessionId, error: err.name }, "work live view lease end failed");
 }
 
 // 07.8 hardening: sandboxd's own writers (the browser broker's brw lines).

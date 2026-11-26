@@ -21,6 +21,11 @@
 // OCW_RUNTIME_FAKE_LIMIT_PREFIX=<prefix> (e2e only): every turn of an account whose label starts with <prefix> reports a
 // `five_hour` limit resetting 15 minutes ahead, then fails with "You've hit your session limit", as a Claude
 // subscription does, so the browser journey sees the platform switch accounts on the real daemon.
+// Work Zone browser (07.13 PD-28, D-31): each prompt line `browser <tool> <json>` (e.g. `browser open {"url":"…"}`,
+// `browser snapshot {"expect":"Fixture app"}`) runs that tool through the session's `SessionBrowserTools`, in order,
+// after the behaviours above, with `tool.started` / `tool.completed` carrying the summary only (no `output`). The
+// answer lists each summary, `Signed in: yes|no` when the result says, and for a snapshot with `expect` only
+// `Contains "<expect>": yes|no`, never page text. The fake's models accept images (`setImageInput(true)`).
 
 import { execFile } from "node:child_process";
 import { access, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -35,7 +40,9 @@ import type {
   SessionEvent,
 } from "@ocw/contracts";
 import {
+  canonicalBrowserTool,
   minMode,
+  originOf,
   parseRuntimeVersion,
   promptFilesNotePaths,
   type RuntimeCatalog,
@@ -43,7 +50,16 @@ import {
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
   type SessionSettingsPatch,
+  WorkBrowserTool,
 } from "@ocw/contracts";
+import type { SessionBrowserTools } from "../browser/manager.js";
+import {
+  browserToolSummary,
+  pageContentOf,
+  refusedResult,
+  resultSignedIn,
+  type WorkBrowserToolResult,
+} from "../browser/tools.js";
 import { findExecutable } from "../exec-path.js";
 import {
   type AccountSignal,
@@ -83,6 +99,8 @@ interface FakeSession {
   /** 07.18: the label of the pool account the session runs on (null = the device's own login). */
   accountLabel: string | null;
   onAccountSignal: (signal: AccountSignal) => void;
+  /** 07.13 (PD-28): the session's browser, when the daemon handed one. */
+  browser: SessionBrowserTools | null;
 }
 
 /** 07.18: how far ahead a fake limit resets. */
@@ -334,7 +352,10 @@ export class FakeRuntime implements AgentRuntime {
       dormant: false,
       accountLabel: o.account?.label ?? null,
       onAccountSignal: o.onAccountSignal ?? (() => undefined),
+      browser: o.browser ?? null,
     };
+    // The fake's models accept images (PD-23).
+    o.browser?.setImageInput(true);
     this.sessions.set(s.id, s);
     sink({
       type: "session.started",
@@ -494,6 +515,64 @@ export class FakeRuntime implements AgentRuntime {
   }
 
   /**
+   * 07.13 (PD-28): the prompt's `browser <tool> <json>` lines, in order, through the session's browser. The answer says
+   * what each did (its summary), whether a sign-in is loaded, and for a snapshot's `expect` only yes or no.
+   */
+  private async runBrowserLines(s: FakeSession, prompt: PromptPayload): Promise<void> {
+    const lines = prompt.text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^browser\s+/.test(l));
+    if (lines.length === 0) return;
+    const out: string[] = [];
+    for (const [i, line] of lines.entries()) {
+      if (s.aborted) return;
+      const m = line.match(/^browser\s+([a-z]+)(?:\s+(.*))?$/);
+      const tool = WorkBrowserTool.safeParse(m?.[1]);
+      if (!tool.success) {
+        out.push("- Unknown browser tool");
+        continue;
+      }
+      let args: unknown = {};
+      const raw = m?.[2]?.trim();
+      if (raw) {
+        try {
+          args = JSON.parse(raw);
+        } catch {
+          args = null;
+        }
+      }
+      let expected: string | null = null;
+      if (tool.data === "snapshot" && args && typeof args === "object" && !Array.isArray(args)) {
+        const { expect: e, ...rest } = args as Record<string, unknown>;
+        if (typeof e === "string") expected = e;
+        args = rest;
+      }
+      const url = (args as { url?: unknown } | null)?.url;
+      const target = tool.data === "open" && typeof url === "string" ? originOf(url) : null;
+      const toolUseId = `${prompt.promptId}-browser-${i + 1}`;
+      this.emit(s, {
+        type: "tool.started",
+        toolUseId,
+        name: canonicalBrowserTool(tool.data),
+        summary: browserToolSummary(tool.data, args, { origin: target }),
+      });
+      const result: WorkBrowserToolResult = s.browser
+        ? await s.browser.call(tool.data, args)
+        : refusedResult(tool.data, "not_allowed", null);
+      this.emit(s, { type: "tool.completed", toolUseId, ok: !result.isError, summary: result.summary });
+      out.push(`- ${result.summary}`);
+      const signedIn = resultSignedIn(result);
+      if (signedIn !== null) out.push(`  Signed in: ${signedIn ? "yes" : "no"}`);
+      if (expected !== null) {
+        const text = pageContentOf(result);
+        out.push(`  Contains "${expected}": ${text?.includes(expected) ? "yes" : "no"}`);
+      }
+    }
+    if (!s.aborted) await this.stream(s, `${prompt.promptId}-browser`, `Browser:\n\n${out.join("\n")}\n`);
+  }
+
+  /**
    * ADR-0045: the footer's `Files: <path> (<n> bytes), …` for the note the daemon appended, each size read from the
    * working tree (`missing` when the file is not there), so end-to-end tests see the files landed before the turn.
    */
@@ -599,6 +678,7 @@ export class FakeRuntime implements AgentRuntime {
           `Here is my plan (plan mode, no changes made):\n\n1. Read the README\n2. Make the change: _${prompt.text.split("\n")[0]}_\n3. Run the tests${footer}\n`,
         );
       }
+      if (!s.aborted) await this.runBrowserLines(s, prompt);
     } catch (err) {
       isError = true;
       this.emit(s, { type: "session.error", message: err instanceof Error ? err.message : String(err) });

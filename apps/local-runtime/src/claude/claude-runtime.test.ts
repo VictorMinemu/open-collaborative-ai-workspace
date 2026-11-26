@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -11,17 +13,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   HookCallback,
+  McpSdkServerConfigWithInstance,
+  McpServerConfig,
+  McpServerStatus,
   ModelInfo,
   Options,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import { isSecretBasename, type PermissionMode, type RuntimeInfo, type SessionEvent } from "@ocw/contracts";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import {
+  isSecretBasename,
+  originOf,
+  type PermissionMode,
+  type RuntimeCatalog,
+  type RuntimeInfo,
+  type SessionBrowserGrant,
+  type SessionEvent,
+  WORK_BROWSER_REFUSAL_TEXT,
+} from "@ocw/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
+import { BrowserManager, type ChildFactoryOptions, type ManagedChild } from "../browser/manager.js";
+import { silentLogger } from "../logger.js";
 import { type AccountSignal, RuntimeError, type StartSessionOptions } from "../runtime.js";
-import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
+import { ClaudeCodeRuntime, childEnv, claudeImageInput, type QueryHandle } from "./claude-runtime.js";
 import { commandTouchesSecrets, isSecretPath, secretDenyReason, secretDenyRules } from "./tool-policy.js";
 
 /** Every control request a fake query received, in order, across the whole suite (T-03.2-02-01 assertion). */
@@ -92,6 +110,17 @@ class FakeQuery implements QueryHandle {
     const max = this.model === undefined ? undefined : this.windows[this.model];
     if (max === undefined) return Promise.reject(new Error(`model not available: ${this.model}`));
     return Promise.resolve({ maxTokens: max, model: this.model ?? "" });
+  }
+  /** Reported by `mcpServerStatus()` (07.13 A-4). */
+  mcpStatus: McpServerStatus[] = [];
+  setMcpServers(servers: Record<string, McpServerConfig>): Promise<unknown> {
+    this.calls.push({ method: "setMcpServers", arg: servers });
+    this.log.push(`setMcpServers:${Object.keys(servers).join(",")}`);
+    return Promise.resolve({ added: Object.keys(servers), removed: [], errors: {} });
+  }
+  mcpServerStatus(): Promise<McpServerStatus[]> {
+    this.calls.push({ method: "mcpServerStatus", arg: undefined });
+    return Promise.resolve(this.mcpStatus);
   }
   methodCalls(method: string): unknown[] {
     return this.calls.filter((c) => c.method === method).map((c) => c.arg);
@@ -1726,5 +1755,319 @@ describe("ClaudeCodeRuntime — retire idle and resume (07.11 D-03a)", () => {
     await runtime.prompt("s1", { promptId: "p1", text: "go" });
     await settle();
     expect(queries.at(-1)?.params.options.pathToClaudeCodeExecutable).toBe("/opt/claude/bin/claude");
+  });
+});
+
+// ------------------------------------------------------------------ 07.13-13: the Work Zone browser (PD-07, PD-23, A-4)
+
+const BROWSER_ALLOW: SessionBrowserGrant = {
+  allowed: true,
+  reason: "ok",
+  askerId: "00000000-0000-4000-8000-000000000001",
+  askerIsBot: false,
+  alwaysAsk: [],
+  whenTainted: [],
+  signinAllowed: false,
+};
+const BROWSER_DENY: SessionBrowserGrant = { ...BROWSER_ALLOW, allowed: false, reason: "off_policy" };
+
+/** A child that answers like the agent without a real browser (the manager's rules are tested in 12). */
+class ScriptedBrowserChild implements ManagedChild {
+  state: ManagedChild["state"] = "running";
+  readonly closed: Promise<void>;
+  private done: () => void = () => {};
+  constructor(private readonly o: ChildFactoryOptions) {
+    this.closed = new Promise((r) => {
+      this.done = r;
+    });
+  }
+  async call(op: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    if (op === "open") {
+      const url = new URL(String(input.url));
+      const origin = originOf(url.href);
+      if (origin) this.o.onEvent({ event: "navigated", origin });
+      return { host: url.host, secure: false, title: "Scripted", signedIn: false };
+    }
+    if (op === "screenshot")
+      return { mimeType: "image/jpeg", data: "/9j/2w==", width: 1, height: 1, masked: 0 };
+    return { closed: true };
+  }
+  async close(): Promise<void> {
+    this.state = "closed";
+    this.done();
+  }
+}
+
+function browserSetup(extra: { prepare?: (q: FakeQuery) => void } = {}) {
+  const base = setup(extra.prepare ? { prepare: extra.prepare } : {});
+  const root = mkdtempSync(join(tmpdir(), "ocw-claude-rt-browser-"));
+  const manager = new BrowserManager({
+    root,
+    link: { send: () => undefined, sendBinary: () => false },
+    api: { put: async () => 404 },
+    optIn: () => true,
+    sandbox: () => false,
+    emit: () => undefined,
+    browsers: {
+      installed: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+      install: async () => ({ executable: "/scripted/chrome", version: "156.0.8078.47" }),
+    },
+    createChild: (o) => new ScriptedBrowserChild(o),
+    log: silentLogger,
+  });
+  const sid = randomUUID();
+  const tools = manager.forSession(sid);
+  const imageInputs: boolean[] = [];
+  const setImageInput = tools.setImageInput.bind(tools);
+  tools.setImageInput = (on) => {
+    imageInputs.push(on);
+    setImageInput(on);
+  };
+  const start = async (more: Partial<Omit<StartSessionOptions, "sessionId" | "cwd">> = {}) => {
+    await base.runtime.start(
+      { sessionId: sid, cwd: base.cwd, permissionMode: "default", browser: tools, ...more },
+      (e) => base.events.push(e),
+    );
+    const q = base.queries.at(-1);
+    if (!q) throw new Error("query not created");
+    return q;
+  };
+  const cleanup = async () => {
+    await base.runtime.stopAll();
+    await manager.stopAll();
+    rmSync(root, { recursive: true, force: true });
+  };
+  return { ...base, manager, sid, tools, imageInputs, start, cleanup };
+}
+
+function serverOf(servers: Record<string, unknown> | undefined): McpSdkServerConfigWithInstance | undefined {
+  const s = servers?.ocw_browser as McpSdkServerConfigWithInstance | undefined;
+  return s?.type === "sdk" ? s : undefined;
+}
+
+async function mcpClient(server: McpSdkServerConfigWithInstance): Promise<Client> {
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.instance.connect(serverSide);
+  const client = new Client({ name: "claude-runtime-test", version: "0.0.0" });
+  await client.connect(clientSide);
+  return client;
+}
+
+describe("ClaudeCodeRuntime — the Work Zone browser (07.13-13 PD-07, PD-23, A-4)", () => {
+  let cleanups: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const c of cleanups) await c();
+    cleanups = [];
+  });
+  const harness = (extra: { prepare?: (q: FakeQuery) => void } = {}) => {
+    const h = browserSetup(extra);
+    cleanups.push(h.cleanup);
+    return h;
+  };
+
+  it("browser: canUseTool allows mcp__ocw_browser__* without an approval; Bash and secret paths are unchanged", async () => {
+    const h = harness();
+    h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
+    const q = await h.start();
+    const canUseTool = q.params.options.canUseTool;
+    await expect(
+      canUseTool?.("mcp__ocw_browser__open", { url: "http://localhost:3000/" }, {
+        signal: signal(),
+        mcpServer: { name: "ocw_browser", source: "sdk" },
+      } as never),
+    ).resolves.toEqual({ behavior: "allow", updatedInput: { url: "http://localhost:3000/" } });
+    // LO-02: a call with no provenance is never trusted to be ours.
+    await expect(
+      canUseTool?.("mcp__ocw_browser__snapshot", {}, { signal: signal() } as never),
+    ).resolves.toEqual({ behavior: "deny", message: WORK_BROWSER_REFUSAL_TEXT.not_allowed });
+    expect(h.events.some((e) => e.type === "approval.requested")).toBe(false);
+
+    // Every other tool keeps the approval flow and the secret denies.
+    void canUseTool?.("Bash", { command: "pnpm test" }, { signal: signal() } as never);
+    await tick();
+    expect(h.events.filter((e) => e.type === "approval.requested")).toHaveLength(1);
+    await expect(
+      canUseTool?.("Read", { file_path: `${h.cwd}/.env` }, { signal: signal() } as never),
+    ).resolves.toMatchObject({ behavior: "deny" });
+  });
+
+  it("browser: a configured (non-sdk) ocw_browser tool is denied by canUseTool and by the PreToolUse hook", async () => {
+    const h = harness();
+    h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
+    const q = await h.start();
+    await expect(
+      q.params.options.canUseTool?.("mcp__ocw_browser__open", { url: "http://x/" }, {
+        signal: signal(),
+        mcpServer: { name: "ocw_browser", source: "project" },
+      } as never),
+    ).resolves.toEqual({ behavior: "deny", message: WORK_BROWSER_REFUSAL_TEXT.not_allowed });
+    const hook = q.params.options.hooks?.PreToolUse?.[0]?.hooks[0] as HookCallback;
+    const pre = (source: string) =>
+      hook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__ocw_browser__open",
+          tool_input: { url: "http://x/" },
+          mcp_server: { name: "ocw_browser", source },
+        } as never,
+        undefined,
+        { signal: signal() },
+      );
+    await expect(pre("project")).resolves.toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+    await expect(pre("sdk")).resolves.toEqual({});
+    // LO-02: the hook denies a call whose server is not named at all.
+    await expect(
+      hook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__ocw_browser__open",
+          tool_input: { url: "http://x/" },
+        } as never,
+        undefined,
+        { signal: signal() },
+      ),
+    ).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+  });
+
+  it("browser: without an allowed grant no server; a later allowed grant registers it with setMcpServers, no relaunch", async () => {
+    const h = harness();
+    // A start-time effort goes through the same between-turn path (it also keeps the suite's flag-settings guard
+    // meaningful when only the browser tests run).
+    const q = await h.start({ effort: "high" });
+    expect(q.params.options.mcpServers?.ocw_browser).toBeUndefined();
+    // Not registered: any mcp__ocw_browser__ call is someone else's.
+    await expect(
+      q.params.options.canUseTool?.("mcp__ocw_browser__open", {}, { signal: signal() } as never),
+    ).resolves.toMatchObject({ behavior: "deny" });
+
+    h.manager.onPrompt(h.sid, "p1", BROWSER_ALLOW);
+    await h.runtime.prompt(h.sid, { promptId: "p1", text: "look" });
+    await settle();
+    const calls = q.methodCalls("setMcpServers") as Array<Record<string, unknown>>;
+    expect(calls).toHaveLength(1);
+    expect(serverOf(calls[0])?.name).toBe("ocw_browser");
+    expect(q.log.indexOf("setMcpServers:ocw_browser")).toBeLessThan(q.log.indexOf("prompt:look"));
+    expect(h.queries).toHaveLength(1);
+    expect(q.methodCalls("mcpServerStatus")).toHaveLength(1);
+    await expect(
+      q.params.options.canUseTool?.("mcp__ocw_browser__open", {}, {
+        signal: signal(),
+        mcpServer: { name: "ocw_browser", source: "sdk" },
+      } as never),
+    ).resolves.toMatchObject({ behavior: "allow" });
+
+    // A grant denied for a queued prompt withdraws the server before that turn, never inside the running one.
+    h.manager.onPrompt(h.sid, "p2", BROWSER_DENY);
+    await h.runtime.prompt(h.sid, { promptId: "p2", text: "again" });
+    await settle();
+    expect(q.methodCalls("setMcpServers")).toHaveLength(1);
+    q.emit(result());
+    await settle();
+    expect(q.methodCalls("setMcpServers").at(-1)).toEqual({});
+    expect(q.log.lastIndexOf("setMcpServers:")).toBeLessThan(q.log.indexOf("prompt:again"));
+    expect(h.queries).toHaveLength(1);
+  });
+
+  it("browser: a configured ocw_browser reported by mcpServerStatus makes the browser unavailable (shadowed)", async () => {
+    const h = harness({
+      prepare: (q) => {
+        q.mcpStatus = [
+          { name: "ocw_browser", status: "connected", config: { type: "stdio", command: "node" } },
+        ];
+      },
+    });
+    h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
+    const q = await h.start();
+    expect(serverOf(q.params.options.mcpServers)).toBeDefined();
+    q.emit(init("default"));
+    await settle();
+    expect(q.methodCalls("mcpServerStatus")).toHaveLength(1);
+    expect(h.tools.available).toBe(false);
+    h.manager.onPrompt(h.sid, "p1", BROWSER_ALLOW);
+    h.manager.onTurnStarted(h.sid, "p1");
+    const refused = await h.tools.call("open", { url: "http://localhost:3000/" });
+    expect(refused.summary).toBe(`Refused: ${WORK_BROWSER_REFUSAL_TEXT.browser_unavailable}`);
+    await expect(
+      q.params.options.canUseTool?.("mcp__ocw_browser__open", {}, {
+        signal: signal(),
+        mcpServer: { name: "ocw_browser", source: "sdk" },
+      } as never),
+    ).resolves.toMatchObject({ behavior: "deny" });
+  });
+
+  it("browser: our own sdk server reported by mcpServerStatus keeps the browser available", async () => {
+    const h = harness({
+      prepare: (q) => {
+        q.mcpStatus = [
+          {
+            name: "ocw_browser",
+            status: "connected",
+            source: "sdk",
+            config: { type: "sdk", name: "ocw_browser" },
+          },
+        ];
+      },
+    });
+    h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
+    const q = await h.start();
+    q.emit(init("default"));
+    await settle();
+    expect(q.methodCalls("mcpServerStatus")).toHaveLength(1);
+    expect(h.tools.available).toBe(true);
+  });
+
+  it("browser: a screenshot is an image only for a model the catalog lists; otherwise image_model_required", async () => {
+    const h = harness({ prepare: prepareProbe });
+    // No catalog yet: unknown, no images.
+    h.manager.onPrompt(h.sid, null, BROWSER_ALLOW);
+    const q = await h.start({ model: "opus" });
+    expect(h.imageInputs.at(-1)).toBe(false);
+    // The catalog arrives: opus is listed, so it reads images.
+    await h.runtime.catalog();
+    expect(h.imageInputs.at(-1)).toBe(true);
+
+    const server = serverOf(q.params.options.mcpServers);
+    if (!server) throw new Error("no ocw_browser server");
+    const client = await mcpClient(server);
+    try {
+      h.manager.onPrompt(h.sid, "p1", BROWSER_ALLOW);
+      h.manager.onTurnStarted(h.sid, "p1");
+      await client.callTool({ name: "open", arguments: { url: "http://localhost:3000/" } });
+      const shot = await client.callTool({ name: "screenshot", arguments: {} });
+      expect(shot.content).toContainEqual({ type: "image", data: "/9j/2w==", mimeType: "image/jpeg" });
+
+      // A model the catalog does not list: unknown, so the tool answers the fixed sentence and no bytes.
+      await h.runtime.configure(h.sid, { model: "claude-unknown-9" });
+      expect(h.imageInputs.at(-1)).toBe(false);
+      const text = await client.callTool({ name: "screenshot", arguments: {} });
+      expect(text.isError).toBe(true);
+      expect(text.content).toEqual([
+        { type: "text", text: `Refused: ${WORK_BROWSER_REFUSAL_TEXT.image_model_required}` },
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("browser: claudeImageInput — listed models read images unless the catalog says imageInput: false", () => {
+    const catalog = {
+      runtime: "claude-code",
+      runtimeVersion: "2.1.332",
+      collectedAt: new Date().toISOString(),
+      permissionModes: ["default"],
+      models: [
+        { id: "opus", isDefault: true },
+        { id: "text-only", isDefault: false, imageInput: false },
+        { id: "vision", isDefault: false, imageInput: true },
+      ],
+    } as unknown as RuntimeCatalog;
+    expect(claudeImageInput(catalog, null)).toBe(true);
+    expect(claudeImageInput(catalog, "opus")).toBe(true);
+    expect(claudeImageInput(catalog, "vision")).toBe(true);
+    expect(claudeImageInput(catalog, "text-only")).toBe(false);
+    expect(claudeImageInput(catalog, "missing")).toBe(false);
+    expect(claudeImageInput(null, "opus")).toBe(false);
   });
 });

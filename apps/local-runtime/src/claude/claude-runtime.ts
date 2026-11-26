@@ -30,6 +30,8 @@ import { mkdir } from "node:fs/promises";
 import {
   type CanUseTool,
   type HookCallback,
+  type McpServerConfig,
+  type McpServerStatus,
   type ModelInfo,
   type Options,
   type PermissionResult,
@@ -47,9 +49,13 @@ import {
   type SessionEvent,
   type SessionSettingsPatch,
   slashDisposition,
+  WORK_BROWSER_MCP_SERVER,
+  WORK_BROWSER_REFUSAL_TEXT,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
+import { browserMcpServer } from "../browser/claude-server.js";
+import type { SessionBrowserTools } from "../browser/manager.js";
 import { ocwHome } from "../config.js";
 import { filterEnv, findExecutable } from "../exec-path.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
@@ -66,6 +72,7 @@ import {
   type TitleRequest,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { RUNTIME_VERSION } from "../version.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
 import { claudeLimitSignal, claudeResetsAt, claudeUsage } from "./limits.js";
@@ -106,6 +113,10 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   }): Promise<void>;
   initializationResult(): Promise<{ models: ModelInfo[] }>;
   getContextUsage(opts?: { detail?: "summary" | "full" }): Promise<{ maxTokens: number; model: string }>;
+  /** 07.13 (PD-07): the dynamic MCP servers between turns (sdk.d.ts:3198); used only for `ocw_browser`. */
+  setMcpServers?(servers: Record<string, McpServerConfig>): Promise<unknown>;
+  /** 07.13 (A-4): the servers the CLI runs and where each came from (`source`, sdk.d.ts:3016, 1260). */
+  mcpServerStatus?(): Promise<McpServerStatus[]>;
 }
 
 type SdkPermissionMode = NonNullable<Options["permissionMode"]>;
@@ -200,6 +211,16 @@ interface Session {
   pending: SessionSettingsPatch | null;
   /** Serialises control requests (settings changes, the per-turn mode) on this session. */
   applying: Promise<void>;
+  /** 07.13 (PD-07): the session's Work Zone browser; null = none. Offered only while the manager says `available`. */
+  browser: SessionBrowserTools | null;
+  /** The current CLI process has the in-process `ocw_browser` server (at launch or through `setMcpServers`). */
+  browserRegistered: boolean;
+  /** A configured (non-sdk) server named `ocw_browser` runs in this session (A-4): its tools are always denied. */
+  browserShadowed: boolean;
+  /** Queries whose MCP servers were already checked for a shadowing `ocw_browser` (once per launch). */
+  browserChecked: WeakSet<QueryHandle>;
+  /** Stops listening to the manager's `onAvailableChange`. */
+  browserUnsubscribe: () => void;
 }
 
 /**
@@ -326,6 +347,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         permissionModes: [...this.capabilities.supportsPermissionModes],
       });
       this.catalogCache = { at: Date.now(), value };
+      for (const s of this.sessions.values()) this.syncImageInput(s);
       return value;
     })().finally(() => {
       this.catalogInFlight = null;
@@ -486,6 +508,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       },
       pending: null,
       applying: Promise.resolve(),
+      browser: options.browser ?? null,
+      browserRegistered: false,
+      browserShadowed: false,
+      browserChecked: new WeakSet(),
+      browserUnsubscribe: () => undefined,
     };
     // Start-time effort / fast mode / context window go through the same between-turn path (first turn).
     const initial: SessionSettingsPatch = {};
@@ -495,10 +522,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     if (options.contextWindow !== undefined) initial.contextWindow = options.contextWindow;
     if (Object.keys(initial).length > 0) session.pending = initial;
 
+    this.syncImageInput(session);
     const sdkOptions = this.launchOptions(session, mode.data, session.resumeId);
     const q = this.queryFn({ prompt: input, options: sdkOptions });
     session.q = q;
     this.sessions.set(session.id, session);
+    if (session.browser) {
+      session.browserUnsubscribe = session.browser.onAvailableChange(() =>
+        this.onBrowserAvailability(session),
+      );
+    }
     this.emit(session, { type: "session.state", status: "idle" });
     session.done = this.consume(session, q);
   }
@@ -538,6 +571,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       abortController: s.abort,
       stderr: (data: string) => this.log.debug(`[claude-code ${s.id}] ${redact(data.trimEnd())}`),
     };
+    // 07.13 (PD-07): the in-process browser server, only while the manager offers it; project servers stay as they are.
+    s.browserRegistered = s.browser?.available === true;
+    if (s.browser && s.browserRegistered) {
+      o.mcpServers = { [WORK_BROWSER_MCP_SERVER]: browserMcpServer(s.browser, { version: RUNTIME_VERSION }) };
+    }
     if (s.runtimeModel) o.model = s.runtimeModel;
     if (resume) o.resume = resume;
     if (this.claudePath) o.pathToClaudeCodeExecutable = this.claudePath;
@@ -602,6 +640,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.launchedAccountRef = accountRef;
     s.bypass = mode === "fullAccess";
     s.applied.permissionMode = mode;
+    this.syncImageInput(s);
     s.done = this.consume(s, q);
     const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
     if (s.applied.effort !== null) flags.effortLevel = s.applied.effort as SdkEffortLevel;
@@ -714,6 +753,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       }
       await s.done.catch(() => undefined);
     }
+    s.browserUnsubscribe();
     this.sessions.delete(sessionId);
   }
 
@@ -783,6 +823,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           return false;
         }
       }
+      // 07.13 (PD-07): the browser offered (or withdrawn) as this turn's grant says, before its message is sent.
+      await this.syncBrowser(s);
       await this.applyPending(s, false);
       try {
         await this.syncMode(s, prompt.permissionMode);
@@ -853,6 +895,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       s.configured.model = s.applied.model = model;
       s.configured.contextWindow = target.requested;
       s.applied.contextWindow = target.reported;
+      this.syncImageInput(s);
     }
     const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
     if (patch.effort !== undefined) flags.effortLevel = patch.effort as SdkEffortLevel | null;
@@ -958,6 +1001,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         if (s.retired.has(q)) break;
         if (isInit(message)) {
           s.accountSwitching = false;
+          if (s.browser && !s.browserChecked.has(q)) {
+            s.browserChecked.add(q);
+            void this.checkBrowserShadow(s, q);
+          }
           if (s.account && projectCredentialWon(message)) {
             this.emit(s, { type: "session.error", message: PROJECT_CREDENTIALS_WON_MESSAGE });
           }
@@ -1059,6 +1106,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   }
 
   private finish(s: Session, error: string | null): void {
+    s.browserUnsubscribe();
     this.settleAllApprovals(s, "deny", "Session ended");
     if (s.running) {
       this.emit(s, {
@@ -1083,9 +1131,96 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     for (const pending of [...s.approvals.values()]) pending.settle(outcome, comment);
   }
 
+  // ------------------------------------------------------------------ the Work Zone browser (07.13 PD-07, PD-23)
+
+  /** The manager's availability changed: while idle the server is added or removed now, else before the next turn. */
+  private onBrowserAvailability(s: Session): void {
+    if (s.stopping || s.running || s.dormant || !this.sessions.has(s.id)) return;
+    void this.serially(s, () => this.syncBrowser(s));
+  }
+
+  /**
+   * Offers or withdraws the in-process `ocw_browser` server on the running process with `setMcpServers` (never a
+   * relaunch), as the manager's `available` says now. Failures are logged; the manager refuses calls on its own.
+   */
+  private async syncBrowser(s: Session): Promise<void> {
+    const q = s.q;
+    if (!s.browser || !q || s.dormant || s.stopping || !q.setMcpServers) return;
+    const want = s.browser.available;
+    if (want === s.browserRegistered) return;
+    try {
+      await q.setMcpServers(
+        want ? { [WORK_BROWSER_MCP_SERVER]: browserMcpServer(s.browser, { version: RUNTIME_VERSION }) } : {},
+      );
+      s.browserRegistered = want;
+    } catch (err) {
+      this.log.warn("the browser server could not be updated", {
+        sessionId: s.id,
+        error: redact(errorMessage(err)).slice(0, 200),
+      });
+      return;
+    }
+    if (want) await this.checkBrowserShadow(s, q);
+  }
+
+  /**
+   * A-4: a configured server named `ocw_browser` (a project `.mcp.json`, a plugin, ...) reports a `source` other than
+   * `sdk`; it makes the browser unavailable for this session, and its tools are denied (canUseTool and the hook).
+   */
+  private async checkBrowserShadow(s: Session, q: QueryHandle): Promise<void> {
+    if (!s.browser || !q.mcpServerStatus) return;
+    let servers: McpServerStatus[];
+    try {
+      servers = await q.mcpServerStatus();
+    } catch (err) {
+      this.log.warn("mcp server status unavailable", {
+        sessionId: s.id,
+        error: errorMessage(err).slice(0, 200),
+      });
+      return;
+    }
+    if (!servers.some((st) => st.name === WORK_BROWSER_MCP_SERVER && !isSdkServer(st))) return;
+    s.browserShadowed = true;
+    this.log.warn("a configured MCP server shadows ocw_browser; the browser is off for this session", {
+      sessionId: s.id,
+    });
+    s.browser.markUnavailable("shadowed");
+  }
+
+  /**
+   * Why a `mcp__ocw_browser__*` call is not the workspace browser's, or null when it is. LO-02: only a call the SDK
+   * names as served by our registered `sdk` server; a call with no provenance is never trusted (`isSdkServer`'s rule),
+   * since the shadow check runs after `init` and cannot tell a project `ocw_browser` from ours before it completes.
+   */
+  private browserDenyReason(s: Session, server: { name: string; source: string } | undefined): string | null {
+    const ours =
+      s.browser !== null &&
+      s.browserRegistered &&
+      !s.browserShadowed &&
+      server?.source === "sdk" &&
+      server.name === WORK_BROWSER_MCP_SERVER;
+    return ours ? null : WORK_BROWSER_REFUSAL_TEXT.not_allowed;
+  }
+
+  /** PD-23: screenshots reach the model only when the session's current model reads images. */
+  private syncImageInput(s: Session): void {
+    s.browser?.setImageInput(claudeImageInput(this.cachedCatalog(), s.applied.model));
+  }
+
   private makePreToolUseHook(s: Session): HookCallback {
     return async (input) => {
       if (input.hook_event_name !== "PreToolUse") return {};
+      // 07.13 (A-4): consulted in every mode, bypass included, so a foreign `ocw_browser` never runs.
+      const foreign = isBrowserToolName(input.tool_name) ? this.browserDenyReason(s, input.mcp_server) : null;
+      if (foreign) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: foreign,
+          },
+        };
+      }
       const toolInput = (
         input.tool_input && typeof input.tool_input === "object" ? input.tool_input : {}
       ) as Record<string, unknown>;
@@ -1102,7 +1237,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   }
 
   private makeCanUseTool(s: Session): CanUseTool {
-    return async (toolName, input, { signal, blockedPath, title }): Promise<PermissionResult> => {
+    return async (toolName, input, { signal, blockedPath, title, mcpServer }): Promise<PermissionResult> => {
+      // 07.13 (PD-07): the browser's own manager decides every call (host approvals, admin rules), because auto and
+      // bypass never consult this callback; here the in-process server's tools are only allowed, never asked twice.
+      if (isBrowserToolName(toolName)) {
+        const foreign = this.browserDenyReason(s, mcpServer);
+        return foreign ? { behavior: "deny", message: foreign } : { behavior: "allow", updatedInput: input };
+      }
       const denied = secretDenyReason(toolName, input, s.cwd);
       if (denied) return { behavior: "deny", message: denied };
       if (s.sessionAllowedTools.has(toolName)) return { behavior: "allow", updatedInput: input };
@@ -1195,6 +1336,30 @@ function reportsBypass(message: SDKMessage): boolean {
   if (message.type !== "system") return false;
   const m = message as { subtype?: unknown; permissionMode?: unknown };
   return (m.subtype === "init" || m.subtype === "status") && m.permissionMode === "bypassPermissions";
+}
+
+const BROWSER_TOOL_PREFIX = `mcp__${WORK_BROWSER_MCP_SERVER}__`;
+
+/** A tool of a server named `ocw_browser` (ours only when its source is `sdk` and we registered it). */
+function isBrowserToolName(name: string): boolean {
+  return name.startsWith(BROWSER_TOOL_PREFIX);
+}
+
+/** An in-process server this SDK host registered (`source: "sdk"`; a missing source is never trusted). */
+function isSdkServer(status: McpServerStatus): boolean {
+  const type = (status.config as { type?: unknown } | undefined)?.type;
+  return status.source === "sdk" && (type === undefined || type === "sdk");
+}
+
+/**
+ * PD-23: whether `model` (null = the default) reads images, from the Claude catalog. The Claude catalog reports no
+ * modality, so a listed model counts as image-capable unless it says `imageInput: false` (the contracts' "absent =
+ * allowed", 06.1 P-08); no catalog, or a model it does not list, is unknown: no images.
+ */
+export function claudeImageInput(catalog: RuntimeCatalog | null, model: string | null): boolean {
+  if (!catalog) return false;
+  const row = model ? catalog.models.find((m) => m.id === model) : catalog.models.find((m) => m.isDefault);
+  return row !== undefined && row.imageInput !== false;
 }
 
 /**

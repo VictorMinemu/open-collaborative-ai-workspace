@@ -7,6 +7,7 @@ import {
   PoolLimitReason,
   PoolSignInErrorCode,
 } from "./account-pool";
+import { LiveInputFrame } from "./browser";
 import { Id, IsoDateTime, RelativePath } from "./common";
 import { DeviceHostKind, RuntimeInfo } from "./device";
 import {
@@ -26,6 +27,15 @@ import {
 import { PermissionMode, RuntimeId, SessionEvent } from "./session-events";
 import { ContextWindow, EffortLevel, RuntimeCatalog, SessionSettingsPatch } from "./session-settings";
 import { TITLE_PROMPT_MAX_CHARS } from "./session-title";
+import {
+  BrowserOrigin,
+  SessionBrowserGrant,
+  WorkBrowserAction,
+  WorkBrowserEventKind,
+  WorkBrowserLaunchFailure,
+  WorkBrowserRefusal,
+  WorkBrowserStorageState,
+} from "./work-browser";
 import { WORK_PROMPT_MAX_ATTACHMENTS } from "./work-prompt-files";
 import { BOT_FILE_LIMITS, WorkSessionFilePath } from "./work-session-files";
 
@@ -48,6 +58,22 @@ export const DEVICE_LINK_PROTOCOL_VERSION = 1;
  * account only for a device that sent it; an older daemon keeps running on its own login.
  */
 export const DEVICE_ACCOUNT_POOL_VERSION = 1;
+
+/**
+ * Phase 07.13 (D-19, PD-20): the Work Zone browser version a daemon announces in `hello.browser`. The API sends a
+ * browser grant or a browser frame only to a device whose hello carried it; an older daemon never receives one.
+ */
+export const DEVICE_BROWSER_VERSION = 1;
+
+/**
+ * 07.13 (D-10, D-19, PD-20): the device can run a Work Zone browser (`version`), and its owner's LOCAL opt-in
+ * (`optIn`: `ocw-runtime browser on|off` or the desktop toggle; never settable from the server or the web).
+ */
+export const DeviceBrowserReport = z.strictObject({
+  version: z.literal(DEVICE_BROWSER_VERSION),
+  optIn: z.boolean(),
+});
+export type DeviceBrowserReport = z.infer<typeof DeviceBrowserReport>;
 
 /**
  * ADR-0045: the prompt-files version a daemon announces in `hello.promptFiles`. The API sends a prompt with `files`
@@ -179,6 +205,23 @@ export const HelloFrame = z.object({
    */
   accountPool: z.literal(DEVICE_ACCOUNT_POOL_VERSION).optional(),
   /**
+   * 07.13 (D-19, PD-20): the device's browser capability and local opt-in. Optional so every pre-07.13 hello still
+   * parses (absent = no browser: the API never sends that device a grant or a browser frame).
+   */
+  browser: DeviceBrowserReport.optional(),
+  /**
+   * 07.13 review MD-01: the Work Zone pages open on the device as it says hello (on every link, a reconnect of the same
+   * daemon as much as a restarted one), and whether a member's sign-in is loaded in each. Ids and a flag only. The API
+   * reconciles its `work_browsers` rows of this device's sessions with it: a page not listed is closed (its lease and
+   * loaded sign-in cleared), a listed page with `signedIn: false` loses the sign-in the API recorded, and a listed page
+   * with `signedIn: true` the API recorded no sign-in for is told `browser.close { reason: "revoked" }`. Optional:
+   * without it, only the pages of sessions missing from `sessions` are closed.
+   */
+  browserPages: z
+    .array(z.strictObject({ sessionId: z.uuid(), signedIn: z.boolean() }))
+    .max(1000)
+    .optional(),
+  /**
    * ADR-0045: `DEVICE_PROMPT_FILES_VERSION` when the daemon copies a prompt's `files` into the working tree before the
    * turn. Optional so every older hello still parses (absent = the API never sends that device a prompt file).
    */
@@ -199,6 +242,8 @@ export const CapabilitiesFrame = z.object({
    * `service` hosts, never settable from the server or the web. Optional for older daemons (absent = off).
    */
   isolatedServer: z.boolean().optional(),
+  /** 07.13 (PD-20): the browser report again, re-sent when the local opt-in changes. Optional for older daemons. */
+  browser: DeviceBrowserReport.optional(),
 });
 export type CapabilitiesFrame = z.infer<typeof CapabilitiesFrame>;
 
@@ -382,6 +427,49 @@ export const AccountLoginFrame = z.object({
 });
 export type AccountLoginFrame = z.infer<typeof AccountLoginFrame>;
 
+/**
+ * 07.13 (D-14, PD-25): what happened to a session's page, for the API's `work_browser.*` audit and the session's browser
+ * state. Ids, codes and the origin only: no title, no element name, no typed or page text, no path (P1, P3). Strict, so
+ * a field that could carry one is refused, not stripped. Not in the offline log: a browser runs only while connected.
+ */
+export const BrowserEventFrame = z.strictObject({
+  type: z.literal("browser.event"),
+  sessionId: z.uuid(),
+  /** The turn the call belongs to (the API resolves its author as the audit's user); null outside a turn. */
+  promptId: z.string().min(1).max(128).nullable(),
+  kind: WorkBrowserEventKind,
+  origin: BrowserOrigin.nullable(),
+  action: WorkBrowserAction.optional(),
+  refusal: WorkBrowserRefusal.optional(),
+  failure: WorkBrowserLaunchFailure.optional(),
+});
+export type BrowserEventFrame = z.infer<typeof BrowserEventFrame>;
+
+/**
+ * 07.13 (D-24, PD-16): the device asks whether the turn's asker has a sealed sign-in it may load for this origin. The
+ * API decides as that member from its own state and answers `browser.signin.state` on the same socket only.
+ */
+export const BrowserSignInLoadFrame = z.strictObject({
+  type: z.literal("browser.signin.load"),
+  requestId: z.uuid(),
+  sessionId: z.uuid(),
+  promptId: z.string().min(1).max(128),
+  origin: BrowserOrigin,
+});
+export type BrowserSignInLoadFrame = z.infer<typeof BrowserSignInLoadFrame>;
+
+/**
+ * 07.13 (D-20): during a takeover the focused field is password-like (`sensitive`), so the holder's client shows the
+ * masking hint. Never the field's value or name.
+ */
+export const BrowserFocusFrame = z.strictObject({
+  type: z.literal("browser.focus"),
+  sessionId: z.uuid(),
+  leaseId: z.uuid(),
+  sensitive: z.boolean(),
+});
+export type BrowserFocusFrame = z.infer<typeof BrowserFocusFrame>;
+
 export const DeviceToServerFrame = z.discriminatedUnion("type", [
   HelloFrame,
   ProjectsSyncFrame,
@@ -397,6 +485,9 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   AccountUsageFrame,
   AccountsSyncFrame,
   AccountLoginFrame,
+  BrowserEventFrame,
+  BrowserSignInLoadFrame,
+  BrowserFocusFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -423,6 +514,97 @@ export const RuntimeConfigFrame = z.object({
 });
 export type RuntimeConfigFrame = z.infer<typeof RuntimeConfigFrame>;
 
+/*
+ * 07.13 server → device browser frames. All six are ephemeral (like `runtime.config`): sent on the live socket, never
+ * queued in `device_commands`, never redelivered. The API sends them only to a device whose hello carried `browser`
+ * (PD-20), so an older daemon never receives one.
+ */
+
+/** 07.13 (D-15, PD-12): stream live frames (`on`) while someone watches; re-sent every `watchPingMs`. */
+export const BrowserFramesFrame = z.strictObject({
+  type: z.literal("browser.frames"),
+  sessionId: z.uuid(),
+  on: z.boolean(),
+});
+export type BrowserFramesFrame = z.infer<typeof BrowserFramesFrame>;
+
+/**
+ * 07.13 (D-20, PD-14): a person holds the page (`held`: the agent's browser tools answer `paused`), handed it back
+ * (`released`) or left it after input without a hand back (`abandoned`: the device closes the page).
+ *
+ * `holderUserId` (07.13 review HI-03): on `held`, the person the API granted the lease to, so the device can refuse a
+ * lease on a page whose loaded sign-in is someone else's without inferring the holder from its turns. Optional: a
+ * frame without it still parses (older API builds); the API always sends it on `held`.
+ */
+export const BrowserLeaseFrame = z.strictObject({
+  type: z.literal("browser.lease"),
+  sessionId: z.uuid(),
+  leaseId: z.uuid(),
+  state: z.enum(["held", "released", "abandoned"]),
+  holderUserId: Id.optional(),
+});
+export type BrowserLeaseFrame = z.infer<typeof BrowserLeaseFrame>;
+
+/** 07.13 (D-20): the lease holder's input, dispatched on the page only while `leaseId` is held. Never logged. */
+export const BrowserInputFrame = z.strictObject({
+  type: z.literal("browser.input"),
+  sessionId: z.uuid(),
+  leaseId: z.uuid(),
+  events: z.array(LiveInputFrame).min(1).max(64),
+});
+export type BrowserInputFrame = z.infer<typeof BrowserInputFrame>;
+
+/**
+ * 07.13 (D-22, PD-15): the holder handed the page back. `save` with an `uploadId` (one use, 5 min, bound by the API to
+ * the session, the member and the origin): the device exports the site's state and PUTs it with its device JWT.
+ */
+export const BrowserHandbackFrame = z.strictObject({
+  type: z.literal("browser.handback"),
+  sessionId: z.uuid(),
+  leaseId: z.uuid(),
+  save: z.boolean(),
+  uploadId: z.uuid().nullable(),
+});
+export type BrowserHandbackFrame = z.infer<typeof BrowserHandbackFrame>;
+
+/** 07.13 (PD-14, PD-17): close the session's page now (opt-in revoked, policy off, access lost, abandoned takeover). */
+export const BrowserCloseFrame = z.strictObject({
+  type: z.literal("browser.close"),
+  sessionId: z.uuid(),
+  reason: z.enum(["revoked", "policy", "access_lost", "takeover_abandoned"]),
+});
+export type BrowserCloseFrame = z.infer<typeof BrowserCloseFrame>;
+
+/**
+ * 07.13 (D-24, PD-16): the answer to `browser.signin.load`. The only server → device frame carrying a storage state
+ * (P7): opened from the secret store at send time and held by the device in memory, for that page only.
+ */
+export const BrowserSignInStateFrame = z.strictObject({
+  type: z.literal("browser.signin.state"),
+  requestId: z.uuid(),
+  result: z.discriminatedUnion("ok", [
+    z.strictObject({
+      ok: z.literal(true),
+      signinId: Id,
+      state: WorkBrowserStorageState,
+      expiresAt: IsoDateTime,
+    }),
+    z.strictObject({ ok: z.literal(false), reason: WorkBrowserRefusal }),
+  ]),
+});
+export type BrowserSignInStateFrame = z.infer<typeof BrowserSignInStateFrame>;
+
+/** Every 07.13 server → device browser frame (the device's browser manager handles exactly these). */
+export const BrowserServerFrame = z.discriminatedUnion("type", [
+  BrowserFramesFrame,
+  BrowserLeaseFrame,
+  BrowserInputFrame,
+  BrowserHandbackFrame,
+  BrowserCloseFrame,
+  BrowserSignInStateFrame,
+]);
+export type BrowserServerFrame = z.infer<typeof BrowserServerFrame>;
+
 export const ServerToDeviceFrame = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), deviceId: z.uuid(), organizationId: z.uuid() }),
   CommandFrame,
@@ -432,6 +614,12 @@ export const ServerToDeviceFrame = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
   RuntimeConfigFrame,
+  BrowserFramesFrame,
+  BrowserLeaseFrame,
+  BrowserInputFrame,
+  BrowserHandbackFrame,
+  BrowserCloseFrame,
+  BrowserSignInStateFrame,
 ]);
 export type ServerToDeviceFrame = z.infer<typeof ServerToDeviceFrame>;
 
@@ -456,6 +644,11 @@ export const SessionStartPayload = z.object({
    * whose hello carried `accountPool`. A token account's `oauthToken` is added by the API at send time only (PD-02).
    */
   account: SessionAccount.nullable().optional(),
+  /**
+   * 07.13 (D-10, PD-09): the browser the session's first turn may use. Absent = not allowed. Sent only to a device whose
+   * hello carried `browser`; the device re-checks it per call with its live local opt-in.
+   */
+  browser: SessionBrowserGrant.optional(),
 });
 export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
 
@@ -536,6 +729,11 @@ export const PromptPayload = z.object({
    * account's `oauthToken` is added by the API at send time only (PD-02).
    */
   account: SessionAccount.nullable().optional(),
+  /**
+   * 07.13 (D-10, PD-09): the browser this turn may use, decided per turn (a policy change applies from the next turn).
+   * Absent = not allowed. Sent only to a device whose hello carried `browser`.
+   */
+  browser: SessionBrowserGrant.optional(),
 });
 export type PromptPayload = z.infer<typeof PromptPayload>;
 

@@ -13,6 +13,7 @@ import {
 } from "./session-events";
 import { ContextWindow, EffortLevel, WorkSessionSettings } from "./session-settings";
 import { TitleSource } from "./session-title";
+import { WorkBrowserApprovalRequest, WorkSessionBrowserState } from "./work-browser";
 import {
   ProjectDefaultVisibility,
   SessionVisibilityKind,
@@ -140,6 +141,11 @@ export const WorkSession = z.object({
    * own login; absent = an older API. Viewer-neutral, so it may ride every surface.
    */
   poolAccount: SessionPoolAccountRef.nullable().optional(),
+  /**
+   * 07.13 (D-19): whether the session's browser is available and a page is open. Viewer-neutral (no host, no member),
+   * so it may ride every surface; absent = an older API.
+   */
+  browser: WorkSessionBrowserState.optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 
@@ -274,7 +280,13 @@ export type ApprovalStatus = z.infer<typeof ApprovalStatus>;
 export const WorkApproval = z.object({
   id: Id,
   workSessionId: Id,
-  request: z.object({ tool: z.string(), summary: z.string(), paths: z.array(z.string()) }),
+  request: z.object({
+    tool: z.string(),
+    summary: z.string(),
+    paths: z.array(z.string()),
+    /** 07.13 (PD-10): a browser approval's kind, origin and tool. Absent on every other approval and on older rows. */
+    browser: WorkBrowserApprovalRequest.optional(),
+  }),
   status: ApprovalStatus,
   decidedBy: Id.nullable(),
   decidedByName: z.string().nullable(),

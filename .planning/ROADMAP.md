@@ -1351,17 +1351,45 @@ with no manual step on any device.
   3. Each session gets a fresh, isolated browser profile that is deleted when the session ends; the user's own browser
      profile and cookies are never read
   4. Everyone in the session's audience sees the browser live in the session view (light/dark, 1440 and 390 widths)
-  5. A team on `v0.2.x` that runs `ocw upgrade` gets the feature with no manual step on headless devices (the runtime
-     updates itself and fetches the pinned browser on first use, checksum-verified), and desktop users are told a new
-     app version is available; an older runtime shows a clear "update this device" state instead of failing
+  5. A team on v0.3.1 or newer that runs `ocw upgrade` gets the feature with no manual step on headless devices (the
+     runtime updates itself to 0.5.0 under its runtime updates level, ADR-0040, and fetches the pinned browser on
+     first use, checksum-verified); runtimes older than v0.3.1 run the install command once (Settings › Devices ›
+     Add a device › Server, ADR-0040); desktop users are told a new app version is available; an older runtime shows
+     a clear "Update this device to use the browser" state instead of failing
   6. Proven by an e2e spec (fake runtime driving the real local browser against a local page) and a container proof on
      the headless runtime; documented in `docs/SERVER.md`, the README and ADR-0035
 
-**Plans:** 0 plans
+**Requirements (widened 2026-11-25):** WZB-08, WZB-09, WZB-10, WZB-11 (takeover, sealed sign-ins, load/unload, leak sweep)
+
+**Plans:** 25 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.13 to break down)
+- [ ] 07.13-01-PLAN.md — Contracts (work-browser vocabulary, Device Link frames, policy, approvals) + phase hub + WZB-01…11 in REQUIREMENTS
+- [ ] 07.13-02-PLAN.md — `packages/browser-engine` (shared redaction, capture, zip, site filter) + runtime `playwright-core` pin, external to the bundle
+- [ ] 07.13-03-PLAN.md — The one migration: `allow_browser`, device opt-in/version, `work_browsers`, owner-only `work_browser_signins`
+- [ ] 07.13-04-PLAN.md — Offline spikes: real Codex 0.172 against the fake model, Claude SDK from its types, Linux same-user probe, apt libraries
+- [ ] 07.13-05-PLAN.md — The bots' brw image builds from the shared engine (root context, infra copies removed)
+- [ ] 07.13-06-PLAN.md — Device: pinned Chrome for Testing installer, opt-in, `ocw-runtime browser`, doctor line
+- [ ] 07.13-07-PLAN.md — API governance: policy ∩ opt-in ∩ capability per turn, admin rule modes, audience rule, browser approvals
+- [ ] 07.13-08-PLAN.md — API `work-browser` module, Device Link binary branch and browser frames, `work_browser.*` audit
+- [ ] 07.13-09-PLAN.md — Device: browser child over a pipe, engine ops on a real local page, per-session 0700 profile
+- [ ] 07.13-10-PLAN.md — API live view: watch, per-frame privacy gate, Redis transit only while watched
+- [ ] 07.13-11-PLAN.md — Web policy switch and session browser state; desktop opt-in, app version, "Update available"
+- [ ] 07.13-12-PLAN.md — Device tracer: manager, tool table, approvals broker, daemon wiring, fake runtime driver
+- [ ] 07.13-13-PLAN.md — Claude bridge: in-process SDK MCP server (phase tracer end)
+- [ ] 07.13-14-PLAN.md — Codex bridge: stdio MCP shim over the control socket
+- [ ] 07.13-15-PLAN.md — Device live frames and takeover input, paused agent, abandoned takeovers
+- [ ] 07.13-16-PLAN.md — Web: the session's Browser tab, live, reusing the bots' components
+- [ ] 07.13-17-PLAN.md — API sign-ins: seal per member × site, Keychain routes, load decision, re-seal, sweep
+- [ ] 07.13-18-PLAN.md — API takeover lease, input relay, hand back → upload slot, Semgrep coverage
+- [ ] 07.13-19-PLAN.md — Device sign-in flow: signin tool, export + upload, site-locked load, unload for others
+- [ ] 07.13-20-PLAN.md — Delivery: runtime 0.5.0, browser-agent self-check, desktop package check, release notes v0.5.0
+- [ ] 07.13-21-PLAN.md — Web takeover, sign-in card, Keychain "Work Zone" sign-ins
+- [ ] 07.13-22-PLAN.md — D-31 e2e journey (desktop + mobile) and the API leak sweep
+- [ ] 07.13-23-PLAN.md — Headless container proof, ADR-0035, SERVER.md, README, STATUS, AGENTS.md, criterion 5
+- [ ] 07.13-24-PLAN.md — The brw image's build wiring: compose, both CI pipelines, e2e-isolated, smokes, CODEOWNERS
+- [ ] 07.13-25-PLAN.md — Pinned runtime versions Codex 0.172.0 / Claude Code 2.1.332 with an offline fixture refresh
 
 ### Phase 07.14: Organization connector auth (INSERTED)
 

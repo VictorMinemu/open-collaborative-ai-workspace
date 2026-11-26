@@ -29,6 +29,7 @@ import { RUNTIME_VERSION } from "./version.js";
 const PKG_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(PKG_ROOT, "scripts", "build-bundle.mjs");
 const SDK = "@anthropic-ai/claude-agent-sdk";
+const PLAYWRIGHT = "playwright-core";
 const pkg = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")) as {
   version: string;
   dependencies: Record<string, string>;
@@ -96,15 +97,34 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
         "utf8",
       ),
     ) as { peerDependencies: Record<string, string> };
-    const expected = [SDK, ...Object.keys(sdkPkg.peerDependencies)].map((name) => ({
+    // The SDK first (the contract requires it), its peers, then the extra pins: playwright-core (07.13 PD-22).
+    const expected = [SDK, ...Object.keys(sdkPkg.peerDependencies), PLAYWRIGHT].map((name) => ({
       name,
       version: pkg.dependencies[name],
     }));
     expect(manifest.external).toEqual(expected);
+    expect(manifest.external.at(-1)).toEqual({ name: PLAYWRIGHT, version: "1.64.1" });
     expect(manifest.bundled.map((p) => p.name)).not.toContain(SDK);
     expect(manifest.bundled.every((p) => !p.name.startsWith(SDK))).toBe(true);
     for (const p of manifest.bundled) expect(BUNDLE_LICENSE_ALLOWLIST).toContain(p.license);
     expect(bundleText).not.toContain("node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs");
+  });
+
+  it("keeps playwright-core external: in the shrinkwrap with brw's integrity, never in the file (07.13 PD-22)", async () => {
+    const mod = (await import(pathToFileURL(SCRIPT).href)) as { EXTRA_EXTERNALS: string[] };
+    expect(mod.EXTRA_EXTERNALS).toEqual([PLAYWRIGHT]);
+    const lock = JSON.parse(readFileSync(join(out, RUNTIME_EXTERNAL_LOCK_FILE), "utf8")) as {
+      packages: Record<string, { version?: string; integrity?: string; optional?: boolean }>;
+    };
+    expect(lock.packages[`node_modules/${PLAYWRIGHT}`]).toMatchObject({
+      version: "1.64.1",
+      integrity:
+        "sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ==",
+    });
+    expect(lock.packages[`node_modules/${PLAYWRIGHT}`]?.optional).toBeUndefined();
+    expect(manifest.bundled.map((p) => p.name)).not.toContain(PLAYWRIGHT);
+    expect(bundleText).not.toContain("playwright-core/lib/server");
+    expect(bundleText).not.toContain("node_modules/playwright-core/");
   });
 
   describe("pins the whole external tree with integrity (07.12 review ME-03)", () => {
@@ -258,22 +278,33 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
 });
 
 describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
-  function scratch(withSdk: boolean): {
+  function scratch(
+    withSdk: boolean,
+    withPlaywright = withSdk,
+  ): {
     file: string;
     env: Record<string, string>;
     ocwHome: string;
     root: string;
   } {
-    const root = tempDir("ocwr-");
+    // The real path, as on Linux and in an install: macOS's tmpdir is behind the /var → /private/var symlink, which
+    // once hid a bundled module's "am I the main script?" guard firing for the runtime's own file (07.13-20).
+    const root = realpathSync(tempDir("ocwr-"));
     const app = join(root, "app");
     mkdirSync(app);
     const file = join(app, "ocw-runtime.mjs");
     // A copy, not a symlink: Node resolves packages from the real path of the main module.
     copyFileSync(join(out, "ocw-runtime.mjs"), file);
     if (withSdk) {
+      // Only the externals beside the file: the SDK and playwright-core (07.13 PD-22).
       mkdirSync(join(app, "node_modules", "@anthropic-ai"), { recursive: true });
       const real = realpathSync(join(PKG_ROOT, "node_modules", "@anthropic-ai", "claude-agent-sdk"));
       symlinkSync(real, join(app, "node_modules", "@anthropic-ai", "claude-agent-sdk"), "dir");
+    }
+    if (withPlaywright) {
+      mkdirSync(join(app, "node_modules"), { recursive: true });
+      const playwright = realpathSync(join(PKG_ROOT, "node_modules", PLAYWRIGHT));
+      symlinkSync(playwright, join(app, "node_modules", PLAYWRIGHT), "dir");
     }
     const home = join(root, "u");
     const ocwHome = join(root, "h");
@@ -335,6 +366,24 @@ describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
     const exited = new Promise<number | null>((resolve) => daemon.once("exit", (code) => resolve(code)));
     daemon.kill("SIGTERM");
     expect(await exited).toBe(0);
+  }, 60_000);
+
+  it("is the 0.5.0 build and proves it loads the browser engine with only the externals beside it (07.13-20, PD-22)", async () => {
+    expect(manifest.version).toBe("0.5.0");
+    const s = scratch(true);
+    const r = await run(s.file, ["browser-agent", "--check"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toBe("browser-agent ok 1.64.1\n");
+  }, 60_000);
+
+  it("fails the browser check naming playwright-core when only the SDK is beside it", async () => {
+    const s = scratch(true, false);
+    const r = await run(s.file, ["browser-agent", "--check"], s.env);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe("browser-agent failed: playwright-core is not installed\n");
+    // The rest of the runtime still runs: playwright-core loads only for the browser.
+    const v = await run(s.file, ["version"], s.env);
+    expect(v.code, v.stderr).toBe(0);
   }, 60_000);
 
   it("fails naming the Claude Agent SDK when nothing is installed beside it (the SDK is not inside)", async () => {

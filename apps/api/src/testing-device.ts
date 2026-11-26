@@ -19,13 +19,18 @@ export type Frame = Record<string, unknown> & { type: string };
 
 export class FakeDevice {
   readonly frames: Frame[] = [];
+  /** 07.13 (PD-12): binary frames from the API, kept as they came (never parsed as JSON). */
+  readonly binaries: Buffer[] = [];
   private cursor = 0;
   closed = false;
   /** The API this link was opened against and the device JWT it used (null for a raw device token). */
   baseUrl: string | null = null;
   jwt: string | null = null;
   private constructor(readonly ws: WebSocket) {
-    ws.on("message", (d) => this.frames.push(JSON.parse(d.toString()) as Frame));
+    ws.on("message", (d, isBinary) => {
+      if (isBinary) this.binaries.push(asBuffer(d));
+      else this.frames.push(JSON.parse(d.toString()) as Frame);
+    });
     ws.on("close", () => {
       this.closed = true;
     });
@@ -78,6 +83,10 @@ export class FakeDevice {
       accountPool?: 1;
       /** 07.18 (PD-17): whether Claude Code reports a login of its own (default true). */
       claudeLoggedIn?: boolean;
+      /** 07.13 (D-19, PD-20): the Work Zone browser report (`hello.browser`); sent only when given. */
+      browser?: { version: 1; optIn: boolean };
+      /** 07.13 review MD-01: the pages open on the device as it says hello (`hello.browserPages`); sent only when given. */
+      browserPages?: Array<{ sessionId: string; signedIn: boolean }>;
       /** ADR-0045: the daemon copies prompt files into the tree (`hello.promptFiles`); sent only when given. */
       promptFiles?: 1;
     } = {},
@@ -111,6 +120,8 @@ export class FakeDevice {
       ...(sessions ? { sessions } : {}),
       ...(opts.isolatedServer !== undefined ? { isolatedServer: opts.isolatedServer } : {}),
       ...(opts.accountPool !== undefined ? { accountPool: opts.accountPool } : {}),
+      ...(opts.browser ? { browser: opts.browser } : {}),
+      ...(opts.browserPages ? { browserPages: opts.browserPages } : {}),
       ...(opts.promptFiles !== undefined ? { promptFiles: opts.promptFiles } : {}),
     });
     await d.next((f) => f.type === "welcome");
@@ -119,6 +130,18 @@ export class FakeDevice {
 
   send(frame: Record<string, unknown>) {
     this.ws.send(JSON.stringify(frame));
+  }
+
+  /** 07.13 (PD-12): one binary Device Link frame (a live JPEG frame on a real daemon). */
+  sendBinary(bytes: Uint8Array): Promise<void> {
+    return new Promise((resolve, reject) =>
+      this.ws.send(bytes, { binary: true }, (err) => (err ? reject(err) : resolve())),
+    );
+  }
+
+  /** 07.13 (D-14, PD-25): a `browser.event` frame (`promptId` and `origin` null unless given). */
+  browserEvent(sessionId: string, event: Record<string, unknown> & { kind: string }) {
+    this.send({ type: "browser.event", sessionId, promptId: null, origin: null, ...event });
   }
 
   /** Wait for (and consume) the next frame matching `pred` after the cursor. */
@@ -208,13 +231,22 @@ export class FakeDevice {
     return answer(null);
   }
 
-  /** Report what the device's runtimes offer (P-05); `isolatedServer` (07.16, D-19) is sent only when given. */
-  capabilities(catalogs: unknown[], fullAccessOptIn = false, isolatedServer?: boolean) {
+  /**
+   * Report what the device's runtimes offer (P-05); `isolatedServer` (07.16, D-19) and `browser` (07.13, PD-20) are
+   * sent only when given.
+   */
+  capabilities(
+    catalogs: unknown[],
+    fullAccessOptIn = false,
+    isolatedServer?: boolean,
+    browser?: { version: 1; optIn: boolean },
+  ) {
     this.send({
       type: "capabilities",
       catalogs,
       fullAccessOptIn,
       ...(isolatedServer !== undefined ? { isolatedServer } : {}),
+      ...(browser ? { browser } : {}),
     });
   }
 
@@ -359,6 +391,13 @@ export function selfStatus(over: Partial<RuntimeSelfStatus> = {}): RuntimeSelfSt
     checkedAt: null,
     ...over,
   };
+}
+
+/** A `ws` message as one Buffer (it may arrive as a Buffer, an ArrayBuffer or fragments). */
+function asBuffer(data: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data);
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

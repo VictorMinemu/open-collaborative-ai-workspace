@@ -6,7 +6,8 @@
 // `npm ci`, at the exact versions and integrity this checkout was built with (the SDK is never inside the file, D-10).
 //
 // Fails when any bundled input comes from the Claude Agent SDK, when a bundled third-party package's license is outside
-// the allowlist, or when the SDK or one of its peer dependencies is not pinned to an exact version in package.json.
+// the allowlist, or when the SDK, one of its peer dependencies or an extra external (playwright-core, 07.13) is not
+// pinned to an exact version in package.json.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -29,6 +30,12 @@ export const BUNDLE_LICENSE_ALLOWLIST = [
   "BlueOak-1.0.0",
 ];
 export const CLAUDE_AGENT_SDK = "@anthropic-ai/claude-agent-sdk";
+/**
+ * Pinned externals beyond the SDK and its peers (07.13 PD-22), in manifest order after them. playwright-core (the brw
+ * engine's exact version) is never bundled: it loads its own modules with dynamic requires and weighs
+ * 13 MB. install.sh and self-update's `npm ci` (ADR-0040) install it beside the bundle from the shrinkwrap.
+ */
+export const EXTRA_EXTERNALS = ["playwright-core"];
 export const SOURCE_REPOSITORY = "https://github.com/VictorMinemu/open-collaborative-ai-workspace";
 const MIN_NODE = 24;
 /** `ws`'s optional native accelerators: loaded in a try/catch, ws falls back without them. */
@@ -82,7 +89,10 @@ function sourceCommit(explicit) {
   }
 }
 
-/** The SDK followed by its peer dependencies, each at the exact version this package depends on (D-10). */
+/**
+ * The SDK, its peer dependencies, then `EXTRA_EXTERNALS`, each at the exact version this package depends on (D-10,
+ * 07.13 PD-22). The SDK stays first (RuntimeDistManifest requires it).
+ */
 function externalPins(pkg) {
   const deps = pkg.dependencies ?? {};
   const pinned = (name) => {
@@ -103,7 +113,9 @@ function externalPins(pkg) {
       `installed ${CLAUDE_AGENT_SDK} is ${sdkPkg.version}, package.json pins ${sdk.version} (run pnpm install)`,
     );
   }
-  return [sdk, ...Object.keys(sdkPkg.peerDependencies ?? {}).map(pinned)];
+  const pins = [sdk, ...Object.keys(sdkPkg.peerDependencies ?? {}).map(pinned)];
+  for (const name of EXTRA_EXTERNALS) if (!pins.some((p) => p.name === name)) pins.push(pinned(name));
+  return pins;
 }
 
 /** `name` and package directory of a metafile input under node_modules; null for our own sources. */
@@ -187,7 +199,7 @@ export async function buildBundle({ out, commit } = {}) {
     sourcemap: false,
     legalComments: "none",
     logLevel: "warning",
-    external: [CLAUDE_AGENT_SDK, ...OPTIONAL_NATIVES],
+    external: [CLAUDE_AGENT_SDK, ...EXTRA_EXTERNALS, ...OPTIONAL_NATIVES],
     define: { __OCW_RUNTIME_VERSION__: JSON.stringify(version) },
   });
   const packages = bundledPackages(result.metafile);

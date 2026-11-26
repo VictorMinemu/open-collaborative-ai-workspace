@@ -1473,6 +1473,18 @@ export const devices = appSchema.table(
      */
     accountPoolVersion: integer("account_pool_version"),
     /**
+     * Phase 07.13 (D-10, D-19, PD-20): the owner turned the Work Zone browser on for this device, on the device itself
+     * (`hello.browser.optIn`, `capabilities.browser`). Written only from the device's own hello/capabilities, never from a
+     * web route (as `full_access_opt_in`).
+     */
+    browserOptIn: boolean("browser_opt_in").notNull().default(false),
+    /**
+     * Phase 07.13 (D-19, PD-20): the Work Zone browser version the daemon supports (`hello.browser.version`); null = a
+     * daemon without the browser, which never gets a browser frame or grant. Written only from the device's own
+     * hello/capabilities.
+     */
+    browserVersion: integer("browser_version"),
+    /**
      * ADR-0045: the prompt-files version the daemon supports (`hello.promptFiles`); null = a daemon that would drop a
      * prompt's `files`, so it never gets one ("Update this device to attach files"). Written only from the device's
      * own hello.
@@ -1484,6 +1496,10 @@ export const devices = appSchema.table(
     check(
       "devices_account_pool_version_ck",
       sql`${t.accountPoolVersion} is null or ${t.accountPoolVersion} between 1 and 100`,
+    ),
+    check(
+      "devices_browser_version_ck",
+      sql`${t.browserVersion} is null or ${t.browserVersion} between 1 and 100`,
     ),
     check(
       "devices_prompt_files_version_ck",
@@ -1554,6 +1570,11 @@ export const workZonePolicies = appSchema.table(
      * by default). Never above `OCW_ATTACHMENT_MAX_BYTES`, which only the API knows and enforces.
      */
     botFileMaxBytes: bigint("bot_file_max_bytes", { mode: "number" }).notNull().default(26214400),
+    /**
+     * Phase 07.13 (D-10): the organization lets Work Zone sessions use the device's local browser. Off by default; a
+     * session gets it only where this and the device's own opt-in (`devices.browser_opt_in`) both allow it.
+     */
+    allowBrowser: boolean("allow_browser").notNull().default(false),
   },
   (t) => [
     check("work_zone_policies_runtime_updates_ck", sql`${t.runtimeUpdates} in ('automatic','notify','off')`),
@@ -5397,4 +5418,113 @@ export const workMemoryPrefs = appSchema.table(
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.organizationId, t.userId] })],
+);
+
+/**
+ * Phase 07.13 (D-23, D-30, PD-03; ADR-0035): a member's sealed Work Zone browser sign-in for one site, one per (member,
+ * site key), the sibling of the bots' `browser_sessions` and never shared with them. The storage state itself is never
+ * here: it is the sealed `secret_id` row (kind `browser_session`, AAD `${org}:${user}:browser:workzone:${siteKey}`, which
+ * never collides with a bot's `${org}:${user}:browser:${agentId}:${siteKey}`), deleted with it
+ * (`work_browser_signin_secret_cleanup`); a member who leaves loses every row (`work_browser_signins_member_gone`).
+ * `site_key` is the exact lower-case host (`:port` when not the default). The row is its owner's ALONE: a RESTRICTIVE
+ * `personal_owner_only` policy in post-migrate.sql hides it from every session whose `app.user_id` is not `user_id`
+ * (another member, an admin, a user-less device path). Expired rows go through `app.purge_work_browser_signins`.
+ */
+export const workBrowserSignins = appSchema.table(
+  "work_browser_signins",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    siteKey: text("site_key").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: ts("last_used_at"),
+    expiresAt: ts("expires_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: "work_browser_signins_secret_fk",
+      columns: [t.organizationId, t.secretId],
+      foreignColumns: [secrets.organizationId, secrets.id],
+    }).onDelete("cascade"),
+    unique("work_browser_signins_owner_site_uq").on(t.organizationId, t.userId, t.siteKey),
+    /** Target of `work_browsers_signin_fk`. */
+    unique("work_browser_signins_org_id_uq").on(t.organizationId, t.id),
+    index("work_browser_signins_secret_idx").on(t.organizationId, t.secretId),
+    /** The expiry sweep (`work_browser_sweep_organizations`) runs across organizations. */
+    index("work_browser_signins_expires_idx").on(t.expiresAt),
+    browserHostCheck("work_browser_signins_site_key_check", t.siteKey),
+  ],
+);
+
+/** A page origin as the API stores it (`BrowserOrigin`): `scheme://host:port`, never a path, a query or credentials. */
+const browserOriginCheck = (name: string, column: AnyPgColumn) =>
+  check(
+    name,
+    sql`${column} is null or (char_length(${column}) <= 300 and ${column} ~ ${sql.raw(String.raw`'^https?://[a-z0-9.\-\[\]:]+:[0-9]{1,5}$'`)})`,
+  );
+
+/**
+ * Phase 07.13 (D-20, D-22, D-24, PD-04, PD-14 … PD-17): the local browser of one Work Zone session, at most one row per
+ * session, deleted with it, behind the session's audience (RESTRICTIVE `audience_backstop` in post-migrate, as
+ * `work_prompts`). `origin` is the page's origin only (`BrowserOrigin`). `controller_user_id` + `lease_id` +
+ * `lease_expires_at` are a person's takeover lease (all three or none); `lease_input` = the holder sent input during the
+ * current lease, recorded before the input reaches the page. `signin_id` / `signin_user_id` = the member sign-in loaded
+ * into the page (a deleted sign-in only unlinks `signin_id`). `upload_*` = the one-use hand-back upload the API minted
+ * (member, origin, expiry; all four or none). No storage state is ever a column (P7).
+ */
+export const workBrowsers = appSchema.table(
+  "work_browsers",
+  {
+    workSessionId: uuid("work_session_id").primaryKey(),
+    organizationId: orgId(),
+    state: text("state", { enum: ["open", "closed"] })
+      .notNull()
+      .default("open"),
+    origin: text("origin"),
+    controllerUserId: uuid("controller_user_id"),
+    leaseId: uuid("lease_id"),
+    leaseExpiresAt: ts("lease_expires_at"),
+    leaseInput: boolean("lease_input").notNull().default(false),
+    signinId: uuid("signin_id"),
+    signinUserId: uuid("signin_user_id"),
+    uploadId: uuid("upload_id"),
+    uploadUserId: uuid("upload_user_id"),
+    uploadOrigin: text("upload_origin"),
+    uploadExpiresAt: ts("upload_expires_at"),
+    openedAt: ts("opened_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    closedAt: ts("closed_at"),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS). The migration narrows the sign-in action to
+    // `SET NULL ("signin_id")` (no drizzle builder for the column list), so a deleted sign-in never nulls
+    // `organization_id`.
+    foreignKey({
+      name: "work_browsers_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_browsers_signin_fk",
+      columns: [t.organizationId, t.signinId],
+      foreignColumns: [workBrowserSignins.organizationId, workBrowserSignins.id],
+    }).onDelete("set null"),
+    index("work_browsers_signin_idx").on(t.organizationId, t.signinId).where(sql`signin_id is not null`),
+    /** The lapsed-lease sweep (`work_browser_sweep_organizations`) runs across organizations. */
+    index("work_browsers_lease_idx").on(t.leaseExpiresAt).where(sql`lease_id is not null`),
+    check("work_browsers_state_ck", sql`${t.state} in ('open','closed')`),
+    browserOriginCheck("work_browsers_origin_ck", t.origin),
+    browserOriginCheck("work_browsers_upload_origin_ck", t.uploadOrigin),
+    check(
+      "work_browsers_lease_ck",
+      sql`(${t.leaseId} is null) = (${t.controllerUserId} is null) and (${t.leaseId} is null) = (${t.leaseExpiresAt} is null)`,
+    ),
+    check(
+      "work_browsers_upload_ck",
+      sql`(${t.uploadId} is null) = (${t.uploadUserId} is null) and (${t.uploadId} is null) = (${t.uploadOrigin} is null)
+        and (${t.uploadId} is null) = (${t.uploadExpiresAt} is null)`,
+    ),
+  ],
 );

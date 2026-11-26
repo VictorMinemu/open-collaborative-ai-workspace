@@ -4,7 +4,7 @@
 import { chmod, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
-import { RuntimeId } from "@ocw/contracts";
+import { RuntimeId, WorkBrowserTool } from "@ocw/contracts";
 import { z } from "zod";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
@@ -49,6 +49,22 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
    * slots come from the file on this device; strict, so a forged value is refused, not ignored.
    */
   z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("reloadAccounts") }).strict(),
+  /**
+   * 07.13 (PD-08): one Work Zone browser tool call from the Codex shim (`ocw-runtime browser-mcp`). Local only (never
+   * reachable from the server). `token` is the session's 256-bit token from its 0600 `shim-token` file: it binds a shim
+   * to its own session, and is not a boundary against other processes of the same OS user (Pitfall 5, ADR-0035). The
+   * manager decides the call like any other; strict, so no other key is taken.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("browserCall"),
+      session: z.uuid(),
+      token: z.string().regex(/^[0-9a-f]{64}$/),
+      tool: WorkBrowserTool,
+      args: z.unknown(),
+    })
+    .strict(),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
