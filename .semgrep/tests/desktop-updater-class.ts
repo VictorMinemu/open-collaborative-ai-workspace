@@ -24,6 +24,21 @@ import * as electronNs from "electron";
 import { AppImageUpdater, BaseUpdater, NsisUpdater, type AppUpdater } from "electron-updater";
 // ok: ocw.desktop-updater-class
 import { app as electronApp, powerMonitor } from "electron";
+// Review IN-03: electron-updater's own module files are the same classes under another specifier.
+// ruleid: ocw.desktop-updater-class
+import { MacUpdater as DeepMac } from "electron-updater/out/MacUpdater";
+// ruleid: ocw.desktop-updater-class
+import { DebUpdater as DeepDeb } from "electron-updater/out/DebUpdater";
+// ruleid: ocw.desktop-updater-class
+import * as deepRpm from "electron-updater/out/RpmUpdater";
+// ruleid: ocw.desktop-updater-class
+import { autoUpdater as deepAuto } from "electron-updater/out/main";
+// ruleid: ocw.desktop-updater-class
+const deepPacman = require("electron-updater/out/PacmanUpdater");
+// ok: ocw.desktop-updater-class
+import type { DownloadUpdateOptions } from "electron-updater/out/AppUpdater";
+// ok: ocw.desktop-updater-class
+import { NsisUpdater as DeepNsis } from "electron-updater/out/NsisUpdater";
 
 // ruleid: ocw.desktop-updater-class
 const viaRequire = require("electron-updater").autoUpdater;
@@ -33,6 +48,23 @@ const { MacUpdater: Mac } = require("electron-updater");
 const nativeViaRequire = require("electron").autoUpdater;
 // ruleid: ocw.desktop-updater-class
 const lazy = (await import("electron-updater")).autoUpdater;
+
+// Review IN-03: a dynamic import destructured or read in its `then`.
+async function dynamic() {
+  // ruleid: ocw.desktop-updater-class
+  const { autoUpdater: dynAuto } = await import("electron-updater");
+  // ruleid: ocw.desktop-updater-class
+  const { MacUpdater: dynMac } = await import("electron-updater");
+  // ruleid: ocw.desktop-updater-class
+  const { DebUpdater } = await import("electron-updater");
+  // ruleid: ocw.desktop-updater-class
+  void import("electron-updater").then((m) => m.MacUpdater);
+  // ok: ocw.desktop-updater-class
+  const { NsisUpdater: dynNsis } = await import("electron-updater");
+  // ok: ocw.desktop-updater-class
+  void import("electron-updater").then((m) => m.AppImageUpdater);
+  void [dynAuto, dynMac, DebUpdater, dynNsis];
+}
 
 function namespaces() {
   // ruleid: ocw.desktop-updater-class
@@ -66,4 +98,5 @@ function allowed(u: AppUpdater) {
 // Semgrep resolves an imported name to its module, so using a forbidden import is a finding too.
 // ruleid: ocw.desktop-updater-class
 void [autoUpdater, MacUpdater, DebUpdater, Nsis, Rpm, PacmanUpdater, squirrel, app, nativeUpdater];
-void [viaRequire, Mac, nativeViaRequire, lazy, namespaces, allowed];
+void [viaRequire, Mac, nativeViaRequire, lazy, namespaces, allowed, dynamic];
+void [DeepMac, DeepDeb, deepRpm, deepAuto, deepPacman, DeepNsis];

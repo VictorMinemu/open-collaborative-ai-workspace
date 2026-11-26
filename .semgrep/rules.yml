@@ -309,6 +309,10 @@ rules:
               - pattern: "const { $NAME: $ALIAS } = require(\"electron-updater\")"
               - pattern: require("electron-updater").$NAME
               - pattern: (await import("electron-updater")).$NAME
+              # Review IN-03: a dynamic import destructured, or read in its `then`.
+              - pattern: const { $NAME } = await import("electron-updater")
+              - pattern: "const { $NAME: $ALIAS } = await import(\"electron-updater\")"
+              - pattern: import("electron-updater").then(($M) => $M.$NAME)
               - patterns:
                   - pattern-either:
                       - pattern-inside: |
@@ -321,6 +325,9 @@ rules:
           - metavariable-regex:
               metavariable: $NAME
               regex: ^(autoUpdater|MacUpdater|DebUpdater|RpmUpdater|PacmanUpdater)$
+      # Review IN-03: the same classes through electron-updater's own module files, however they are imported.
+      - pattern-regex: >-
+          ["']electron-updater/out/(?:MacUpdater|DebUpdater|RpmUpdater|PacmanUpdater)(?:\.js)?["']
       # Electron's own Squirrel updater.
       - pattern: import { autoUpdater } from "electron"
       - pattern: import { autoUpdater as $ALIAS } from "electron"
