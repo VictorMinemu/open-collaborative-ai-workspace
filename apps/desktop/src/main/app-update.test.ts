@@ -34,7 +34,8 @@ class FakeUpdater extends EventEmitter {
       throw this.downloadError;
     }
     this.emit("download-progress", { percent: 42.7 });
-    if (this.emitOnDownload) this.emit("update-downloaded", { version: this.available, downloadedFile: DOWNLOADED });
+    if (this.emitOnDownload)
+      this.emit("update-downloaded", { version: this.available, downloadedFile: DOWNLOADED });
     return [DOWNLOADED];
   });
   quitAndInstall = vi.fn();
@@ -64,7 +65,9 @@ function harness(over: Partial<AppUpdateDeps> & { updater?: FakeUpdater | null }
   const updater = over.updater === undefined ? new FakeUpdater() : over.updater;
   const daemon = { kind: "ours" as DaemonKind };
   const idle = { seconds: 0 };
-  const hold = vi.fn(async (_drain: boolean): Promise<unknown> => ({ held: true, state: "held", running: 0 }));
+  const hold = vi.fn(
+    async (_drain: boolean): Promise<unknown> => ({ held: true, state: "held", running: 0 }),
+  );
   const release = vi.fn(async () => ({ released: true }));
   const quit = vi.fn();
   const notify = vi.fn();
@@ -133,17 +136,20 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
     expect(h.updater.quitAndInstall).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["paused", "external", "stopped"] as const)("with the daemon %s it quits without asking for a hold", async (kind) => {
-    await h.controller.check("click");
-    await flush();
-    h.daemon.kind = kind;
-    await h.controller.restart();
-    await flush();
-    expect(h.hold).not.toHaveBeenCalled();
-    expect(h.quit).toHaveBeenCalledTimes(1);
-    h.controller.onQuit();
-    expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
-  });
+  it.each(["paused", "external", "stopped"] as const)(
+    "with the daemon %s it quits without asking for a hold",
+    async (kind) => {
+      await h.controller.check("click");
+      await flush();
+      h.daemon.kind = kind;
+      await h.controller.restart();
+      await flush();
+      expect(h.hold).not.toHaveBeenCalled();
+      expect(h.quit).toHaveBeenCalledTimes(1);
+      h.controller.onQuit();
+      expect(h.updater.quitAndInstall).toHaveBeenCalledWith(true, true);
+    },
+  );
 
   it("never quits when the hold is not held", async () => {
     h.hold.mockResolvedValue({ held: false, state: "draining", running: 1 });
@@ -191,7 +197,9 @@ describe("the macOS prepare step (D-05)", () => {
   it("offers the restart only after prepareDownloaded resolved, with the downloaded file and version", async () => {
     const mac = new FakeMacUpdater();
     let finish: () => void = () => undefined;
-    mac.prepareDownloaded.mockImplementation(() => new Promise<undefined>((r) => (finish = () => r(undefined))));
+    mac.prepareDownloaded.mockImplementation(
+      () => new Promise<undefined>((r) => (finish = () => r(undefined))),
+    );
     h = harness({ updater: mac });
     h.controller.start();
     await h.controller.check("click");
@@ -216,7 +224,12 @@ describe("the macOS prepare step (D-05)", () => {
     expect(view.notice).toBe(UPDATE_SENTENCES.macPrepareFailed);
     expect(UPDATE_SENTENCES.macPrepareFailed).toMatch(/could not be prepared/);
     const menu = appUpdateMenuModel(view);
-    expect(menu).toContainEqual({ label: "Update available (v0.5.1)", enabled: true, action: "openRelease", url: RELEASE_URL });
+    expect(menu).toContainEqual({
+      label: "Update available (v0.5.1)",
+      enabled: true,
+      action: "openRelease",
+      url: RELEASE_URL,
+    });
     expect(JSON.stringify(menu)).not.toContain("codesign");
     expect(JSON.stringify(onboardingUpdateView(view))).not.toContain("Users");
     await h.controller.restart();

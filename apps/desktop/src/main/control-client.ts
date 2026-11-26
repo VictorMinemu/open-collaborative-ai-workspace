@@ -10,7 +10,11 @@ export type ControlCommand =
   | { cmd: "addProject"; path: string; name?: string }
   | { cmd: "removeProject"; localId: string }
   /** Re-read runtime.json (Full access opt-in, ADR-0012); carries no value. */
-  | { cmd: "reloadConfig" };
+  | { cmd: "reloadConfig" }
+  /** 07.13.1 (D-07): hold every runtime gate for the app update's restart (`drain` closes them at once). */
+  | { cmd: "appUpdateHold"; drain: boolean }
+  /** 07.13.1 (D-07): reopen the gates after a cancelled or failed restart. */
+  | { cmd: "appUpdateRelease" };
 
 export class ControlError extends Error {}
 

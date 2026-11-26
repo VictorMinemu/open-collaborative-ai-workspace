@@ -329,15 +329,23 @@ describe("the desktop app update's daemon shapes and actions (07.13.1, D-07, D-0
   const base = { paired: true, connected: true };
 
   it("status().appUpdate parses the daemon's block and drops one it cannot read", () => {
-    expect(DaemonStatusPayload.parse({ ...base, appUpdate: { state: "draining", running: 2 } }).appUpdate).toEqual({
+    expect(
+      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "draining", running: 2 } }).appUpdate,
+    ).toEqual({
       state: "draining",
       running: 2,
     });
     expect(
-      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "idle", running: 0, lastEnd: "timed_out" } }).appUpdate,
+      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "idle", running: 0, lastEnd: "timed_out" } })
+        .appUpdate,
     ).toEqual({ state: "idle", running: 0, lastEnd: "timed_out" });
     expect(DaemonStatusPayload.parse(base).appUpdate).toBeUndefined();
-    for (const odd of ["held", { state: "paused", running: 0 }, { state: "idle", running: -1 }, { running: 1 }]) {
+    for (const odd of [
+      "held",
+      { state: "paused", running: 0 },
+      { state: "idle", running: -1 },
+      { running: 1 },
+    ]) {
       const parsed = DaemonStatusPayload.safeParse({ ...base, appUpdate: odd });
       expect(parsed.success).toBe(true);
       expect(parsed.data?.appUpdate).toBeUndefined();
@@ -351,13 +359,14 @@ describe("the desktop app update's daemon shapes and actions (07.13.1, D-07, D-0
       running: 0,
     });
     expect(
-      AppUpdateHoldAnswer.parse({ held: false, state: "idle", running: 1, blocked: "runtime_update" }).blocked,
+      AppUpdateHoldAnswer.parse({ held: false, state: "idle", running: 1, blocked: "runtime_update" })
+        .blocked,
     ).toBe("runtime_update");
     expect(AppUpdateHoldAnswer.safeParse({ held: false, state: "waiting", running: 1 }).success).toBe(false);
     expect(AppUpdateHoldAnswer.safeParse({ held: true, state: "held" }).success).toBe(false);
-    expect(AppUpdateHoldAnswer.safeParse({ held: false, state: "idle", running: 0, blocked: "cli" }).success).toBe(
-      false,
-    );
+    expect(
+      AppUpdateHoldAnswer.safeParse({ held: false, state: "idle", running: 0, blocked: "cli" }).success,
+    ).toBe(false);
   });
 
   it("update actions from the onboarding window are a closed list", () => {
