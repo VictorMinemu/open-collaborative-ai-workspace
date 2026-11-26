@@ -14,6 +14,11 @@ export interface SupervisorDeps {
   spawn: () => ChildLike;
   /** Signal the child's whole process group (negative pid on POSIX). */
   killGroup: (pid: number, signal: NodeJS.Signals) => void;
+  /**
+   * Review WR-03: asks the daemon to stop itself (its control socket's `shutdown`) before any signal; the signals
+   * follow only when it has not exited within `gracefulStopMs`. Windows: a signal would end the daemon alone.
+   */
+  requestStop?: (pid: number) => Promise<void>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -29,6 +34,8 @@ export interface BackoffOptions {
   stableMs: number;
   /** Grace period between SIGTERM and SIGKILL on stop. */
   killTimeoutMs: number;
+  /** With `requestStop`: how long the daemon may take to stop itself before the signals. */
+  gracefulStopMs: number;
 }
 
 export const DEFAULT_BACKOFF: BackoffOptions = {
@@ -37,6 +44,7 @@ export const DEFAULT_BACKOFF: BackoffOptions = {
   factor: 2,
   stableMs: 30_000,
   killTimeoutMs: 5000,
+  gracefulStopMs: 8000,
 };
 
 export type SupervisorState = "stopped" | "starting" | "running" | "restarting";
@@ -148,7 +156,10 @@ export class DaemonSupervisor extends EventEmitter {
     this.restartTimer = this.setTimer(() => this.launch(), delay);
   }
 
-  /** Stop and do not restart. SIGTERM the process group, SIGKILL after the grace period. */
+  /**
+   * Stop and do not restart. SIGTERM the process group, SIGKILL after the grace period; with `requestStop`, the daemon
+   * is first asked to stop itself and the signals follow only after `gracefulStopMs` (review WR-03).
+   */
   stop(): Promise<void> {
     this.wanted = false;
     if (this.restartTimer !== null) {
@@ -166,28 +177,45 @@ export class DaemonSupervisor extends EventEmitter {
     this.stopping = new Promise<void>((resolve) => {
       let done = false;
       let killTimer: unknown = null;
+      let graceTimer: unknown = null;
       const finish = () => {
         if (done) return;
         done = true;
         if (killTimer !== null) this.clearTimer(killTimer);
+        if (graceTimer !== null) this.clearTimer(graceTimer);
         this.stopping = null;
         resolve();
       };
-      child.on("exit", finish);
-      try {
-        this.deps.killGroup(pid, "SIGTERM");
-      } catch {
-        // already gone
-      }
-      killTimer = this.setTimer(() => {
+      const signal = () => {
+        if (done || killTimer !== null) return;
+        if (graceTimer !== null) this.clearTimer(graceTimer);
+        graceTimer = null;
         try {
-          this.deps.killGroup(pid, "SIGKILL");
+          this.deps.killGroup(pid, "SIGTERM");
         } catch {
           // already gone
         }
-        // Do not hang quit forever if the exit event never comes.
-        this.setTimer(finish, 500);
-      }, this.opts.killTimeoutMs);
+        killTimer = this.setTimer(() => {
+          try {
+            this.deps.killGroup(pid, "SIGKILL");
+          } catch {
+            // already gone
+          }
+          // Do not hang quit forever if the exit event never comes.
+          this.setTimer(finish, 500);
+        }, this.opts.killTimeoutMs);
+      };
+      child.on("exit", finish);
+      const requestStop = this.deps.requestStop;
+      if (!requestStop) {
+        signal();
+        return;
+      }
+      graceTimer = this.setTimer(signal, this.opts.gracefulStopMs);
+      // A request that fails (the daemon does not answer, or is too old to know it) goes straight to the signals.
+      void Promise.resolve()
+        .then(() => requestStop(pid))
+        .catch(() => signal());
     });
     return this.stopping;
   }

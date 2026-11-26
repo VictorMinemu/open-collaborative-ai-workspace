@@ -3,7 +3,7 @@
 
 import { chmod, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { RuntimeId, WorkBrowserTool } from "@ocw/contracts";
 import { z } from "zod";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
@@ -66,6 +66,27 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
       id: z.union([z.string(), z.number()]).optional(),
       cmd: z.literal("appUpdateRelease"),
       holdId: z.uuid(),
+    })
+    .strict(),
+  /**
+   * Review WR-03: the desktop app asks the daemon it started to stop itself (as SIGTERM does: every session, CLI and
+   * browser child stops), because on Windows a signal ends the daemon's process alone. Local only; carries no value;
+   * strict. Refused unless `ocw-runtime run` gave the daemon its stop hook.
+   */
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("shutdown") }).strict(),
+  /**
+   * Review WR-03: whether this daemon's executable or entry script lies inside `folder` (the desktop app's install
+   * folder, which an update replaces). Answers a boolean only, never a path. Local only; strict, absolute folders only.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("runsFromFolder"),
+      folder: z
+        .string()
+        .min(1)
+        .max(4096)
+        .refine((p) => isAbsolute(p)),
     })
     .strict(),
   /**

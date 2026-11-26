@@ -4,7 +4,7 @@
 // so it is never written to disk in plaintext. No Electron imports (unit-tested).
 
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve, win32 } from "node:path";
 
 export interface LaunchContext {
   isPackaged: boolean;
@@ -94,6 +94,45 @@ export function buildDaemonEnv(
     env.OCW_APP_VERSION = opts.appVersion;
   }
   return env;
+}
+
+/**
+ * Review WR-03: the folder an update replaces (the NSIS installer kills every process under it; the macOS swap renames
+ * and removes the bundle; the AppImage mount goes with the old app). Null unpackaged or outside an app bundle.
+ */
+export function installRoot(ctx: {
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+  execPath: string;
+  env: NodeJS.ProcessEnv;
+}): string | null {
+  if (!ctx.isPackaged) return null;
+  switch (ctx.platform) {
+    case "darwin":
+      return /^(\/.+\.app)\/Contents\/MacOS\/[^/]+$/.exec(ctx.execPath)?.[1] ?? null;
+    case "win32":
+      return win32.dirname(ctx.execPath);
+    case "linux":
+      return ctx.env.APPIMAGE && ctx.env.APPDIR ? ctx.env.APPDIR : dirname(ctx.execPath);
+    default:
+      return null;
+  }
+}
+
+/**
+ * Review WR-03: Windows' fallback stop when the daemon did not stop itself in time: `taskkill` from System32 over the
+ * daemon's whole process tree (its CLIs and browser children included), with a fixed argv and never a shell.
+ */
+export function killTreeCommand(
+  pid: number,
+  env: NodeJS.ProcessEnv,
+): { command: string; args: string[] } | null {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  const systemRoot = env.SystemRoot && win32.isAbsolute(env.SystemRoot) ? env.SystemRoot : "C:\\Windows";
+  return {
+    command: win32.join(systemRoot, "System32", "taskkill.exe"),
+    args: ["/PID", String(pid), "/T", "/F"],
+  };
 }
 
 export function ocwHomeDir(env: NodeJS.ProcessEnv = process.env): string {

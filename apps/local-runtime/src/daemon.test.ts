@@ -23,7 +23,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
@@ -902,6 +902,59 @@ describe("Control socket", () => {
     expect(
       await controlRequest(socketPath(), { cmd: "addProject", path: join(home, "missing") }),
     ).toMatchObject({ ok: false });
+  });
+});
+
+// Review WR-03: on Windows the desktop app cannot signal the daemon's process tree, so it asks the daemon to stop
+// itself (which stops its CLIs and browser children), and asks whether a daemon it did not start runs from the
+// folder an update replaces. Both are local only; no host data goes out.
+describe("review WR-03: shutdown and runsFromFolder over the control socket", () => {
+  const opts = () => ({
+    home,
+    env: { CODEX_HOME: join(home, "codex-default") },
+    token: "device-token-123",
+    config: { serverUrl: server.url },
+    runtimes: [runtime],
+    logger: silentLogger,
+    controlSocket: socketPath(),
+    link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+  });
+
+  it("shutdown asks the run loop to stop once, and is refused without one or with any value", async () => {
+    await daemon.start();
+    expect(await controlRequest(socketPath(), { cmd: "shutdown" })).toMatchObject({ ok: false });
+    expect(await controlRequest(socketPath(), { cmd: "shutdown", now: true } as never)).toMatchObject({
+      ok: false,
+      error: "invalid request",
+    });
+    await daemon.stop();
+    const requestShutdown = vi.fn();
+    daemon = await Daemon.create({ ...opts(), requestShutdown });
+    await daemon.start();
+    expect(await controlRequest(socketPath(), { cmd: "shutdown" })).toEqual({
+      ok: true,
+      result: { stopping: true },
+    });
+    await vi.waitFor(() => expect(requestShutdown).toHaveBeenCalledTimes(1));
+  });
+
+  it("runsFromFolder answers a boolean only, for an absolute folder", async () => {
+    await daemon.start();
+    // The test daemon runs in this process: its executable is process.execPath.
+    expect(
+      await controlRequest(socketPath(), { cmd: "runsFromFolder", folder: dirname(process.execPath) }),
+    ).toEqual({ ok: true, result: { inside: true } });
+    expect(await controlRequest(socketPath(), { cmd: "runsFromFolder", folder: home })).toEqual({
+      ok: true,
+      result: { inside: false },
+    });
+    expect(
+      await controlRequest(socketPath(), { cmd: "runsFromFolder", folder: "relative/OCW" } as never),
+    ).toMatchObject({ ok: false, error: "invalid request" });
+    expect(await controlRequest(socketPath(), { cmd: "runsFromFolder" } as never)).toMatchObject({
+      ok: false,
+      error: "invalid request",
+    });
   });
 });
 

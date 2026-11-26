@@ -673,7 +673,9 @@ async function run(): Promise<void> {
     },
     exit: (code) => process.exit(code),
   });
-  const daemon = await Daemon.create({ exitForUpdate });
+  // Review WR-03: the desktop app's `shutdown` control command takes the same path as SIGTERM (Windows cannot signal
+  // the daemon's process tree). `shutdown` is defined below; the hook runs only once the socket answers.
+  const daemon = await Daemon.create({ exitForUpdate, requestShutdown: () => shutdown("shutdown request") });
   current = daemon;
   // Handlers go in before start: the control socket exists before start() resolves, and a service manager (or a
   // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.

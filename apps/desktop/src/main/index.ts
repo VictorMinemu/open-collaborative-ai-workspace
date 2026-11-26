@@ -19,7 +19,7 @@
 //   event, after `before-quit` stopped the daemon. Where the app cannot update itself (.deb, a Mac from the disk image
 //   or an unwritable folder, other builds) the daily 07.13 GitHub notice links the release page instead.
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
@@ -80,7 +80,13 @@ import {
 } from "./chatgpt-loopback";
 import { ConfigStore } from "./config-store";
 import { ControlError, controlRequest, controlSocketPath } from "./control-client";
-import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
+import {
+  buildDaemonEnv,
+  installRoot,
+  killTreeCommand,
+  ocwHomeDir,
+  resolveDaemonCommand,
+} from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
 import {
   createAdhocMacUpdater,
@@ -132,6 +138,8 @@ let onboardingWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let paused = false;
 let externalDaemon = false;
+/** Review WR-03: the adopted daemon runs from this app's install folder (an update would kill it). */
+let externalInInstall = false;
 let lastReport: DaemonStatusPayload | null = null;
 /** runtime.json's Full access opt-in as last read here (shown while the daemon is unreachable). */
 let localFullAccess = false;
@@ -234,6 +242,47 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * The supervisor's stop signal. Review WR-03: on Windows a signal is TerminateProcess of the daemon alone, so the
+ * fallback (after the daemon's own `shutdown` did not finish in time) is `taskkill /T /F` over its process tree.
+ */
+function killDaemonTree(pid: number, signal: NodeJS.Signals): void {
+  const tree = process.platform === "win32" ? killTreeCommand(pid, process.env) : null;
+  if (!tree) {
+    killGroup(pid, signal);
+    return;
+  }
+  execFile(tree.command, tree.args, { windowsHide: true, timeout: 10_000 }, (err) => {
+    if (!err) return;
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // gone
+    }
+  });
+}
+
+/**
+ * Review WR-03: whether a daemon this app did not start runs from the folder an update replaces. Asked once, when the
+ * daemon is adopted; only a boolean comes back. A daemon that cannot answer is not this build's own bundled daemon,
+ * so it does not run from this folder.
+ */
+async function externalRunsFromInstall(): Promise<boolean> {
+  const root = installRoot({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    execPath: process.execPath,
+    env: process.env,
+  });
+  if (!root) return false;
+  try {
+    const answer = await controlRequest(socketPath, { cmd: "runsFromFolder", folder: root }, 5000);
+    return (answer as { inside?: unknown } | null)?.inside === true;
+  } catch {
+    return false;
+  }
+}
+
 async function probeDaemon(): Promise<DaemonStatusPayload | null> {
   try {
     return DaemonStatusPayload.parse(await controlRequest(socketPath, { cmd: "status" }, 8000));
@@ -256,7 +305,12 @@ async function startDaemon(): Promise<void> {
   if (existing) {
     externalDaemon = true;
     lastReport = existing;
-    log("using an already running daemon");
+    externalInInstall = await externalRunsFromInstall();
+    log(
+      externalInInstall
+        ? "using an already running daemon from this app's folder: updates wait until it stops"
+        : "using an already running daemon",
+    );
     return;
   }
   externalDaemon = false;
@@ -427,7 +481,7 @@ function onAppUpdateChange(): void {
 }
 
 function appDaemonKind(): DaemonKind {
-  if (externalDaemon) return "external";
+  if (externalDaemon) return externalInInstall ? "external_install" : "external";
   if (paused) return "paused";
   return supervisor.state === "running" ? "ours" : "stopped";
 }
@@ -1179,7 +1233,15 @@ async function main(): Promise<void> {
 
   supervisor = new DaemonSupervisor({
     spawn: spawnDaemon,
-    killGroup,
+    killGroup: killDaemonTree,
+    // Review WR-03: on Windows the daemon is asked to stop itself first (its CLIs and browser children with it).
+    ...(process.platform === "win32"
+      ? {
+          requestStop: async () => {
+            await controlRequest(socketPath, { cmd: "shutdown" }, 3000);
+          },
+        }
+      : {}),
     // Serialised so a restart's "remove old" can never land after "write new".
     onSpawned: (pid) => pidOp(() => writePidfile(pidfile, pid)),
     onExited: (pid) => pidOp(() => removePidfileIfOwner(pidfile, pid)),

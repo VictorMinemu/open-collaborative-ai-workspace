@@ -30,8 +30,9 @@
 // (before the adapter's) and the shim's `browserCall` on the control socket. Adapters get `StartSessionOptions.browser`.
 
 import { realpathSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { arch, homedir, platform, userInfo } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import {
   AccountLoginPayload,
   AccountLogoutPayload,
@@ -197,6 +198,21 @@ function daemonBrowsersRoot(env: NodeJS.ProcessEnv, home: string): string {
   }
 }
 
+/**
+ * Review WR-03: whether this process's executable or entry script lies inside `folder` (both resolved through
+ * symlinks; `path.relative` compares case-insensitively on Windows).
+ */
+async function runsFromFolder(folder: string): Promise<boolean> {
+  const real = (p: string) => realpath(p).catch(() => resolvePath(p));
+  const root = await real(folder);
+  for (const p of [process.execPath, process.argv[1]]) {
+    if (!p) continue;
+    const rel = relative(root, await real(p));
+    if (rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) return true;
+  }
+  return false;
+}
+
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** 07.13 (PD-15, PD-17): the only paths the browser manager may PUT to: the sign-in routes with uuid ids. */
 const BROWSER_PUT_PATHS: readonly RegExp[] = [
@@ -341,6 +357,11 @@ export interface DaemonOptions {
    * no `SelfUpdate` exists and an `ocw-runtime` update is refused with `SELF_UPDATE_UNAVAILABLE_MESSAGE`.
    */
   exitForUpdate?: (code: number) => Promise<void>;
+  /**
+   * Review WR-03: the run loop's stop (`cli.ts run`: the same path as SIGTERM, then exit 0), started by the local
+   * `shutdown` command. Without it the command is refused.
+   */
+  requestShutdown?: () => void;
   /**
    * Tests only (07.17.1, PD-19): overrides for the `SelfUpdate` (the stub's URL, the running build, supervision, the
    * fake npm through `prepare`, short polls). The exit, the lock directory and the scratch-home rule always come from
@@ -2350,6 +2371,23 @@ export class Daemon {
         return this.appHold.hold({ drain: req.drain });
       case "appUpdateRelease":
         return this.appHold.release({ holdId: req.holdId });
+      // Review WR-03: the desktop app's graceful stop (Windows cannot signal a process tree); local only.
+      case "shutdown": {
+        const stop = this.opts.requestShutdown;
+        if (!stop) throw new Error("shutdown is not available for this runtime");
+        // After the answer is written: the stop closes the control socket.
+        setImmediate(() => {
+          try {
+            stop();
+          } catch {
+            // the run loop's own guard reports nothing here
+          }
+        });
+        return { stopping: true };
+      }
+      // Review WR-03: a boolean only; the folder comes from the desktop app, never leaves this process.
+      case "runsFromFolder":
+        return { inside: await runsFromFolder(req.folder) };
     }
   }
 }

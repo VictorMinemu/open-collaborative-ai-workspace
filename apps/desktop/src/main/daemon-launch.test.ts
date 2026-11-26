@@ -1,5 +1,67 @@
 import { describe, expect, it } from "vitest";
-import { augmentPath, buildDaemonEnv, resolveDaemonCommand } from "./daemon-launch";
+import {
+  augmentPath,
+  buildDaemonEnv,
+  installRoot,
+  killTreeCommand,
+  resolveDaemonCommand,
+} from "./daemon-launch";
+
+// Review WR-03: the folder an update replaces, to tell whether a daemon started by hand runs from it.
+describe("installRoot", () => {
+  it("is the app bundle on macOS, the install folder on Windows, the AppImage mount or folder on Linux", () => {
+    expect(
+      installRoot({
+        isPackaged: true,
+        platform: "darwin",
+        execPath: "/Applications/OCW.app/Contents/MacOS/OCW",
+        env: {},
+      }),
+    ).toBe("/Applications/OCW.app");
+    expect(
+      installRoot({
+        isPackaged: true,
+        platform: "win32",
+        execPath: "C:\\Users\\someone\\AppData\\Local\\Programs\\OCW\\OCW.exe",
+        env: {},
+      }),
+    ).toBe("C:\\Users\\someone\\AppData\\Local\\Programs\\OCW");
+    expect(
+      installRoot({
+        isPackaged: true,
+        platform: "linux",
+        execPath: "/tmp/.mount_OCWabc/ocw",
+        env: { APPIMAGE: "/home/someone/OCW.AppImage", APPDIR: "/tmp/.mount_OCWabc" },
+      }),
+    ).toBe("/tmp/.mount_OCWabc");
+    expect(installRoot({ isPackaged: true, platform: "linux", execPath: "/opt/OCW/ocw", env: {} })).toBe(
+      "/opt/OCW",
+    );
+  });
+
+  it("is null unpackaged or outside an app bundle", () => {
+    expect(
+      installRoot({ isPackaged: false, platform: "darwin", execPath: "/x/Electron", env: {} }),
+    ).toBeNull();
+    expect(
+      installRoot({ isPackaged: true, platform: "darwin", execPath: "/usr/local/bin/ocw", env: {} }),
+    ).toBeNull();
+  });
+});
+
+describe("killTreeCommand (review WR-03)", () => {
+  it("is taskkill from System32 over the whole tree, with a fixed argv", () => {
+    expect(killTreeCommand(4242, { SystemRoot: "D:\\Windows" })).toEqual({
+      command: "D:\\Windows\\System32\\taskkill.exe",
+      args: ["/PID", "4242", "/T", "/F"],
+    });
+    expect(killTreeCommand(7, {})?.command).toBe("C:\\Windows\\System32\\taskkill.exe");
+  });
+
+  it("refuses a pid that is not a positive integer", () => {
+    for (const pid of [0, -1, 1.5, Number.NaN]) expect(killTreeCommand(pid, {})).toBeNull();
+  });
+});
 
 describe("resolveDaemonCommand", () => {
   const base = {

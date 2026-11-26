@@ -179,6 +179,34 @@ describe("click to restart (07.13.1 D-07, Pitfall 3)", () => {
     },
   );
 
+  // Review WR-03: the installer (NSIS) or the swap (macOS) replaces the install folder; a daemon the person started by
+  // hand from it would be killed mid-turn, so the update waits until it is stopped.
+  it("refuses the restart while a daemon started by hand runs from the install folder", async () => {
+    await h.controller.check("click");
+    await flush();
+    h.daemon.kind = "external_install";
+    await h.controller.restart();
+    await flush();
+    expect(h.hold).not.toHaveBeenCalled();
+    expect(h.quit).not.toHaveBeenCalled();
+    expect(h.controller.view()).toMatchObject({ phase: "ready", notice: UPDATE_SENTENCES.externalRuntime });
+    expect(labels(h.controller)).toEqual([UPDATE_SENTENCES.externalRuntime, "Restart to update to v0.5.1"]);
+    h.controller.onQuit();
+    expect(h.updater.install).not.toHaveBeenCalled();
+  });
+
+  it("never installs on a normal quit at automatic while such a daemon runs", async () => {
+    h.controller.onDaemonStatus(status("automatic"));
+    await flush();
+    h.daemon.kind = "external_install";
+    h.controller.onQuit();
+    expect(h.updater.install).not.toHaveBeenCalled();
+    expect(h.recordFailure).not.toHaveBeenCalled();
+    h.daemon.kind = "external";
+    h.controller.onQuit();
+    expect(h.updater.install).toHaveBeenCalledWith(true, false);
+  });
+
   it("never quits when the hold is not held", async () => {
     h.hold.mockResolvedValue({ held: false, state: "draining", running: 1 });
     await h.controller.check("click");
@@ -504,6 +532,15 @@ describe("the unattended restart (automatic only, D-08)", () => {
     await vi.advanceTimersByTimeAsync(MIN);
     expect(h.hold).toHaveBeenCalledTimes(2);
     expect(h.hold.mock.calls.every((c) => c[0] === false)).toBe(true);
+    expect(h.quit).not.toHaveBeenCalled();
+  });
+
+  it("never while a daemon started by hand runs from the install folder (review WR-03)", async () => {
+    await readyAt("automatic");
+    h.daemon.kind = "external_install";
+    h.idle.seconds = 7200;
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(h.hold).not.toHaveBeenCalled();
     expect(h.quit).not.toHaveBeenCalled();
   });
 

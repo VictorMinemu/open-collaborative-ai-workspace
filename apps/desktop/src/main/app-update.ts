@@ -38,6 +38,7 @@ export const UPDATE_SENTENCES = {
   macPrepareFailed: "The update could not be prepared. Download it from the release page.",
   holdTimedOut: "Sessions were still running after 30 minutes, so OCW did not restart.",
   runtimeUnreachable: "The runtime did not answer, so OCW did not restart.",
+  externalRuntime: "A runtime started from OCW's own folder is running. Stop it, then restart to update.",
   upToDate: "OCW is up to date.",
 } as const;
 
@@ -79,8 +80,12 @@ export type UpdateFallbackReason =
   | "not_release"
   | "dev";
 
-/** The app's own daemon runs (`ours`), or none needs holding (paused, stopped, or one started by hand). */
-export type DaemonKind = "ours" | "paused" | "stopped" | "external";
+/**
+ * The app's own daemon runs (`ours`), or none needs holding (paused, stopped, or one started by hand). Review WR-03:
+ * `external_install` is a daemon started by hand from the folder an update replaces (the installer or the swap would
+ * kill it mid-turn), so no update installs while it runs.
+ */
+export type DaemonKind = "ours" | "paused" | "stopped" | "external" | "external_install";
 
 export type UpdateLevel = "automatic" | "notify" | "off";
 
@@ -336,7 +341,12 @@ export class AppUpdateController {
     if (this.stopped || this.pending || this.acting) return;
     const previous = this.phase;
     this.notice = null;
-    if (this.deps.daemon() !== "ours") return this.run(action, previous, null);
+    const daemon = this.deps.daemon();
+    if (daemon === "external_install") {
+      this.notice = UPDATE_SENTENCES.externalRuntime;
+      return this.set(previous);
+    }
+    if (daemon !== "ours") return this.run(action, previous, null);
     const pending: PendingHold = { action, previous, holdId: null, asking: false };
     this.pending = pending;
     this.boundTimer = this.timer(WAIT_BOUND_MS, () => {
@@ -384,6 +394,8 @@ export class AppUpdateController {
     if (!updater || !this.deps.installAllowed || !version || this.installStarted) return;
     const restart = this.restartRequested;
     if (!restart && this.level !== "automatic") return;
+    // Review WR-03: the installer or the swap would kill a daemon started by hand from the install folder.
+    if (this.deps.daemon() === "external_install") return;
     this.installStarted = true;
     let started = false;
     try {
@@ -628,7 +640,9 @@ export class AppUpdateController {
       return;
     }
     if (!(idle >= AWAY_SECONDS)) return;
-    if (this.deps.daemon() !== "ours") return this.run(this.restartAction, this.phase, null);
+    const daemon = this.deps.daemon();
+    if (daemon === "external_install") return;
+    if (daemon !== "ours") return this.run(this.restartAction, this.phase, null);
     this.unattendedAsking = true;
     // Review CR-01: the answer is handled inside its own turn of the chain, so a click that came meanwhile sends its
     // hold only after this one was released.
