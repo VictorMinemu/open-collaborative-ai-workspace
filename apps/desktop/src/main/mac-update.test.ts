@@ -1,9 +1,46 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { DownloadUpdateOptions } from "electron-updater/out/AppUpdater";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { buildDummyMacApp, zipDummyMacApp } from "../../e2e/support/mac-dummy-app";
-import { MacUpdateError, macInstallTarget, type RunTool, stageUpdate } from "./mac-update";
+import {
+  AdhocMacUpdater,
+  createAdhocMacUpdater,
+  MacUpdateError,
+  macInstallTarget,
+  type RunTool,
+  readSwapResult,
+  type SpawnDetached,
+  stageUpdate,
+  sweepLeftovers,
+} from "./mac-update";
+
+// electron-updater's BaseUpdater needs Electron; this stand-in records the download it is asked for and runs its task
+// with the options (sha512 included) electron-updater would pass.
+vi.mock("electron-updater", () => {
+  class BaseUpdater {
+    readonly httpExecutor = { download: vi.fn(async (_url: URL, dest: string, _opts: unknown) => dest) };
+    readonly executeDownload = vi.fn(
+      async (t: { task: (dest: string, opts: unknown, pkg: null, rm: () => Promise<void>) => Promise<unknown> }) => {
+        await t.task("/cache/pending/OCW-v0.5.1-macos-arm64.zip", { sha512: "c2hhNTEy" }, null, async () => {});
+        return { updateFile: "/cache/pending/OCW-v0.5.1-macos-arm64.zip" };
+      },
+    );
+  }
+  return { BaseUpdater };
+});
 
 /**
  * 07.13.1 (D-04, D-05): macOS gets its own installer because Squirrel.Mac refuses ad-hoc signed updates. A downloaded
@@ -264,4 +301,237 @@ describe.runIf(process.platform === "darwin")("stageUpdate with the real macOS t
     expect(err.code).toBe("wrong_bundle");
     expect(existsSync(join(target.parent, ".ocw-update-0.5.1"))).toBe(false);
   }, 60_000);
+});
+
+type FakeBase = {
+  httpExecutor: { download: Mock };
+  executeDownload: Mock;
+};
+
+/** Exposes the protected electron-updater hooks to the tests. */
+class TestMacUpdater extends AdhocMacUpdater {
+  download(o: DownloadUpdateOptions) {
+    return this.doDownloadUpdate(o);
+  }
+  installNow(o: { isSilent: boolean; isForceRunAfter: boolean }) {
+    return this.doInstall(o);
+  }
+  get fake(): FakeBase {
+    return this as unknown as FakeBase;
+  }
+}
+
+function releaseFile(name: string) {
+  return {
+    url: new URL(
+      `https://github.com/VictorMinemu/open-collaborative-ai-workspace/releases/download/v0.5.1/${name}`,
+    ),
+    info: { url: name, sha512: "c2hhNTEy", size: 10 },
+  };
+}
+
+function downloadOptions(files: ReturnType<typeof releaseFile>[]): DownloadUpdateOptions {
+  const info = { version: "0.5.1", files: files.map((f) => f.info), path: "", sha512: "", releaseDate: "" };
+  return {
+    updateInfoAndProvider: { info, provider: { resolveFiles: () => files } },
+    requestHeaders: {},
+    cancellationToken: {},
+  } as unknown as DownloadUpdateOptions;
+}
+
+function setup(opts: { daemonPid?: () => number } = {}) {
+  const dir = temp();
+  const target = targetIn(dir);
+  const userData = join(dir, "userData");
+  mkdirSync(userData);
+  const helperSource = join(dir, "mac-swap-helper.cjs");
+  writeFileSync(helperSource, "// the bundled swap helper\n");
+  const tools = fakeTools();
+  const unref = vi.fn();
+  const spawn = vi.fn<SpawnDetached>(() => ({ unref }));
+  const updater = new TestMacUpdater({
+    target,
+    userData,
+    helperSource,
+    daemonPid: opts.daemonPid ?? (() => 4242),
+    run: tools.run,
+    spawn,
+  });
+  return { dir, target, userData, helperSource, tools, spawn, unref, updater };
+}
+
+const CACHED = "/cache/OCW-v0.5.1-macos-arm64.zip";
+
+describe("AdhocMacUpdater (D-01, D-05)", () => {
+  it("downloads the release's zip through electron-updater, with its sha512", async () => {
+    const { updater } = setup();
+    const dmg = releaseFile("OCW-v0.5.1-macos-arm64.dmg");
+    const zip = releaseFile("OCW-v0.5.1-macos-arm64.zip");
+    await updater.download(downloadOptions([dmg, zip]));
+    const { executeDownload, httpExecutor } = updater.fake;
+    expect(executeDownload).toHaveBeenCalledTimes(1);
+    expect(executeDownload.mock.calls[0]?.[0]).toMatchObject({ fileExtension: "zip", fileInfo: zip });
+    expect(httpExecutor.download).toHaveBeenCalledTimes(1);
+    expect(httpExecutor.download).toHaveBeenCalledWith(zip.url, "/cache/pending/OCW-v0.5.1-macos-arm64.zip", {
+      sha512: "c2hhNTEy",
+    });
+  });
+
+  it("rejects with no_zip when the release has no zip", async () => {
+    const { updater } = setup();
+    const err = await failure(updater.download(downloadOptions([releaseFile("OCW-v0.5.1-macos-arm64.dmg")])));
+    expect(err.code).toBe("no_zip");
+    expect(updater.fake.executeDownload).not.toHaveBeenCalled();
+  });
+
+  it("prepares the download: stages it and copies the helper beside the staged app (0600)", async () => {
+    const { updater, target, tools } = setup();
+    await updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED });
+    const staging = join(target.parent, ".ocw-update-0.5.1");
+    const helper = join(staging, "swap-helper.cjs");
+    expect(readFileSync(helper, "utf8")).toBe("// the bundled swap helper\n");
+    expect(statSync(helper).mode & 0o777).toBe(0o600);
+    expect(tools.calls[0]?.args).toEqual(["-x", "-k", CACHED, staging]);
+    // Already prepared for that version: nothing runs again.
+    await updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED });
+    expect(tools.calls.filter((c) => c.cmd === "/usr/bin/ditto")).toHaveLength(1);
+  });
+
+  it("fails to prepare with helper_failed and leaves no staging folder when the helper is missing", async () => {
+    const { updater, target, helperSource } = setup();
+    rmSync(helperSource);
+    const err = await failure(updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED }));
+    expect(err.code).toBe("helper_failed");
+    expect(err.message).not.toContain("/");
+    expect(existsSync(join(target.parent, ".ocw-update-0.5.1"))).toBe(false);
+    expect(updater.installNow({ isSilent: true, isForceRunAfter: true })).toBe(false);
+  });
+
+  it("installs by spawning the detached helper with Electron as Node and argv only", async () => {
+    const { updater, target, userData, spawn, unref } = setup();
+    await updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED });
+    expect(updater.installNow({ isSilent: true, isForceRunAfter: true })).toBe(true);
+    const staging = join(target.parent, ".ocw-update-0.5.1");
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        join(staging, "swap-helper.cjs"),
+        String(process.pid),
+        "4242",
+        target.app,
+        join(staging, "OCW.app"),
+        join(userData, "update-result.json"),
+        "0.5.1",
+        "1",
+      ],
+      { detached: true, stdio: "ignore", env: { ELECTRON_RUN_AS_NODE: "1" } },
+    );
+    const options = spawn.mock.calls[0]?.[2];
+    expect(options?.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+    expect(options).not.toHaveProperty("shell");
+    expect(unref).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [0, "0"],
+    [-1, "0"],
+    [1.5, "0"],
+    [Number.NaN, "0"],
+    [77, "77"],
+  ])("passes daemonPid %s as %j", async (pid, arg) => {
+    const { updater, spawn } = setup({ daemonPid: () => pid });
+    await updater.prepareDownloaded({ version: "0.5.1", downloadedFile: CACHED });
+    expect(updater.installNow({ isSilent: true, isForceRunAfter: false })).toBe(true);
+    expect(spawn.mock.calls[0]?.[1][2]).toBe(arg);
+    expect(spawn.mock.calls[0]?.[1][7]).toBe("0");
+  });
+
+  it("installs nothing before a download was prepared", () => {
+    const { updater, spawn } = setup();
+    expect(updater.installNow({ isSilent: true, isForceRunAfter: true })).toBe(false);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("createAdhocMacUpdater (D-05)", () => {
+  const base = { userData: "/x", helperSource: "/x/h.cjs", daemonPid: () => 0 };
+
+  it("returns the target's refusal reason", () => {
+    expect(
+      createAdhocMacUpdater({ ...base, exePath: "/Volumes/OCW/OCW.app/Contents/MacOS/OCW", isWritable: writable }),
+    ).toEqual({ ok: false, reason: "dmg" });
+    expect(
+      createAdhocMacUpdater({
+        ...base,
+        exePath: "/Applications/OCW.app/Contents/MacOS/OCW",
+        isWritable: () => false,
+      }),
+    ).toEqual({ ok: false, reason: "unwritable" });
+  });
+
+  it("builds the updater, with installedAppOverride replacing the computed bundle", () => {
+    const dir = temp();
+    const override = join(dir, "Applications", "OCW.app");
+    mkdirSync(override, { recursive: true });
+    const made = createAdhocMacUpdater({
+      ...base,
+      exePath: "/Volumes/OCW/OCW.app/Contents/MacOS/OCW",
+      installedAppOverride: override,
+    });
+    expect(made.ok).toBe(true);
+    if (!made.ok) return;
+    expect(made.updater).toBeInstanceOf(AdhocMacUpdater);
+    expect(made.updater.installedApp).toBe(override);
+    const plain = createAdhocMacUpdater({
+      ...base,
+      exePath: "/Applications/OCW.app/Contents/MacOS/OCW",
+      isWritable: writable,
+    });
+    expect(plain.ok && plain.updater.installedApp).toBe("/Applications/OCW.app");
+  });
+});
+
+describe("readSwapResult and sweepLeftovers (D-05)", () => {
+  it("returns the last result once and deletes it", async () => {
+    const dir = temp();
+    const result = {
+      outcome: "failed",
+      version: "0.5.1",
+      reason: "swap_failed",
+      at: "2026-11-26T10:00:00.000Z",
+    };
+    writeFileSync(join(dir, "update-result.json"), JSON.stringify(result));
+    expect(await readSwapResult(dir)).toEqual(result);
+    expect(existsSync(join(dir, "update-result.json"))).toBe(false);
+    expect(await readSwapResult(dir)).toBeNull();
+  });
+
+  it.each([
+    "not json",
+    JSON.stringify({ outcome: "installed", version: "0.5.1", at: "2026-11-26T10:00:00.000Z", path: "/x" }),
+    JSON.stringify({ outcome: "installed", version: "../x", at: "2026-11-26T10:00:00.000Z" }),
+  ])("deletes a malformed result and gives null (%s)", async (raw) => {
+    const dir = temp();
+    writeFileSync(join(dir, "update-result.json"), raw);
+    expect(await readSwapResult(dir)).toBeNull();
+    expect(existsSync(join(dir, "update-result.json"))).toBe(false);
+  });
+
+  it("removes only old bundles and staging folders beside the app", async () => {
+    const dir = temp();
+    const names = [
+      "OCW.app",
+      ".OCW.app.old-1732600000000",
+      ".ocw-update-0.5.1",
+      ".ocw-update-x",
+      ".OCW.app.old-x",
+      "Other.app",
+    ];
+    for (const name of names) mkdirSync(join(dir, name, "Contents"), { recursive: true });
+    await sweepLeftovers(dir);
+    expect(readdirSync(dir).sort()).toEqual([".OCW.app.old-x", ".ocw-update-x", "OCW.app", "Other.app"]);
+    // A missing folder is not an error.
+    await expect(sweepLeftovers(join(dir, "missing"))).resolves.toBeUndefined();
+  });
 });
