@@ -528,10 +528,14 @@ describe("waiting for the daemon (D-07, D-09)", () => {
     expect(h.quit).toHaveBeenCalledTimes(1);
   });
 
-  it("a hold that throws goes back to ready with the runtime-unreachable sentence", async () => {
+  it("a hold that throws goes back to ready with the runtime-unreachable sentence and reopens the gates", async () => {
     h.hold.mockRejectedValue(new Error("connect ENOENT /Users/someone/.ocw/runtime.sock"));
     await h.controller.restart();
-    expect(h.controller.view()).toMatchObject({ phase: "ready", notice: UPDATE_SENTENCES.runtimeUnreachable });
+    expect(h.controller.view()).toMatchObject({
+      phase: "ready",
+      notice: UPDATE_SENTENCES.runtimeUnreachable,
+    });
+    expect(h.release).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(appUpdateMenuModel(h.controller.view()))).not.toContain("ENOENT");
   });
 
@@ -563,12 +567,21 @@ describe("the fallback notice (no platform updater)", () => {
   });
 });
 
-const v = (over: Partial<AppUpdateView>): AppUpdateView => ({ phase: "idle", fallback: null, notice: null, ...over });
+const v = (over: Partial<AppUpdateView>): AppUpdateView => ({
+  phase: "idle",
+  fallback: null,
+  notice: null,
+  ...over,
+});
 
 describe("the menu and onboarding views (D-06, D-09)", () => {
   it("gives exactly the fixed labels per phase", () => {
-    expect(appUpdateMenuModel(v({}))).toEqual([{ label: "Check for updates…", enabled: true, action: "check" }]);
-    expect(appUpdateMenuModel(v({ phase: "checking" }))).toEqual([{ label: "Checking for updates…", enabled: false }]);
+    expect(appUpdateMenuModel(v({}))).toEqual([
+      { label: "Check for updates…", enabled: true, action: "check" },
+    ]);
+    expect(appUpdateMenuModel(v({ phase: "checking" }))).toEqual([
+      { label: "Checking for updates…", enabled: false },
+    ]);
     expect(appUpdateMenuModel(v({ phase: "downloading", version: "0.5.1", percent: 42 }))).toEqual([
       { label: "Downloading v0.5.1… 42%", enabled: false },
     ]);
@@ -587,7 +600,8 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
       url: RELEASE_URL,
     });
     expect(
-      appUpdateMenuModel(v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback: "deb" }))[0]?.label,
+      appUpdateMenuModel(v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback: "deb" }))[0]
+        ?.label,
     ).toBe("Update available (v0.5.1): download the .deb, or use the AppImage, which updates itself");
   });
 
@@ -597,9 +611,19 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
       enabled: true,
       action: "moveToApplications",
     };
-    const reasons: UpdateFallbackReason[] = ["dmg", "translocated", "unwritable", "not_bundle", "deb", "unsupported"];
+    const reasons: UpdateFallbackReason[] = [
+      "dmg",
+      "translocated",
+      "unwritable",
+      "not_bundle",
+      "deb",
+      "unsupported",
+    ];
     for (const fallback of reasons) {
-      for (const view of [v({ fallback }), v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback })]) {
+      for (const view of [
+        v({ fallback }),
+        v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback }),
+      ]) {
         const has = appUpdateMenuModel(view).some((i) => i.action === "moveToApplications");
         expect(has).toBe(fallback === "dmg" || fallback === "translocated");
         if (has) expect(appUpdateMenuModel(view)).toContainEqual(move);
@@ -609,7 +633,10 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
 
   it("maps the same phases for the onboarding window", () => {
     expect(onboardingUpdateView(v({}))).toBeUndefined();
-    expect(onboardingUpdateView(v({ phase: "checking" }))).toEqual({ kind: "progress", label: "Checking for updates…" });
+    expect(onboardingUpdateView(v({ phase: "checking" }))).toEqual({
+      kind: "progress",
+      label: "Checking for updates…",
+    });
     expect(onboardingUpdateView(v({ phase: "downloading", version: "0.5.1", percent: 42 }))).toEqual({
       kind: "progress",
       label: "Downloading v0.5.1… 42%",
@@ -618,9 +645,9 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
       kind: "ready",
       label: "Restart to update to v0.5.1",
     });
-    expect(onboardingUpdateView(v({ phase: "waiting", version: "0.5.1", running: 2, waitingFor: "sessions" }))).toEqual(
-      { kind: "waiting", label: "Waiting for 2 sessions to finish…" },
-    );
+    expect(
+      onboardingUpdateView(v({ phase: "waiting", version: "0.5.1", running: 2, waitingFor: "sessions" })),
+    ).toEqual({ kind: "waiting", label: "Waiting for 2 sessions to finish…" });
     expect(onboardingUpdateView(v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL }))).toEqual({
       kind: "link",
       label: "Update available (v0.5.1)",
@@ -631,7 +658,9 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
       label: "Move OCW to Applications to get automatic updates",
     });
     expect(
-      onboardingUpdateView(v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback: "translocated" })),
+      onboardingUpdateView(
+        v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback: "translocated" }),
+      ),
     ).toEqual({
       kind: "move",
       label: "Move OCW to Applications to get automatic updates",
@@ -671,9 +700,20 @@ describe("updateErrorSentence and appImageNameNotice", () => {
     expect(updateErrorSentence(new Error("sha512 checksum mismatch after full download of OCW.zip"))).toBe(
       UPDATE_SENTENCES.checksumMismatch,
     );
-    expect(updateErrorSentence(coded("ERR_UPDATER_CHANNEL_FILE_NOT_FOUND"))).toBe(UPDATE_SENTENCES.noUpdateFile);
-    expect(updateErrorSentence(coded("ERR_UPDATER_LATEST_VERSION_NOT_FOUND"))).toBe(UPDATE_SENTENCES.noUpdateFile);
-    for (const other of [coded("ERR_UPDATER_INVALID_VERSION"), new Error("boom"), "text", null, undefined, 42]) {
+    expect(updateErrorSentence(coded("ERR_UPDATER_CHANNEL_FILE_NOT_FOUND"))).toBe(
+      UPDATE_SENTENCES.noUpdateFile,
+    );
+    expect(updateErrorSentence(coded("ERR_UPDATER_LATEST_VERSION_NOT_FOUND"))).toBe(
+      UPDATE_SENTENCES.noUpdateFile,
+    );
+    for (const other of [
+      coded("ERR_UPDATER_INVALID_VERSION"),
+      new Error("boom"),
+      "text",
+      null,
+      undefined,
+      42,
+    ]) {
       expect(updateErrorSentence(other)).toBe(UPDATE_SENTENCES.checkFailed);
     }
   });

@@ -2,6 +2,9 @@
 // install starts. The platform updater (electron-updater's NSIS or AppImage updater, or the ad-hoc macOS updater) is
 // injected; this module imports no Electron, so every decision is unit-tested with fakes.
 //
+// - The 07.11 level decides (D-08): `automatic` checks daily, downloads, installs on a normal quit and restarts by
+//   itself only when the daemon holds without draining and the person has been away 30 min; `notify` checks and
+//   downloads, and installs only after "Restart to update"; `off` never checks by itself. A click works at every level.
 // - The app quits for an update only after the daemon answered `held` to `appUpdateHold` (or when no daemon of the
 //   app's own runs: paused, stopped or external), so a Work Zone turn is never cut (D-07, Pitfall 3).
 // - The install itself starts only in `onQuit()`, which the app calls from Electron's `quit` event, after `before-quit`
@@ -9,11 +12,21 @@
 // - The views (tray, Runtime menu, onboarding window) carry fixed sentences, versions, percentages and counts only:
 //   never an updater error text, never a path (D-09).
 
-import { AppUpdateHoldAnswer, type OnboardingUpdate } from "../shared/ipc";
-import { compareVersions } from "./update-check";
+import { AppUpdateHoldAnswer, DaemonAppUpdate, type OnboardingUpdate } from "../shared/ipc";
+import { compareVersions, isReleasePageUrl } from "./update-check";
 
 const RELEASE_TAG_URL = "https://github.com/VictorMinemu/open-collaborative-ai-workspace/releases/tag/v";
 const STABLE_VERSION = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+
+/** The person has been away this long (system idle time) before an unattended restart (D-08). */
+const AWAY_SECONDS = 1800;
+/** A blocked or ended hold is asked again at most this often. */
+const REASK_MS = 10_000;
+/** The desktop's own bound on a wait, just past the daemon's 30-min drain (which answers `timed_out` first). */
+const WAIT_BOUND_MS = 31 * 60_000;
+const FIRST_CHECK_FALLBACK_MS = 60_000;
+const CHECK_EVERY_MS = 24 * 60 * 60_000;
+const IDLE_CHECK_MS = 60_000;
 
 /** Fixed sentences: the only update text besides versions, percentages and counts that reaches a view. */
 export const UPDATE_SENTENCES = {
@@ -73,7 +86,7 @@ export interface AppUpdateDeps {
   /** False under the unpackaged test feed: everything runs except the installer. */
   installAllowed: boolean;
   currentVersion: string;
-  /** `appUpdateHold { drain }` over the control socket; the answer is parsed here. */
+  /** `appUpdateHold { drain }` over the control socket; the answer is parsed here with `AppUpdateHoldAnswer`. */
   hold: (drain: boolean) => Promise<unknown>;
   /** `appUpdateRelease`. */
   release: () => Promise<unknown>;
@@ -86,16 +99,32 @@ export interface AppUpdateDeps {
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
+  /** The first automatic check when no daemon status arrives (default 60 s). */
   firstCheckFallbackMs?: number;
+  /** Between automatic checks (default 24 h). */
   checkEveryMs?: number;
+  /** How often the unattended restart reads the idle time (default 60 s). */
   idleCheckMs?: number;
 }
+
+/** What the app passes from each daemon status poll. */
+export interface DaemonUpdateStatus {
+  /** A status answer arrived (false: the daemon is unreachable; the last known level stays). */
+  reported: boolean;
+  /** `status.runtimeUpdates.effectiveLevel`; absent (older or unpaired daemon) counts as `notify`. */
+  level: UpdateLevel | null | undefined;
+  /** `status.appUpdate`, the restart hold. */
+  appUpdate?: DaemonAppUpdate | null;
+}
+
+type WaitingFor = "sessions" | "runtime_update";
 
 type Phase =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "downloading"; version: string; percent: number }
   | { kind: "ready"; version: string }
+  | { kind: "waiting"; version?: string; running: number; waitingFor: WaitingFor }
   | { kind: "restarting"; version?: string }
   | { kind: "fallback"; version: string; url: string };
 
@@ -104,6 +133,8 @@ export interface AppUpdateView {
   phase: Phase["kind"];
   version?: string;
   percent?: number;
+  running?: number;
+  waitingFor?: WaitingFor;
   url?: string;
   /** Why the platform has no updater (null when it has one). */
   fallback: UpdateFallbackReason | null;
@@ -111,8 +142,22 @@ export interface AppUpdateView {
   notice: string | null;
 }
 
+type Action = () => void | Promise<void>;
+interface PendingHold {
+  action: Action;
+  previous: Phase;
+}
+interface Acting {
+  previous: Phase;
+  held: boolean;
+}
+
 function stableVersion(value: unknown): string | null {
   return typeof value === "string" && STABLE_VERSION.test(value) ? value : null;
+}
+
+function versionOf(phase: Phase): string | undefined {
+  return "version" in phase ? phase.version : undefined;
 }
 
 /** The error's code (and the checksum wording) picks a fixed sentence; the error's own text is never shown. */
@@ -126,10 +171,25 @@ export function updateErrorSentence(error: unknown): string {
   return UPDATE_SENTENCES.checkFailed;
 }
 
+const PLAIN_FILE_NAME = /^[^/\\]{1,255}$/;
+
+/**
+ * Pitfall 6: the AppImage updater keeps the new file's versioned name, so a shortcut to the old file breaks. One
+ * notice naming both files (plain file names only; null when nothing changed or a name carries a path).
+ */
+export function appImageNameNotice(previous: string | null, next: string | null): string | null {
+  if (!previous || !next || previous === next) return null;
+  if (!PLAIN_FILE_NAME.test(previous) || !PLAIN_FILE_NAME.test(next)) return null;
+  return `OCW now runs from ${next}. Shortcuts to ${previous} no longer work: point them at the new file, or rename it to OCW.AppImage so later updates keep that name.`;
+}
+
 export class AppUpdateController {
   private readonly updater: UpdaterLike | null;
+  private readonly now: () => number;
   private phase: Phase = { kind: "idle" };
   private notice: string | null = null;
+  /** No status yet, or one without a level: `notify` (never install unattended without a known level). */
+  private level: UpdateLevel = "notify";
   private readyVersion: string | null = null;
   /** The quit is the update's restart (a click or the unattended restart): install silently and relaunch. */
   private restartRequested = false;
@@ -138,10 +198,24 @@ export class AppUpdateController {
   private stopped = false;
   /** Who started the running check or download: a click shows its failure, an automatic run fails silently. */
   private source: "auto" | "click" = "auto";
+  private firstDone = false;
+  private lastAutoAt: number | null = null;
+  private firstTimer: TimerHandle | null = null;
+  private autoTimer: TimerHandle | null = null;
+  private idleTimer: TimerHandle | null = null;
+  private boundTimer: TimerHandle | null = null;
+  /** A hold asked with `drain` whose action has not run yet. */
+  private pending: PendingHold | null = null;
+  /** An action running after the hold (the restart, or Move to Applications). */
+  private acting: Acting | null = null;
+  private lastAskAt = 0;
+  private unattendedAsking = false;
 
   private readonly onProgress = (info: { percent: number }) => {
     if (this.phase.kind !== "downloading") return;
-    const percent = Number.isFinite(info?.percent) ? Math.max(0, Math.min(100, Math.floor(info.percent))) : 0;
+    const raw = info?.percent;
+    const percent =
+      typeof raw === "number" && Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.floor(raw))) : 0;
     this.set({ ...this.phase, percent });
   };
   private readonly onDownloaded = (event: { version: string; downloadedFile: string }) => {
@@ -153,6 +227,7 @@ export class AppUpdateController {
 
   constructor(private readonly deps: AppUpdateDeps) {
     this.updater = deps.updater;
+    this.now = deps.now ?? Date.now;
   }
 
   start(): void {
@@ -162,21 +237,43 @@ export class AppUpdateController {
     this.updater.on("download-progress", this.onProgress);
     this.updater.on("update-downloaded", this.onDownloaded);
     this.updater.on("error", this.onError);
+    this.firstTimer = this.timer(this.deps.firstCheckFallbackMs ?? FIRST_CHECK_FALLBACK_MS, () => {
+      this.firstTimer = null;
+      this.firstCheck();
+    });
   }
 
   stop(): void {
     this.stopped = true;
+    for (const t of [this.firstTimer, this.autoTimer, this.idleTimer, this.boundTimer]) this.clear(t);
+    this.firstTimer = this.autoTimer = this.idleTimer = this.boundTimer = null;
     if (!this.updater || !this.started) return;
     this.updater.removeListener("download-progress", this.onProgress);
     this.updater.removeListener("update-downloaded", this.onDownloaded);
     this.updater.removeListener("error", this.onError);
   }
 
+  /** Every daemon status poll: the level (first automatic check, schedule) and the restart hold's progress. */
+  onDaemonStatus(status: DaemonUpdateStatus): void {
+    if (this.stopped) return;
+    if (status.reported) {
+      const next = status.level ?? "notify";
+      const changed = next !== this.level;
+      this.level = next;
+      if (!this.firstDone) this.firstCheck();
+      else if (changed) this.scheduleAuto();
+      if (changed) this.syncIdleTimer();
+    }
+    const parsed = DaemonAppUpdate.safeParse(status.appUpdate);
+    if (parsed.success) this.onHoldStatus(parsed.data);
+  }
+
   /** Check, and download what it finds. Never throws: a failure becomes a sentence (a click) or nothing (automatic). */
   async check(source: "auto" | "click"): Promise<void> {
     const updater = this.updater;
-    if (!updater || this.stopped) return;
+    if (!updater || this.stopped || this.pending || this.acting) return;
     if (this.phase.kind !== "idle" && this.phase.kind !== "fallback") return;
+    if (source === "auto" && this.level === "off") return;
     this.source = source;
     this.notice = null;
     this.set({ kind: "checking" });
@@ -205,44 +302,65 @@ export class AppUpdateController {
   /** "Restart to update": hold the daemon (drain), then quit; the install starts from the quit event. */
   async restart(): Promise<void> {
     if (this.phase.kind !== "ready") return;
-    await this.holdThen(() => {
-      this.restartRequested = true;
-      this.deps.quit();
-    });
+    await this.holdThen(this.restartAction);
   }
 
   /**
-   * Run `action` once the daemon holds (or right away when no daemon of the app's own runs). An action that throws
-   * returns the view to its previous phase.
+   * Run `action` once the daemon holds with `drain` (or right away when no daemon of the app's own runs). While the
+   * daemon drains, the view waits (`cancelWait` gives up). An action that throws returns the view to its previous
+   * phase and reopens the gates; it never escapes.
    */
-  async holdThen(action: () => void | Promise<void>): Promise<void> {
-    if (this.stopped || this.phase.kind === "restarting") return;
+  async holdThen(action: Action): Promise<void> {
+    if (this.stopped || this.pending || this.acting) return;
     const previous = this.phase;
     this.notice = null;
     if (this.deps.daemon() !== "ours") return this.run(action, previous, false);
-    let answer: AppUpdateHoldAnswer | null = null;
-    try {
-      const parsed = AppUpdateHoldAnswer.safeParse(await this.deps.hold(true));
-      answer = parsed.success ? parsed.data : null;
-    } catch {
-      answer = null;
+    const pending: PendingHold = { action, previous };
+    this.pending = pending;
+    this.boundTimer = this.timer(WAIT_BOUND_MS, () => {
+      this.boundTimer = null;
+      this.endWait(pending, UPDATE_SENTENCES.holdTimedOut, true);
+    });
+    await this.ask(pending);
+  }
+
+  /** "Cancel the restart" (or a cancelled Move to Applications): reopen the gates and go back. */
+  cancelWait(): void {
+    if (this.pending) {
+      this.endWait(this.pending, null, true);
+      return;
     }
-    if (this.stopped) return;
-    if (!answer) {
-      this.notice = UPDATE_SENTENCES.runtimeUnreachable;
-      return this.set(previous);
+    const acting = this.acting;
+    if (!acting) return;
+    this.acting = null;
+    this.restartRequested = false;
+    if (acting.held) this.releaseQuietly();
+    this.set(acting.previous);
+  }
+
+  /** The 07.13 notice for a platform without an updater (`.deb`, dmg, unwritable folder…): a checked release page. */
+  setFallbackNotice(notice: { version: string; url: string } | null): void {
+    if (this.updater || this.stopped) return;
+    if (this.phase.kind !== "idle" && this.phase.kind !== "fallback") return;
+    if (!notice) {
+      if (this.phase.kind === "fallback") this.set({ kind: "idle" });
+      return;
     }
-    if (answer.held) return this.run(action, previous, true);
+    const version = stableVersion(notice.version);
+    if (!version || !isReleasePageUrl(notice.url)) return;
+    this.set({ kind: "fallback", version, url: notice.url });
   }
 
   /** Electron's `quit` event (the daemon is already stopped): the only place an install starts. */
   onQuit(): void {
     const updater = this.updater;
     if (!updater || !this.deps.installAllowed || !this.readyVersion || this.installStarted) return;
-    if (!this.restartRequested) return;
+    const restart = this.restartRequested;
+    if (!restart && this.level !== "automatic") return;
     this.installStarted = true;
     try {
-      updater.quitAndInstall(true, true);
+      // Silent; relaunch only when the quit is the update's restart (a normal quit at `automatic` stays quit).
+      updater.quitAndInstall(true, restart);
     } catch {
       // The app is quitting either way; the next start checks again.
     }
@@ -251,22 +369,182 @@ export class AppUpdateController {
   view(): AppUpdateView {
     const p = this.phase;
     const view: AppUpdateView = { phase: p.kind, fallback: this.deps.fallback, notice: this.notice };
-    if ("version" in p && p.version) view.version = p.version;
+    const version = versionOf(p);
+    if (version) view.version = version;
     if (p.kind === "downloading") view.percent = p.percent;
+    if (p.kind === "waiting") {
+      view.running = p.running;
+      view.waitingFor = p.waitingFor;
+    }
     if (p.kind === "fallback") view.url = p.url;
     return view;
   }
 
-  private async run(action: () => void | Promise<void>, previous: Phase, held: boolean): Promise<void> {
-    const version = "version" in previous ? previous.version : undefined;
+  private readonly restartAction: Action = () => {
+    this.restartRequested = true;
+    this.deps.quit();
+  };
+
+  private async ask(pending: PendingHold): Promise<void> {
+    this.lastAskAt = this.now();
+    const answer = await this.askHold(true);
+    if (this.stopped || this.pending !== pending) return;
+    // No readable answer: the request may still have closed the gates, so they are reopened (quietly) as well.
+    if (!answer) return this.endWait(pending, UPDATE_SENTENCES.runtimeUnreachable, true);
+    if (answer.held) return this.proceed(pending);
+    this.set({
+      kind: "waiting",
+      version: versionOf(pending.previous),
+      running: answer.running,
+      waitingFor: answer.blocked ? "runtime_update" : "sessions",
+    });
+  }
+
+  private async askHold(drain: boolean): Promise<AppUpdateHoldAnswer | null> {
+    try {
+      const parsed = AppUpdateHoldAnswer.safeParse(await this.deps.hold(drain));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** `status.appUpdate` while a drain hold is pending: follow it, quit on `held`, ask again when it ended. */
+  private onHoldStatus(hold: DaemonAppUpdate): void {
+    const pending = this.pending;
+    if (!pending) return;
+    if (hold.state === "held") return void this.proceed(pending);
+    const phase = this.phase;
+    if (phase.kind !== "waiting") return; // the hold request is still in flight
+    if (hold.state === "draining") {
+      this.set({ ...phase, running: hold.running, waitingFor: "sessions" });
+      return;
+    }
+    // Idle: the hold ended or was refused. A status read just before the last ask is ignored.
+    if (this.now() - this.lastAskAt < REASK_MS) return;
+    if (phase.waitingFor === "sessions" && hold.lastEnd === "timed_out") {
+      this.endWait(pending, UPDATE_SENTENCES.holdTimedOut, false);
+      return;
+    }
+    void this.ask(pending);
+  }
+
+  private async proceed(pending: PendingHold): Promise<void> {
+    if (this.pending !== pending) return;
+    this.pending = null;
+    this.clear(this.boundTimer);
+    this.boundTimer = null;
+    await this.run(pending.action, pending.previous, true);
+  }
+
+  private endWait(pending: PendingHold, notice: string | null, release: boolean): void {
+    if (this.pending !== pending) return;
+    this.pending = null;
+    this.clear(this.boundTimer);
+    this.boundTimer = null;
+    if (release) this.releaseQuietly();
+    this.notice = notice;
+    this.set(pending.previous);
+  }
+
+  private async run(action: Action, previous: Phase, held: boolean): Promise<void> {
+    const acting: Acting = { previous, held };
+    this.acting = acting;
+    const version = versionOf(previous);
     this.set(version ? { kind: "restarting", version } : { kind: "restarting" });
     try {
       await action();
     } catch {
+      if (this.acting !== acting) return;
+      this.acting = null;
       this.restartRequested = false;
-      if (held) await this.deps.release().catch(() => undefined);
+      if (held) this.releaseQuietly();
       this.set(previous);
     }
+  }
+
+  private releaseQuietly(): void {
+    try {
+      void Promise.resolve(this.deps.release()).catch(() => undefined);
+    } catch {
+      // The runtime is gone; its gates reopen with it.
+    }
+  }
+
+  private firstCheck(): void {
+    if (this.firstDone || this.stopped) return;
+    this.firstDone = true;
+    this.clear(this.firstTimer);
+    this.firstTimer = null;
+    this.scheduleAuto();
+  }
+
+  /** The next automatic check: now when none ran within `checkEveryMs`, else when it is due; never at `off`. */
+  private scheduleAuto(): void {
+    this.clear(this.autoTimer);
+    this.autoTimer = null;
+    if (!this.firstDone || this.stopped || !this.updater || this.level === "off") return;
+    const every = this.deps.checkEveryMs ?? CHECK_EVERY_MS;
+    const due = this.lastAutoAt === null ? 0 : this.lastAutoAt + every - this.now();
+    if (due <= 0) {
+      this.autoCheck();
+      return;
+    }
+    this.autoTimer = this.timer(due, () => {
+      this.autoTimer = null;
+      this.autoCheck();
+    });
+  }
+
+  private autoCheck(): void {
+    this.lastAutoAt = this.now();
+    void this.check("auto");
+    this.scheduleAuto();
+  }
+
+  private unattendedAllowed(): boolean {
+    return (
+      !this.stopped &&
+      this.updater !== null &&
+      this.level === "automatic" &&
+      this.phase.kind === "ready" &&
+      !this.pending &&
+      !this.acting
+    );
+  }
+
+  /** The unattended restart's minute timer runs only at `automatic` with a ready update. */
+  private syncIdleTimer(): void {
+    if (!this.unattendedAllowed()) {
+      this.clear(this.idleTimer);
+      this.idleTimer = null;
+      return;
+    }
+    if (this.idleTimer !== null) return;
+    this.idleTimer = this.timer(this.deps.idleCheckMs ?? IDLE_CHECK_MS, () => {
+      this.idleTimer = null;
+      void this.idleTick();
+      this.syncIdleTimer();
+    });
+  }
+
+  /** Away ≥ 30 min and the daemon holds without draining (nothing runs): restart into the update. */
+  private async idleTick(): Promise<void> {
+    if (this.unattendedAsking || !this.unattendedAllowed()) return;
+    let idle: number;
+    try {
+      idle = this.deps.idleSeconds();
+    } catch {
+      return;
+    }
+    if (!(idle >= AWAY_SECONDS)) return;
+    if (this.deps.daemon() !== "ours") return this.run(this.restartAction, this.phase, false);
+    this.unattendedAsking = true;
+    const answer = await this.askHold(false);
+    this.unattendedAsking = false;
+    if (!answer?.held) return;
+    if (!this.unattendedAllowed()) return this.releaseQuietly();
+    await this.run(this.restartAction, this.phase, true);
   }
 
   private async downloaded(event: { version: string; downloadedFile: string }): Promise<void> {
@@ -302,7 +580,17 @@ export class AppUpdateController {
 
   private set(phase: Phase): void {
     this.phase = phase;
+    this.syncIdleTimer();
     this.deps.onChange();
+  }
+
+  private timer(ms: number, fn: () => void): TimerHandle {
+    return (this.deps.setTimer ?? ((f: () => void, t: number) => setTimeout(f, t)))(fn, ms);
+  }
+
+  private clear(handle: TimerHandle | null): void {
+    if (handle === null) return;
+    (this.deps.clearTimer ?? ((h: TimerHandle) => clearTimeout(h as ReturnType<typeof setTimeout>)))(handle);
   }
 }
 
@@ -316,12 +604,30 @@ export interface AppUpdateMenuItem {
 }
 
 const CHECK_LABEL = "Check for updates…";
+const MOVE_LABEL = "Move OCW to Applications to get automatic updates";
 
-function updateAvailableLabel(version: string): string {
-  return `Update available (v${version})`;
+function canMove(view: AppUpdateView): boolean {
+  return view.fallback === "dmg" || view.fallback === "translocated";
 }
 
-/** The tray's and the Runtime menu's update lines, top to bottom. */
+function updateAvailableLabel(view: AppUpdateView, version: string): string {
+  return view.fallback === "deb"
+    ? `Update available (v${version}): download the .deb, or use the AppImage, which updates itself`
+    : `Update available (v${version})`;
+}
+
+function waitingLabel(view: AppUpdateView): string {
+  if (view.waitingFor === "runtime_update") return "Waiting for a runtime update to finish…";
+  const n = view.running ?? 0;
+  if (n === 1) return "Waiting for 1 session to finish…";
+  return n > 1 ? `Waiting for ${n} sessions to finish…` : "Waiting for sessions to finish…";
+}
+
+function restartingLabel(view: AppUpdateView): string {
+  return view.version ? `Restarting to update to v${view.version}…` : "Restarting…";
+}
+
+/** The tray's and the Runtime menu's update lines, top to bottom (fixed sentences, versions, counts; no path). */
 export function appUpdateMenuModel(view: AppUpdateView): AppUpdateMenuItem[] {
   const items: AppUpdateMenuItem[] = [];
   if (view.notice) items.push({ label: view.notice, enabled: false });
@@ -335,23 +641,22 @@ export function appUpdateMenuModel(view: AppUpdateView): AppUpdateMenuItem[] {
     case "ready":
       items.push({ label: `Restart to update to v${view.version}`, enabled: true, action: "restart" });
       break;
-    case "restarting":
-      items.push({
-        label: view.version ? `Restarting to update to v${view.version}…` : "Restarting…",
-        enabled: false,
-      });
+    case "waiting":
+      items.push({ label: waitingLabel(view), enabled: false });
+      items.push({ label: "Cancel the restart", enabled: true, action: "cancelWait" });
       break;
-    case "fallback":
-      if (view.version && view.url)
+    case "restarting":
+      items.push({ label: restartingLabel(view), enabled: false });
+      break;
+    default:
+      if (view.phase === "fallback" && view.version && view.url)
         items.push({
-          label: updateAvailableLabel(view.version),
+          label: updateAvailableLabel(view, view.version),
           enabled: true,
           action: "openRelease",
           url: view.url,
         });
-      items.push({ label: CHECK_LABEL, enabled: true, action: "check" });
-      break;
-    default:
+      if (canMove(view)) items.push({ label: MOVE_LABEL, enabled: true, action: "moveToApplications" });
       items.push({ label: CHECK_LABEL, enabled: true, action: "check" });
   }
   return items;
@@ -366,16 +671,17 @@ export function onboardingUpdateView(view: AppUpdateView): OnboardingUpdate | un
       return { kind: "progress", label: `Downloading v${view.version}… ${view.percent ?? 0}%` };
     case "ready":
       return { kind: "ready", label: `Restart to update to v${view.version}` };
+    case "waiting":
+      return { kind: "waiting", label: waitingLabel(view) };
     case "restarting":
-      return {
-        kind: "waiting",
-        label: view.version ? `Restarting to update to v${view.version}…` : "Restarting…",
-      };
+      return { kind: "waiting", label: restartingLabel(view) };
     case "fallback":
-      if (view.version && view.url)
-        return { kind: "link", label: updateAvailableLabel(view.version), url: view.url };
-      return undefined;
-    default:
-      return view.notice ? { kind: "error", label: view.notice } : undefined;
+      if (view.version && view.url) {
+        const link = { label: updateAvailableLabel(view, view.version), url: view.url };
+        return canMove(view) ? { kind: "move", label: MOVE_LABEL, link } : { kind: "link", ...link };
+      }
+      break;
   }
+  if (view.notice) return { kind: "error", label: view.notice };
+  return canMove(view) ? { kind: "move", label: MOVE_LABEL } : undefined;
 }
