@@ -12,7 +12,7 @@
 # every runner, for pull requests and tags. Only a tag's build sets the release-build flag, the one build that may turn
 # the updater on (D-02). Jobs that can write releases check out without persisting the token in .git/config. Turning on
 # GitHub immutable releases (published assets can no longer be replaced) is the owner's repository setting.
-# workflow_dispatch rebuilds and re-uploads an existing tag, only from v0.5.1 on: an older tag's electron-builder
+# workflow_dispatch rebuilds and re-uploads an existing tag, only from v0.5.2 on: an older tag's electron-builder
 # config has neither the release names nor the update manifests, so the collect and check steps would fail on it.
 name: release
 
