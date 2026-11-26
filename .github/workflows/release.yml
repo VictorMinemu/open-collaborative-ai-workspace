@@ -2,7 +2,8 @@
 # the apps, the server installer and their SHA-256 checksums; the notes come from docs/releases/<tag>.md (else GitHub's
 # generated notes). A tag with a suffix (v0.2.0-rc.1) is published as a pre-release, which `ocw upgrade` never picks by
 # itself. The release stays a draft until every build is uploaded and SHA256SUMS covers them all.
-# Pull requests touching the desktop app, the daemon or this file build the apps too (nothing is uploaded).
+# Pull requests touching the desktop app, the daemon or this file build the apps too, check their update manifests and
+# run the update e2e (nothing is uploaded).
 # No build is signed yet: macOS gets an ad-hoc signature (no Developer ID, no notarization) and Windows none (the
 # release notes say how to open them).
 # The build names every file with its release name and writes the update manifests (latest-mac.yml, latest.yml,
@@ -136,6 +137,21 @@ jobs:
           else
             node apps/desktop/scripts/check-update-manifest.mjs
           fi
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The update path end to end (07.13.1, D-12): the unpackaged app downloads from a loopback fake release served by
+      # the test process itself, never GitHub, and never installs (apps/desktop/e2e/update.e2e.ts).
+      - name: Update e2e (offline fake release)
+        run: |
+          set -euo pipefail
+          display=""
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            command -v xvfb-run >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq xvfb; }
+            display="xvfb-run -a"
+          fi
+          $display pnpm --filter @ocw/desktop test:update
       # The files exactly as built: the manifests name them, so a rename would break every update. An unmatched
       # pattern stays literal and `cp` fails the step.
       - name: Collect the release files
