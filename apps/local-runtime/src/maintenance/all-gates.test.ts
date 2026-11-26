@@ -92,4 +92,20 @@ describe("all-gates (ADR-0040 § 7, 07.13.1 D-07)", () => {
     expect(gate("claude-code").isOpen).toBe(true);
     expect(gate("codex").isOpen).toBe(false);
   });
+
+  it("a command inside admit with no turn reported yet: closeAllIfIdle returns false and touches no gate (ADR-0040 § 7)", async () => {
+    const { gates, activeTurns, gate } = setup();
+    const d = deferred();
+    // Admitted, but the adapter has not started the turn: activeTurns is still 0 everywhere.
+    const call = gate("claude-code").admit(() => d.promise);
+    expect(gate("claude-code").admitted).toBe(1);
+    expect(activeTurns("claude-code")).toBe(0);
+    expect(allIdle(gates, activeTurns)).toBe(false);
+    expect(closeAllIfIdle(gates, activeTurns)).toBe(false);
+    expect(gate("claude-code").isOpen).toBe(true);
+    expect(gate("codex").isOpen).toBe(true);
+    d.resolve();
+    await call;
+    expect(closeAllIfIdle(gates, activeTurns)).toBe(true);
+  });
 });
