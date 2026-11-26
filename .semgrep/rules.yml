@@ -289,3 +289,53 @@ rules:
       exclude:
         - "*.test.ts"
         - "*.test.tsx"
+
+  - id: ocw.desktop-updater-class
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      The desktop app constructs its updater per platform in apps/desktop/src/main/platform-updater.ts (07.13.1 D-01,
+      ADR-0046): the NSIS updater, the AppImage updater or the ad-hoc macOS updater. electron-updater's `autoUpdater`
+      getter, its `MacUpdater` and Electron's own `autoUpdater` use Squirrel.Mac, whose check fails on every ad-hoc
+      build and which opens a loopback listener; `DebUpdater`, `RpmUpdater` and `PacmanUpdater` install as root through
+      an elevation helper. Use createPlatformUpdater.
+    pattern-either:
+      # electron-updater's stock getter and its Squirrel-based and package-manager updaters.
+      - patterns:
+          - pattern-either:
+              - pattern: import { $NAME } from "electron-updater"
+              - pattern: import { $NAME as $ALIAS } from "electron-updater"
+              - pattern: const { $NAME } = require("electron-updater")
+              - pattern: "const { $NAME: $ALIAS } = require(\"electron-updater\")"
+              - pattern: require("electron-updater").$NAME
+              - pattern: (await import("electron-updater")).$NAME
+              - patterns:
+                  - pattern-either:
+                      - pattern-inside: |
+                          import * as $NS from "electron-updater";
+                          ...
+                      - pattern-inside: |
+                          import $NS from "electron-updater";
+                          ...
+                  - pattern: $NS.$NAME
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^(autoUpdater|MacUpdater|DebUpdater|RpmUpdater|PacmanUpdater)$
+      # Electron's own Squirrel updater.
+      - pattern: import { autoUpdater } from "electron"
+      - pattern: import { autoUpdater as $ALIAS } from "electron"
+      - pattern: const { autoUpdater } = require("electron")
+      - pattern: require("electron").autoUpdater
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  import * as $NS from "electron";
+                  ...
+              - pattern-inside: |
+                  import $NS from "electron";
+                  ...
+          - pattern: $NS.autoUpdater
+    paths:
+      # Fixture: .semgrep/tests/desktop-updater-class.ts.
+      include:
+        - /apps/desktop/

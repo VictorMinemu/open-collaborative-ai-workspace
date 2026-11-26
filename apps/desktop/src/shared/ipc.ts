@@ -54,6 +54,13 @@ export const ChatgptLoopbackAwaitArgs = z
 
 export const ChatgptLoopbackCancelArgs = z.object({ flowToken: ChatgptFlowToken }).strict();
 
+/**
+ * 07.13.1 (D-09): what the onboarding window may ask of the app update. The release link stays an `<a>` the
+ * window-open guard checks, so it is not an action.
+ */
+export const UpdateActionArgs = z.enum(["check", "restart", "cancelWait", "moveToApplications"]);
+export type UpdateActionArgs = z.infer<typeof UpdateActionArgs>;
+
 /** Parse IPC args, turning Zod errors into a short message (never echo the payload back). */
 export function parseArgs<T>(schema: z.ZodType<T>, value: unknown): T {
   const res = schema.safeParse(value);
@@ -108,6 +115,30 @@ export const DaemonRuntimeUpdates = z.object({
 });
 export type DaemonRuntimeUpdates = z.infer<typeof DaemonRuntimeUpdates>;
 
+/**
+ * 07.13.1 (D-07): the daemon's restart hold for the app update, `status().appUpdate`. A local copy of the daemon's
+ * shape (the desktop does not depend on `@ocw/contracts`): states and counts only. A newer end reason is dropped on
+ * its own, so the state still reads.
+ */
+export const DaemonAppUpdate = z.object({
+  state: z.enum(["idle", "draining", "held"]),
+  running: z.number().int().min(0),
+  lastEnd: z.enum(["released", "timed_out", "auto_released"]).optional().catch(undefined),
+});
+export type DaemonAppUpdate = z.infer<typeof DaemonAppUpdate>;
+
+/**
+ * 07.13.1 (D-07): the answer to `appUpdateHold { drain }`. The app quits for an update only on `held: true`;
+ * `blocked: "runtime_update"` (a 07.11 CLI job or the runtime self-update holds) means wait and ask again.
+ */
+export const AppUpdateHoldAnswer = z.object({
+  held: z.boolean(),
+  state: z.enum(["idle", "draining", "held"]),
+  running: z.number().int().min(0),
+  blocked: z.literal("runtime_update").optional(),
+});
+export type AppUpdateHoldAnswer = z.infer<typeof AppUpdateHoldAnswer>;
+
 /** What the daemon returns over the control socket for `status` (subset we rely on). */
 export const DaemonStatusPayload = z.object({
   paired: z.boolean(),
@@ -125,6 +156,8 @@ export const DaemonStatusPayload = z.object({
    * not run). Main process only: never part of `DesktopStatus`. A block this app cannot read is dropped, never fatal.
    */
   runtimeUpdates: DaemonRuntimeUpdates.optional().catch(undefined),
+  /** 07.13.1: the app update's restart hold (absent on older daemons; an unreadable block is dropped). */
+  appUpdate: DaemonAppUpdate.optional().catch(undefined),
 });
 export type DaemonStatusPayload = z.infer<typeof DaemonStatusPayload>;
 
@@ -179,7 +212,24 @@ export interface DesktopStatus {
  * this app, its version and release page (already checked against the repository's releases in the main process).
  * The web app gets `DesktopStatus` only.
  */
-export type OnboardingStatus = DesktopStatus & { update?: { version: string; url: string } };
+export type OnboardingStatus = DesktopStatus & {
+  update?: { version: string; url: string };
+  /** 07.13.1 (D-09): the app update's line (fixed sentences, versions, percentages and counts only; never a path). */
+  appUpdate?: OnboardingUpdate;
+};
+
+/**
+ * 07.13.1 (D-09): what the onboarding window shows about the app update. `link` is the release page (already checked
+ * against the repository's releases); `move` offers "Move OCW to Applications", with the release link when an update
+ * is known.
+ */
+export type OnboardingUpdate =
+  | { kind: "link"; label: string; url: string }
+  | { kind: "progress"; label: string }
+  | { kind: "ready"; label: string }
+  | { kind: "waiting"; label: string }
+  | { kind: "move"; label: string; link?: { label: string; url: string } }
+  | { kind: "error"; label: string };
 
 export interface ChatgptLoopbackPrepared {
   flowToken: string;
