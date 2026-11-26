@@ -29,6 +29,7 @@ import { z } from "zod";
 import { runtimeDir } from "../install-info.js";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import { DEV_RUNTIME_VERSION, RUNTIME_VERSION } from "../version.js";
+import { allIdle, closeAll, closeAllIfIdle, openAll } from "./all-gates.js";
 import type { RuntimeGate } from "./gate.js";
 import {
   CANCELLED_OFF,
@@ -554,7 +555,7 @@ export class SelfUpdate {
         if (!job.holding && !this.opts.cliBusy()) {
           if (this.closeAllIfIdle()) job.holding = true;
           else if (job.trigger === "manual" || this.now() >= (job.pendingSince ?? 0) + this.drainAfterMs) {
-            for (const gate of this.opts.gates.values()) gate.close();
+            closeAll(this.opts.gates);
             job.holding = true;
           }
           if (job.holding) job.holdingSince = this.now();
@@ -579,22 +580,20 @@ export class SelfUpdate {
     return this.opts.drainAfterMs ?? DRAIN_AFTER_MS;
   }
 
-  /** One synchronous step: every gate admits nothing and every runtime runs nothing → every gate closes. */
+  /**
+   * One synchronous step: every gate admits nothing and every runtime runs nothing → every gate closes. The step is
+   * shared with the desktop app's restart hold (`all-gates.ts`, 07.13.1 D-07).
+   */
   private closeAllIfIdle(): boolean {
-    if (!this.allIdle()) return false;
-    for (const gate of this.opts.gates.values()) gate.close();
-    return true;
+    return closeAllIfIdle(this.opts.gates, this.opts.activeTurns);
   }
 
   private allIdle(): boolean {
-    for (const [id, gate] of this.opts.gates) {
-      if (gate.admitted > 0 || this.opts.activeTurns(id) > 0) return false;
-    }
-    return true;
+    return allIdle(this.opts.gates, this.opts.activeTurns);
   }
 
   private openAll(): void {
-    for (const gate of this.opts.gates.values()) gate.open();
+    openAll(this.opts.gates);
   }
 
   private async releaseLock(job: Job): Promise<void> {

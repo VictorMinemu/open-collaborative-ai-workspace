@@ -44,6 +44,24 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
     })
     .strict(),
   /**
+   * 07.13.1 (D-07): the desktop app asks its daemon to hold every runtime gate before it quits to install an update
+   * (`drain: false`: only if no turn runs now; `drain: true`, a click: close every gate at once and let the running
+   * turns finish). Answers states and counts only. Local only (never reachable from the server, never a Device Link
+   * frame); carries no host data; strict, so a missing `drain` or any other key is refused.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("appUpdateHold"),
+      drain: z.boolean(),
+    })
+    .strict(),
+  /**
+   * 07.13.1 (D-07): the app's install was cancelled or failed: every gate the hold closed reopens at once. Local only;
+   * carries no value and no host data; strict.
+   */
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("appUpdateRelease") }).strict(),
+  /**
    * 07.18 (D-02, PD-11): re-read the Codex account slots (`ocw-runtime account add|remove` changed slots.json) and
    * re-send them to the server (`accounts.sync`). Local only (never reachable from the server); carries no value: the
    * slots come from the file on this device; strict, so a forged value is refused, not ignored.

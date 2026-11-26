@@ -130,6 +130,7 @@ import {
   unifiedPatch,
 } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
+import { AppRestartHold } from "./maintenance/app-restart-hold.js";
 import { RuntimeGate } from "./maintenance/gate.js";
 import {
   RuntimeMaintenance,
@@ -527,6 +528,13 @@ export class Daemon {
   private boot: { report: SelfUpdateBoot; running: { version: string; sha256: string } | null } | null = null;
   /** 07.17.1 (PD-18): sessions told the OCW runtime is restarting during the current hold (once each), and their runtime. */
   private readonly selfHeldSessions = new Map<string, RuntimeId>();
+  /**
+   * 07.13.1 (D-07): the desktop app's restart hold on the same gates (`appUpdateHold` / `appUpdateRelease`, local
+   * control socket only).
+   */
+  private readonly appHold: AppRestartHold;
+  /** 07.13.1 (D-07): sessions told the OCW runtime is restarting during the app's current hold (once each). */
+  private readonly appHeldSessions = new Map<string, RuntimeId>();
   /** `stop()` began: a hold that ends now is the daemon going away, not an update that did not run (review IN-04). */
   private stopping = false;
   /** Snapshots with `self` go out in the order their status was read. */
@@ -584,6 +592,14 @@ export class Daemon {
       this.runtimes.set(r.id, r);
       this.gates.set(r.id, new RuntimeGate());
     }
+    // 07.13.1 (D-07): the app's hold decides on the same gates and turn counts as the self-update (ADR-0040 § 7), and
+    // never closes a gate while a 07.11 CLI job is past `pending` or the self-update holds (both read at each request).
+    this.appHold = new AppRestartHold({
+      gates: this.gates,
+      activeTurns: (r) => this.runtimes.get(r)?.activeTurns() ?? 0,
+      runtimeUpdateBusy: () => (this.maintenance?.jobActive ?? false) || (this.selfUpdate?.holding ?? false),
+      onChange: () => this.onAppHoldChange(),
+    });
     this.browserCfg = resolveBrowser(config, env);
     this.appVersion = appVersionOf(env);
     this.browserRoot = opts.browser?.root ?? daemonBrowsersRoot(env, home);
@@ -706,7 +722,8 @@ export class Daemon {
       failedBuild,
       gates: this.gates,
       activeTurns: (r) => this.runtimes.get(r)?.activeTurns() ?? 0,
-      cliBusy: () => maintenance.jobActive,
+      // 07.13.1 (D-07): the app's restart hold excludes the self-update as a CLI job does (PD-09, both directions).
+      cliBusy: () => maintenance.jobActive || this.appHold.active,
       level: () => maintenance.effectiveLevel,
       sendRun: (frame) => this.send(frame),
       publish: () => this.onSelfUpdateChange(),
@@ -763,6 +780,26 @@ export class Daemon {
       );
   }
 
+  /**
+   * 07.13.1 (D-07): the app's restart hold changed state. A hold that ended without the restart (released, timed out
+   * or auto-released) tells each session it held that the restart did not happen, so its "Restarting…" line is taken
+   * back; on a daemon stop nothing is said (the server re-queues the held prompt after the restart, PD-27).
+   */
+  private onAppHoldChange(): void {
+    if (this.appHold.active || this.appHeldSessions.size === 0) return;
+    const held = [...this.appHeldSessions];
+    this.appHeldSessions.clear();
+    if (this.stopping) return;
+    for (const [sessionId, runtime] of held) {
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase: "failed",
+        subject: OCW_RUNTIME_TARGET,
+      });
+    }
+  }
+
   /** Every `runtime.maintenance` frame carries `self` exactly when a SelfUpdate exists. */
   private withSelf(frame: RuntimeMaintenanceFrame): RuntimeMaintenanceFrame {
     return this.selfUpdate ? { ...frame, self: this.selfUpdate.status() } : frame;
@@ -810,8 +847,9 @@ export class Daemon {
         this.detectCache = null;
         if (this.isConnected) this.send(await this.capabilitiesFrame());
       },
-      // 07.17.1 (PD-09): no CLI job starts while the OCW runtime's self-update holds the gates.
-      exclusive: () => this.selfUpdate?.holding ?? false,
+      // 07.17.1 (PD-09): no CLI job starts while the OCW runtime's self-update holds the gates; 07.13.1 (D-07): nor
+      // while the desktop app's restart hold drains or holds.
+      exclusive: () => (this.selfUpdate?.holding ?? false) || this.appHold.active,
       ...this.opts.maintenance,
       userHome: scope.userHome,
       requireScratchHome: scope.requireScratchHome,
@@ -904,6 +942,8 @@ export class Daemon {
     // 07.18: a sign-in in progress is cancelled at Codex (its slot removed); the admin starts it again.
     for (const login of this.accountLogins.values()) login.abort();
     for (const gate of this.gates.values()) gate.seal();
+    // 07.13.1 (D-07): the app's hold keeps its gates sealed; no timer reopens anything and nobody is told.
+    this.appHold.stop();
     await this.selfUpdate?.stop();
     if (this.selfUpdate?.holding) {
       await this.snapshotChain;
@@ -940,6 +980,8 @@ export class Daemon {
         openPages: this.browser.openPages,
       },
       ...(this.maintenance ? { runtimeUpdates: this.runtimeUpdatesStatus(this.maintenance) } : {}),
+      // 07.13.1 (D-07): the app's restart hold, for its "Waiting for N sessions…" line (states and counts only).
+      appUpdate: this.appHold.status(),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
         projectLocalId: s.project.localId,
@@ -1269,6 +1311,18 @@ export class Daemon {
     if (this.selfUpdate?.holding) {
       if (this.selfHeldSessions.has(sessionId)) return;
       this.selfHeldSessions.set(sessionId, runtime);
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase: "waiting",
+        subject: OCW_RUNTIME_TARGET,
+      });
+      return;
+    }
+    // 07.13.1 (D-07): the desktop app's restart holds this turn; for the session it is the OCW runtime restarting.
+    if (this.appHold.active) {
+      if (this.appHeldSessions.has(sessionId)) return;
+      this.appHeldSessions.set(sessionId, runtime);
       this.forwardEvent(sessionId, {
         type: "runtime.update",
         runtime,
@@ -2291,6 +2345,11 @@ export class Daemon {
       // 07.13 (PD-08): the Codex shim's tool call; the manager checks the session's token, then decides it.
       case "browserCall":
         return this.browser.shimCall(req);
+      // 07.13.1 (D-07): the desktop app's restart hold; local only, never logged, no host data in or out.
+      case "appUpdateHold":
+        return this.appHold.hold({ drain: req.drain });
+      case "appUpdateRelease":
+        return this.appHold.release();
     }
   }
 }
