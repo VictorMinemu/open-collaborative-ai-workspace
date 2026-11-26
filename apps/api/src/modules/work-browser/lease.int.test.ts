@@ -553,6 +553,58 @@ describe("07.13-18 Task 2: lease rules, expiry, abandonment and dead instances",
     );
   });
 
+  it("a refresh that read the row before the take and finishes after it keeps the new lease", async () => {
+    const sid = await askedSessionWithPage(mia);
+    const owenLive = await open(owen, sid);
+    const miaLive = await open(mia, sid);
+    await waitState(owenLive, "live");
+    await waitState(miaLive, "live");
+
+    // The live view's session reads (system transactions returning `{ deviceId, page, …, endReason }`) are held after
+    // their queries ran until `release()`: the next poll reads the row without a lease and finishes after the take.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let held = 0;
+    const db = core().db;
+    const withTenant = db.withTenant.bind(db);
+    const spy = vi.spyOn(db, "withTenant").mockImplementation((async (
+      ...args: Parameters<typeof withTenant>
+    ) => {
+      const result: unknown = await withTenant(...args);
+      if (result && typeof result === "object" && "page" in result && "endReason" in result) {
+        held++;
+        await gate;
+      }
+      return result;
+    }) as typeof db.withTenant);
+    try {
+      await waitFor(() => held > 0, 4000);
+      const leaseId = await take(miaLive, sid);
+      expect(await browserRow(sid)).toMatchObject({ lease_id: leaseId, controller_user_id: miaId });
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+
+    // The stale read lands, then the polls read the row again: the holder still controls and types into the page.
+    await sleep(1_500);
+    expect(lastState(miaLive)).toMatchObject({ state: "controlling", controller: "self" });
+    expect(lastState(owenLive)).toMatchObject({ state: "private", privateReason: "takeover" });
+    send(miaLive, { type: "text", text: "still-the-holder" });
+    expect(await deviceFrame("browser.input", sid)).toMatchObject({
+      sessionId: sid,
+      events: [{ type: "text" }],
+    });
+
+    send(miaLive, { type: "release", save: false });
+    await deviceFrame("browser.lease", sid, (f) => f.state === "released");
+    await waitState(miaLive, "live", 3000);
+    owenLive.close();
+    miaLive.close();
+  });
+
   it("lease announcements between instances carry ids only", () => {
     const lease = published.filter((p) => p.channel === "ocw:wb:lease");
     expect(lease.length).toBeGreaterThan(0);

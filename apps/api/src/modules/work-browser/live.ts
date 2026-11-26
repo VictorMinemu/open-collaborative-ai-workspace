@@ -196,6 +196,8 @@ interface Entry {
   poll: NodeJS.Timeout;
   refreshing: boolean;
   refreshAgain: boolean;
+  /** Session reads started so far (`refresh`): a read numbered at most a local lease's `readsBefore` predates it. */
+  reads: number;
   /** The ping timer while the device is asked for frames. */
   ping: NodeJS.Timeout | null;
   /** The device the last `on: true` went to (the `on: false` goes there too). */
@@ -227,6 +229,11 @@ interface LocalLease {
   ending: boolean;
   /** The row records input in this lease (`markWorkLeaseInput`, before the first such input is sent). */
   inputMarked: boolean;
+  /**
+   * The entry's `reads` when this lease was set here: a read started by then may predate the take's commit, so its
+   * row (without this lease) is older than this instance's copy and never ends the lease (it is read again instead).
+   */
+  readsBefore: number;
   inputs: LiveInputFrame[];
   flush: NodeJS.Timeout | null;
   flushing: boolean;
@@ -364,7 +371,15 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     e.refreshing = true;
     void (async () => {
       try {
-        e.view = await readView(e);
+        const n = ++e.reads;
+        const view = await readView(e);
+        const l = e.lease;
+        if (l && n <= l.readsBefore) {
+          // Started before the lease was taken here: older than the take's own copy of the row. Read again.
+          e.refreshAgain = true;
+          return;
+        }
+        e.view = view;
         reconcileLease(e);
         for (const v of e.viewers) pushState(v);
       } catch (err) {
@@ -615,6 +630,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
       warned: false,
       ending: false,
       inputMarked: false,
+      readsBefore: viewer.entry.reads,
       inputs: [],
       flush: null,
       flushing: false,
@@ -971,6 +987,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         poll: setInterval(() => refresh(created), pollMs),
         refreshing: false,
         refreshAgain: false,
+        reads: 0,
         ping: null,
         pinged: null,
         lease: null,
