@@ -963,6 +963,55 @@ describe("07.13.1 app update hold (D-07): the desktop app holds every gate for i
     // Nothing was held by the refused requests.
     expect(await appUpdateOf()).toEqual({ state: "idle", running: 0 });
   });
+
+  const updateEvents = (sessionId: string) =>
+    server.allFrames.flatMap((f) =>
+      f.type === "event" && f.sessionId === sessionId && f.event.type === "runtime.update" ? [f.event] : [],
+    );
+  const RESTARTING = { type: "runtime.update", runtime: "claude-code", subject: "ocw-runtime" };
+
+  it("a prompt held by the app's hold is told once the OCW runtime restarts, then failed after the release", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    await startSession("N");
+    expect((await hold(false)).result).toMatchObject({ held: true });
+    server.send({ id: "pn1", kind: "prompt", sessionId: "N", payload: { promptId: "n1", text: "go" } });
+    server.send({ id: "pn2", kind: "prompt", sessionId: "N", payload: { promptId: "n2", text: "again" } });
+    await server.waitFor(() => (updateEvents("N").length > 0 ? true : undefined));
+    await sleep(200);
+    expect(updateEvents("N")).toEqual([{ ...RESTARTING, phase: "waiting" }]);
+    expect(runtime.prompts).toEqual([]);
+
+    expect((await release()).result).toEqual({ released: true });
+    expect(await server.frame("ack", (f) => f.commandId === "pn1")).toMatchObject({ ok: true });
+    expect(await server.frame("ack", (f) => f.commandId === "pn2")).toMatchObject({ ok: true });
+    expect(updateEvents("N")).toEqual([
+      { ...RESTARTING, phase: "waiting" },
+      { ...RESTARTING, phase: "failed" },
+    ]);
+    // The `failed` line went out before the held prompt started.
+    const frames = server.allFrames;
+    const failedAt = frames.findIndex(
+      (f) => f.type === "event" && f.event.type === "runtime.update" && f.event.phase === "failed",
+    );
+    const startedAt = frames.findIndex((f) => f.type === "event" && f.event.type === "prompt.started");
+    expect(failedAt).toBeGreaterThanOrEqual(0);
+    expect(startedAt).toBeGreaterThan(failedAt);
+  });
+
+  it("the daemon stops during the hold: the held prompt never runs, is never acked, and no failed line is sent", async () => {
+    await daemon.start();
+    await server.frame("hello");
+    await startSession("S");
+    expect((await hold(false)).result).toMatchObject({ held: true });
+    server.send({ id: "ps1", kind: "prompt", sessionId: "S", payload: { promptId: "s1", text: "go" } });
+    await server.waitFor(() => (updateEvents("S").length > 0 ? true : undefined));
+    await daemon.stop();
+    await sleep(200);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("s1");
+    expect(hasAck("ps1")).toBe(false);
+    expect(updateEvents("S")).toEqual([{ ...RESTARTING, phase: "waiting" }]);
+  });
 });
 
 /** Replace the default daemon with one whose runtime sees the daemon's own Full access gate (ADR-0012). */
@@ -2265,6 +2314,52 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
     );
   }, 40_000);
 
+  it("07.13.1 app update hold: no CLI job starts while the app holds, and the app is not held while a CLI job runs", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 800 }, maintenance: { pollMs: 20, drainPollMs: 20 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(notify());
+    await server.frame("runtime.maintenance", (f) => f.orgLevelReceived, 10_000);
+
+    // The app holds first: an "Update now" is accepted but its job waits pending, nothing runs.
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: false })).toMatchObject({
+      ok: true,
+      result: { held: true, state: "held" },
+    });
+    expect(
+      await controlRequest(socketPath(), { cmd: "runtimeUpdate", runtime: "claude-code" }),
+    ).toMatchObject({ ok: true, result: { accepted: true } });
+    await sleep07(400);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.phase === "started")).toBe(
+      false,
+    );
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+
+    // The release lets it run; while it runs the app's hold is refused and closes nothing more.
+    expect(await controlRequest(socketPath(), { cmd: "appUpdateRelease" })).toMatchObject({
+      result: { released: true },
+    });
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
+    const blocked = await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: true });
+    expect(blocked).toMatchObject({
+      ok: true,
+      result: { held: false, state: "idle", blocked: "runtime_update" },
+    });
+    const gates = (daemon as unknown as { gates: Map<RuntimeId, RuntimeGate> }).gates;
+    expect(gates.get("codex")?.isOpen).toBe(true);
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ outcome: "succeeded", toVersion: "2.1.300" });
+    // Once the job is over the app can hold again.
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await controlRequest(socketPath(), { cmd: "appUpdateHold", drain: false })).result,
+        ).toMatchObject({ held: true }),
+      { timeout: 5_000, interval: 50 },
+    );
+  }, 40_000);
+
   // ---- 07.11-08: the device owner's level through the value-less reloadConfig (D-02) ----
 
   const reload = async () => {
@@ -2753,6 +2848,39 @@ describe("07.17.1 runtime self-update: the daemon updates itself over the Device
     ]);
     expect(updateEvents("C")).toEqual([]);
     expect(spy).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it("07.13.1 app update hold: the self-update closes no gate while the app holds; once it holds, the app is refused", async () => {
+    const spy = vi.fn(async (_code: number) => undefined);
+    const d = await selfDaemon({ exitForUpdate: spy });
+    daemon = d;
+    const control = (req: ControlRequest) =>
+      (d as unknown as { handleControl(r: ControlRequest): Promise<unknown> }).handleControl(req);
+    await d.start();
+    await server.frame("hello");
+    server.push(welcome());
+    expect(await control({ cmd: "appUpdateHold", drain: false })).toMatchObject({ held: true });
+
+    const cmd = selfCmd();
+    server.send(cmd);
+    expect(await ackOf(cmd.id)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => f.self?.state === "waiting", 30_000);
+    await sleep(300);
+    expect(spy).not.toHaveBeenCalled();
+    expect((d as unknown as { selfUpdate: { holding: boolean } }).selfUpdate.holding).toBe(false);
+
+    // The app's release lets the self-update take its idle moment and switch.
+    expect(await control({ cmd: "appUpdateRelease" })).toEqual({ released: true });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(75), { timeout: 15_000, interval: 20 });
+    // The self-update holds every gate into its exit: the app's hold is refused and changes nothing.
+    expect(await control({ cmd: "appUpdateHold", drain: true })).toEqual({
+      held: false,
+      state: "idle",
+      running: 0,
+      blocked: "runtime_update",
+    });
+    expect((await d.status()).appUpdate).toEqual({ state: "idle", running: 0, lastEnd: "released" });
+    expect([...gatesOf(d).values()].every((g) => !g.isOpen)).toBe(true);
   }, 60_000);
 
   it("review IN-06: a snapshot whose send throws does not stop later CLI snapshots, and stop() still closes the link", async () => {
