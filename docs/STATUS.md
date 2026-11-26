@@ -137,6 +137,28 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   with one apt line and the AppArmor line; runtimes from v0.3.1 update themselves to 0.5.0; the desktop app shows
   "Update available". Proven by the D-31 e2e journey with a leak sweep and the headless container proof under the
   `brw` seccomp profile (ADR-0035, docs/SERVER.md, docs/releases/v0.5.0.md).
+- **07.13.1 Desktop app auto-update (v0.5.2):** the desktop app updates itself, its runtime included, from the
+  canonical GitHub releases: electron-updater (exact pin) with one updater built per platform (`NsisUpdater`; the
+  `AppImageUpdater` only inside an AppImage; `AdhocMacUpdater`, because Squirrel.Mac refuses every ad-hoc build), never
+  the stock getter, `MacUpdater`, `DebUpdater` or a listening port (Semgrep `ocw.desktop-updater-class`); the feed is
+  set in code, stable only, no downgrade, and only a tag build of release.yml turns it on (`RELEASE_BUILD`). The builds
+  carry their release names and `latest*.yml` / `app-update.yml`, uploaded unrenamed and checked on every runner by
+  `check-update-manifest.mjs` (sha512, size, version, no `publisherName`, on macOS the zip's seal, id, version and
+  daemon); release jobs never persist git credentials. Downloads are sha512-checked; on macOS the zip is extracted with
+  `ditto` beside `OCW.app`, kept only if `codesign --verify --deep --strict`, the bundle id, version, daemon and
+  framework symlinks pass, and swapped after quit by a detached helper (two renames with rollback, a path-free result,
+  relaunch). The app quits for an update only after the daemon answers `held` to the new strict local-only
+  `appUpdateHold { drain }` (ADR-0040's all-gates step, extracted and shared; 30-min drain, 2-min auto-release, never
+  with a 07.11 CLI job or a self-update; `appUpdateRelease`, `status().appUpdate`), and installs only from the `quit`
+  event, so no turn is cut and held prompts run after the restart. The 07.11 org ∩ device level decides (Automatic:
+  background download, install on quit or after 30 min away; Notify only: "Restart to update"; Off: no automatic
+  check; "Check for updates…" always); tray, Runtime menu and onboarding window only, fixed sentences, no paths. The
+  `.deb`, a Mac from the disk image, translocated or in an unwritable folder keep the release link ("Move OCW to
+  Applications" where possible). Proven by unit tests with fakes, darwin cases on a dummy ad-hoc bundle, the daemon
+  hold tests and the update e2e against a loopback fake release on the three release.yml runners (CI only). Limits:
+  unsigned until Phase 9 (ASVS 10.3.1 accepted deviation), a new Mac code identity per update (Keychain or privacy
+  prompts, maybe re-pairing), v0.5.2 is installed by hand once, the owner turns on GitHub immutable releases
+  (ADR-0046, docs/releases/v0.5.2.md).
 - **07.14 Organization connector auth:** MCP servers take five auth modes. Besides Organization headers and the two
   member modes, **Organization sign-in** (an admin with `mcp.manage` signs in once with the 07.4 OAuth client: PKCE
   S256, `resource`, `iss`, pre-registered → CIMD → DCR; only that admin completes the flow and `mcp.manage` is
