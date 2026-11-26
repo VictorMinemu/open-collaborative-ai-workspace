@@ -38,6 +38,26 @@ let engId: string;
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Passes of the app's sandbox events consumer until `done` holds (at most 30 s, 200 ms apart), with the events they
+ * applied summed. A fixed pause and one pass raced the fake sandboxd's end event on a loaded runner.
+ */
+async function pumpUntil(done: (applied: number) => Promise<boolean>): Promise<number> {
+  const until = Date.now() + 30_000;
+  let applied = 0;
+  for (;;) {
+    applied += (await pumpSandboxEvents(s)).applied;
+    if (await done(applied)) return applied;
+    if (Date.now() > until)
+      throw new Error(`the sandbox event did not arrive within 30 s (applied ${applied})`);
+    await pause(200);
+  }
+}
+
+/** Pumps until the task's (only) process row reads `exited`. */
+const pumpUntilExited = (taskId: string) =>
+  pumpUntil(async () => (await processRowsOf(s, taskId))[0]?.status === "exited");
+
 beforeAll(async () => {
   s = await startSandboxStack();
   await s.setPolicy({ enabled: true });
@@ -104,9 +124,7 @@ describe("tracer: a background command of a waiting task ends, and the task gets
   });
 
   it("the command ends; one pass of the consumer records it and wakes the task with one job", async () => {
-    await pause(Math.max(0, execAt + 1_100 - Date.now()));
-    const pass = await pumpSandboxEvents(s);
-    expect(pass.applied).toBeGreaterThanOrEqual(1);
+    expect(await pumpUntilExited(taskId)).toBeGreaterThanOrEqual(1);
     const [row] = await processRowsOf(s, taskId);
     expect(row).toMatchObject({ status: "exited", exit_code: 0 });
     expect(row?.duration_ms).toBeGreaterThanOrEqual(900);
@@ -178,8 +196,7 @@ describe("a command that ends while its task waits on something else (E19)", () 
     expect((await reportTurnDone(s, start.eventId as string)).status).toBe(200);
     const wakeBefore = (await taskRow(s, taskId)).wake_at as Date;
     const jobsBefore = (await queuedTaskJobs(s, taskId)).length;
-    await pause(400);
-    await pumpSandboxEvents(s);
+    await pumpUntilExited(taskId);
     expect((await processRowsOf(s, taskId))[0]).toMatchObject({
       status: "exited",
       exit_code: 75,
@@ -424,12 +441,10 @@ describe("a background run on a turn without a task (P5)", () => {
         ])
       ).rows[0]?.n,
     ).toBe(0);
-    await pause(400);
     const jobsBefore = (
       await s.su.query("select count(*)::int as n from pgboss.job where name = 'bot_task.continue'")
     ).rows[0]?.n;
-    const pass = await pumpSandboxEvents(s);
-    expect(pass.applied).toBeGreaterThanOrEqual(1);
+    expect(await pumpUntil(async (applied) => applied >= 1)).toBeGreaterThanOrEqual(1);
     expect(
       (await s.su.query("select count(*)::int as n from pgboss.job where name = 'bot_task.continue'")).rows[0]
         ?.n,

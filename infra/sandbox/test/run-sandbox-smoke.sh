@@ -564,9 +564,9 @@ section_core() {
   fi
 
   # B's objects right before the purge: at least its shell, workspace and packages volumes and network (07.8-17), plus
-  # the files helper when a sweep's quota measurement of the stopped bot created one. A measurement already in flight
-  # can still create that helper after this count (purge then removes it too), so one more is accepted, and only
-  # when no helper was counted (its name is fixed: there is at most one).
+  # the files helper when a sweep's quota measurement of the stopped bot created one. Objects created between this
+  # count and the purge (a measurement already in flight, even after the helper was counted) are removed too, so the
+  # purge may remove more than were counted. What matters is that nothing of B is left and A's objects stay.
   b_objects() {
     echo $(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
   }
@@ -576,7 +576,7 @@ section_core() {
   removed_b="$(jfield "$WORK/body.json" removed)"
   left_b="$(b_objects)"
   if [ "$status" = 200 ] && [ "$before_b" -ge 4 ] && [ "$left_b" = 0 ] &&
-    { [ "$removed_b" = "$before_b" ] || { [ "$helper_b" = 0 ] && [ "$removed_b" = "$((before_b + 1))" ]; }; } &&
+    [[ "$removed_b" =~ ^[0-9]+$ ]] && [ "$removed_b" -ge "$before_b" ] &&
     [ "$(running_of "$CID_A")" = false ]; then
     ok "purge B removes its container, workspace and packages volumes and network (${removed_b} of ${before_b} counted before; A's objects stay)"
   else
