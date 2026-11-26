@@ -6,7 +6,16 @@ import {
   WORK_BROWSER_LIMITS,
   type WorkSession,
 } from "@ocw/contracts";
-import { Check, Keyboard, LockKeyhole, MonitorSmartphone, MousePointerClick, Undo2 } from "lucide-react";
+import {
+  Check,
+  Keyboard,
+  LockKeyhole,
+  Maximize2,
+  Minimize2,
+  MonitorSmartphone,
+  MousePointerClick,
+  Undo2,
+} from "lucide-react";
 import {
   type ClipboardEvent,
   type CompositionEvent,
@@ -53,6 +62,7 @@ import {
 import { type LiveActions, LiveContext } from "@/components/browser/live-view-provider";
 import { TakeoverBar } from "@/components/browser/takeover-bar";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import {
@@ -211,7 +221,32 @@ export function WorkLivePanel({
   useEffect(() => {
     if (takeRequest > 0) actions.take();
   }, [takeRequest, actions]);
-  return (
+
+  // The large view: the Expand button opens it; taking control opens it by itself on a desktop (the side panel's page
+  // is too small to read or type in) and handing back closes it again unless the person opened it themselves.
+  const [large, setLarge] = useState(false);
+  const autoLarge = useRef(false);
+  const controlling = workUiStateOf(view) === "controlling";
+  useEffect(() => {
+    if (coarse) return;
+    if (controlling) {
+      setLarge((was) => {
+        if (!was) autoLarge.current = true;
+        return true;
+      });
+    } else if (autoLarge.current) {
+      autoLarge.current = false;
+      setLarge(false);
+    }
+  }, [controlling, coarse]);
+  const toggleLarge = coarse
+    ? undefined
+    : () => {
+        autoLarge.current = false;
+        setLarge((was) => !was);
+      };
+  const frame = useRef<HTMLElement | null>(null);
+  const body = (
     <WorkLiveBody
       view={view}
       frames={frames}
@@ -219,7 +254,52 @@ export function WorkLivePanel({
       deviceName={session.deviceName}
       actions={actions}
       coarse={coarse}
+      large={large && !coarse}
+      onToggleLarge={toggleLarge}
+      frameRef={frame}
     />
+  );
+  if (!large || coarse) return body;
+  return (
+    <>
+      <WorkLiveDocked deviceName={session.deviceName} onShowHere={() => toggleLarge?.()} />
+      <Dialog
+        open
+        disablePointerDismissal
+        onOpenChange={(open) => {
+          // Escape belongs to the page while in control (Shift+Esc gives the keyboard back).
+          if (open || controlling) return;
+          autoLarge.current = false;
+          setLarge(false);
+        }}
+      >
+        <DialogContent
+          showClose={false}
+          data-testid="work-live-large"
+          initialFocus={controlling ? frame : undefined}
+          className="gap-0 p-4 sm:max-h-[calc(100dvh-2rem)] sm:w-full sm:max-w-[min(1280px,calc(100vw-4rem))] sm:p-4"
+        >
+          <DialogTitle className="sr-only">Browser on {session.deviceName}</DialogTitle>
+          {body}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/** What the panel shows while the page is in the large view. */
+function WorkLiveDocked({ deviceName, onShowHere }: { deviceName: string; onShowHere: () => void }) {
+  return (
+    <div
+      data-testid="work-live-docked"
+      className="grid place-items-center gap-2 rounded-md border border-dashed px-4 py-8 text-center"
+    >
+      <p className="text-muted-foreground text-xs">The browser on {deviceName} is open in the large view.</p>
+      <Button variant="outline" size="sm" onClick={onShowHere} className="max-md:h-11">
+        <Minimize2 aria-hidden />
+        Show here
+      </Button>
+    </div>
   );
 }
 
@@ -311,6 +391,9 @@ export function WorkLiveBody({
   deviceName,
   actions,
   coarse = false,
+  large = false,
+  onToggleLarge,
+  frameRef,
 }: {
   view: LiveView & Partial<Pick<WorkLiveView, "refused">>;
   frames: FrameBus | null;
@@ -319,6 +402,12 @@ export function WorkLiveBody({
   actions?: WorkLiveActions;
   /** A touch screen: taps and swipes on the page, and a hidden keyboard input. */
   coarse?: boolean;
+  /** Drawn in the large view: the page fills the dialog's width and fits the screen's height. */
+  large?: boolean;
+  /** Expand (or back to the panel); absent = no button (touch screens, static renders). */
+  onToggleLarge?: () => void;
+  /** The frame element, for the large view's initial focus while in control. */
+  frameRef?: RefObject<HTMLElement | null>;
 }) {
   const state = workUiStateOf(view);
   const host = view.server?.host ?? null;
@@ -375,6 +464,19 @@ export function WorkLiveBody({
             </span>
           )}
           <StateChip state={state} />
+          {onToggleLarge ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              data-testid="work-live-expand"
+              aria-label={large ? "Show in the panel" : "Expand"}
+              title={large ? "Show in the panel" : "Expand"}
+              onClick={onToggleLarge}
+              className="shrink-0 max-lg:size-11"
+            >
+              {large ? <Minimize2 aria-hidden /> : <Maximize2 aria-hidden />}
+            </Button>
+          ) : null}
         </div>
         {controlling ? (
           <div className="overflow-hidden rounded-md border border-amber-300/70 dark:border-amber-400/30">
@@ -391,6 +493,8 @@ export function WorkLiveBody({
           hintId={hintId}
           coarse={coarse}
           onFocusChange={setFrameFocused}
+          large={large}
+          frameRef={frameRef}
         />
         {activity ? (
           // The state chip is the polite region; this line changes with every action, so it is not announced.
@@ -498,6 +602,8 @@ function WorkLiveFrame({
   hintId,
   coarse,
   onFocusChange,
+  large = false,
+  frameRef,
 }: {
   view: LiveView;
   state: LiveUiState;
@@ -509,9 +615,12 @@ function WorkLiveFrame({
   hintId: string;
   coarse: boolean;
   onFocusChange: (focused: boolean) => void;
+  large?: boolean;
+  frameRef?: RefObject<HTMLElement | null>;
 }) {
   const img = useRef<HTMLImageElement | null>(null);
-  const area = useRef<HTMLElement | null>(null);
+  const ownArea = useRef<HTMLElement | null>(null);
+  const area = frameRef ?? ownArea;
   const framed = workShowsFrames(state);
   const placeholder = framed ? null : workPlaceholderOf(view, state);
   const host = view.server?.host ?? null;
@@ -535,7 +644,7 @@ function WorkLiveFrame({
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [controlling, coarse, input]);
+  }, [controlling, coarse, input, area]);
 
   const send = (frame: LiveInputFrame | null) => {
     if (frame && input) input(frame);
@@ -654,6 +763,8 @@ function WorkLiveFrame({
       {...capture}
       className={cn(
         "relative m-0 aspect-[8/5] w-full overflow-hidden rounded-md border bg-muted outline-none dark:bg-black/40",
+        // The large view: as wide as the dialog, never taller than the screen leaves (bar, take-over bar, buttons, lines).
+        large && "mx-auto max-w-[calc((100dvh-18rem)*1.6)]",
         controlling && "cursor-default focus-visible:ring-[3px] focus-visible:ring-ring/40",
         controlling && coarse && "touch-pinch-zoom select-none",
       )}
@@ -684,7 +795,7 @@ function WorkLiveFrame({
           <Spinner className="size-5 text-muted-foreground" />
         </div>
       ) : null}
-      {placeholder ? <FramePlaceholder placeholder={placeholder} large={false} onRetry={onRetry} /> : null}
+      {placeholder ? <FramePlaceholder placeholder={placeholder} large={large} onRetry={onRetry} /> : null}
     </figure>
   );
 }

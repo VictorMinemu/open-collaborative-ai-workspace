@@ -296,6 +296,8 @@ test.describe("work zone browser", () => {
       const controlling = page.getByTestId("work-live-panel");
       await expect(controlling).toHaveAttribute("data-state", "controlling", { timeout: 20_000 });
       await expect(page.getByTestId("work-live-device-lines")).toBeVisible();
+      // On a desktop, taking control opens the large view so the page is readable; a phone keeps its sheet.
+      await expect(page.getByTestId("work-live-large")).toHaveCount(mobile ? 0 : 1);
 
       // While Mara is in control the owner's Browser tab is private.
       const ownerPanel = await openBrowserTab(boss, mobile);
@@ -322,6 +324,8 @@ test.describe("work zone browser", () => {
           message: "Mara's sign-in is saved",
         })
         .toBe("active");
+      // Handing back closes the large view it opened.
+      await expect(page.getByTestId("work-live-large")).toHaveCount(0, { timeout: 20_000 });
       await expect(banner).toHaveCount(0, { timeout: 20_000 });
       await expect(
         browserAnswer(page, new RegExp(`Sign-in on ${site.host.replaceAll(".", "\\.")}`)),

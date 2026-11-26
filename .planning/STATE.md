@@ -99,6 +99,7 @@ Recent decisions affecting current work:
 | 261111-gyk | Bots with an active Work Zone profile start sessions directly; no proposal tools on their turns | 2026-11-11 | 18d5bcb9 | [261111-gyk-bots-with-an-active-work-zone-profile-st](./quick/261111-gyk-bots-with-an-active-work-zone-profile-st/) |
 | 261111-hs9 | Bot MCP tools past the per-turn cap were silently dropped: cap 128, over-limit warning, bulk enable by read/write | 2026-11-11 | (PR #71) | [261111-hs9-bot-mcp-tools-past-the-64-per-turn-cap-w](./quick/261111-hs9-bot-mcp-tools-past-the-64-per-turn-cap-w/) |
 | 261119-ngw | Bot sessions run in place in projects without git, also when the device never said (live git re-detection; API learns from the refusal) | 2026-11-19 | (PR) | [261119-ngw-bot-sessions-run-in-place-in-projects-without-git](./quick/261119-ngw-bot-sessions-run-in-place-in-projects-without-git/) |
+| 261126-f6s | Work Zone browser large view: Expand button, opened by Take control on desktop | 2026-11-26 | (PR) | [261126-f6s-work-zone-browser-large-view-and-auto-ex](./quick/261126-f6s-work-zone-browser-large-view-and-auto-ex/) |
 
 ### Roadmap Evolution
 
