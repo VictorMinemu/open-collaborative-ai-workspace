@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Channels } from "./channels";
 import {
   AddProjectArgs,
+  AppUpdateHoldAnswer,
   ChatgptLoopbackAwaitArgs,
   ChatgptLoopbackCancelArgs,
   CheckServerArgs,
@@ -12,6 +13,7 @@ import {
   parseArgs,
   SetBadgeCountArgs,
   toPublicProject,
+  UpdateActionArgs,
 } from "./ipc";
 import { deriveStatus } from "./status";
 
@@ -320,5 +322,50 @@ describe("DaemonStatusPayload.runtimeUpdates (07.11, D-09)", () => {
     const report = DaemonStatusPayload.parse({ ...base, runtimeUpdates: fromDaemon });
     const s = deriveStatus({ paused: false, paired: true, daemon: "running", report });
     expect(Object.keys(s)).not.toContain("runtimeUpdates");
+  });
+});
+
+describe("the desktop app update's daemon shapes and actions (07.13.1, D-07, D-09)", () => {
+  const base = { paired: true, connected: true };
+
+  it("status().appUpdate parses the daemon's block and drops one it cannot read", () => {
+    expect(DaemonStatusPayload.parse({ ...base, appUpdate: { state: "draining", running: 2 } }).appUpdate).toEqual({
+      state: "draining",
+      running: 2,
+    });
+    expect(
+      DaemonStatusPayload.parse({ ...base, appUpdate: { state: "idle", running: 0, lastEnd: "timed_out" } }).appUpdate,
+    ).toEqual({ state: "idle", running: 0, lastEnd: "timed_out" });
+    expect(DaemonStatusPayload.parse(base).appUpdate).toBeUndefined();
+    for (const odd of ["held", { state: "paused", running: 0 }, { state: "idle", running: -1 }, { running: 1 }]) {
+      const parsed = DaemonStatusPayload.safeParse({ ...base, appUpdate: odd });
+      expect(parsed.success).toBe(true);
+      expect(parsed.data?.appUpdate).toBeUndefined();
+    }
+  });
+
+  it("the hold answer is states and counts only, and refuses an unknown state", () => {
+    expect(AppUpdateHoldAnswer.parse({ held: true, state: "held", running: 0 })).toEqual({
+      held: true,
+      state: "held",
+      running: 0,
+    });
+    expect(
+      AppUpdateHoldAnswer.parse({ held: false, state: "idle", running: 1, blocked: "runtime_update" }).blocked,
+    ).toBe("runtime_update");
+    expect(AppUpdateHoldAnswer.safeParse({ held: false, state: "waiting", running: 1 }).success).toBe(false);
+    expect(AppUpdateHoldAnswer.safeParse({ held: true, state: "held" }).success).toBe(false);
+    expect(AppUpdateHoldAnswer.safeParse({ held: false, state: "idle", running: 0, blocked: "cli" }).success).toBe(
+      false,
+    );
+  });
+
+  it("update actions from the onboarding window are a closed list", () => {
+    for (const action of ["check", "restart", "cancelWait", "moveToApplications"]) {
+      expect(parseArgs(UpdateActionArgs, action)).toBe(action);
+    }
+    for (const bad of ["openRelease", "install", "", undefined, { action: "restart" }, 1]) {
+      expect(() => parseArgs(UpdateActionArgs, bad)).toThrow();
+    }
   });
 });
