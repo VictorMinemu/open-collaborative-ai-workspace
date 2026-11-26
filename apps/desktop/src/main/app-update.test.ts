@@ -825,7 +825,7 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
     ).toBe("Update available (v0.5.1): download the .deb, or use the AppImage, which updates itself");
   });
 
-  it("offers Move OCW to Applications only from the disk image or a translocated path", () => {
+  it("offers Move OCW to Applications from the disk image, a translocated path or an unwritable folder outside Applications", () => {
     const move = {
       label: "Move OCW to Applications to get automatic updates",
       enabled: true,
@@ -835,6 +835,7 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
       "dmg",
       "translocated",
       "unwritable",
+      "unwritable_outside_applications",
       "not_bundle",
       "deb",
       "unsupported",
@@ -845,7 +846,9 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
         v({ phase: "fallback", version: "0.5.1", url: RELEASE_URL, fallback }),
       ]) {
         const has = appUpdateMenuModel(view).some((i) => i.action === "moveToApplications");
-        expect(has).toBe(fallback === "dmg" || fallback === "translocated");
+        expect(has).toBe(
+          fallback === "dmg" || fallback === "translocated" || fallback === "unwritable_outside_applications",
+        );
         if (has) expect(appUpdateMenuModel(view)).toContainEqual(move);
       }
     }

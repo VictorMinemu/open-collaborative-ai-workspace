@@ -103,6 +103,29 @@ describe("macInstallTarget (D-05)", () => {
     });
     expect(isWritable).toHaveBeenCalledWith("/Applications");
   });
+
+  // Review IN-02 (D-05, ADR-0046 § 5): an unwritable folder outside Applications can be left by moving the app; one in
+  // an Applications folder cannot (Electron's mover does nothing there).
+  it("tells an unwritable folder outside Applications from one inside", () => {
+    const no = () => false;
+    for (const exe of [
+      "/Applications/OCW.app/Contents/MacOS/OCW",
+      "/Applications/Tools/OCW.app/Contents/MacOS/OCW",
+      "/Users/someone/Applications/OCW.app/Contents/MacOS/OCW",
+    ]) {
+      expect(macInstallTarget(exe, { isWritable: no })).toEqual({ ok: false, reason: "unwritable" });
+    }
+    for (const exe of [
+      "/Users/Shared/OCW.app/Contents/MacOS/OCW",
+      "/Users/someone/Applications Old/OCW.app/Contents/MacOS/OCW",
+      "/opt/ApplicationsX/OCW.app/Contents/MacOS/OCW",
+    ]) {
+      expect(macInstallTarget(exe, { isWritable: no })).toEqual({
+        ok: false,
+        reason: "unwritable_outside_applications",
+      });
+    }
+  });
 });
 
 type Call = { cmd: string; args: readonly string[]; timeoutMs: number };

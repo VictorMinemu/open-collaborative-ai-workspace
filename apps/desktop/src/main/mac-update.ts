@@ -68,7 +68,16 @@ export class MacUpdateError extends Error {
   }
 }
 
-export type MacTargetRefusal = "dmg" | "translocated" | "unwritable" | "not_bundle";
+/**
+ * `unwritable`: a folder this user cannot write inside an Applications folder; `unwritable_outside_applications`
+ * (review IN-02, D-05): one elsewhere, which "Move OCW to Applications" can leave.
+ */
+export type MacTargetRefusal =
+  | "dmg"
+  | "translocated"
+  | "unwritable"
+  | "unwritable_outside_applications"
+  | "not_bundle";
 export type MacInstallTarget =
   | { ok: true; app: string; parent: string }
   | { ok: false; reason: MacTargetRefusal };
@@ -98,8 +107,18 @@ export function macInstallTarget(
   const app = m?.[1];
   if (!app || basename(app) !== APP_NAME) return { ok: false, reason: "not_bundle" };
   const parent = dirname(app);
-  if (!(opts.isWritable ?? defaultIsWritable)(parent)) return { ok: false, reason: "unwritable" };
+  if (!(opts.isWritable ?? defaultIsWritable)(parent)) {
+    return {
+      ok: false,
+      reason: inApplicationsFolder(parent) ? "unwritable" : "unwritable_outside_applications",
+    };
+  }
   return { ok: true, app, parent };
+}
+
+/** `/Applications` or `~/Applications`, or a folder inside one (where Electron's mover does nothing). */
+function inApplicationsFolder(dir: string): boolean {
+  return /^(?:\/Users\/[^/]+)?\/Applications(?:\/|$)/.test(dir);
 }
 
 /** Runs one tool from its absolute path with an argv array; rejects on a non-zero exit or the timeout. */

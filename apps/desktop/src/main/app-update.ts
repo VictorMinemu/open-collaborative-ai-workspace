@@ -74,6 +74,8 @@ export type UpdateFallbackReason =
   | "dmg"
   | "translocated"
   | "unwritable"
+  /** macOS, review IN-02: an unwritable folder outside Applications ("Move OCW to Applications" can leave it). */
+  | "unwritable_outside_applications"
   | "not_bundle"
   | "deb"
   | "unsupported"
@@ -743,8 +745,13 @@ export interface AppUpdateMenuItem {
 const CHECK_LABEL = "Check for updates…";
 const MOVE_LABEL = "Move OCW to Applications to get automatic updates";
 
+/** D-05, ADR-0046 § 5: from a disk image, a translocated copy or an unwritable folder outside Applications (IN-02). */
 function canMove(view: AppUpdateView): boolean {
-  return view.fallback === "dmg" || view.fallback === "translocated";
+  return (
+    view.fallback === "dmg" ||
+    view.fallback === "translocated" ||
+    view.fallback === "unwritable_outside_applications"
+  );
 }
 
 function updateAvailableLabel(view: AppUpdateView, version: string): string {

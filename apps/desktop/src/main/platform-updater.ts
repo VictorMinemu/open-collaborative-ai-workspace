@@ -21,7 +21,10 @@ export type UpdaterMode =
 
 export type MacUpdaterResult =
   | { ok: true; updater: BaseUpdater }
-  | { ok: false; reason: "dmg" | "translocated" | "unwritable" | "not_bundle" };
+  | {
+      ok: false;
+      reason: "dmg" | "translocated" | "unwritable" | "unwritable_outside_applications" | "not_bundle";
+    };
 
 export interface PlatformUpdater {
   updater: BaseUpdater | null;
