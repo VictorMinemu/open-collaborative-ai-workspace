@@ -246,6 +246,17 @@ export async function openSessionFileForRead(
   }
 }
 
+/**
+ * ADR-0045: removes a file this daemon just landed for a prompt whose next file failed, so a retry does not leave a
+ * `spec-1.pdf` beside the first copy. Contained like every other move (`resolveSessionPath`, no folder created); only
+ * a regular file is removed, never a link or a folder.
+ */
+export async function removeLandedSessionFile(root: string, rel: string): Promise<void> {
+  const { target } = await resolveSessionPath(root, rel, { create: false });
+  const st = await lstatOrNull(target);
+  if (st?.isFile()) await unlink(target);
+}
+
 /** The command id as it appears in the temp file's name; anything else is never written. */
 const TRANSFER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 

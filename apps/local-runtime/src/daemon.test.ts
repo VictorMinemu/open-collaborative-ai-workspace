@@ -4315,3 +4315,161 @@ describe("Work Zone browser: capability, lifecycle, server frames and the shim (
     );
   });
 });
+
+// -------------------------------------------------------------------------------------------------
+// ADR-0045: any file on a person's prompt lands in the working tree before the turn, with a note the runtime reads
+
+describe("ADR-0045 prompt files: copied into the tree before the turn, listed in a note", () => {
+  function promptCmd(sessionId: string, text: string, files: Array<{ path: string; bytes: Buffer }>) {
+    const payloadFiles = files.map((f) => ({
+      transferId: randomUUID(),
+      path: f.path,
+      sizeBytes: f.bytes.byteLength,
+      sha256: sha256Hex(f.bytes),
+    }));
+    return {
+      id: randomUUID(),
+      kind: "prompt" as const,
+      sessionId,
+      payload: { promptId: randomUUID(), text, files: payloadFiles },
+    };
+  }
+
+  it("announces promptFiles in the hello", async () => {
+    await daemon.start();
+    expect(await server.frame("hello")).toMatchObject({ promptFiles: 1 });
+  });
+
+  it("each file is fetched with the device JWT and lands before the runtime gets the prompt with the note", async () => {
+    await fileDaemon();
+    await activeSession("pf-1");
+    const bytes = Buffer.from("%PDF-1.4 spec\n");
+    server.fileBody = bytes;
+    let landedBeforeTurn = false;
+    const originalPrompt = runtime.prompt.bind(runtime);
+    runtime.prompt = async (sessionId, p) => {
+      landedBeforeTurn = existsSync(join(project, ".ocw", "uploads", "spec.pdf"));
+      return originalPrompt(sessionId, p);
+    };
+    const cmd = promptCmd("pf-1", "Summarise the spec", [{ path: ".ocw/uploads/spec.pdf", bytes }]);
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toEqual({ type: "ack", commandId: cmd.id, ok: true });
+    expect(landedBeforeTurn).toBe(true);
+    expect(readFileSync(join(project, ".ocw", "uploads", "spec.pdf")).equals(bytes)).toBe(true);
+    expect(server.fileRequests).toEqual([
+      expect.objectContaining({
+        method: "GET",
+        url: `/api/v1/runtime/files/${cmd.payload.files[0]!.transferId}`,
+        authorization: `Bearer ${server.issued.at(-1)}`,
+      }),
+    ]);
+    const got = runtime.prompts.at(-1)!;
+    expect(got.text).toBe(
+      "Summarise the spec\n\nAttached files (in the working tree):\n- .ocw/uploads/spec.pdf",
+    );
+    expect(got.files).toBeUndefined();
+    expect(readdirSync(join(project, ".ocw", "uploads"))).toEqual(["spec.pdf"]);
+    // Kept out of the runtime's commits by the repository's own exclude file (never the tracked .gitignore).
+    expect(readFileSync(join(project, ".git", "info", "exclude"), "utf8")).toContain("\n/.ocw/uploads/\n");
+    expect(existsSync(join(project, ".gitignore"))).toBe(false);
+  });
+
+  it("never overwrites: a taken name, and the same name twice in one prompt, get name-N.ext", async () => {
+    await fileDaemon();
+    await activeSession("pf-2");
+    mkdirSync(join(project, ".ocw", "uploads"), { recursive: true });
+    writeFileSync(join(project, ".ocw", "uploads", "notes.md"), "mine\n");
+    const bytes = Buffer.from("# Notes\n");
+    server.fileBody = bytes;
+    const cmd = promptCmd("pf-2", "Merge these notes", [
+      { path: ".ocw/uploads/notes.md", bytes },
+      { path: ".ocw/uploads/notes.md", bytes },
+    ]);
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+    expect(readFileSync(join(project, ".ocw", "uploads", "notes.md"), "utf8")).toBe("mine\n");
+    expect(readFileSync(join(project, ".ocw", "uploads", "notes-1.md")).equals(bytes)).toBe(true);
+    expect(readFileSync(join(project, ".ocw", "uploads", "notes-2.md")).equals(bytes)).toBe(true);
+    // One GET per file: a taken name is found before any byte is fetched.
+    expect(server.fileRequests).toHaveLength(2);
+    expect(runtime.prompts.at(-1)!.text).toBe(
+      "Merge these notes\n\nAttached files (in the working tree):\n- .ocw/uploads/notes-1.md\n- .ocw/uploads/notes-2.md",
+    );
+  });
+
+  it("a file that does not land fails the prompt with one sentence; nothing runs and earlier files are removed", async () => {
+    await fileDaemon();
+    await activeSession("pf-3");
+    const bytes = Buffer.from("first\n");
+    server.fileBody = bytes;
+    server.fileStatuses = [200, 410];
+    const cmd = promptCmd("pf-3", "Use both files", [
+      { path: ".ocw/uploads/a.txt", bytes },
+      { path: ".ocw/uploads/b.txt", bytes },
+    ]);
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({
+      ok: false,
+      error: "Could not copy b.txt into the working tree (the transfer expired). The prompt was not run.",
+    });
+    expect(runtime.prompts).toEqual([]);
+    expect(existsSync(join(project, ".ocw", "uploads", "a.txt"))).toBe(false);
+    expect(readdirSync(join(project, ".ocw", "uploads"))).toEqual([]);
+  });
+
+  it("the deny list still decides on the device: a secret name is refused before any request", async () => {
+    await fileDaemon();
+    await activeSession("pf-4");
+    server.fileBody = Buffer.from("x");
+    const cmd = promptCmd("pf-4", "Here", [{ path: ".ocw/uploads/server.key", bytes: server.fileBody }]);
+    server.send(cmd);
+    expect(await fileAck(cmd.id)).toMatchObject({
+      ok: false,
+      error:
+        "Could not copy server.key into the working tree (the name is not allowed). The prompt was not run.",
+    });
+    expect(server.fileRequests).toEqual([]);
+    expect(runtime.prompts).toEqual([]);
+  });
+
+  for (const id of ["claude-code", "codex"] as const) {
+    it(`the ${id} runtime reads the note and finds the file in its tree`, async () => {
+      await daemon.stop();
+      daemon = await Daemon.create({
+        home,
+        env: { CODEX_HOME: join(home, "codex-default") },
+        token: "device-token-123",
+        config: { serverUrl: server.url },
+        runtimes: [new ScriptedRuntime(id, 1)],
+        logger: silentLogger,
+        controlSocket: false,
+        link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+        fileRetryDelaysMs: [10, 20],
+      });
+      const localId = (await daemon.registry.add(project)).localId;
+      await daemon.start();
+      await server.frame("hello");
+      server.send({
+        id: `start-${id}`,
+        kind: "session.start",
+        sessionId: `pf-${id}`,
+        payload: { projectLocalId: localId, permissionMode: "plan", runtime: id },
+      });
+      expect(await fileAck(`start-${id}`)).toMatchObject({ ok: true });
+      const bytes = Buffer.from("col1,col2\n1,2\n");
+      server.fileBody = bytes;
+      const cmd = promptCmd(`pf-${id}`, "Chart this CSV", [{ path: ".ocw/uploads/data.csv", bytes }]);
+      server.send(cmd);
+      expect(await fileAck(cmd.id)).toMatchObject({ ok: true });
+      const reply = await server.frame(
+        "event",
+        (f) =>
+          f.sessionId === `pf-${id}` &&
+          f.event.type === "assistant.message" &&
+          f.event.text.includes("Mode:"),
+      );
+      const text = reply.event.type === "assistant.message" ? reply.event.text : "";
+      expect(text).toContain(`Files: .ocw/uploads/data.csv (${bytes.byteLength} bytes)`);
+    });
+  }
+});

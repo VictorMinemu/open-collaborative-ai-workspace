@@ -17,7 +17,10 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
 - **5 AI chats:** private streaming AI chats, ChatGPT plan per member, model gateway, usage (ADR-0017, ADR-0018).
 - **6 Multiplayer AI chats and agents:** shared AI chats with structural identity, personas, Agent Cards
   (ADR-0019, ADR-0020).
-- **06.1 Work Zone image attachments.**
+- **06.1 Work Zone image attachments.** Since ADR-0045 a prompt takes any file: images the model reads go inline,
+  every other file (and an image the model can't read) is copied into the session's working tree at
+  `.ocw/uploads/` before the turn, through ADR-0041's transfer, and the runtime reads a note listing the paths.
+  Devices whose runtime predates it are asked to update ("Update this device to attach files").
 - **7 Self-hosted release:** `pnpm ocw setup` + `docker compose up`, OpenTelemetry, secrets as inputs, backups,
   release gate (ADR-0021).
 - **07.1 Board channels and record templates:** a channel can be a board whose cards are threads (moves by pointer,
@@ -209,7 +212,10 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   `~/.ocw/runtime/current` atomically and exits with 75 so systemd or launchd restarts it; the run survives the restart
   through a marker, and a prompt that never started is requeued and runs after any daemon restart instead of failing.
   Only a real service run qualifies (`OCW_RUNTIME_HOST=service`, the service manager's marker, a bundle under
-  `versions/`); the previous version stays; the doctor names a build that did not come back. The runtime's version
+  `versions/`); a unit a v0.2.x installer wrote (no `OCW_RUNTIME_HOST`) also qualifies when systemd runs this process
+  as `ocw-runtime.service` (cgroup) or launchd as `org.ocw.runtime`, and that unit is ours, runs `current` and restarts
+  on exit 75 with no drop-in, so ADR-0040 D-05's restart guarantee holds; the doctor and `service status` flag such a
+  unit with "run `ocw-runtime service install` once" (`docs/SERVER.md` › Updates); the previous version stays; the doctor names a build that did not come back. The runtime's version
   follows the release (0.3.1, shown as "0.3.1 · <build>"). History and audit carry builds, never a path. Limits: a
   v0.3.0 runtime still needs the install command once; no desktop app self-update, no bundle signatures, no Windows
   service (ADR-0040, docs/SERVER.md › Updates).

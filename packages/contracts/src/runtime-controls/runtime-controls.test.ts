@@ -188,7 +188,7 @@ describe("runtime controls inventory (WZC-06, P-09)", () => {
     const reason = (k: string) => rows("workzone-ui").find((r) => r.uiKey === k)?.reason ?? "";
     expect(reason("ui.stream.subagents")).toMatch(/sub-agent events/i);
     expect(reason("ui.header.actions")).toMatch(/git and editor integration/);
-    expect(reason("ui.composer.attach")).toMatch(/^Images only \(PNG, JPEG, GIF, WebP\)/);
+    expect(reason("ui.composer.attach")).toMatch(/^Any file by paste, drop or the paperclip/);
     expect(reason("ui.minimap")).toMatch(/turn navigation rail/i);
   });
 

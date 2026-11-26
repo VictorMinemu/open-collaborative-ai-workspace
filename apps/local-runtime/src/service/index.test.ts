@@ -94,8 +94,32 @@ describe("service install on a systemd user manager (07.12, D-04, PD-11)", () =>
       unitPath: "~/.config/systemd/user/ocw-runtime.service",
       nodePathExists: true,
       bundlePathExists: true,
+      outdated: false,
       reason: null,
     });
+  });
+
+  it("status flags a unit an older installer wrote (no OCW_RUNTIME_HOST); install rewrites it", async () => {
+    const h = harness({ exec: systemdUser("yes") });
+    const legacy = EXPECTED_USER_UNIT.replace('Environment="OCW_RUNTIME_HOST=service"\n', "");
+    h.write(USER_UNIT_PATH, legacy);
+    const manager = createServiceManager(h.deps);
+    expect((await manager.status()).outdated).toBe(true);
+    h.lines.length = 0;
+    expect(await serviceCommand(["status"], h.deps)).toBe(0);
+    expect(h.lines).toContain(
+      "  written by an older runtime: re-run `ocw-runtime service install` once to rewrite it",
+    );
+    // A unit we did not write is never called ours.
+    h.write(USER_UNIT_PATH, legacy.split("\n").slice(1).join("\n"));
+    expect((await manager.status()).outdated).toBe(null);
+
+    h.write(USER_UNIT_PATH, legacy);
+    const r = await manager.install({ manager: "systemd-user" });
+    // Written now; applied by the restart it makes when idle, else at the next one (the harness's daemon is busy).
+    expect(r.ok && r.outcome).toBe("updated-restart-pending");
+    expect(readFileSync(h.at(USER_UNIT_PATH), "utf8")).toBe(EXPECTED_USER_UNIT);
+    expect((await manager.status()).outdated).toBe(false);
   });
 
   it("status sees a node that an nvm upgrade removed", async () => {
@@ -121,6 +145,7 @@ describe("service install on a systemd user manager (07.12, D-04, PD-11)", () =>
       unitPath: null,
       nodePathExists: null,
       bundlePathExists: null,
+      outdated: null,
       reason: null,
     });
   });
@@ -440,6 +465,7 @@ describe("service install --system: printed by the account, written by root with
       unitPath: "/etc/systemd/system/ocw-runtime.service",
       nodePathExists: true,
       bundlePathExists: true,
+      outdated: false,
       reason: null,
     });
     h.calls.length = 0;
@@ -557,8 +583,17 @@ describe("service install on macOS (07.12, D-04, PD-11, RESEARCH Pitfall 9)", ()
       unitPath: "~/Library/LaunchAgents/org.ocw.runtime.plist",
       nodePathExists: true,
       bundlePathExists: true,
+      outdated: false,
       reason: null,
     });
+  });
+
+  it("status flags a LaunchAgent an older installer wrote (no OCW_RUNTIME_HOST)", async () => {
+    const h = mac("not loaded");
+    await serviceCommand(["install"], h.deps);
+    const plist = readFileSync(h.at(PLIST_PATH), "utf8");
+    h.write(PLIST_PATH, plist.replace("    <key>OCW_RUNTIME_HOST</key>\n    <string>service</string>\n", ""));
+    expect((await createServiceManager(h.deps).status()).outdated).toBe(true);
   });
 
   it("status of an installed agent that is not loaded", async () => {

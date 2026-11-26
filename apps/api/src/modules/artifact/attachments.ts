@@ -41,14 +41,15 @@ export type ScopedKind = "work_session";
 export interface AttachmentScope {
   /**
    * The caller may upload into this conversation: throws 404 (hidden reads exactly like missing, with
-   * `notFoundMessage`), 403 or 409. Returns the declared types it accepts and the refusal text for any other type.
+   * `notFoundMessage`), 403 or 409. Returns the declared types it accepts (null = any type, as in a channel) and the
+   * refusal text for any other type.
    */
   assertUpload(
     req: FastifyRequest,
     tx: Tx,
     conversationId: string,
     notFoundMessage: string,
-  ): Promise<{ allowedTypes: readonly string[]; typeMessage: string }>;
+  ): Promise<{ allowedTypes: readonly string[] | null; typeMessage: string }>;
   /** The caller may read this conversation's attachments: throws 404 (with `notFoundMessage`) otherwise. */
   assertRead(req: FastifyRequest, tx: Tx, conversationId: string, notFoundMessage: string): Promise<void>;
 }
@@ -207,7 +208,7 @@ export function registerAttachmentRoutes(app: App, deps: AttachmentRoutesDeps): 
             req.params.id,
             "Conversation not found",
           );
-          if (!allowedTypes.includes(req.body.contentType)) {
+          if (allowedTypes && !allowedTypes.includes(req.body.contentType)) {
             throw new HttpError(400, "images_only", typeMessage, { allowedTypes });
           }
           return insertPending(tx, req.params.id);

@@ -601,6 +601,8 @@ export class DeviceHub {
           // never sends that device a browser grant or frame. The opt-in is its owner's local switch (D-10).
           browserVersion: hello.browser?.version ?? null,
           browserOptIn: hello.browser?.optIn ?? false,
+          // ADR-0045: likewise only from the device's own hello; null never gets a prompt file.
+          promptFilesVersion: hello.promptFiles ?? null,
         })
         .where(eq(devices.id, device.deviceId));
       await this.opts.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {

@@ -306,16 +306,16 @@ const promptCount = async (sid: string) =>
   );
 
 describe("the model gate (D-05, P-08): images never go to a model that says it cannot read them", () => {
-  it("a Codex session on a text-only model refuses images at submit with 400 images_not_supported", async () => {
+  it("ADR-0045: a text-only model takes the image as a file, which this older device cannot receive (409 runtime_too_old)", async () => {
     const { id, conv } = await newSession({ runtime: "codex", model: "gpt-6.1-text", title: "Text only" });
     const att = await upload(admin, conv, "photo.jpg", "image/jpeg", jpeg);
     const res = await admin.request("POST", `/api/v1/work-sessions/${id}/prompts`, {
       body: "what is this?",
       attachmentIds: [att.id],
     });
-    expect(res.status, JSON.stringify(res.body)).toBe(400);
-    expect(errorCode(res)).toBe("images_not_supported");
-    expect((res.body!.error as Json).message).toBe("GPT-6.1 Text can't read images");
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(errorCode(res)).toBe("runtime_too_old");
+    expect((res.body!.error as Json).message).toBe("Update this device to attach files (Settings › Devices)");
     expect(await promptCount(id)).toBe(0);
     const row = (await su.query("select work_prompt_id from app.attachments where id = $1", [att.id]))
       .rows[0];
@@ -494,13 +494,9 @@ describe("access: only the session's controllers upload, only its readers see (D
     expect(res.status, JSON.stringify(res.body)).toBe(403);
   });
 
-  it("presign: a PDF is 400 images_only; an archived session is 409 session_archived", async () => {
+  it("presign: any type goes (ADR-0045); an archived session is 409 session_archived", async () => {
     const pdf = await presign(admin, sessionConv, "spec.pdf", "application/pdf", 1000);
-    expect(pdf.status, JSON.stringify(pdf.body)).toBe(400);
-    expect(errorCode(pdf)).toBe("images_only");
-    expect((pdf.body!.error as Json).message).toBe(
-      "Only images (PNG, JPEG, GIF, WebP) can be attached to a Work Zone prompt",
-    );
+    expect(pdf.status, JSON.stringify(pdf.body)).toBe(200);
     const { id, conv } = await newSession({ title: "Archived" });
     await ok(admin.request("POST", `/api/v1/work-sessions/${id}/archive`));
     const archived = await presign(admin, conv, "x.jpg", "image/jpeg", jpeg.length);
@@ -554,7 +550,8 @@ describe("linking: only the sender's own ready session images (D-03, P-05, T-06.
        values ($1, $2, $3, $4, 'b.png', 'image/png', 'image/png', 10, 'ready', true, 8, 8)`,
       [foreign, orgB, sessionConv, adminId],
     );
-    // A ready non-image of Víctor's in this session (the scope never presigns one; inserted to prove the link rule).
+    // A ready non-image of Víctor's in this session: linkable since ADR-0045 (prompt-files.int.test.ts); here it only
+    // proves that no refused case links it.
     const pdf = randomUUID();
     await su.query(
       `insert into app.attachments (id, organization_id, conversation_id, uploader_id, filename, declared_type,
@@ -584,7 +581,6 @@ describe("linking: only the sender's own ready session images (D-03, P-05, T-06.
       ["another tenant's id", async () => [foreign]],
       ["an id already linked to an earlier prompt", async () => [alreadyLinked]],
       ["a pending upload", async () => [pending.attachment.id]],
-      ["a non-image", async () => [pdf]],
       ["the same id twice", async () => [mine.id, mine.id]],
       ["a random uuid", async () => [randomUUID()]],
       ["a good id next to a refused one", async () => [mine.id, danas.id]],
@@ -622,10 +618,10 @@ describe("linking: only the sender's own ready session images (D-03, P-05, T-06.
     expect(free.rows.map((r) => r.id).sort()).toEqual([...untouched].sort());
   });
 
-  it("5 ids are refused by the schema (400)", async () => {
+  it("11 ids are refused by the schema (400; ADR-0045: up to 10 attachments)", async () => {
     const res = await admin.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, {
       body: "too many",
-      attachmentIds: [1, 2, 3, 4, 5].map(() => randomUUID()),
+      attachmentIds: Array.from({ length: 11 }, () => randomUUID()),
     });
     expect(res.status).toBe(400);
   });

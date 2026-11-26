@@ -1,6 +1,5 @@
 import {
   EffectiveSessionSettings,
-  INLINE_IMAGE_TYPES,
   type PromptImage,
   type RuntimeCatalog,
   type RuntimeModel,
@@ -24,13 +23,6 @@ import {
 import { CommandUndeliverableError, type DeviceCommandRow } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { sessionFacts } from "./facts";
-
-/** Phase 06.1: the refusal for a non-image declared into a session's conversation (400 `images_only`). */
-export const IMAGES_ONLY_MESSAGE = "Only images (PNG, JPEG, GIF, WebP) can be attached to a Work Zone prompt";
-
-/** 400 `images_not_supported` (D-05, P-08): the session's model says it cannot read images. */
-export const imagesNotSupported = (m: RuntimeModel) =>
-  new HttpError(400, "images_not_supported", `${m.displayName} can't read images`, { model: m.id });
 
 /**
  * The catalog row of the model the session's next turn runs (P-08), the composer's rule (`sessionModel` in the web's
@@ -64,7 +56,8 @@ type ScopedSession = Pick<typeof workSessions.$inferSelect, "id" | "createdBy" |
  * The artifact module's `work_session` scope (06.1, P-04): a session's images live in its conversation and follow
  * the session, not the channel rules. Read = `work_session.read` on the session, hidden as 404 (the `ws` topic's
  * decision); upload = readable, not archived, `work_session.prompt` on the session and org-level
- * `attachment.upload`, images only. The Phase 4 routes and URLs stay unchanged (D-01).
+ * `attachment.upload`, any type (ADR-0045: what the model does not read inline is copied into the working tree). The
+ * Phase 4 routes and URLs stay unchanged (D-01).
  */
 export function createWorkSessionAttachmentScope(core: Core): AttachmentScope {
   const perms = createPermissionService(core);
@@ -110,7 +103,7 @@ export function createWorkSessionAttachmentScope(core: Core): AttachmentScope {
       if (session.status === "archived") throw conflict("This session is archived", "session_archived");
       await perms.assertCan(req, tx, "work_session.prompt", facts);
       await perms.assertCan(req, tx, "attachment.upload");
-      return { allowedTypes: INLINE_IMAGE_TYPES, typeMessage: IMAGES_ONLY_MESSAGE };
+      return { allowedTypes: null, typeMessage: "" };
     },
   };
 }

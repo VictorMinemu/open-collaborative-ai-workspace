@@ -64,7 +64,13 @@ import {
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
 import { sessionNotFound } from "./hidden";
-import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy, serverFileMaxBytes } from "./policy";
+import {
+  knownModels,
+  loadBotFileLimit,
+  loadWorkZonePolicy,
+  saveWorkZonePolicy,
+  serverFileMaxBytes,
+} from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
@@ -844,10 +850,18 @@ export function registerWorkSessionRoutes(
         const session = await svc.session(tx, req.params.id);
         if (!session) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
         await assertReadable(req, tx, await sessionFacts(tx, auth, session));
-        return buildSessionControls(
+        const controls = buildSessionControls(
           session,
           await controlsFor(tx, auth, session.deviceId, session.runtime, true),
         );
+        // ADR-0045: whether the device takes prompt files, and the per-file limit the composer checks first.
+        const [d] = await tx
+          .select({ promptFilesVersion: devices.promptFilesVersion })
+          .from(devices)
+          .where(eq(devices.id, session.deviceId))
+          .limit(1);
+        const limit = await loadBotFileLimit(tx, null, fileCeiling);
+        return { ...controls, files: { supported: d?.promptFilesVersion != null, maxBytes: limit.bytes } };
       }),
   );
 

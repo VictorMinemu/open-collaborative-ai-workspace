@@ -176,6 +176,8 @@ export function createWorkSessionModule(
     jobs: core.jobs,
     // 07.18 (D-02, D-05, PD-02): sessions on pool-capable devices start on, and switch between, pool accounts.
     pool: createAccountPoolPort(core),
+    // ADR-0045: a prompt file's limit is the lower of this ceiling and the organization's.
+    serverFileMaxBytes: serverFileMaxBytes(core.env),
   });
   hub.setSessionHandler(service);
   // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.

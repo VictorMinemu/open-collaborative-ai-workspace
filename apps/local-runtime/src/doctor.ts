@@ -571,6 +571,15 @@ async function checkService(ctx: Context): Promise<Finding> {
       `\`sudo loginctl enable-linger ${s.account}\` so it runs without a login session`,
     );
   }
+  if (s.outdated === true) {
+    // A unit from before 07.16-05 lacks OCW_RUNTIME_HOST=service; `service install` rewrites it (idempotent).
+    return warn(
+      `The ${label} was written by an older runtime`,
+      s.manager === "systemd-system"
+        ? "run `ocw-runtime service install --system` once and the root lines it prints, when no session runs"
+        : "run `ocw-runtime service install` once to rewrite it (it restarts the runtime only when no session runs)",
+    );
+  }
   const where = s.unitPath ? ` (${s.unitPath})` : "";
   return ok(`The ${label} is ${s.active ? "active" : "installed"} as ${s.account}${where}`);
 }

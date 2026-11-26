@@ -29,17 +29,17 @@ const PROMPT = {
 };
 
 describe("CreatePromptRequest.attachmentIds (D-02)", () => {
-  it("accepts a body alone and a body with up to 4 attachment ids", () => {
+  it("accepts a body alone and a body with up to 10 attachment ids (ADR-0045: images and files)", () => {
     expect(CreatePromptRequest.parse({ body: "hi" })).toEqual({ body: "hi" });
-    const four = ids(4);
-    expect(CreatePromptRequest.parse({ body: "hi", attachmentIds: four })).toEqual({
+    const ten = ids(10);
+    expect(CreatePromptRequest.parse({ body: "hi", attachmentIds: ten })).toEqual({
       body: "hi",
-      attachmentIds: four,
+      attachmentIds: ten,
     });
   });
 
-  it("refuses 5 ids, a non-uuid and an empty body (the body stays required, P-06)", () => {
-    expect(CreatePromptRequest.safeParse({ body: "hi", attachmentIds: ids(5) }).success).toBe(false);
+  it("refuses 11 ids, a non-uuid and an empty body (the body stays required, P-06)", () => {
+    expect(CreatePromptRequest.safeParse({ body: "hi", attachmentIds: ids(11) }).success).toBe(false);
     expect(CreatePromptRequest.safeParse({ body: "hi", attachmentIds: ["not-a-uuid"] }).success).toBe(false);
     expect(CreatePromptRequest.safeParse({ body: "", attachmentIds: ids(1) }).success).toBe(false);
     expect(CreatePromptRequest.safeParse({ attachmentIds: ids(1) }).success).toBe(false);

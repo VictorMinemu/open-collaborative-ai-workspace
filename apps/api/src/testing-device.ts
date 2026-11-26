@@ -87,6 +87,8 @@ export class FakeDevice {
       browser?: { version: 1; optIn: boolean };
       /** 07.13 review MD-01: the pages open on the device as it says hello (`hello.browserPages`); sent only when given. */
       browserPages?: Array<{ sessionId: string; signedIn: boolean }>;
+      /** ADR-0045: the daemon copies prompt files into the tree (`hello.promptFiles`); sent only when given. */
+      promptFiles?: 1;
     } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
@@ -120,6 +122,7 @@ export class FakeDevice {
       ...(opts.accountPool !== undefined ? { accountPool: opts.accountPool } : {}),
       ...(opts.browser ? { browser: opts.browser } : {}),
       ...(opts.browserPages ? { browserPages: opts.browserPages } : {}),
+      ...(opts.promptFiles !== undefined ? { promptFiles: opts.promptFiles } : {}),
     });
     await d.next((f) => f.type === "welcome");
     return d;

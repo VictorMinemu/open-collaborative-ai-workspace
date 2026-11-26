@@ -302,6 +302,7 @@ describe("bot file exchange schema (07.17.1.1, D-05, D-07, PD-05, PD-16)", () =>
       "expires_at",
       "created_at",
       "completed_at",
+      "work_prompt_id",
     ]);
     expect(cols.filter((c) => c.includes("path"))).toEqual(["path_length"]);
     expect(cols.filter((c) => c.includes("name") || c.includes("content") || c.includes("body"))).toEqual([]);
@@ -326,6 +327,33 @@ describe("bot file exchange schema (07.17.1.1, D-05, D-07, PD-05, PD-16)", () =>
     await refused(transfer(A, { work_session_id: B.session }), {
       constraint: "bot_work_session_files_session_fk",
     });
+  });
+
+  it("ADR-0045: a row belongs to a bot's turn or to a person's prompt (to the device only), never both or neither", async () => {
+    const prompt = { work_prompt_id: randomUUID(), agent_id: null, event_id: null };
+    const id = await transfer(A, prompt);
+    expect(await count("app.bot_work_session_files where id = $1 and agent_id is null", [id])).toBe(1);
+    const cases: Array<Record<string, unknown>> = [
+      { agent_id: null, event_id: null },
+      { agent_id: null },
+      { event_id: null },
+      { work_prompt_id: randomUUID() },
+      { ...prompt, agent_id: A.agent },
+      { ...prompt, direction: "from_device" },
+    ];
+    for (const cols of cases) {
+      await refused(transfer(A, cols), { constraint: "bot_work_session_files_owner_ck" });
+    }
+  });
+
+  it("ADR-0045: a device's prompt-files version is null (an older daemon) or 1 … 100", async () => {
+    expect(
+      (await db.query("select prompt_files_version from app.devices where id = $1", [A.device])).rows[0],
+    ).toEqual({ prompt_files_version: null });
+    await refused(db.query("update app.devices set prompt_files_version = 0 where id = $1", [A.device]), {
+      constraint: "devices_prompt_files_version_ck",
+    });
+    await db.query("update app.devices set prompt_files_version = 1 where id = $1", [A.device]);
   });
 });
 

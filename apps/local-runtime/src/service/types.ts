@@ -32,8 +32,23 @@ export type ServiceStatus = {
   nodePathExists: boolean | null;
   /** The bundle the unit names still exists; null when not installed. */
   bundlePathExists: boolean | null;
+  /**
+   * The unit is one `service install` wrote, but an older one (before 07.16-05, v0.3.0): it does not set
+   * `OCW_RUNTIME_HOST=service`, so re-running `service install` rewrites it. Null when not installed or not ours.
+   */
+  outdated: boolean | null;
   /** Why the manager is `none` or the state is unknown (one line, safe to print); null otherwise. */
   reason: string | null;
+};
+
+/** What supervision and status read back from a unit or plist that `ocw-runtime service install` wrote. */
+export type GeneratedUnitFacts = {
+  /** The bundle it runs (with `run`). */
+  bundlePath: string;
+  /** The manager starts it again after the self-update exit (75, a failure exit). */
+  restartsOnUpdateExit: boolean;
+  /** It sets `OCW_RUNTIME_HOST=service`, which installers write since 07.16-05 (v0.3.0); older ones lack it. */
+  setsServiceHost: boolean;
 };
 
 /**

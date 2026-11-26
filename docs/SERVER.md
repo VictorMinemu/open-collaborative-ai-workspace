@@ -208,6 +208,18 @@ One click needs a real service (`ocw-runtime service install`, or `setup --servi
 "Run as a service to update from the browser; or re-run the install command". If `systemctl --user cat ocw-runtime`
 does not show `OCW_RUNTIME_HOST=service`, run `ocw-runtime service install` once.
 
+**A service installed by a v0.2.x runtime.** Installers before v0.3.0 wrote the unit (or LaunchAgent) without
+`OCW_RUNTIME_HOST=service`, and re-running the install command switches the runtime but never rewrites the unit. A
+runtime up to v0.4.0 on such a unit says "Run as a service…" although `service status` shows it running. Run
+`ocw-runtime service install` (`--system` for a system unit, then the root lines it prints) once on the device: it
+rewrites the unit and restarts the runtime when no session runs, and **Update** appears. Newer runtimes accept the old
+unit by themselves, only when it still guarantees the restart: systemd runs the process as `ocw-runtime.service`
+(its cgroup) or launchd as `org.ocw.runtime`; the unit file is the one `service install` wrote; it runs
+`~/.ocw/runtime/current/ocw-runtime.mjs run` and restarts on a failure exit (`Restart=on-failure` or `always`, KeepAlive
+on failure); and no drop-in (`ocw-runtime.service.d/*.conf`) sits beside it. Anything else stays "Run as a service…".
+`ocw-runtime doctor` and `service status` still flag the old unit ("written by an older runtime") with the same
+one-line fix.
+
 **The first update from v0.3.0 is still the install command.** A v0.3.0 runtime does not have the self-update code.
 Re-run the command from [Install](#install), then `ocw-runtime service restart` when no session runs. From then on,
 every update is one click (or none, at *Automatic*).

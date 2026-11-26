@@ -47,6 +47,7 @@ export * from "./tool-approvals";
 export * from "./watched-records";
 export * from "./work-browser";
 export * from "./work-projects";
+export * from "./work-prompt-files";
 export * from "./work-session";
 export * from "./work-session-files";
 export * from "./work-zone-memory";

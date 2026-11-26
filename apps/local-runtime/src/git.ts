@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { type DiffFile, NO_GIT_WORKTREE_MESSAGE } from "@ocw/contracts";
 import { redact, truncateBytes } from "./sanitize.js";
 
@@ -270,6 +270,30 @@ export async function removeSessionWorktree(repo: string, sessionId: string): Pr
   const path = join(top, WORKTREE_DIR, sessionId);
   if (!existsSync(path)) return;
   await git(top, ["worktree", "remove", "--force", path]);
+}
+
+/**
+ * ADR-0045: keeps a prompt's uploads (`<cwd>/.ocw/uploads/`, `WORK_PROMPT_UPLOADS_DIR`) out of every commit the runtime
+ * makes, without touching the tracked `.gitignore`: when `cwd` is inside a git work tree, the repository's own
+ * `info/exclude` (resolved by git, `rev-parse --git-path info/exclude`, so a linked worktree's goes to the common git
+ * dir) gets the line `/<prefix>.ocw/uploads/` once, anchored at the work tree's top (`<prefix>` = `cwd` below it).
+ * Idempotent. A project without git: nothing to do. Returns whether the line is (now) present.
+ */
+export async function excludePromptUploads(cwd: string, uploadsDir: string): Promise<boolean> {
+  if (!(await isGitRepo(cwd))) return false;
+  const prefix = (await git(cwd, ["rev-parse", "--show-prefix"])).stdout.trim();
+  const raw = (await git(cwd, ["rev-parse", "--git-path", "info/exclude"])).stdout.trim();
+  const exclude = isAbsolute(raw) ? raw : join(cwd, raw);
+  const line = `/${prefix}${uploadsDir.replace(/\/+$/, "")}/`;
+  let current = "";
+  try {
+    current = await readFile(exclude, "utf8");
+  } catch {
+    await mkdir(dirname(exclude), { recursive: true });
+  }
+  if (current.split(/\r?\n/).some((l) => l.trim() === line)) return true;
+  await appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}${line}\n`);
+  return true;
 }
 
 async function excludeWorktreeDir(top: string): Promise<void> {
