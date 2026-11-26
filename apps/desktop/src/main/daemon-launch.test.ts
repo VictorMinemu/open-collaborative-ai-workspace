@@ -53,6 +53,17 @@ describe("buildDaemonEnv", () => {
     expect(env.PATH).toBe("/usr/bin:/bin:/Users/v/.local/bin:/opt/homebrew/bin:/usr/local/bin");
   });
 
+  // Review WR-02: the AppImage updater's markers are about this app's own start, never the daemon's.
+  it("drops the AppImage updater's install markers", () => {
+    const env = buildDaemonEnv(
+      { APPIMAGE_SILENT_INSTALL: "true", APPIMAGE_EXIT_AFTER_INSTALL: "true", APPIMAGE: "/x.AppImage" },
+      { token: null, apiUrl: null, electronAsNode: true },
+    );
+    expect(env.APPIMAGE_SILENT_INSTALL).toBeUndefined();
+    expect(env.APPIMAGE_EXIT_AFTER_INSTALL).toBeUndefined();
+    expect(env.APPIMAGE).toBe("/x.AppImage");
+  });
+
   it("sets no token when unpaired and no Electron flag for a system node", () => {
     const env = buildDaemonEnv(
       { OCW_DEVICE_TOKEN: "x" },

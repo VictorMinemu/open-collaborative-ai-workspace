@@ -100,6 +100,7 @@ import {
   writeDaemonRuntimeUpdates,
 } from "./runtime-config";
 import { hardenedPreferences, installGlobalGuards, isTrustedSender, restrictNavigation } from "./security";
+import { acquireSingleInstanceLock } from "./single-instance";
 import { DaemonSupervisor } from "./supervisor";
 import {
   checkForUpdate,
@@ -1252,8 +1253,9 @@ if (process.env.APPIMAGE_EXIT_AFTER_INSTALL === "true") {
   // electron-updater runs the new AppImage once with this variable after replacing the file on a normal quit (no
   // relaunch wanted): that instance exits at once, before any window, tray or daemon (Pitfall 6).
   app.exit(0);
-} else if (!app.requestSingleInstanceLock()) {
-  app.quit();
 } else {
-  void main();
+  // Review WR-02: the instance the AppImage updater relaunched waits (bounded) for the old one to let go of the lock.
+  void acquireSingleInstanceLock({ request: () => app.requestSingleInstanceLock(), env: process.env }).then(
+    (locked) => (locked ? main() : app.quit()),
+  );
 }

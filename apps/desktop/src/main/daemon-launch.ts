@@ -49,6 +49,9 @@ const DROP = [
   /^OCW_APP_VERSION$/,
   /^CHROME_/,
   /^GOOGLE_API_KEY$/,
+  // The AppImage updater's markers for this app's own start (review WR-02).
+  /^APPIMAGE_SILENT_INSTALL$/,
+  /^APPIMAGE_EXIT_AFTER_INSTALL$/,
 ];
 
 /** Common user tool locations; apps launched from Finder get a minimal PATH. */
