@@ -208,6 +208,29 @@ export function appImageNameNotice(previous: string | null, next: string | null)
   return `OCW now runs from ${next}. Shortcuts to ${previous} no longer work: point them at the new file, or rename it to OCW.AppImage so later updates keep that name.`;
 }
 
+/**
+ * The one-time notice after an install that failed (the macOS swap's result, or an install that did not start; read
+ * once at the next start). Versions and fixed sentences only. Review WR-04: after a failed rollback the app is no
+ * longer in its folder, so the notice says where to get it again.
+ */
+export function installFailureNotice(
+  result: { outcome: "installed" | "failed"; version: string; reason?: string } | null,
+  currentVersion: string,
+): { title: string; body: string } | null {
+  if (result?.outcome !== "failed") return null;
+  const title = "OCW was not updated";
+  if (result.reason === "rollback_failed") {
+    return {
+      title,
+      body: `The update to v${result.version} could not be installed and OCW could not be put back in its folder. Download OCW again from the release page and install it.`,
+    };
+  }
+  return {
+    title,
+    body: `The update to v${result.version} could not be installed. OCW is still on v${currentVersion}.`,
+  };
+}
+
 export class AppUpdateController {
   private readonly updater: UpdaterLike | null;
   private readonly now: () => number;

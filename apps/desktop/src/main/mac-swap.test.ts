@@ -182,13 +182,22 @@ describe("runSwap (D-05)", () => {
     expect(d.openApp).toHaveBeenCalledWith(l.installedApp);
   });
 
-  it("reports rollback_failed and does not relaunch a missing app when the rollback also fails", async () => {
-    const l = layout();
-    const { d } = deps({ failRenames: [2, 3] });
-    const out = await runSwap(parseHelperArgs(argv(l)), d);
-    expect(out).toMatchObject({ outcome: "failed", reason: "rollback_failed" });
-    expect(d.openApp).not.toHaveBeenCalled();
-  });
+  // Review WR-04: with no OCW.app left, the old bundle (now hidden under its dot name) is the only working copy; it is
+  // opened where it is, so the person keeps an app and reads the one-time notice, relaunch asked or not.
+  it.each(["1", "0"])(
+    "reports rollback_failed and opens the old bundle where it now is (relaunch %s)",
+    async (relaunch) => {
+      const l = layout();
+      const { d } = deps({ failRenames: [2, 3] });
+      const out = await runSwap(parseHelperArgs(argv(l, { 6: relaunch })), d);
+      expect(out).toMatchObject({ outcome: "failed", reason: "rollback_failed" });
+      expect(result(l.resultFile)).toEqual(out);
+      const old = join(l.parent, `.OCW.app.old-${AT}`);
+      expect(readFileSync(join(old, "marker"), "utf8")).toBe("old");
+      expect(d.openApp).toHaveBeenCalledTimes(1);
+      expect(d.openApp).toHaveBeenCalledWith(old);
+    },
+  );
 
   it("reports swap_failed and leaves everything when the first rename fails", async () => {
     const l = layout();

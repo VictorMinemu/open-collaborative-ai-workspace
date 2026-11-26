@@ -479,7 +479,10 @@ export function recordInstallFailure(userData: string, version: string, now: () 
 
 const LEFTOVER = [/^\.OCW\.app\.old-\d{1,16}$/, /^\.ocw-update-\d{1,9}\.\d{1,9}\.\d{1,9}$/];
 
-/** Removes old bundles (`.OCW.app.old-<digits>`) and staging folders (`.ocw-update-<x.y.z>`) beside the app, nothing else. */
+/**
+ * Removes old bundles (`.OCW.app.old-<digits>`) and staging folders (`.ocw-update-<x.y.z>`) beside the app, nothing
+ * else. Review WR-04: only when an `OCW.app` is there too; after a failed rollback a leftover is the only copy left.
+ */
 export async function sweepLeftovers(parentDir: string): Promise<void> {
   let names: string[];
   try {
@@ -487,6 +490,7 @@ export async function sweepLeftovers(parentDir: string): Promise<void> {
   } catch {
     return;
   }
+  if (!names.includes(APP_NAME)) return;
   for (const name of names) {
     if (LEFTOVER.some((re) => re.test(name))) await removePath(join(parentDir, name)).catch(() => undefined);
   }

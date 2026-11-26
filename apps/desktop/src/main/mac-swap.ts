@@ -8,7 +8,7 @@
 // main-process modules (unit-tested).
 
 import { spawn } from "node:child_process";
-import { chmod, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
 import { z } from "zod";
 
@@ -187,7 +187,21 @@ export async function runSwap(args: HelperArgs, deps: SwapDeps = {}): Promise<Sw
     try {
       await move(old, args.installedApp);
     } catch {
-      return finish("failed", "rollback_failed");
+      const out = await finish("failed", "rollback_failed");
+      // Review WR-04: no OCW.app is left; the old bundle, hidden under its dot name, is the only working copy. It is
+      // opened where it is (relaunch asked or not), so the person keeps an app and reads the notice.
+      const stillThere = await lstat(old).then(
+        (st) => st.isDirectory(),
+        () => false,
+      );
+      if (stillThere) {
+        try {
+          openApp(old);
+        } catch {
+          // the result file already says what happened
+        }
+      }
+      return out;
     }
     const out = await finish("failed", "swap_failed");
     relaunch();

@@ -69,6 +69,7 @@ import {
   appImageNameNotice,
   appUpdateMenuModel,
   type DaemonKind,
+  installFailureNotice,
   onboardingUpdateView,
 } from "./app-update";
 import { RELEASE_BUILD } from "./build-flags";
@@ -543,13 +544,8 @@ async function afterUpdateNotices(mode: UpdaterMode): Promise<void> {
     const testApp = process.platform === "darwin" && mode.kind === "test" ? mode.macTestApp : null;
     // The macOS swap's result, or an install that did not start on any platform (review WR-01), read once.
     if (app.isPackaged || testApp) {
-      const result = await readSwapResult(app.getPath("userData"));
-      if (result?.outcome === "failed") {
-        notify(
-          "OCW was not updated",
-          `The update to v${result.version} could not be installed. OCW is still on v${app.getVersion()}.`,
-        );
-      }
+      const notice = installFailureNotice(await readSwapResult(app.getPath("userData")), app.getVersion());
+      if (notice) notify(notice.title, notice.body);
     }
     if (process.platform === "darwin") {
       if (!app.isPackaged && !testApp) return;

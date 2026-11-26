@@ -7,6 +7,7 @@ import {
   appImageNameNotice,
   appUpdateMenuModel,
   type DaemonKind,
+  installFailureNotice,
   onboardingUpdateView,
   UPDATE_SENTENCES,
   type UpdateFallbackReason,
@@ -913,6 +914,25 @@ describe("the menu and onboarding views (D-06, D-09)", () => {
         expect(JSON.stringify(out ?? null).replaceAll(RELEASE_URL, "")).not.toContain("/");
       }
     }
+  });
+});
+
+// Review WR-04: the notice after a failed install names versions only; a failed rollback says the app is not in its
+// folder any more and where to get it.
+describe("installFailureNotice", () => {
+  it("says the version stayed, and after a failed rollback that OCW must be downloaded again", () => {
+    const base = { outcome: "failed" as const, version: "0.5.1", at: "2026-11-26T10:00:00.000Z" };
+    expect(installFailureNotice({ ...base, reason: "swap_failed" }, "0.5.0")).toEqual({
+      title: "OCW was not updated",
+      body: "The update to v0.5.1 could not be installed. OCW is still on v0.5.0.",
+    });
+    const lost = installFailureNotice({ ...base, reason: "rollback_failed" }, "0.5.0");
+    expect(lost?.title).toBe("OCW was not updated");
+    expect(lost?.body).toMatch(/could not be put back/);
+    expect(lost?.body).toMatch(/release page/);
+    expect(lost?.body).not.toContain("/");
+    expect(installFailureNotice({ ...base, outcome: "installed" }, "0.5.1")).toBeNull();
+    expect(installFailureNotice(null, "0.5.1")).toBeNull();
   });
 });
 

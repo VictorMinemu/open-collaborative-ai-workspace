@@ -574,4 +574,14 @@ describe("readSwapResult and sweepLeftovers (D-05)", () => {
     // A missing folder is not an error.
     await expect(sweepLeftovers(join(dir, "missing"))).resolves.toBeUndefined();
   });
+
+  // Review WR-04: after a failed rollback the old bundle (or the staged one) is the only copy left; without an OCW.app
+  // beside them, nothing is removed.
+  it("removes nothing when no OCW.app is beside the leftovers", async () => {
+    const dir = temp();
+    const names = [".OCW.app.old-1732600000000", ".ocw-update-0.5.1"];
+    for (const name of names) mkdirSync(join(dir, name, "Contents"), { recursive: true });
+    await sweepLeftovers(dir);
+    expect(readdirSync(dir).sort()).toEqual(names);
+  });
 });
