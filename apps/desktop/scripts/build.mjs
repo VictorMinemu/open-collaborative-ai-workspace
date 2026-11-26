@@ -34,6 +34,8 @@ await Promise.all([
     target: "node24",
     external: ["electron"],
     absWorkingDir: root,
+    // src/main/build-flags.ts: only the release workflow's tag builds set OCW_RELEASE_BUILD=1 (07.13.1, D-02).
+    define: { __OCW_RELEASE_BUILD__: process.env.OCW_RELEASE_BUILD === "1" ? "true" : "false" },
   }),
   build({
     ...common,
