@@ -165,6 +165,20 @@ The Work Zone runs Claude Code or Codex on a machine you choose, under your own 
     keyring (GNOME Keyring or KWallet), which must be available.
 
   Then enter your workspace URL and pair it under **Settings › Devices › Add device › Desktop app**.
+
+  **Updates.** From v0.5.2 the app updates itself, its runtime included (ADR-0046). Install v0.5.2 or later
+  by hand once; later releases arrive by themselves.
+  - **Windows** and the **AppImage** update themselves. Name the AppImage `OCW.AppImage` so it is replaced in place
+    and your shortcuts keep working.
+  - **A Mac** updates itself when OCW runs from Applications. Run from the disk image or from a folder it cannot write
+    (a standard user's `/Applications`), it shows **Update available** with the download link, and offers
+    **Move OCW to Applications** where it can.
+  - **The `.deb`** shows **Update available** with the link: download the new `.deb`, or switch to the AppImage, which
+    updates itself.
+  - **When:** the runtime updates level (**Settings › Work Zone policy › Runtime updates**, lowered per device in the
+    app's Runtime menu) decides. *Automatic* downloads in the background and installs when you quit OCW or have been
+    away for 30 minutes, *Notify only* downloads and waits for **Restart to update**, *Off* checks only when you
+    choose **Check for updates…** in the tray. A restart always waits until no Work Zone turn runs on the computer.
 - **A shared Linux or macOS server** with no desktop app:
   1. Under **Settings › Devices › Add a device › Server**, copy the one-line command (`curl … /api/v1/runtime/install.sh | sh`).
   2. Run it there as a non-root user.
