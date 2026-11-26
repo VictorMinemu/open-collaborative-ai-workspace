@@ -254,6 +254,12 @@ describe("07.13-18 Task 1: the asker takes control, types into the device's page
       memberName: "Mia Lopez",
       host: null,
     });
+    // MD-02: the others go private at the take, before the row's next read; that very first frame names the holder.
+    expect(owenLive.json.find((f) => f.type === "state" && f.state === "private")).toMatchObject({
+      privateReason: "takeover",
+      controller: "other",
+      memberName: "Mia Lopez",
+    });
     expect(await audits("work_browser.takeover_started", sid)).toEqual([
       { actor_kind: "user", actor_id: miaId, user_id: miaId, metadata: { origin: ORIGIN } },
     ]);

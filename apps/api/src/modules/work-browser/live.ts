@@ -315,7 +315,10 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         .where(eq(workBrowsers.workSessionId, e.sessionId))
         .limit(1);
       const page = row ?? null;
-      const people = [page?.signinUserId, page?.controllerUserId].filter((x): x is string => !!x);
+      // MD-02: a lease taken here is private before the row shows it (and while its end is written): the row names its
+      // holder first, the local lease when the row has no controller.
+      const holderId = page?.controllerUserId ?? e.lease?.viewer.auth.userId ?? null;
+      const people = [page?.signinUserId, holderId].filter((x): x is string => !!x);
       const names = people.length
         ? await tx
             .select({ userId: orgMembers.userId, name: orgMembers.displayName })
@@ -328,7 +331,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
         deviceId: session.deviceId,
         page,
         memberName: nameOf(page?.signinUserId),
-        controllerName: nameOf(page?.controllerUserId),
+        controllerName: nameOf(holderId),
         endReason: page?.state === "closed" ? await lastEndReason(tx, e.sessionId) : null,
       };
     });
@@ -493,7 +496,8 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
           ...base,
           state: "private",
           privateReason: "takeover",
-          controller: page.controllerUserId === v.auth.userId ? "other_device" : "other",
+          controller:
+            (page.controllerUserId ?? local?.viewer.auth.userId) === v.auth.userId ? "other_device" : "other",
           ...(view.controllerName ? { memberName: view.controllerName.slice(0, 200) } : {}),
         },
         frames: false,
@@ -669,7 +673,17 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     const { auth } = v;
     const taken = await core.db.withTenant(
       { organizationId: auth.organizationId, userId: auth.userId, sessionId: auth.sessionId },
-      (tx) => takeWorkLease(tx, core, perms, { sessionId: e.sessionId, userId: auth.userId }),
+      async (tx) => {
+        const t = await takeWorkLease(tx, core, perms, { sessionId: e.sessionId, userId: auth.userId });
+        if ("refused" in t) return t;
+        // The holder's display name, read with the take: the others' first `takeover` frame names them (MD-02).
+        const [me] = await tx
+          .select({ name: orgMembers.displayName })
+          .from(orgMembers)
+          .where(eq(orgMembers.userId, auth.userId))
+          .limit(1);
+        return { ...t, holderName: me?.name ?? null };
+      },
     );
     if ("refused" in taken) {
       sendJson(v, { type: "refused", op: "take", reason: taken.refused });
@@ -683,6 +697,7 @@ export function registerWorkLiveView(app: App, deps: WorkLiveDeps): WorkLiveHub 
     // from the commit on; this instance's copy of it is patched instead of waiting for the next read).
     if (e.view?.page) {
       e.view.page = { ...e.view.page, leaseId: l.leaseId, controllerUserId: auth.userId };
+      e.view.controllerName = taken.holderName;
     }
     for (const viewer of e.viewers) pushState(viewer);
     if (v.closed) {
