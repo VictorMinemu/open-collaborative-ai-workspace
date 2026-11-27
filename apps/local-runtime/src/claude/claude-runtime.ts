@@ -46,11 +46,13 @@ import {
   type PromptPayload,
   type RuntimeCatalog,
   type RuntimeInfo,
+  SESSION_RENAME_REFUSAL_TEXT,
   type SessionEvent,
   type SessionSettingsPatch,
   slashDisposition,
   WORK_BROWSER_MCP_SERVER,
   WORK_BROWSER_REFUSAL_TEXT,
+  WORK_SESSION_MCP_SERVER,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { AsyncQueue } from "../async-queue.js";
@@ -68,10 +70,12 @@ import {
   type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
+  type SessionToolsHandle,
   type StartSessionOptions,
   type TitleRequest,
 } from "../runtime.js";
 import { redact } from "../sanitize.js";
+import { sessionMcpServer } from "../session-tools/claude-server.js";
 import { RUNTIME_VERSION } from "../version.js";
 import { collectClaudeCatalog, ONE_M_CONTEXT, runtimeModelId } from "./catalog.js";
 import { detectClaudeCode } from "./detect.js";
@@ -113,7 +117,7 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   }): Promise<void>;
   initializationResult(): Promise<{ models: ModelInfo[] }>;
   getContextUsage(opts?: { detail?: "summary" | "full" }): Promise<{ maxTokens: number; model: string }>;
-  /** 07.13 (PD-07): the dynamic MCP servers between turns (sdk.d.ts:3198); used only for `ocw_browser`. */
+  /** 07.13 (PD-07): the dynamic MCP servers between turns (sdk.d.ts:3198); only for our `ocw_browser` and `ocw_session`. */
   setMcpServers?(servers: Record<string, McpServerConfig>): Promise<unknown>;
   /** 07.13 (A-4): the servers the CLI runs and where each came from (`source`, sdk.d.ts:3016, 1260). */
   mcpServerStatus?(): Promise<McpServerStatus[]>;
@@ -221,6 +225,14 @@ interface Session {
   browserChecked: WeakSet<QueryHandle>;
   /** Stops listening to the manager's `onAvailableChange`. */
   browserUnsubscribe: () => void;
+  /** 07.13.1.1 (PD-08): the session's `ocw_session` tools; null = none. Offered only while the relay says `offered`. */
+  sessionTools: SessionToolsHandle | null;
+  /** The description of the `ocw_session` server the current CLI process has (null = not registered). */
+  sessionRegistered: string | null;
+  /** A configured (non-sdk) server named `ocw_session` runs in this session (Pitfall 8): its tools are always denied. */
+  sessionShadowed: boolean;
+  /** Stops listening to the relay's `onChange`. */
+  sessionUnsubscribe: () => void;
 }
 
 /**
@@ -513,6 +525,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       browserShadowed: false,
       browserChecked: new WeakSet(),
       browserUnsubscribe: () => undefined,
+      sessionTools: options.sessionTools ?? null,
+      sessionRegistered: null,
+      sessionShadowed: false,
+      sessionUnsubscribe: () => undefined,
     };
     // Start-time effort / fast mode / context window go through the same between-turn path (first turn).
     const initial: SessionSettingsPatch = {};
@@ -528,9 +544,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     session.q = q;
     this.sessions.set(session.id, session);
     if (session.browser) {
-      session.browserUnsubscribe = session.browser.onAvailableChange(() =>
-        this.onBrowserAvailability(session),
-      );
+      session.browserUnsubscribe = session.browser.onAvailableChange(() => this.onOurServersChange(session));
+    }
+    if (session.sessionTools) {
+      session.sessionUnsubscribe = session.sessionTools.onChange(() => this.onOurServersChange(session));
     }
     this.emit(session, { type: "session.state", status: "idle" });
     session.done = this.consume(session, q);
@@ -571,11 +588,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       abortController: s.abort,
       stderr: (data: string) => this.log.debug(`[claude-code ${s.id}] ${redact(data.trimEnd())}`),
     };
-    // 07.13 (PD-07): the in-process browser server, only while the manager offers it; project servers stay as they are.
-    s.browserRegistered = s.browser?.available === true;
-    if (s.browser && s.browserRegistered) {
-      o.mcpServers = { [WORK_BROWSER_MCP_SERVER]: browserMcpServer(s.browser, { version: RUNTIME_VERSION }) };
-    }
+    // 07.13 (PD-07), 07.13.1.1 (PD-08): our in-process servers (`ocw_browser` while the manager offers it,
+    // `ocw_session` while the relay does), always together; project servers stay as they are.
+    const ours = this.ourServers(s);
+    s.browserRegistered = WORK_BROWSER_MCP_SERVER in ours;
+    s.sessionRegistered = this.wantedSession(s);
+    if (Object.keys(ours).length > 0) o.mcpServers = ours;
     if (s.runtimeModel) o.model = s.runtimeModel;
     if (resume) o.resume = resume;
     if (this.claudePath) o.pathToClaudeCodeExecutable = this.claudePath;
@@ -754,6 +772,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       await s.done.catch(() => undefined);
     }
     s.browserUnsubscribe();
+    s.sessionUnsubscribe();
     this.sessions.delete(sessionId);
   }
 
@@ -823,8 +842,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           return false;
         }
       }
-      // 07.13 (PD-07): the browser offered (or withdrawn) as this turn's grant says, before its message is sent.
-      await this.syncBrowser(s);
+      // 07.13 (PD-07), 07.13.1.1: our servers offered (or withdrawn, or with new naming rules) as this turn's grants
+      // say, before its message is sent.
+      await this.syncServers(s);
       await this.applyPending(s, false);
       try {
         await this.syncMode(s, prompt.permissionMode);
@@ -1001,9 +1021,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         if (s.retired.has(q)) break;
         if (isInit(message)) {
           s.accountSwitching = false;
-          if (s.browser && !s.browserChecked.has(q)) {
+          if ((s.browser || s.sessionTools) && !s.browserChecked.has(q)) {
             s.browserChecked.add(q);
-            void this.checkBrowserShadow(s, q);
+            void this.checkShadows(s, q);
           }
           if (s.account && projectCredentialWon(message)) {
             this.emit(s, { type: "session.error", message: PROJECT_CREDENTIALS_WON_MESSAGE });
@@ -1107,6 +1127,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   private finish(s: Session, error: string | null): void {
     s.browserUnsubscribe();
+    s.sessionUnsubscribe();
     this.settleAllApprovals(s, "deny", "Session ended");
     if (s.running) {
       this.emit(s, {
@@ -1131,44 +1152,71 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     for (const pending of [...s.approvals.values()]) pending.settle(outcome, comment);
   }
 
-  // ------------------------------------------------------------------ the Work Zone browser (07.13 PD-07, PD-23)
+  // ------------------------------------------------------------------ our in-process servers (07.13 PD-07, 07.13.1.1 PD-08)
 
-  /** The manager's availability changed: while idle the server is added or removed now, else before the next turn. */
-  private onBrowserAvailability(s: Session): void {
+  /**
+   * The manager's availability or the relay's offer (or rules) changed: while idle the servers are re-registered now,
+   * else before the next turn (never inside a running one).
+   */
+  private onOurServersChange(s: Session): void {
     if (s.stopping || s.running || s.dormant || !this.sessions.has(s.id)) return;
-    void this.serially(s, () => this.syncBrowser(s));
+    void this.serially(s, () => this.syncServers(s));
+  }
+
+  /** The `ocw_session` description to register now, or null when the tool is not offered (or shadowed). */
+  private wantedSession(s: Session): string | null {
+    if (!s.sessionTools?.offered || s.sessionShadowed) return null;
+    return s.sessionTools.description("rename");
   }
 
   /**
-   * Offers or withdraws the in-process `ocw_browser` server on the running process with `setMcpServers` (never a
-   * relaunch), as the manager's `available` says now. Failures are logged; the manager refuses calls on its own.
+   * Every server of ours that is on: `ocw_browser` while the manager says `available`, `ocw_session` while the relay
+   * offers it. The SDK replaces the whole dynamic set on `setMcpServers`, so every call passes both (Pitfall 8).
    */
-  private async syncBrowser(s: Session): Promise<void> {
+  private ourServers(s: Session): Record<string, McpServerConfig> {
+    const out: Record<string, McpServerConfig> = {};
+    if (s.browser?.available) {
+      out[WORK_BROWSER_MCP_SERVER] = browserMcpServer(s.browser, { version: RUNTIME_VERSION });
+    }
+    if (s.sessionTools && this.wantedSession(s) !== null) {
+      out[WORK_SESSION_MCP_SERVER] = sessionMcpServer(s.sessionTools, { version: RUNTIME_VERSION });
+    }
+    return out;
+  }
+
+  /**
+   * Offers or withdraws our in-process servers on the running process with `setMcpServers` (never a relaunch), as the
+   * manager and the relay say now. Failures are logged; the manager and the relay refuse calls on their own.
+   */
+  private async syncServers(s: Session): Promise<void> {
     const q = s.q;
-    if (!s.browser || !q || s.dormant || s.stopping || !q.setMcpServers) return;
-    const want = s.browser.available;
-    if (want === s.browserRegistered) return;
+    if ((!s.browser && !s.sessionTools) || !q || s.dormant || s.stopping || !q.setMcpServers) return;
+    const wantBrowser = s.browser?.available === true;
+    const wantSession = this.wantedSession(s);
+    if (wantBrowser === s.browserRegistered && wantSession === s.sessionRegistered) return;
+    const newlyRegistered =
+      (wantBrowser && !s.browserRegistered) || (wantSession !== null && s.sessionRegistered === null);
     try {
-      await q.setMcpServers(
-        want ? { [WORK_BROWSER_MCP_SERVER]: browserMcpServer(s.browser, { version: RUNTIME_VERSION }) } : {},
-      );
-      s.browserRegistered = want;
+      await q.setMcpServers(this.ourServers(s));
+      s.browserRegistered = wantBrowser;
+      s.sessionRegistered = wantSession;
     } catch (err) {
-      this.log.warn("the browser server could not be updated", {
+      this.log.warn("the in-process MCP servers could not be updated", {
         sessionId: s.id,
         error: redact(errorMessage(err)).slice(0, 200),
       });
       return;
     }
-    if (want) await this.checkBrowserShadow(s, q);
+    if (newlyRegistered) await this.checkShadows(s, q);
   }
 
   /**
-   * A-4: a configured server named `ocw_browser` (a project `.mcp.json`, a plugin, ...) reports a `source` other than
-   * `sdk`; it makes the browser unavailable for this session, and its tools are denied (canUseTool and the hook).
+   * A-4, Pitfall 8: a configured server named `ocw_browser` or `ocw_session` (a project `.mcp.json`, a plugin, ...)
+   * reports a `source` other than `sdk`; it turns that feature off for this session, and its tools are denied
+   * (canUseTool and the hook). The other server of ours is unaffected.
    */
-  private async checkBrowserShadow(s: Session, q: QueryHandle): Promise<void> {
-    if (!s.browser || !q.mcpServerStatus) return;
+  private async checkShadows(s: Session, q: QueryHandle): Promise<void> {
+    if ((!s.browser && !s.sessionTools) || !q.mcpServerStatus) return;
     let servers: McpServerStatus[];
     try {
       servers = await q.mcpServerStatus();
@@ -1179,27 +1227,41 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       });
       return;
     }
-    if (!servers.some((st) => st.name === WORK_BROWSER_MCP_SERVER && !isSdkServer(st))) return;
-    s.browserShadowed = true;
-    this.log.warn("a configured MCP server shadows ocw_browser; the browser is off for this session", {
-      sessionId: s.id,
-    });
-    s.browser.markUnavailable("shadowed");
+    const shadowed = (name: string) => servers.some((st) => st.name === name && !isSdkServer(st));
+    if (s.browser && !s.browserShadowed && shadowed(WORK_BROWSER_MCP_SERVER)) {
+      s.browserShadowed = true;
+      this.log.warn("a configured MCP server shadows ocw_browser; the browser is off for this session", {
+        sessionId: s.id,
+      });
+      s.browser.markUnavailable("shadowed");
+    }
+    if (s.sessionTools && !s.sessionShadowed && shadowed(WORK_SESSION_MCP_SERVER)) {
+      s.sessionShadowed = true;
+      this.log.warn("a configured MCP server shadows ocw_session; renaming is off for this session", {
+        sessionId: s.id,
+      });
+      s.sessionTools.markUnavailable("shadowed");
+    }
   }
 
   /**
-   * Why a `mcp__ocw_browser__*` call is not the workspace browser's, or null when it is. LO-02: only a call the SDK
-   * names as served by our registered `sdk` server; a call with no provenance is never trusted (`isSdkServer`'s rule),
-   * since the shadow check runs after `init` and cannot tell a project `ocw_browser` from ours before it completes.
+   * Why a call to one of our servers' tools is not ours, or null when it is. LO-02: only a call the SDK names as served
+   * by our registered `sdk` server of that name; a call with no provenance is never trusted (`isSdkServer`'s rule),
+   * since the shadow check runs after `init` and cannot tell a project server of the same name from ours before it.
    */
-  private browserDenyReason(s: Session, server: { name: string; source: string } | undefined): string | null {
-    const ours =
-      s.browser !== null &&
-      s.browserRegistered &&
-      !s.browserShadowed &&
-      server?.source === "sdk" &&
-      server.name === WORK_BROWSER_MCP_SERVER;
-    return ours ? null : WORK_BROWSER_REFUSAL_TEXT.not_allowed;
+  private ourToolDenyReason(
+    s: Session,
+    toolName: string,
+    server: { name: string; source: string } | undefined,
+  ): string | null {
+    const name = ourServerOf(toolName);
+    const fromUs = server?.source === "sdk" && server.name === name;
+    if (name === WORK_BROWSER_MCP_SERVER) {
+      const ours = s.browser !== null && s.browserRegistered && !s.browserShadowed && fromUs;
+      return ours ? null : WORK_BROWSER_REFUSAL_TEXT.not_allowed;
+    }
+    const ours = s.sessionTools !== null && s.sessionRegistered !== null && !s.sessionShadowed && fromUs;
+    return ours ? null : SESSION_RENAME_REFUSAL_TEXT.not_available;
   }
 
   /** PD-23: screenshots reach the model only when the session's current model reads images. */
@@ -1210,8 +1272,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private makePreToolUseHook(s: Session): HookCallback {
     return async (input) => {
       if (input.hook_event_name !== "PreToolUse") return {};
-      // 07.13 (A-4): consulted in every mode, bypass included, so a foreign `ocw_browser` never runs.
-      const foreign = isBrowserToolName(input.tool_name) ? this.browserDenyReason(s, input.mcp_server) : null;
+      // 07.13 (A-4), 07.13.1.1 (Pitfall 8): consulted in every mode, bypass included, so a foreign `ocw_browser` or
+      // `ocw_session` never runs.
+      const foreign = isOurToolName(input.tool_name)
+        ? this.ourToolDenyReason(s, input.tool_name, input.mcp_server)
+        : null;
       if (foreign) {
         return {
           hookSpecificOutput: {
@@ -1240,8 +1305,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     return async (toolName, input, { signal, blockedPath, title, mcpServer }): Promise<PermissionResult> => {
       // 07.13 (PD-07): the browser's own manager decides every call (host approvals, admin rules), because auto and
       // bypass never consult this callback; here the in-process server's tools are only allowed, never asked twice.
-      if (isBrowserToolName(toolName)) {
-        const foreign = this.browserDenyReason(s, mcpServer);
+      // 07.13.1.1 (Pitfall 7): the same for `ocw_session`, whose relay and the API decide every rename.
+      if (isOurToolName(toolName)) {
+        const foreign = this.ourToolDenyReason(s, toolName, mcpServer);
         return foreign ? { behavior: "deny", message: foreign } : { behavior: "allow", updatedInput: input };
       }
       const denied = secretDenyReason(toolName, input, s.cwd);
@@ -1338,11 +1404,17 @@ function reportsBypass(message: SDKMessage): boolean {
   return (m.subtype === "init" || m.subtype === "status") && m.permissionMode === "bypassPermissions";
 }
 
-const BROWSER_TOOL_PREFIX = `mcp__${WORK_BROWSER_MCP_SERVER}__`;
+/** The names of our in-process servers (07.13 `ocw_browser`, 07.13.1.1 `ocw_session`). */
+const OUR_SERVERS = [WORK_BROWSER_MCP_SERVER, WORK_SESSION_MCP_SERVER] as const;
 
-/** A tool of a server named `ocw_browser` (ours only when its source is `sdk` and we registered it). */
-function isBrowserToolName(name: string): boolean {
-  return name.startsWith(BROWSER_TOOL_PREFIX);
+/** The server of ours a tool name belongs to (`mcp__<server>__<tool>`), or null for any other tool. */
+function ourServerOf(name: string): (typeof OUR_SERVERS)[number] | null {
+  return OUR_SERVERS.find((server) => name.startsWith(`mcp__${server}__`)) ?? null;
+}
+
+/** A tool of a server named like one of ours (ours only when its source is `sdk` and we registered it). */
+function isOurToolName(name: string): boolean {
+  return ourServerOf(name) !== null;
 }
 
 /** An in-process server this SDK host registered (`source: "sdk"`; a missing source is never trusted). */

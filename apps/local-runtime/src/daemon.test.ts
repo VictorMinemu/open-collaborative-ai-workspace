@@ -51,6 +51,7 @@ import { setBrowserOptIn, setFullAccessOptIn, setIsolatedServer, setRuntimeUpdat
 import { type ControlRequest, controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toBrowserApiUrl, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
+import { installedBundlePath, installInfoPath } from "./install-info.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
@@ -1274,6 +1275,35 @@ describe("Isolated server and host kind (07.16, D-19, PD-18)", () => {
     expect(hello.device.host).toBe("desktop");
     expect(hello.isolatedServer).toBe(false);
     expect((await server.frame("capabilities")).isolatedServer).toBe(false);
+  });
+
+  it("07.13.1.1 (D-04): the desktop app's env wins over an install record whose bundle is the running entry", async () => {
+    // The install record and `runtime/current/ocw-runtime.mjs` pointing at this process's own entry (argv[1]), so
+    // without the env the daemon would say `service` (the control half below proves the setup is effective).
+    const entry = process.argv[1];
+    if (!entry) throw new Error("no entry script");
+    mkdirSync(dirname(installedBundlePath(home)), { recursive: true });
+    symlinkSync(realpathSync(entry), installedBundlePath(home));
+    writeFileSync(
+      installInfoPath(home),
+      JSON.stringify({
+        serverUrl: server.url,
+        version: "1.0.0",
+        sha256: "a".repeat(64),
+        installedAt: new Date().toISOString(),
+        nodePath: process.execPath,
+      }),
+    );
+    await gatedDaemon({ OCW_RUNTIME_HOST: "desktop" });
+    await daemon.start();
+    expect((await server.frame("hello")).device.host).toBe("desktop");
+
+    await gatedDaemon({});
+    await daemon.start();
+    const hello = await server.waitFor(() =>
+      server.connections.length >= 2 ? server.last.frames.find((f) => f.type === "hello") : undefined,
+    );
+    expect(hello.type === "hello" ? hello.device.host : null).toBe("service");
   });
 
   it("an unknown host sends no device.host and no mark", async () => {
@@ -4575,6 +4605,191 @@ describe("Work Zone browser: capability, lifecycle, server frames and the shim (
     expect(toBrowserApiUrl("https://ocw.example", `/api/v1/runtime/browser-signins/${id}/state`)).toBe(
       `https://ocw.example/api/v1/runtime/browser-signins/${id}/state`,
     );
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// 07.13.1.1 (D-07, PD-08, PD-09): the session's agent renames its session through the daemon and the Device Link
+
+describe("07.13.1.1 session tools", () => {
+  const RENAME_ALLOWED = { rename: true, namingRules: null };
+  const NOT_AVAILABLE = "Renaming the session is not available right now.";
+
+  /** Replaces the default daemon with one driving the real fake runtime (its `session rename` directive). */
+  async function fakeRuntimeDaemon(over: { timeoutMs?: number } = {}): Promise<string> {
+    await daemon.stop();
+    daemon = await Daemon.create({
+      home,
+      env: { CODEX_HOME: join(home, "codex-default") },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [new ScriptedRuntime("claude-code", 1)],
+      logger: silentLogger,
+      controlSocket: false,
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      ...(over.timeoutMs !== undefined ? { sessionTools: { timeoutMs: over.timeoutMs } } : {}),
+    });
+    const localId = (await daemon.registry.add(project)).localId;
+    await daemon.start();
+    await server.frame("hello");
+    return localId;
+  }
+
+  async function startRenameSession(
+    localId: string,
+    sessionTools: typeof RENAME_ALLOWED | undefined,
+  ): Promise<string> {
+    const sid = randomUUID();
+    server.send({
+      id: `start-${sid}`,
+      kind: "session.start",
+      sessionId: sid,
+      payload: {
+        projectLocalId: localId,
+        permissionMode: "plan",
+        ...(sessionTools ? { sessionTools } : {}),
+      },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sid}`)).toMatchObject({ ok: true });
+    return sid;
+  }
+
+  function renamePrompt(sid: string, promptId: string, sessionTools: typeof RENAME_ALLOWED | undefined) {
+    server.send({
+      id: `prompt-${promptId}`,
+      kind: "prompt",
+      sessionId: sid,
+      payload: {
+        promptId,
+        text: 'session rename {"title":"Fix login redirect"}',
+        ...(sessionTools ? { sessionTools } : {}),
+      },
+    });
+  }
+
+  const renameCompleted = (sid: string) =>
+    server.frame(
+      "event",
+      (f) =>
+        f.sessionId === sid && f.event.type === "tool.completed" && f.event.toolUseId.includes("-session-"),
+      5000,
+    );
+
+  it("a fake-runtime turn sends one session.rename and reads the API's answer", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const sid = await startRenameSession(localId, RENAME_ALLOWED);
+    renamePrompt(sid, "rp1", RENAME_ALLOWED);
+    const asked = await server.frame("session.rename", (f) => f.sessionId === sid);
+    expect(asked).toEqual({
+      type: "session.rename",
+      requestId: asked.requestId,
+      sessionId: sid,
+      promptId: "rp1",
+      title: "Fix login redirect",
+    });
+    server.push({
+      type: "session.rename.result",
+      requestId: asked.requestId,
+      result: { ok: true, title: "Fix login redirect" },
+    });
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({
+      type: "tool.completed",
+      ok: true,
+      summary: 'Renamed the session to "Fix login redirect".',
+    });
+    const started = await server.frame(
+      "event",
+      (f) =>
+        f.sessionId === sid && f.event.type === "tool.started" && f.event.toolUseId.includes("-session-"),
+    );
+    expect(started.event).toMatchObject({ name: "ocw_session_rename" });
+    // Never the call's arguments in the timeline.
+    expect(JSON.stringify(started.event)).not.toContain("Fix login redirect");
+    await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.completed");
+    expect(server.allFrames.filter((f) => f.type === "session.rename")).toHaveLength(1);
+  });
+
+  it("no answer from the API: the call ends after the timeout with not_available and the turn completes", async () => {
+    const localId = await fakeRuntimeDaemon({ timeoutMs: 50 });
+    const sid = await startRenameSession(localId, RENAME_ALLOWED);
+    renamePrompt(sid, "rp2", RENAME_ALLOWED);
+    await server.frame("session.rename", (f) => f.sessionId === sid);
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({ ok: false, summary: NOT_AVAILABLE });
+    const completed = await server.frame(
+      "event",
+      (f) => f.sessionId === sid && f.event.type === "prompt.completed",
+    );
+    expect(completed.event).not.toHaveProperty("isError");
+  });
+
+  it("a start without sessionTools: the tool is not offered, answers not_available locally, no frame", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const sid = await startRenameSession(localId, undefined);
+    expect(daemon.sessionTools.forSession(sid).offered).toBe(false);
+    renamePrompt(sid, "rp3", undefined);
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({ ok: false, summary: NOT_AVAILABLE });
+    expect(server.allFrames.filter((f) => f.type === "session.rename")).toEqual([]);
+  });
+
+  /** The default daemon (scripted stub runtime) with a started session whose turn is held in flight. */
+  async function heldTurn(): Promise<{
+    sid: string;
+    handle: NonNullable<StartSessionOptions["sessionTools"]>;
+  }> {
+    await daemon.start();
+    await server.frame("hello");
+    const localId = await addProject();
+    const sid = randomUUID();
+    server.send({
+      id: `start-${sid}`,
+      kind: "session.start",
+      sessionId: sid,
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits", sessionTools: RENAME_ALLOWED },
+    });
+    await server.frame("ack", (f) => f.commandId === `start-${sid}`);
+    runtime.promptHold = new Promise(() => {});
+    server.send({
+      id: `prompt-${sid}`,
+      kind: "prompt",
+      sessionId: sid,
+      payload: { promptId: "hp1", text: "work", sessionTools: RENAME_ALLOWED },
+    });
+    await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.started");
+    const handle = runtime.started.find((s) => s.sessionId === sid)?.sessionTools;
+    if (!handle) throw new Error("no session tools handed to the adapter");
+    expect(handle.offered).toBe(true);
+    return { sid, handle };
+  }
+
+  it("an answer for another requestId is dropped; the matching one settles the call", async () => {
+    const { sid, handle } = await heldTurn();
+    const call = handle.call("rename", { title: "Fix login redirect" });
+    const asked = await server.frame("session.rename", (f) => f.sessionId === sid);
+    server.push({
+      type: "session.rename.result",
+      requestId: randomUUID(),
+      result: { ok: true, title: "Someone else entirely" },
+    });
+    server.push({
+      type: "session.rename.result",
+      requestId: asked.requestId,
+      result: { ok: false, reason: "title_locked" },
+    });
+    expect(await call).toEqual({
+      content: [{ type: "text", text: "A person named this session, so their title stays." }],
+      isError: true,
+    });
+  });
+
+  it("daemon.stop() resolves a pending call with not_available", async () => {
+    const { sid, handle } = await heldTurn();
+    const call = handle.call("rename", { title: "Fix login redirect" });
+    await server.frame("session.rename", (f) => f.sessionId === sid);
+    await daemon.stop();
+    expect(await call).toEqual({ content: [{ type: "text", text: NOT_AVAILABLE }], isError: true });
   });
 });
 

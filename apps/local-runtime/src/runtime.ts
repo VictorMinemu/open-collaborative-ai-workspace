@@ -12,6 +12,7 @@ import type {
   RuntimeInfo,
   SessionEvent,
   SessionSettingsPatch,
+  WorkSessionTool,
 } from "@ocw/contracts";
 import type { SessionBrowserTools } from "./browser/manager.js";
 
@@ -100,6 +101,35 @@ export interface StartSessionOptions {
    * rule (opt-in, turn grant, lease, approvals, admin rules) is the manager's, decided per call. Absent = no browser.
    */
   browser?: SessionBrowserTools;
+  /**
+   * 07.13.1.1 (D-07, D-08, PD-08, PD-10): the session's `ocw_session` tools (rename). The adapter only exposes them
+   * (Claude: the in-process `ocw_session` MCP server; Codex: the stdio shim), and offers them only while `offered`;
+   * every rule (a turn in flight, the turn's grant, once per turn, the title's shape, no path or secret) is the relay's
+   * or the API's, decided per call. Absent = no session tools.
+   */
+  sessionTools?: SessionToolsHandle;
+}
+
+/** 07.13.1.1: one `ocw_session` tool answer, MCP-shaped: a fixed sentence (with the stored title at most). */
+export interface SessionToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError: boolean;
+}
+
+/** 07.13.1.1 (D-07, PD-08): what an adapter gets for one session's `ocw_session` tools. */
+export interface SessionToolsHandle {
+  /** The session's latest grant carried `sessionTools` and the adapter did not mark the tools off. */
+  readonly offered: boolean;
+  /** The tool's description for the model, with the organization's and project's naming rules as delimited data. */
+  description(tool: WorkSessionTool): string;
+  /** One tool call. Never throws: a refusal, a bad body or no answer from the API is an `isError` result. */
+  call(tool: WorkSessionTool, args: unknown, signal?: AbortSignal): Promise<SessionToolResult>;
+  /** The adapter cannot offer the tools (a project MCP server shadows `ocw_session`, or the runtime refused them). */
+  markUnavailable(reason: "shadowed" | "runtime"): void;
+  /** Called whenever `offered` or the description changes; returns the unsubscribe. */
+  onChange(cb: () => void): () => void;
+  /** The session's 0600 shim token file (created once), for the Codex shim's env (PD-08). */
+  shimTokenFile(): Promise<string>;
 }
 
 /**
