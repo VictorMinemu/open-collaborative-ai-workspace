@@ -532,6 +532,7 @@ export class CodexRuntime implements AgentRuntime {
       model: req.model,
       effort,
       signal: req.signal,
+      ...(req.namingRules ? { namingRules: req.namingRules } : {}),
       ...(this.opts.onRpcMessage ? { onRpcMessage: this.opts.onRpcMessage } : {}),
     });
   }
