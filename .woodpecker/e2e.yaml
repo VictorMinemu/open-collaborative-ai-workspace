@@ -62,6 +62,10 @@ variables:
     # 07.13-22 (PD-19): the pinned headless shell of the Work Zone browser journey, installed once per pins on the
     # shared cache volume by the install step (sha256-verified); each spec daemon links it into a root of its own.
     OCW_E2E_BROWSERS_DIR: /home/ocw-ci/cache/e2e-browsers
+    # 07.13.1.1-08 (D-09): review screenshots of one spec only (e2e/support/screenshots.ts; every other spec writes
+    # none and keeps its theme and pointer). The `review-screenshots` step keeps only `0713111-*.png` from this folder.
+    OCW_E2E_SCREENSHOT_DIR: /home/ocw-ci/ws/e2e-${PROJECT}/review-screenshots
+    OCW_E2E_SCREENSHOT_SPECS: work-zone-session-owners
 
 steps:
   - name: ci-image
@@ -123,8 +127,24 @@ steps:
       # e2e/playwright.config.ts caps a CI run at 15 minutes (sized for a 30-minute GitHub job); the serial suite now
       # needs ~30 minutes of test time on this agent (07.4/07.5 specs), so the cap is raised to 50 minutes here. It
       # still fails well inside the workflow's 120-minute timeout, with its report.
+      - mkdir -p "$${OCW_E2E_SCREENSHOT_DIR}"
       - pnpm e2e --project=${PROJECT} --global-timeout=4800000
       - cat e2e/test-results/realtime-latency.json || true
+
+  # 07.13.1.1-08 (D-09): the owner's review screenshots, on success and on failure. Only files named `0713111-*.png`
+  # leave the workspace (never the folder, the report or traces: T-07.13.1.1-08-01); none is not an error. They go
+  # to the artifacts directory the failure-logs step uses.
+  - name: review-screenshots
+    image: ocw-ci:${CI_COMMIT_SHA}
+    pull: false
+    volumes: [*shared]
+    environment: *env
+    commands:
+      - out="/home/ocw-ci/artifacts/$${CI_PIPELINE_NUMBER}-e2e-${PROJECT}/review-screenshots" && mkdir -p "$${out}"
+      - find "$${OCW_E2E_SCREENSHOT_DIR}" -maxdepth 1 -type f -name '0713111-*.png' -exec cp {} "$${out}/" \; 2>/dev/null || true
+      - echo "$$(ls "$${out}" | wc -l) review screenshots kept on woodpecker-dind at $${out}"
+    when:
+      status: [success, failure]
 
   - name: failure-logs
     image: ocw-ci:${CI_COMMIT_SHA}

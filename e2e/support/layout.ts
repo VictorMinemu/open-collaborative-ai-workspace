@@ -1,5 +1,6 @@
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { shot } from "../tests/env";
+import { writesScreenshots } from "./screenshots";
 
 /**
  * Layout checks shared by the 07.5 web specs (07.5-09, reused by 10-15; generalised from ai-chat-visual.spec.ts, which
@@ -81,10 +82,13 @@ export async function expectTouchTargets(page: Page, root: string | Locator): Pr
 
 /**
  * Saves `<name>.png`, switches to dark, saves `<name>-dark.png`, and restores light. No-op without
- * OCW_E2E_SCREENSHOT_DIR (`shot` decides). Toasts are waited out so they never cover what is reviewed.
+ * OCW_E2E_SCREENSHOT_DIR, and in a spec this run writes no screenshots for (`writesScreenshots`, as `shot` decides):
+ * CI sets the folder for one spec's review (07.13.1.1-08), so every other spec keeps its pointer, theme and toasts.
+ * Toasts are waited out so they never cover what is reviewed.
  */
 export async function captureReview(page: Page, name: string): Promise<void> {
   if (!process.env.OCW_E2E_SCREENSHOT_DIR) return;
+  if (!writesScreenshots(test.info().file, process.env.OCW_E2E_SCREENSHOT_SPECS)) return;
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
   const viewport = page.viewportSize();
   // The pointer rests on an empty edge, so no hover state is captured by accident.

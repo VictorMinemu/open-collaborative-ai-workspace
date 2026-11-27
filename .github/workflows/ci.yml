@@ -78,6 +78,10 @@ jobs:
       OCW_E2E_SANDBOX: fake
       # 07.13-22 (PD-19): the Work Zone browser journey's pinned headless shell (cached below, keyed on the pins).
       OCW_E2E_BROWSERS_DIR: /home/runner/.cache/ocw-e2e-browsers
+      # 07.13.1.1-08 (D-09, as .woodpecker/e2e.yaml): review screenshots of one spec only; only `0713111-*.png` is
+      # uploaded (the review-screenshots step below).
+      OCW_E2E_SCREENSHOT_DIR: ${{ github.workspace }}/review-screenshots
+      OCW_E2E_SCREENSHOT_SPECS: work-zone-session-owners
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -127,7 +131,19 @@ jobs:
       # globalTimeout is 15 minutes in CI (e2e/playwright.config.ts); this only backs it up. Setup (~2) + 8 + 17 < 30.
       - name: Playwright
         timeout-minutes: 17
-        run: pnpm e2e --project=${{ matrix.project }}
+        run: |
+          mkdir -p "$OCW_E2E_SCREENSHOT_DIR"
+          pnpm e2e --project=${{ matrix.project }}
+      # The owner's review screenshots (07.13.1.1 D-09): only `0713111-*.png`, never the report or traces
+      # (T-07.13.1.1-08-01), kept 14 days; a run that wrote none uploads nothing.
+      - name: Review screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-screenshots-${{ matrix.project }}
+          path: ${{ env.OCW_E2E_SCREENSHOT_DIR }}/0713111-*.png
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Realtime latency report
         if: always()
         uses: actions/upload-artifact@v7
