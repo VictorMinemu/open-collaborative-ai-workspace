@@ -24,7 +24,7 @@ import {
   type PeopleModel,
   peopleModel,
 } from "./model";
-import { PeopleRow, ROW_COPY } from "./people-row";
+import { PeopleRow, ROW_COPY, RowMenu } from "./people-row";
 
 export const PEOPLE_COPY = {
   title: "Sessions by person",
@@ -105,7 +105,7 @@ export function PeopleView() {
 
 /**
  * The filter bar and the groups, pure over the model (`undefined` while loading), so every state renders in a unit
- * test. `row` renders one session (the view passes the row with its menu; the default is the plain row).
+ * test. Each row carries its menu (Open, Rename…, Assign to me… or the reason).
  */
 export function PeopleViewBody({
   model,
@@ -113,7 +113,6 @@ export function PeopleViewBody({
   avatars,
   filters,
   onFilters,
-  row,
 }: {
   model: PeopleModel | undefined;
   viewerId: string | null;
@@ -121,10 +120,7 @@ export function PeopleViewBody({
   avatars: ReadonlyMap<string, string | null>;
   filters: PeopleFilters;
   onFilters: (next: PeopleFilters) => void;
-  row?: (session: PeopleGroup["sessions"][number]) => React.ReactNode;
 }) {
-  const renderRow =
-    row ?? ((s: PeopleGroup["sessions"][number]) => <PeopleRow key={s.id} session={s} viewerId={viewerId} />);
   const empty = model !== undefined && model.total === 0;
   return (
     <>
@@ -150,7 +146,14 @@ export function PeopleViewBody({
           <div className="mx-auto grid w-full max-w-4xl gap-6 px-4 py-5 sm:px-6 sm:py-6">
             {model.groups.map((g) => (
               <PeopleGroupSection key={g.ownerId} group={g} avatarUrl={avatars.get(g.ownerId) ?? null}>
-                {g.sessions.map(renderRow)}
+                {g.sessions.map((s) => (
+                  <PeopleRow
+                    key={s.id}
+                    session={s}
+                    viewerId={viewerId}
+                    actions={<RowMenu session={s} viewerId={viewerId} />}
+                  />
+                ))}
               </PeopleGroupSection>
             ))}
           </div>

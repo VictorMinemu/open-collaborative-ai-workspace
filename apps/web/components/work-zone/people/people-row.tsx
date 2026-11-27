@@ -1,16 +1,135 @@
 "use client";
 
-import type { WorkSession } from "@ocw/contracts";
+import { Menu } from "@base-ui/react/menu";
+import { ASSIGN_REFUSAL_TEXT, type WorkSession } from "@ocw/contracts";
+import { ArrowUpRight, MoreHorizontal, PencilLine, UserRoundCheck } from "lucide-react";
 import Link from "next/link";
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { relativeTime } from "@/lib/utils";
 import { OnlineDot, RuntimeLogo, STATUS, StatusChip } from "../meta";
+import { ASSIGN_DIALOG_COPY, AssignSessionDialog } from "../session-owner/assign-dialog";
+import { RENAME_COPY, RenameSessionDialog } from "../session-owner/rename-dialog";
 import { VisibilityMarker, VisibilitySrSuffix } from "../visibility/visibility-marker";
 
 export const ROW_COPY = {
   server: "Server",
   serverHint: "Runs on a server",
+  open: "Open",
+  menu: (title: string) => `Session actions for ${title}`,
 } as const;
+
+export type RowAction = "open" | "rename" | "assign";
+
+/**
+ * What a row's menu offers (D-04, D-06). A UI hint only, from viewer-neutral fields of the list row (the DTO carries
+ * no device owner and none is inferred): it hides what cannot apply; the dialogs show the API's decision (the assign
+ * preview's `allowed`/`reason`, a refused rename), and the API refuses the write anyway (T-07.13.1.1-07-02).
+ * - archived: Open only;
+ * - the viewer's own session (the session's owner, never the device's): Rename, no Assign and no reason;
+ * - bot-started: the sponsor keeps it (the API checks this first);
+ * - not on a server (`desktop`, or a host the device never reported): the server sentence;
+ * - otherwise Assign to me.
+ */
+export function rowActions(
+  session: Pick<WorkSession, "createdBy" | "deviceHostKind" | "startedByAgent" | "status">,
+  viewerId: string | null,
+): { actions: RowAction[]; reason: string | null } {
+  if (session.status === "archived") return { actions: ["open"], reason: null };
+  const base: RowAction[] = ["open", "rename"];
+  if (session.createdBy === viewerId) return { actions: base, reason: null };
+  if (session.startedByAgent) return { actions: base, reason: ASSIGN_REFUSAL_TEXT.bot_session };
+  if (session.deviceHostKind !== "service")
+    return { actions: base, reason: ASSIGN_REFUSAL_TEXT.not_on_server };
+  return { actions: [...base, "assign"], reason: null };
+}
+
+/**
+ * The row's "Session actions" menu: Open, Rename… and Assign to me… (or the one-line reason), opening plan 06's
+ * dialogs. The dialogs mount on first use and stay mounted (their close animation), so a long list runs no assign
+ * preview or mutation observers it never needs.
+ */
+export function RowMenu({ session, viewerId }: { session: WorkSession; viewerId: string | null }) {
+  const { actions, reason } = rowActions(session, viewerId);
+  const [dialog, setDialog] = useState<"assign" | "rename" | null>(null);
+  const [used, setUsed] = useState<{ assign: boolean; rename: boolean }>({ assign: false, rename: false });
+  const open = (d: "assign" | "rename") => {
+    setUsed((u) => ({ ...u, [d]: true }));
+    setDialog(d);
+  };
+  const extra = actions.includes("rename") || actions.includes("assign") || reason !== null;
+  return (
+    <>
+      <Menu.Root>
+        <Menu.Trigger
+          render={
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={ROW_COPY.menu(session.title)}
+              data-testid="people-row-actions"
+              className="mr-1.5 size-9 shrink-0 text-muted-foreground hover:text-foreground max-md:size-11 sm:mr-2"
+            />
+          }
+        >
+          <MoreHorizontal />
+        </Menu.Trigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            data-testid="people-row-open"
+            className="max-md:min-h-11"
+            render={<Link href={`/work-zone/${session.id}`} />}
+          >
+            <ArrowUpRight /> {ROW_COPY.open}
+          </DropdownMenuItem>
+          {extra ? <DropdownMenuSeparator /> : null}
+          {actions.includes("rename") ? (
+            <DropdownMenuItem
+              data-testid="session-rename"
+              className="max-md:min-h-11"
+              onClick={() => open("rename")}
+            >
+              <PencilLine /> {RENAME_COPY.menuItem}
+            </DropdownMenuItem>
+          ) : null}
+          {actions.includes("assign") ? (
+            <DropdownMenuItem
+              data-testid="session-assign"
+              className="max-md:min-h-11"
+              onClick={() => open("assign")}
+            >
+              <UserRoundCheck /> {ASSIGN_DIALOG_COPY.menuItem}
+            </DropdownMenuItem>
+          ) : reason ? (
+            // Not a disabled item: one quiet line that says why Assign to me is not offered (D-04), as in the header.
+            <p
+              data-testid="session-assign-reason"
+              className="max-w-64 px-2 py-1.5 text-muted-foreground text-xs leading-snug"
+            >
+              {reason}
+            </p>
+          ) : null}
+        </DropdownMenuContent>
+      </Menu.Root>
+      {used.assign ? (
+        <AssignSessionDialog
+          session={session}
+          open={dialog === "assign"}
+          onOpenChange={(o) => setDialog(o ? "assign" : null)}
+        />
+      ) : null}
+      {used.rename ? (
+        <RenameSessionDialog
+          session={session}
+          open={dialog === "rename"}
+          onOpenChange={(o) => setDialog(o ? "rename" : null)}
+        />
+      ) : null}
+    </>
+  );
+}
 
 /** The status on a phone: the chip's icon and colour without its label (the label is the accessible name). */
 function PhoneStatus({ status }: { status: WorkSession["status"] }) {

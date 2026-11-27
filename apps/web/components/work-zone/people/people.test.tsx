@@ -1,8 +1,10 @@
-import type { WorkSession } from "@ocw/contracts";
+import { ASSIGN_REFUSAL_TEXT, type WorkSession } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { SidebarFooterLinks } from "../sidebar/work-zone-sidebar";
 import { filtersFrom, filtersQuery, hasFilters, NO_FILTERS, peopleModel } from "./model";
-import { PEOPLE_COPY, PeopleViewBody } from "./people-view";
+import { PeopleRow, RowMenu, rowActions } from "./people-row";
+import { PEOPLE_COPY, PeopleFilterBar, PeopleViewBody } from "./people-view";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: unknown } & Record<string, unknown>) => (
@@ -275,5 +277,136 @@ describe("PeopleViewBody (D-01)", () => {
     const markup = body([luis({ createdByName: "<img src=x>", title: "<b>x</b>" })]);
     expect(markup).not.toContain("<img src=x>");
     expect(markup).not.toContain("<b>x</b>");
+  });
+});
+
+const BOT = { agentId: "01a11635-d6e7-7c87-9f17-0000000000f1", displayName: "Scout", handle: "scout" };
+
+describe("rowActions (D-04, D-06): a hint from viewer-neutral fields; the dialogs show the API's decision", () => {
+  it("offers Assign to me on someone else's session on a server", () => {
+    expect(rowActions(pia({ deviceHostKind: "service" }), ANA)).toEqual({
+      actions: ["open", "rename", "assign"],
+      reason: null,
+    });
+  });
+
+  it("explains why not on a desktop or an unreported host", () => {
+    for (const deviceHostKind of ["desktop", null, undefined] as const) {
+      expect(rowActions(pia({ deviceHostKind }), ANA)).toEqual({
+        actions: ["open", "rename"],
+        reason: "Only sessions on a server can be assigned.",
+      });
+    }
+    expect(ASSIGN_REFUSAL_TEXT.not_on_server).toBe("Only sessions on a server can be assigned.");
+  });
+
+  it("explains why not on a bot-started session (the sponsor keeps it)", () => {
+    for (const deviceHostKind of ["service", "desktop"] as const) {
+      expect(rowActions(pia({ deviceHostKind, startedByAgent: BOT }), ANA)).toEqual({
+        actions: ["open", "rename"],
+        reason: "A bot started this session; it stays with the bot's sponsor.",
+      });
+    }
+  });
+
+  it("gives the viewer's own session neither the item nor a reason, bot-started or not", () => {
+    expect(rowActions(ana({ deviceHostKind: "service" }), ANA)).toEqual({
+      actions: ["open", "rename"],
+      reason: null,
+    });
+    expect(rowActions(ana({ deviceHostKind: "desktop" }), ANA)).toEqual({
+      actions: ["open", "rename"],
+      reason: null,
+    });
+    expect(rowActions(ana({ startedByAgent: BOT }), ANA)).toEqual({
+      actions: ["open", "rename"],
+      reason: null,
+    });
+  });
+
+  it("an archived session only opens", () => {
+    expect(rowActions(pia({ status: "archived" }), ANA)).toEqual({ actions: ["open"], reason: null });
+    expect(rowActions(ana({ status: "archived" }), ANA)).toEqual({ actions: ["open"], reason: null });
+  });
+
+  it("compares the session's owner, never the device's: Pia's session on Ana's own server is Ana's to take", () => {
+    // The DTO carries no device owner; Ana owning the server changes nothing for the hint (the API decides device.use).
+    const onAnasServer = pia({ deviceHostKind: "service", deviceId: D1, deviceName: "Ana's server" });
+    expect(rowActions(onAnasServer, ANA).actions).toContain("assign");
+    const anasOwn = ana({ deviceHostKind: "service", deviceId: D1, deviceName: "Ana's server" });
+    expect(rowActions(anasOwn, ANA)).toEqual({ actions: ["open", "rename"], reason: null });
+  });
+});
+
+describe("PeopleRow and its menu (D-01, D-04, D-06)", () => {
+  it("puts the 44 px menu button outside the session link, named after the session", () => {
+    const s = pia({ title: "Fix the login page" });
+    const markup = html(
+      <PeopleRow session={s} viewerId={ANA} actions={<RowMenu session={s} viewerId={ANA} />} />,
+    );
+    const link = markup.match(/<a [^>]*href="\/work-zone\/[^"]+"[^>]*>[\s\S]*?<\/a>/)?.[0] ?? "";
+    expect(link).not.toBe("");
+    expect(link).not.toContain("Session actions");
+    const button =
+      markup.match(/<button[^>]*aria-label="Session actions for Fix the login page"[^>]*>/)?.[0] ?? "";
+    expect(button).not.toBe("");
+    expect(button).toContain("size-9");
+    expect(button).toContain("max-md:size-11");
+    expect(markup.indexOf("</a>")).toBeLessThan(markup.indexOf("Session actions for"));
+  });
+});
+
+describe("PeopleFilterBar (D-01)", () => {
+  const bar = (filters = NO_FILTERS) =>
+    html(<PeopleFilterBar model={peopleModel(fixture(), ANA, filters)} filters={filters} onFilters={noop} />);
+
+  it("renders three labelled selects, 44 px on touch screens, Person full width on a phone", () => {
+    const markup = bar();
+    for (const label of ["Person", "Project", "Device"]) {
+      const trigger = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0] ?? "";
+      expect(trigger, label).not.toBe("");
+      expect(trigger, label).toContain("max-md:h-11");
+    }
+    expect(markup).toContain("grid-cols-2");
+    expect(markup).toContain("col-span-2 sm:w-52");
+    expect(markup).toContain("sm:flex");
+    expect(text(markup)).toContain("Everyone");
+    expect(text(markup)).toContain("All projects");
+    expect(text(markup)).toContain("All devices");
+  });
+
+  it("shows Clear filters only when a filter is set, and the count either way", () => {
+    expect(bar()).not.toContain('data-testid="people-clear"');
+    expect(text(bar())).toContain("6 sessions");
+    const filtered = bar({ ...NO_FILTERS, project: P2 });
+    expect(filtered).toContain('data-testid="people-clear"');
+    expect(text(filtered)).toContain("2 of 6 sessions");
+  });
+
+  it("names a filter from an old link that no listed session has, never its raw id", () => {
+    const stale = "01a11635-d6e7-7c87-9f17-0000000000ff";
+    const markup = bar({ ...NO_FILTERS, device: stale });
+    expect(text(markup)).toContain(PEOPLE_COPY.notListed);
+    expect(text(markup)).not.toContain(stale);
+  });
+});
+
+describe("the sidebar footer (D-01, Pitfall 9)", () => {
+  it("links Sessions by person between Browse projects and Devices, 44 px on phones", () => {
+    const markup = html(<SidebarFooterLinks pathname="/work-zone" />);
+    const t = text(markup);
+    expect(t.indexOf("Browse projects")).toBeLessThan(t.indexOf("Sessions by person"));
+    expect(t.indexOf("Sessions by person")).toBeLessThan(t.indexOf("Devices"));
+    const link = markup.match(/<a [^>]*data-testid="sidebar-people"[^>]*>/)?.[0] ?? "";
+    expect(link).toContain('href="/work-zone/people"');
+    expect(link).toContain("max-md:h-11");
+    expect(link).not.toContain("aria-current");
+  });
+
+  it("marks the link current on the people view", () => {
+    const link = html(<SidebarFooterLinks pathname="/work-zone/people" />).match(
+      /<a [^>]*data-testid="sidebar-people"[^>]*>/,
+    )?.[0];
+    expect(link).toContain('aria-current="page"');
   });
 });
