@@ -45,6 +45,7 @@ import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
+import { decideAssign, registerAssignRoutes } from "./assign";
 import { browserApproverRule, openBrowserPages } from "./browser-grant";
 import { loadControlsContext } from "./context";
 import {
@@ -71,6 +72,7 @@ import {
   saveWorkZonePolicy,
   serverFileMaxBytes,
 } from "./policy";
+import { registerRenameRoutes } from "./rename";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
@@ -562,7 +564,19 @@ export function registerWorkSessionRoutes(
           })
           .filter((e) => e !== null);
         const origin = await originFor(tx, viewerId, session.id);
-        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin };
+        // 07.13.1.1 (PD-14): per viewer, the cheap decision only (the preview route runs the transfer).
+        const [row] = await tx
+          .select({ startedByAgentId: workSessions.startedByAgentId })
+          .from(workSessions)
+          .where(eq(workSessions.id, found.id));
+        const assign = await decideAssign(
+          tx,
+          perms,
+          req,
+          { ...found, startedByAgentId: row?.startedByAgentId ?? null },
+          facts,
+        );
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin, assign };
       }),
   );
 
@@ -914,6 +928,10 @@ export function registerWorkSessionRoutes(
 
   // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
   registerVisibilityRoutes(app, core, { perms, svc });
+  // Phase 07.13.1.1 (D-03, D-04, D-05): Assign to me on a server, with this route family's audience 404 and device denial.
+  registerAssignRoutes(app, core, { perms, svc, visible, assertDeviceUsable });
+  // 07.13.1.1 (D-06, PD-07): people rename a session; the same grain as its settings.
+  registerRenameRoutes(app, core, { svc, lockedFor });
 }
 
 /** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */

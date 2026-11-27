@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -9,6 +10,8 @@ import {
   invite,
   linkRepo,
   pairDevice,
+  setAudience,
+  shareDevice,
   startSession,
 } from "../../testing-workzone";
 
@@ -20,6 +23,8 @@ import {
  *   nobody who keeps it is counted as removed (the facts of others come from the definer shape, not the caller's RLS).
  * - A route that finds no session still audits the audience denial when the session exists (`sessionNotFound`), and
  *   only then: an unknown id stays a plain 404.
+ * - 07.13.1.1 (D-03): after an Assign to me of an owner-only session, the previous owner's own transaction reads none
+ *   of it and cannot write `created_by` back to themself.
  */
 
 let stack: TestStack;
@@ -32,6 +37,8 @@ let olga: TestClient;
 let leaId = "";
 let piaId = "";
 let olgaId = "";
+let orgId = "";
+let gusUserId = "";
 let device: FakeDevice | null = null;
 let session = "";
 
@@ -67,6 +74,7 @@ beforeAll(async () => {
     }),
   );
   const org = setup.organization.id as string;
+  orgId = org;
   ({ client: lea, userId: leaId } = await invite(stack, victor, "lea@example.test", "Lea Lund", "lead"));
   const { client: gusClient, userId: gusId } = await invite(
     stack,
@@ -76,6 +84,7 @@ beforeAll(async () => {
     "developer",
   );
   gus = gusClient;
+  gusUserId = gusId;
   ({ client: pia, userId: piaId } = await invite(
     stack,
     victor,
@@ -196,5 +205,46 @@ describe("a session the caller cannot see still audits the attempt (07.9-12)", (
     expect((await ok(gus.request("GET", `/api/v1/work-sessions/${session}`))).session.visibility.kind).toBe(
       "owner",
     );
+  });
+});
+
+describe("an owner transfer cannot be reclaimed through the database (07.13.1.1 D-03, T-07.13.1.1-02-04)", () => {
+  it("after Gus takes Pia's owner-only session on his server, Pia's transaction reads 0 rows and cannot set created_by back", async () => {
+    const paired = await pairDevice(stack, gus, "Gus's server");
+    const connected = await connectWithProject(
+      stack,
+      gus,
+      paired.token,
+      { localId: "infra", name: "infra" },
+      { host: "service" },
+    );
+    try {
+      await shareDevice(gus, paired.deviceId, piaId);
+      const id = await startSession(pia, connected.device, connected.projectId, { title: "Pia's infra" });
+      await setAudience(pia, id, { kind: "owner" });
+      const res = await gus.request("POST", `/api/v1/work-sessions/${id}/assign`);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      // Pia's own tenant transaction (the `app` role, RLS on): the backstop hides the row from her.
+      const asPia = { organizationId: orgId, userId: piaId };
+      const read = await stack.built.core.db.withTenant(asPia, (tx) =>
+        tx.execute(sql`select id from app.work_sessions where id = ${id}::uuid`),
+      );
+      expect(read.rows).toEqual([]);
+      const reclaim = await stack.built.core.db
+        .withTenant(asPia, (tx) =>
+          tx.execute(
+            sql`update app.work_sessions set created_by = ${piaId}::uuid where id = ${id}::uuid returning id`,
+          ),
+        )
+        .then((r) => r.rows.length)
+        .catch(() => "refused" as const);
+      expect([0, "refused"]).toContain(reclaim);
+      const owner = await su.query("select created_by from app.work_sessions where id = $1", [id]);
+      expect(owner.rows[0].created_by).toBe(gusUserId);
+      expect((await pia.request("GET", `/api/v1/work-sessions/${id}`)).status).toBe(404);
+    } finally {
+      await connected.device.close();
+    }
   });
 });

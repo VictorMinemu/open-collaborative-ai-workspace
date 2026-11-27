@@ -190,7 +190,7 @@ export function registerWorkMemoryRoutes(app: App, deps: WorkMemoryRouteDeps): v
         const s = await readable(req, tx, perms, req.params.id);
         // Only the owner proposes, and pays (D-07).
         if (authOf(req).userId !== s.createdBy) {
-          throw forbidden("Only the person who started this session can propose it", "not_session_owner");
+          throw forbidden("Only the session's owner can propose it", "not_session_owner");
         }
         if (s.status !== "completed" && s.status !== "archived") {
           throw conflict("The session has not ended", "session_not_finished");
