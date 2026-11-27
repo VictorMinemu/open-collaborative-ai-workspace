@@ -158,3 +158,61 @@ describe("buildItems › account.switched", () => {
     expect(item).toMatchObject({ text: `Switched to account B: A reached its limit until ${local}` });
   });
 });
+
+/**
+ * The take-over line (07.13.1.1-06, D-03): the API appends `session.owner_changed` to the stored stream when a member
+ * assigns a server session to themselves, so every viewer sees who took it from whom, also after a reload. Names come
+ * from the member directory; an id it does not know reads "a former member". Plain text through React.
+ */
+describe("buildItems › session.owner_changed", () => {
+  const LUIS = "01a11635-d6e7-7c87-9f17-0000000000a1";
+  const ANA = "01a11635-d6e7-7c87-9f17-0000000000a2";
+  const GONE = "01a11635-d6e7-7c87-9f17-0000000000a9";
+  const names: Record<string, string> = { [LUIS]: "Luis Pérez", [ANA]: "Ana García" };
+  const nameOf = (id: string) => names[id] ?? null;
+  const changed = (fromUserId: string, toUserId: string): SessionEvent => ({
+    type: "session.owner_changed",
+    fromUserId,
+    toUserId,
+  });
+
+  it("says who took the session over from whom", () => {
+    expect(buildItems(live([changed(LUIS, ANA)]), undefined, nameOf)).toEqual([
+      {
+        kind: "system",
+        key: "e1",
+        at: AT,
+        text: "Ana García took over this session from Luis Pérez",
+        testId: "owner-changed-line",
+      },
+    ]);
+  });
+
+  it("names someone the directory does not know a former member", () => {
+    const [from] = buildItems(live([changed(GONE, ANA)]), undefined, nameOf);
+    expect(from).toMatchObject({ text: "Ana García took over this session from a former member" });
+    const [to] = buildItems(live([changed(LUIS, GONE)]), undefined, nameOf);
+    expect(to).toMatchObject({ text: "A former member took over this session from Luis Pérez" });
+  });
+
+  it("without a directory both names read a former member", () => {
+    const [item] = buildItems(live([changed(LUIS, ANA)]));
+    expect(item).toMatchObject({ text: "A former member took over this session from a former member" });
+  });
+
+  it("leaves the account switch line as it was", () => {
+    const items = buildItems(
+      live([
+        changed(LUIS, ANA),
+        { type: "account.switched", fromLabel: "A", toLabel: "B", reason: "unavailable", until: null },
+      ]),
+      undefined,
+      nameOf,
+    );
+    expect(items.map((i) => (i.kind === "system" ? i.testId : i.kind))).toEqual([
+      "owner-changed-line",
+      "account-switch-line",
+    ]);
+    expect(items[1]).toMatchObject({ text: "Switched to account B: A is no longer available" });
+  });
+});
