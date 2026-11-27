@@ -72,6 +72,7 @@ import {
   saveWorkZonePolicy,
   serverFileMaxBytes,
 } from "./policy";
+import { registerRenameRoutes } from "./rename";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
@@ -929,6 +930,8 @@ export function registerWorkSessionRoutes(
   registerVisibilityRoutes(app, core, { perms, svc });
   // Phase 07.13.1.1 (D-03, D-04, D-05): Assign to me on a server, with this route family's audience 404 and device denial.
   registerAssignRoutes(app, core, { perms, svc, visible, assertDeviceUsable });
+  // 07.13.1.1 (D-06, PD-07): people rename a session; the same grain as its settings.
+  registerRenameRoutes(app, core, { svc, lockedFor });
 }
 
 /** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */
