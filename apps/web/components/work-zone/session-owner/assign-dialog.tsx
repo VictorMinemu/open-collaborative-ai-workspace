@@ -19,6 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage } from "@/lib/api";
 import { useAssignPreview, useAssignSession } from "@/lib/workzone-queries";
@@ -80,6 +81,24 @@ export function assignMenuState(
   if (a.allowed) return { kind: "item" };
   if (a.reason && EXPLAINED.has(a.reason)) return { kind: "reason", text: ASSIGN_REFUSAL_TEXT[a.reason] };
   return { kind: "none" };
+}
+
+/**
+ * Why Assign to me is not offered, inside a session menu (D-04; IN-06): a disabled menu item holding the one quiet
+ * sentence, because a `role="menu"` owns only items and groups, so a plain paragraph is skipped by screen readers and
+ * never reached with the arrow keys. Base UI keeps a disabled item focusable and announces it as dimmed; it does
+ * nothing when chosen. Full contrast, wrapped, never the 50 % disabled look: it is information, not a dead action.
+ */
+export function AssignReasonItem({ text, testId }: { text: string; testId: string }) {
+  return (
+    <DropdownMenuItem
+      disabled
+      data-testid={testId}
+      className="max-w-64 whitespace-normal text-muted-foreground text-xs leading-snug data-disabled:opacity-100"
+    >
+      {text}
+    </DropdownMenuItem>
+  );
 }
 
 /** The consequences the preview reports, as fixed sentences (D-13, D-15). */

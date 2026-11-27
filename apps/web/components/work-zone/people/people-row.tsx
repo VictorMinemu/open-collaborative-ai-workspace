@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { relativeTime, shortAge } from "@/lib/utils";
 import { OnlineDot, RuntimeLogo, STATUS, StatusChip } from "../meta";
-import { ASSIGN_DIALOG_COPY, AssignSessionDialog } from "../session-owner/assign-dialog";
+import { ASSIGN_DIALOG_COPY, AssignReasonItem, AssignSessionDialog } from "../session-owner/assign-dialog";
 import { RENAME_COPY, RenameSessionDialog } from "../session-owner/rename-dialog";
 import { VisibilityMarker, VisibilitySrSuffix } from "../visibility/visibility-marker";
 
@@ -104,13 +104,8 @@ export function RowMenu({ session, viewerId }: { session: WorkSession; viewerId:
               <UserRoundCheck /> {ASSIGN_DIALOG_COPY.menuItem}
             </DropdownMenuItem>
           ) : reason ? (
-            // Not a disabled item: one quiet line that says why Assign to me is not offered (D-04), as in the header.
-            <p
-              data-testid="session-assign-reason"
-              className="max-w-64 px-2 py-1.5 text-muted-foreground text-xs leading-snug"
-            >
-              {reason}
-            </p>
+            // One quiet line that says why Assign to me is not offered (D-04), as in the header (IN-06).
+            <AssignReasonItem text={reason} testId="session-assign-reason" />
           ) : null}
         </DropdownMenuContent>
       </Menu.Root>

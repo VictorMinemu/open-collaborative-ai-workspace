@@ -62,7 +62,12 @@ import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
 import { SessionMemoryStrip } from "./session-memory-strip";
-import { ASSIGN_DIALOG_COPY, AssignSessionDialog, assignMenuState } from "./session-owner/assign-dialog";
+import {
+  ASSIGN_DIALOG_COPY,
+  AssignReasonItem,
+  AssignSessionDialog,
+  assignMenuState,
+} from "./session-owner/assign-dialog";
 import { absentParticipants, OwnerChip, OwnerLine } from "./session-owner/owner-chip";
 import { RENAME_COPY, RenameSessionDialog, renameAllowed } from "./session-owner/rename-dialog";
 import { projectInitials } from "./session-sidebar";
@@ -870,13 +875,8 @@ function SessionHeader({
                   <UserRoundCheck /> {ASSIGN_DIALOG_COPY.menuItem}
                 </DropdownMenuItem>
               ) : assignMenu.kind === "reason" ? (
-                // Not a disabled item: one quiet line that says why Assign to me is not offered (D-04).
-                <p
-                  data-testid="session-assign-reason"
-                  className="max-w-64 px-2 py-1.5 text-muted-foreground text-xs leading-snug"
-                >
-                  {assignMenu.text}
-                </p>
+                // One quiet line that says why Assign to me is not offered (D-04), as a menu item (IN-06).
+                <AssignReasonItem text={assignMenu.text} testId="session-assign-reason" />
               ) : null}
               {menuTop ? <DropdownMenuSeparator /> : null}
               <DropdownMenuItem

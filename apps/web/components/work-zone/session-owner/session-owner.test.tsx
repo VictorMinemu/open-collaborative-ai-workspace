@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { toneFor } from "@/components/ui/avatar";
 import { Dialog } from "@/components/ui/dialog";
-import { ASSIGN_DIALOG_COPY, AssignPreviewBody, assignMenuState } from "./assign-dialog";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { ASSIGN_DIALOG_COPY, AssignPreviewBody, AssignReasonItem, assignMenuState } from "./assign-dialog";
 import { absentParticipants, OwnerChip, OwnerLine } from "./owner-chip";
 import { RENAME_COPY, RenameForm, renameAllowed, renameError } from "./rename-dialog";
 
@@ -139,6 +140,16 @@ describe("assignMenuState (D-04, PD-14)", () => {
     expect(
       assignMenuState(detail({ allowed: false, reason: "not_on_server" }, { status: "archived" }), VIEWER),
     ).toEqual({ kind: "none" });
+  });
+});
+
+describe("AssignReasonItem (IN-06)", () => {
+  it("is a disabled menu item, so screen readers and arrow keys reach the reason inside role=menu", () => {
+    const el = AssignReasonItem({ text: ASSIGN_REFUSAL_TEXT.not_on_server, testId: "session-assign-reason" });
+    expect(el.type).toBe(DropdownMenuItem);
+    expect(el.props.disabled).toBe(true);
+    expect(el.props.children).toBe(ASSIGN_REFUSAL_TEXT.not_on_server);
+    expect(el.props["data-testid"]).toBe("session-assign-reason");
   });
 });
 
