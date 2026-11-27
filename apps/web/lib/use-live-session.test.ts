@@ -1,6 +1,6 @@
 import { EventTypes, type WorkPrompt, type WorkSession } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { lastTurnEndOf, turnEndedAt } from "./use-live-session";
+import { lastTurnEndOf, refreshesDetail, turnEndedAt } from "./use-live-session";
 
 /**
  * The seen-map writer of the session view's data hook (07.10-04, UI-SPEC § 3, R10, PD-09): which stream frames end a
@@ -102,5 +102,31 @@ describe("lastTurnEndOf", () => {
     expect(lastTurnEndOf({ session: s, prompts })).toBe(Date.parse("2026-10-27T11:03:00.000Z"));
     expect(lastTurnEndOf({ session: s, prompts: [] })).toBe(Date.parse("2026-10-27T11:02:00.000Z"));
     expect(lastTurnEndOf({ session: session(), prompts: [] })).toBe(0);
+  });
+});
+
+describe("refreshesDetail (07.13.1.1 WR-01)", () => {
+  it("an audience change (a take-over or a visibility change) refreshes the per-viewer detail", () => {
+    expect(refreshesDetail(ev(EventTypes.workSessionVisibilityChanged, { workSessionId: SID }))).toBe(true);
+  });
+
+  it("a session update, a timeline event or an ephemeral frame does not", () => {
+    expect(refreshesDetail(ev(EventTypes.workSessionUpdated, session()))).toBe(false);
+    expect(
+      refreshesDetail(
+        ev(EventTypes.workSessionEvent, {
+          at: "2026-10-27T11:05:00.000Z",
+          event: { type: "session.owner_changed", fromUserId: UID, toUserId: SID },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      refreshesDetail({
+        op: "eph",
+        topic: `ws:${SID}`,
+        type: EventTypes.workSessionVisibilityChanged,
+        data: { workSessionId: SID },
+      } as never),
+    ).toBe(false);
   });
 });
