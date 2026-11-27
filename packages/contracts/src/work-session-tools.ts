@@ -82,12 +82,22 @@ export type NamingRules = z.infer<typeof NamingRules>;
  * Phase 07.13.1.1 (D-07, D-08, PD-10, PD-13): what the session's agent may do with `ocw_session` this turn, decided by
  * the API at send time and added to the sent `session.start` / `prompt` copy only. `rename` = the title is not
  * person-typed; `namingRules` = the joined rules shown in the tool's description (null = none).
+ *
+ * Parsed on the device inside payloads whose compatibility rests on being non-strict (ADR-0047 § 8), so it is
+ * tolerant too (WR-04): a key a later API adds is stripped, and a rule this daemon cannot take (longer than its limit,
+ * a character it refuses) degrades to "no rule". The API builds the grant typed, never from input.
  */
-export const SessionToolsGrant = z.strictObject({
+export const SessionToolsGrant = z.object({
   rename: z.boolean(),
-  namingRules: NamingRules.nullable(),
+  namingRules: NamingRules.nullable().catch(null),
 });
 export type SessionToolsGrant = z.infer<typeof SessionToolsGrant>;
+
+/**
+ * The `sessionTools` field of a `session.start` / `prompt` payload (WR-04): a grant this daemon cannot read at all
+ * (`rename` missing or not a boolean) is treated as absent, so no tool is offered and the command still runs.
+ */
+export const SessionToolsGrantField = SessionToolsGrant.optional().catch(undefined);
 
 /** An opening or closing `naming-rules` tag, any case and spacing (`<naming-rules>`, `< / Naming-Rules >`). */
 const NAMING_RULES_TAG_RE = /<\s*\/?\s*naming-rules(?![\w-])[^<>]*>/giu;

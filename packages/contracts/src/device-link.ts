@@ -38,7 +38,7 @@ import {
 } from "./work-browser";
 import { WORK_PROMPT_MAX_ATTACHMENTS } from "./work-prompt-files";
 import { BOT_FILE_LIMITS, WorkSessionFilePath } from "./work-session-files";
-import { NamingRules, SessionRenameRefusal, SessionToolsGrant } from "./work-session-tools";
+import { NamingRules, SessionRenameRefusal, SessionToolsGrantField } from "./work-session-tools";
 
 /**
  * Device Link protocol: JSON frames on `GET /runtime/ws` (Authorization: Bearer <device token>).
@@ -687,7 +687,7 @@ export const SessionStartPayload = z.object({
    * Absent = no session tool. The API adds it to the sent copy only (never to the stored `device_commands` payload),
    * decided at send time; older daemons strip it (non-strict payload).
    */
-  sessionTools: SessionToolsGrant.optional(),
+  sessionTools: SessionToolsGrantField,
 });
 export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
 
@@ -778,7 +778,7 @@ export const PromptPayload = z.object({
    * the title turns `rename` off from the next turn). Absent = no session tool. The API adds it to the sent copy only;
    * older daemons strip it (non-strict payload).
    */
-  sessionTools: SessionToolsGrant.optional(),
+  sessionTools: SessionToolsGrantField,
 });
 export type PromptPayload = z.infer<typeof PromptPayload>;
 

@@ -4637,7 +4637,7 @@ describe("07.13.1.1 session tools", () => {
 
   async function startRenameSession(
     localId: string,
-    sessionTools: typeof RENAME_ALLOWED | undefined,
+    sessionTools: Record<string, unknown> | undefined,
   ): Promise<string> {
     const sid = randomUUID();
     server.send({
@@ -4654,7 +4654,7 @@ describe("07.13.1.1 session tools", () => {
     return sid;
   }
 
-  function renamePrompt(sid: string, promptId: string, sessionTools: typeof RENAME_ALLOWED | undefined) {
+  function renamePrompt(sid: string, promptId: string, sessionTools: Record<string, unknown> | undefined) {
     server.send({
       id: `prompt-${promptId}`,
       kind: "prompt",
@@ -4708,6 +4708,33 @@ describe("07.13.1.1 session tools", () => {
     expect(JSON.stringify(started.event)).not.toContain("Fix login redirect");
     await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.completed");
     expect(server.allFrames.filter((f) => f.type === "session.rename")).toHaveLength(1);
+  });
+
+  it("WR-04: a grant from a newer API (an extra key, a longer rule) still starts the session and offers the tool", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const newer = { rename: true, namingRules: "x".repeat(5_000), archive: true };
+    const sid = await startRenameSession(localId, newer);
+    expect(daemon.sessionTools.forSession(sid).offered).toBe(true);
+    renamePrompt(sid, "rp-newer", newer);
+    expect(await server.frame("ack", (f) => f.commandId === "prompt-rp-newer")).toMatchObject({ ok: true });
+    const asked = await server.frame("session.rename", (f) => f.sessionId === sid);
+    expect(asked).toMatchObject({ promptId: "rp-newer", title: "Fix login redirect" });
+    server.push({
+      type: "session.rename.result",
+      requestId: asked.requestId,
+      result: { ok: true, title: "Fix login redirect" },
+    });
+    expect((await renameCompleted(sid)).event).toMatchObject({ ok: true });
+  });
+
+  it("WR-04: a grant this daemon cannot read at all offers no tool, and the turn still runs", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const sid = await startRenameSession(localId, { rename: "maybe" });
+    expect(daemon.sessionTools.forSession(sid).offered).toBe(false);
+    renamePrompt(sid, "rp-broken", { rename: "maybe" });
+    expect(await server.frame("ack", (f) => f.commandId === "prompt-rp-broken")).toMatchObject({ ok: true });
+    await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.completed", 5000);
+    expect(server.allFrames.filter((f) => f.type === "session.rename")).toEqual([]);
   });
 
   it("no answer from the API: the call ends after the timeout with not_available and the turn completes", async () => {

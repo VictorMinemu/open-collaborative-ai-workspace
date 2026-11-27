@@ -205,6 +205,9 @@ Every new key is optional and the payloads that carry them are non-strict on the
 - **An older daemon with this API** strips `sessionTools` and `namingRules`: no rename tool, titles without rules,
   nothing else changes. It never sends `session.rename`.
 - **This daemon with an older API** never receives `sessionTools`, so it never offers the tool.
+- **This daemon with a newer API:** the nested grant is tolerant too (`SessionToolsGrant` strips unknown keys, a rule
+  it cannot take becomes no rule, and an unreadable grant counts as absent through `SessionToolsGrantField`), so a key
+  or a limit a later API adds never fails a `session.start` or a `prompt`.
 - **Older web clients** ignore the new optional DTO fields. One additive migration (`20261127204827_session_owners_rename`:
   the two rule columns with their checks and `work_prompts.title_renamed_at`); N-1 inserts keep working.
 

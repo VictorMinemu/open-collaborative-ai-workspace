@@ -62,7 +62,7 @@ describe("ocw_session tool names and input (07.13.1.1-01, D-07, PD-08)", () => {
     expect(Object.keys(SESSION_RENAME_REFUSAL_TEXT).sort()).toEqual([...SessionRenameRefusal.options].sort());
   });
 
-  it("the grant is strict", () => {
+  it("the grant is tolerant of a newer API: extra keys stripped, an unreadable rule becomes no rule (WR-04)", () => {
     expect(SessionToolsGrant.parse({ rename: true, namingRules: null })).toEqual({
       rename: true,
       namingRules: null,
@@ -70,10 +70,33 @@ describe("ocw_session tool names and input (07.13.1.1-01, D-07, PD-08)", () => {
     expect(SessionToolsGrant.parse({ rename: false, namingRules: "Use the module name" }).namingRules).toBe(
       "Use the module name",
     );
-    expect(SessionToolsGrant.safeParse({ rename: true, namingRules: null, browser: true }).success).toBe(
-      false,
-    );
-    expect(SessionToolsGrant.safeParse({ rename: true }).success).toBe(false);
+    expect(SessionToolsGrant.parse({ rename: true, namingRules: null, archive: true })).toEqual({
+      rename: true,
+      namingRules: null,
+    });
+    expect(SessionToolsGrant.parse({ rename: true })).toEqual({ rename: true, namingRules: null });
+    expect(
+      SessionToolsGrant.parse({ rename: true, namingRules: "a".repeat(NAMING_RULES_MAX_CHARS + 1) })
+        .namingRules,
+    ).toBeNull();
+    expect(SessionToolsGrant.safeParse({ namingRules: null }).success).toBe(false);
+  });
+
+  it("a start or prompt frame with a newer or unreadable grant still parses (WR-04)", () => {
+    const newer = { rename: true, namingRules: "Use the module name", archive: true };
+    expect(SessionStartPayload.parse({ ...start0713, sessionTools: newer }).sessionTools).toEqual({
+      rename: true,
+      namingRules: "Use the module name",
+    });
+    expect(PromptPayload.parse({ ...prompt0713, sessionTools: newer }).sessionTools).toEqual({
+      rename: true,
+      namingRules: "Use the module name",
+    });
+    for (const broken of [{ rename: "yes" }, "rename", null]) {
+      expect(SessionStartPayload.parse({ ...start0713, sessionTools: broken }).sessionTools).toBeUndefined();
+      expect(PromptPayload.parse({ ...prompt0713, sessionTools: broken }).sessionTools).toBeUndefined();
+    }
+    expect(PromptPayload.parse(prompt0713)).not.toHaveProperty("sessionTools");
   });
 });
 
@@ -158,8 +181,9 @@ describe("session.rename Device Link frames and payload keys (07.13.1.1-01, PD-0
     expect(SessionStartPayload.parse({ ...start0713, sessionTools: tools }).sessionTools).toEqual(tools);
     expect(PromptPayload.parse({ ...prompt0713, sessionTools: tools }).sessionTools).toEqual(tools);
     expect(SessionTitlePayload.parse({ ...title0713, namingRules: "A\n\nB" }).namingRules).toBe("A\n\nB");
-    expect(PromptPayload.safeParse({ ...prompt0713, sessionTools: { ...tools, extra: 1 } }).success).toBe(
-      false,
+    // WR-04: a key a later API adds to the grant is stripped, never a failed prompt.
+    expect(PromptPayload.parse({ ...prompt0713, sessionTools: { ...tools, extra: 1 } }).sessionTools).toEqual(
+      tools,
     );
     expect(
       SessionTitlePayload.safeParse({ ...title0713, namingRules: "a".repeat(NAMING_RULES_MAX_CHARS + 1) })
