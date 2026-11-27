@@ -159,6 +159,26 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   unsigned until Phase 9 (ASVS 10.3.1 accepted deviation), a new Mac code identity per update (Keychain or privacy
   prompts, maybe re-pairing), v0.5.2 is installed by hand once, the owner turns on GitHub immutable releases
   (ADR-0046, docs/releases/v0.5.2.md).
+- **07.13.1.1 Work Zone session owners and rename (v0.5.3):** **Sessions by person** (`/work-zone/people`, linked at
+  the sidebar's foot) groups every session the viewer can already read by its owner, filtered by person, project and
+  device in the URL; the header shows the owner (a line on phones). `work_sessions.created_by` is the owner, and
+  **Assign to me…** moves it with one locked UPDATE, so every owner rule (`app.work_session_access`, the RLS backstop,
+  the resolver's `creator` relation) follows with no SQL or RLS change. Allowed only on devices that report `service`
+  (desktop and null refused; a self-reported label, audited with `hostKind` and `deviceOwnerId`) to a member who may
+  prompt the session and use the device, never for bot-started or archived sessions; a running turn finishes
+  (`interruptInFlight: false`, wire reason `access_changed`), queued prompts of people who lose access are cancelled
+  and audited, the previous owner is not re-added, a savepoint dry run feeds the confirm dialog, the timeline gets the
+  server-only `session.owner_changed`. **Rename…** sets a `user` title (`work_session.configure`, 1–200 characters, one
+  line, no path) that nothing automatic replaces. The session's agent renames through `ocw_session` › `rename` on both
+  runtimes (Claude's in-process SDK server, Codex's `ocw-runtime session-mcp` shim with a per-session token file),
+  pre-checked on the device and decided by the API over `session.rename` / `session.rename.result`: its own device, a
+  turn in flight, never over `user`, once per turn, the generated 2–5 words / 32-character shape, stored as `auto`.
+  Organization and project naming rules (600 characters each, the project's after the organization's) reach the title
+  call and the tool's description as delimited wording data, audited by key or length only; a running Codex
+  app-server sees a change at its next start. One additive migration; older runtimes keep working without the tool.
+  Proven by integration tests on real PostgreSQL (transfer, refusals, cross-tenant, backstop reclaim, rename, agent
+  rename, rules), offline device and shim tests, web tests with 390 and 1440 px screenshots in both themes and the
+  CI-only e2e journey on a `service` and a `desktop` fake device (ADR-0047, docs/releases/v0.5.3.md).
 - **07.14 Organization connector auth:** MCP servers take five auth modes. Besides Organization headers and the two
   member modes, **Organization sign-in** (an admin with `mcp.manage` signs in once with the 07.4 OAuth client: PKCE
   S256, `resource`, `iss`, pre-registered → CIMD → DCR; only that admin completes the flow and `mcp.manage` is

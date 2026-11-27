@@ -134,6 +134,11 @@ Sharing stays in the web, never in the CLI. In **Settings › Devices**, on the 
 Sessions run as the server's account, with its files, git credentials and sign-ins. Share only with people who may act
 as that account on those repositories.
 
+Members who may use the server can take over its sessions: **Assign to me…** in the session's menu makes the session
+theirs, and the running turn finishes first ([ADR-0047](adr/0047-work-zone-session-ownership-and-agent-rename.md)).
+Only sessions on a server can be assigned, never a session on someone's own computer. From runtime 0.5.3, which the
+server gets through its self-update (see [Updates](#updates)), the session's agent can also rename its session.
+
 ## Sign in to Claude Code and Codex on the server
 
 Install the CLIs as the account that runs the runtime, in its home, so the runtime can find and update them:
