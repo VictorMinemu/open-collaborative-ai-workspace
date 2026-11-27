@@ -215,7 +215,13 @@ describe("tracer: a linked image reaches the device as base64 while the database
   it("a prompt without images is delivered exactly as before", async () => {
     const prompt = await ok(submit(main, "just text"));
     const cmd = (await main.device.command("prompt", main.sessionId)) as Cmd;
-    expect(cmd.payload).toEqual({ promptId: prompt.id, text: "just text", permissionMode: "default" });
+    // 07.13.1.1 (PD-10): the sent copy adds the turn's session tools grant (a typed title: no rename); never stored.
+    expect(cmd.payload).toEqual({
+      promptId: prompt.id,
+      text: "just text",
+      permissionMode: "default",
+      sessionTools: { rename: false, namingRules: null },
+    });
     const row = await commandRow(main, cmd.id);
     expect(row.payload).toEqual({ promptId: prompt.id, text: "just text", permissionMode: "default" });
     const audit = await main.su.query(

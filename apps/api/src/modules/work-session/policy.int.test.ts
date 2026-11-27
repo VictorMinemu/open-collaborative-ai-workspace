@@ -629,3 +629,80 @@ describe("07.13: the organization's browser switch (D-10)", () => {
     expect(await browserAudits()).toHaveLength(2);
   });
 });
+
+describe("07.13.1.1: the organization's session naming rule (D-08, PD-16)", () => {
+  const RULE = "Start with the area, then the change";
+  const ruleAudits = async () =>
+    (
+      await su.query(
+        `select metadata from app.audit_events where action = 'work_zone_policy.updated' and organization_id = $1
+           and metadata->'changed' @> '["sessionNamingRule"]'::jsonb order by occurred_at`,
+        [orgId],
+      )
+    ).rows;
+  const stored = async () =>
+    (
+      await su.query("select session_naming_rule from app.work_zone_policies where organization_id = $1", [
+        orgId,
+      ])
+    ).rows[0]?.session_naming_rule as string | null | undefined;
+
+  it("an admin saves it: read back, stored, audited with the key and never the text; blank clears it", async () => {
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      sessionNamingRule: null,
+    });
+    const res = await put({ sessionNamingRule: `  ${RULE}  ` });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ sessionNamingRule: RULE });
+    expect((await admin.request("GET", "/api/v1/work-zone-policy")).body).toMatchObject({
+      sessionNamingRule: RULE,
+    });
+    expect(await stored()).toBe(RULE);
+    const audits = await ruleAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata.changed).toEqual(["sessionNamingRule"]);
+    const leaked = await su.query(
+      "select count(*)::int as n from app.audit_events a where row_to_json(a)::text like '%Start with the area%'",
+    );
+    expect(leaked.rows[0].n).toBe(0);
+
+    // Absent = unchanged; the same rule again audits nothing.
+    expect((await put({ allowFastMode: true })).body).toMatchObject({ sessionNamingRule: RULE });
+    expect((await put({ sessionNamingRule: RULE })).status).toBe(200);
+    expect(await ruleAudits()).toHaveLength(1);
+
+    expect((await put({ sessionNamingRule: "   " })).body).toMatchObject({ sessionNamingRule: null });
+    expect(await stored()).toBeNull();
+    expect(await ruleAudits()).toHaveLength(2);
+    expect((await put({ sessionNamingRule: RULE })).status).toBe(200);
+  });
+
+  it("a rule over 600 characters is refused and a member without work_zone.manage cannot change it", async () => {
+    expect((await put({ sessionNamingRule: "x".repeat(601) })).status).toBe(400);
+    expect((await put({ sessionNamingRule: "Mine" }, dana)).status).toBe(403);
+    expect(await stored()).toBe(RULE);
+  });
+
+  it("a rule-only change re-decides no live session; any other change still does (07.5)", async () => {
+    expect((await put({ allowedPermissionModes: ["plan", "default", "acceptEdits"] })).status).toBe(200);
+    const id = await startSession(admin, device, projectId, { title: "Rules" });
+    const patch = await admin.request("PATCH", `/api/v1/work-sessions/${id}/settings`, {
+      permissionMode: "acceptEdits",
+    });
+    expect(patch.status, JSON.stringify(patch.body)).toBe(200);
+    device.ack((await device.command("session.configure", id)).id);
+    // The stored policy narrows behind the API's back: only a re-decision would clamp the session now.
+    await su.query(
+      "update app.work_zone_policies set allowed_permission_modes = '{plan,default}' where organization_id = $1",
+      [orgId],
+    );
+    expect((await put({ sessionNamingRule: "Area first" })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(device.pending("session.configure").filter((f) => f.sessionId === id)).toHaveLength(0);
+
+    expect((await put({ allowFastMode: false })).status).toBe(200);
+    const configure = await device.command("session.configure", id);
+    expect(configure.payload).toMatchObject({ reason: "policy", settings: { permissionMode: "default" } });
+    device.ack(configure.id);
+  });
+});

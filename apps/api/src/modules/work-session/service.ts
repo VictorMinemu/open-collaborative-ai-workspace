@@ -22,6 +22,7 @@ import {
   type SessionBrowserGrant,
   type SessionEvent,
   SessionTitle,
+  type SessionToolsGrant,
   type SessionVisibilityKind,
   type TeamProjectRef,
   TITLE_PROMPT_MAX_CHARS,
@@ -98,6 +99,7 @@ import {
 } from "./controls";
 import { type SessionFactsRow, sessionAccessSql, sessionFactsForSessions, sessionResourceOf } from "./facts";
 import { hydratePromptImages, type PromptImagesPlan, preparePromptImages } from "./images";
+import { namingRulesFor } from "./naming-rules";
 import { eachBounded, OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import {
@@ -196,6 +198,8 @@ interface CommandPlan {
   account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
   /** 07.13 (PD-09, PD-20): the turn's browser grant, decided at send time; undefined for a device without a browser. */
   browser?: SessionBrowserGrant;
+  /** 07.13.1.1 (D-07, D-08, PD-10, PD-13): the turn's `ocw_session` grant, decided at send time (start and prompt). */
+  sessionTools?: SessionToolsGrant;
 }
 
 /** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
@@ -1710,8 +1714,38 @@ export class WorkSessionService implements DeviceSessionHandler {
     const images = await preparePromptImages(tx, cmd);
     const account = await this.prepareAccount(tx, cmd);
     const browser = await this.prepareBrowser(tx, cmd);
-    if (images === undefined && account === undefined && browser === undefined) return undefined;
-    return { images, account, ...(browser ? { browser } : {}) } satisfies CommandPlan;
+    const sessionTools = await this.prepareSessionTools(tx, cmd);
+    if (
+      images === undefined &&
+      account === undefined &&
+      browser === undefined &&
+      sessionTools === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      images,
+      account,
+      ...(browser ? { browser } : {}),
+      ...(sessionTools ? { sessionTools } : {}),
+    } satisfies CommandPlan;
+  }
+
+  /**
+   * 07.13.1.1 (D-07, D-08, PD-10, PD-13): what the session's agent may do with `ocw_session` this turn, decided now for
+   * a `session.start` or `prompt`: rename while no person typed the title, with the naming rules of the organization
+   * and the session's team project. Undefined for every other command. Sent to every device: an older daemon strips
+   * the key (non-strict payloads) and offers no tool.
+   */
+  private async prepareSessionTools(tx: Tx, cmd: DeviceCommandRow): Promise<SessionToolsGrant | undefined> {
+    const sessionId = cmd.workSessionId;
+    if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    const [s] = await tx
+      .select({ titleSource: workSessions.titleSource, projectId: workSessions.projectId })
+      .from(workSessions)
+      .where(eq(workSessions.id, sessionId));
+    if (!s) return undefined;
+    return { rename: s.titleSource !== "user", namingRules: await namingRulesFor(tx, s) };
   }
 
   /**
@@ -1770,7 +1804,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    const { images, account, browser } = plan as CommandPlan;
+    const { images, account, browser, sessionTools } = plan as CommandPlan;
     if (account && account.token === null) {
       throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
     }
@@ -1779,9 +1813,15 @@ export class WorkSessionService implements DeviceSessionHandler {
     const sent: SessionAccount | undefined = account?.token
       ? { ...account.stored, oauthToken: account.token }
       : undefined;
-    // 07.13 (PD-09): then the turn's browser grant, on the sent copy only too (never written back).
-    if (!sent && !browser) return payload;
-    return { ...payload, ...(sent ? { account: sent } : {}), ...(browser ? { browser } : {}) };
+    // 07.13 (PD-09): then the turn's browser grant, and 07.13.1.1 (PD-10) its session tools grant, on the sent copy
+    // only too (never written back).
+    if (!sent && !browser && !sessionTools) return payload;
+    return {
+      ...payload,
+      ...(sent ? { account: sent } : {}),
+      ...(browser ? { browser } : {}),
+      ...(sessionTools ? { sessionTools } : {}),
+    };
   }
 
   async onCommandResult(
@@ -1984,11 +2024,19 @@ export class WorkSessionService implements DeviceSessionHandler {
     const decision = decideTitleRequest({ runtime: s.runtime, catalog, policy });
     if (!decision.ok) return false;
     const text = prompt.slice(0, TITLE_PROMPT_MAX_CHARS);
+    // 07.13.1.1 (D-08, PD-06): the organization's and the project's naming rules; organization data, so the stored
+    // title command may hold them (never logged, never audited). Absent when there are none.
+    const namingRules = await namingRulesFor(tx, s);
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
       kind: "session.title",
-      payload: { runtime: s.runtime, model: decision.model, prompt: text },
+      payload: {
+        runtime: s.runtime,
+        model: decision.model,
+        prompt: text,
+        ...(namingRules ? { namingRules } : {}),
+      },
     });
     await this.deps.audit.record(tx, {
       action: "work_session.title_requested",

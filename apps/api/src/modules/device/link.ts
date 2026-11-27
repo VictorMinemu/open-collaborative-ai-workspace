@@ -220,6 +220,11 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
           case "browser.signin.load":
             // The answer goes on this socket only (P7), never through Redis or the command queue.
             return hub.browserHandler?.onSignInLoad?.(device, frame, (reply) => hub.replyOn(socket, reply));
+          // 07.13.1.1 (D-07, PD-09): the work-session module decides the agent's rename; the answer goes on this socket only.
+          case "session.rename":
+            return hub.sessionToolHandler?.onSessionRename?.(device, frame, (reply) =>
+              hub.replyOn(socket, reply),
+            );
         }
       };
 
