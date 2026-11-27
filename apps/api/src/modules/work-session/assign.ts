@@ -114,10 +114,14 @@ export async function computeTransfer(
   toUserId: string,
 ): Promise<Transfer> {
   const before = (await readers(tx, perms, s)).map((r) => r.userId);
-  await tx
+  // IN-01: under RLS a row USING hides is skipped without an error; the transfer must then stop before any audit,
+  // role swap, cancelled prompt or timeline line claims an owner that did not move.
+  const moved = await tx
     .update(workSessions)
     .set({ createdBy: toUserId, updatedAt: sql`now()` })
-    .where(eq(workSessions.id, s.id));
+    .where(eq(workSessions.id, s.id))
+    .returning({ id: workSessions.id });
+  if (moved.length !== 1) throw conflict(ASSIGN_REFUSAL_TEXT.not_allowed, "not_allowed");
   const session: SessionRow = { ...s, createdBy: toUserId };
   const still = await stillReading(tx, perms, session, before);
   const removed = before.filter((id) => !still.has(id));

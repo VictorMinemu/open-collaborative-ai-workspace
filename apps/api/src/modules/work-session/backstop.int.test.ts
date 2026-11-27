@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { workSessions } from "@ocw/db";
+import { eq, sql } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -14,6 +15,8 @@ import {
   shareDevice,
   startSession,
 } from "../../testing-workzone";
+import { createPermissionService } from "../organization";
+import { computeTransfer } from "./assign";
 
 /**
  * 07.9-12 Task 2 (D-09, D-13, P-10): the API paths the RESTRICTIVE `audience_backstop` changed, each fixed at its
@@ -240,6 +243,16 @@ describe("an owner transfer cannot be reclaimed through the database (07.13.1.1 
         .then((r) => r.rows.length)
         .catch(() => "refused" as const);
       expect([0, "refused"]).toContain(reclaim);
+      // IN-01: the transfer itself fails loudly when RLS skips its UPDATE, never "moving" an owner that did not move.
+      const row = await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) =>
+        tx.select().from(workSessions).where(eq(workSessions.id, id)),
+      );
+      const perms = createPermissionService(stack.built.core);
+      const transfer = await stack.built.core.db
+        .withTenant(asPia, (tx) => computeTransfer(tx, perms, row[0]!, piaId))
+        .then(() => "moved" as const)
+        .catch((err: { code?: string }) => err.code ?? "error");
+      expect(transfer).toBe("not_allowed");
       const owner = await su.query("select created_by from app.work_sessions where id = $1", [id]);
       expect(owner.rows[0].created_by).toBe(gusUserId);
       expect((await pia.request("GET", `/api/v1/work-sessions/${id}`)).status).toBe(404);
