@@ -9,6 +9,13 @@ import { LINK_COPY, LinkableList, linkBlock } from "./link-repo-dialog";
 import { ProjectAccessLine } from "./project-access-line";
 import { DEFAULT_SWITCH_COPY, ProjectDefaultSwitchRow } from "./project-default-switch";
 import { accessTitle, peopleCount, teamRowCaption } from "./project-labels";
+import {
+  NAMING_RULE_COPY,
+  NamingRuleField,
+  namingRuleError,
+  namingRuleValue,
+  ProjectNamingRuleBody,
+} from "./project-naming-rule";
 import { ProjectReposBody, REPOS_COPY, unlinkConsequence } from "./project-repos-section";
 import { ProjectSessionsBody, SESSIONS_COPY } from "./project-sessions";
 import { ProjectSettingsLayout, readOnlySettings, SETTINGS_COPY } from "./project-settings";
@@ -413,5 +420,124 @@ describe("the remove-member dialog and the manager outside the project (R9, D-14
     expect(text(html(<ProjectSessionsBody project={detail()} {...props} />))).toContain(
       SESSIONS_COPY.noSessionsBody,
     );
+  });
+});
+
+/**
+ * 07.13.1.1-07 (D-08, PD-16, Pitfall 5): the project's naming rule in its Settings tab, added after the organization's.
+ * Managers (`viewerCan.manage`) edit it; everyone else reads it as plain text. A rule is untrusted wording data, never
+ * markup (T-07.13.1.1-07-03).
+ */
+describe("Session names (07.13.1.1-07 Task 3)", () => {
+  it("normalises a rule as the API stores it: CRLF to LF, trimmed, blank = none", () => {
+    expect(namingRuleValue("  Start with the area\r\nthen the change  ")).toBe(
+      "Start with the area\nthen the change",
+    );
+    expect(namingRuleValue("a\rb")).toBe("a\nb");
+    expect(namingRuleValue("   \n  ")).toBeNull();
+    expect(namingRuleValue("")).toBeNull();
+    expect(namingRuleError("x".repeat(600))).toBeNull();
+    expect(namingRuleError(` ${"x".repeat(600)} `)).toBeNull();
+    expect(namingRuleError("x".repeat(601))).toBe("Use at most 600 characters.");
+  });
+
+  it("a manager gets the field with its label, the project helper, the counter and Save", () => {
+    const markup = html(
+      <ProjectNamingRuleBody rule="Start with the area" canManage pending={false} onSave={noop} />,
+    );
+    const t = text(markup);
+    expect(t).toContain("Naming rule");
+    expect(t).toContain(NAMING_RULE_COPY.projectHelper);
+    expect(NAMING_RULE_COPY.projectHelper).toBe("Added after the organization's rule.");
+    expect(t).toContain("19/600");
+    expect(markup).toMatch(/<label[^>]*for="[^"]+"[^>]*>Naming rule<\/label>/);
+    expect(markup).toContain(">Start with the area</textarea>");
+    // Unchanged: Save is off until the rule changes.
+    expect(markup.match(/<button[^>]*data-testid="naming-rule-save"[^>]*>/)?.[0]).toMatch(/\sdisabled=""/);
+  });
+
+  it("everyone else reads the rule as plain text, or that there is none", () => {
+    const reader = html(
+      <ProjectNamingRuleBody
+        rule={"Area first\nthen the change"}
+        canManage={false}
+        pending={false}
+        onSave={noop}
+      />,
+    );
+    expect(reader).not.toContain("<textarea");
+    expect(reader).not.toContain("naming-rule-save");
+    expect(reader).toContain("whitespace-pre-wrap");
+    expect(text(reader)).toContain("Area first then the change");
+    const none = html(<ProjectNamingRuleBody rule={null} canManage={false} pending={false} onSave={noop} />);
+    expect(text(none)).toContain("No naming rule.");
+  });
+
+  it("never renders markup from a rule", () => {
+    const rule = "<img src=x onerror=alert(1)> **bold** [link](javascript:alert(1))";
+    for (const canManage of [true, false]) {
+      const markup = html(
+        <ProjectNamingRuleBody rule={rule} canManage={canManage} pending={false} onSave={noop} />,
+      );
+      expect(markup).not.toContain("<img");
+      expect(markup).not.toContain("<strong");
+      expect(markup).not.toContain('href="javascript');
+      expect(markup).toContain("&lt;img src=x");
+    }
+  });
+
+  it("shows the API's refusal under the field", () => {
+    const markup = html(
+      <ProjectNamingRuleBody rule={null} canManage pending={false} error="Rule refused." onSave={noop} />,
+    );
+    expect(markup).toMatch(/role="alert"[^>]*>Rule refused\.</);
+  });
+
+  it("a long draft shows the limit, marks the field invalid", () => {
+    const markup = html(<NamingRuleField id="r" value={"x".repeat(601)} helper="h" onChange={noop} />);
+    expect(text(markup)).toContain("601/600");
+    expect(text(markup)).toContain("Use at most 600 characters.");
+    expect(markup.match(/<textarea[^>]*>/)?.[0]).toContain('aria-invalid="true"');
+  });
+
+  it("is its own Session names section after New sessions; the rest keeps its order", () => {
+    const markup = html(
+      <ProjectSettingsLayout
+        project={detail({ namingRule: null })}
+        defaultSwitch={<i>SWITCH</i>}
+        namingRule={<i>RULE</i>}
+        people={<i>PEOPLE</i>}
+        teams={<i>TEAMS</i>}
+        repos={<i>REPOS</i>}
+      />,
+    );
+    const at = (s: string) => markup.indexOf(s);
+    const order = ["New sessions", "SWITCH", "Session names", "RULE", "PEOPLE", "TEAMS", "REPOS"].map(at);
+    expect(order.every((i) => i > -1)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("an older API without the namingRule key gets no Session names section", () => {
+    const { namingRule: _drop, ...older } = detail();
+    const markup = html(
+      <ProjectSettingsLayout
+        project={older as WorkProjectDetail}
+        defaultSwitch={null}
+        namingRule={<i>RULE</i>}
+        people={null}
+        teams={null}
+        repos={null}
+      />,
+    );
+    expect(markup).not.toContain("Session names");
+    expect(markup).not.toContain("RULE");
+  });
+
+  it("the tab saves the rule with PATCH { namingRule } and passes the API's viewerCan.manage", () => {
+    const source = readFileSync(join(__dirname, "project-naming-rule.tsx"), "utf8");
+    expect(source).toContain("useUpdateWorkProjectNamingRule(project.id)");
+    expect(source).toContain("canManage={project.viewerCan.manage}");
+    const queries = readFileSync(join(__dirname, "../../../lib/work-project-queries.ts"), "utf8");
+    expect(queries).toContain("body: { namingRule }");
   });
 });

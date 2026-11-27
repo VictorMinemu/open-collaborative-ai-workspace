@@ -25,6 +25,7 @@ import {
   Save,
   ShieldAlert,
   Sparkles,
+  Tags,
   Zap,
 } from "lucide-react";
 import { type ReactNode, useEffect, useId, useState } from "react";
@@ -36,6 +37,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import {
+  NAMING_RULE_COPY,
+  NamingRuleField,
+  namingRuleError,
+  namingRuleValue,
+} from "@/components/work-zone/projects/project-naming-rule";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
@@ -257,9 +264,12 @@ export function PolicyForm({
   initial,
 }: {
   policy: WorkZonePolicyView;
-  initial?: { botSessions?: string; botFileMax?: string; botFileMaxError?: string } | undefined;
+  initial?:
+    | { botSessions?: string; botFileMax?: string; botFileMaxError?: string; namingRule?: string }
+    | undefined;
 }) {
   const save = useUpdateWorkZonePolicy();
+  const namingRuleId = useId();
   const saved = toDraft(policy);
   const [draft, setDraft] = useState<Draft>(saved);
   const [restrict, setRestrict] = useState<Restrict>(restrictOf(saved));
@@ -271,12 +281,19 @@ export function PolicyForm({
   const [botFileMax, setBotFileMax] = useState(initial?.botFileMax ?? String(saved.botFileMaxMb));
   const [botFileMaxRefused, setBotFileMaxRefused] = useState<string | null>(initial?.botFileMaxError ?? null);
   const fileError = botFileMaxError(botFileMax, policy.serverFileMaxBytes);
+  // 07.13.1.1 (D-08): the naming rule's text, so a draft over 600 characters stays visible with its error; the draft
+  // keeps the last valid value. Absent on an older API: no section, nothing sent.
+  const hasNamingRule = policy.sessionNamingRule !== undefined;
+  const [namingRule, setNamingRule] = useState(initial?.namingRule ?? saved.sessionNamingRule ?? "");
+  const [namingRefused, setNamingRefused] = useState<string | null>(null);
+  const namingError = namingRuleError(namingRule);
   const savedRestrict = restrictOf(saved);
   const dirty =
     canonical(draft) !== canonical(saved) ||
     RUNTIME_IDS.some((rt) => restrict[rt] !== savedRestrict[rt]) ||
     botSessions.trim() !== String(saved.botSessionsMax) ||
-    botFileMax.trim() !== String(saved.botFileMaxMb);
+    botFileMax.trim() !== String(saved.botFileMaxMb) ||
+    (hasNamingRule && namingRuleValue(namingRule) !== (saved.sessionNamingRule ?? null));
   const noModes = draft.allowedPermissionModes.length === 0;
 
   // Leaving the page with unsaved changes asks first.
@@ -314,6 +331,15 @@ export function PolicyForm({
     setBotSessions(String(saved.botSessionsMax));
     setBotFileMax(String(saved.botFileMaxMb));
     setBotFileMaxRefused(null);
+    setNamingRule(saved.sessionNamingRule ?? "");
+    setNamingRefused(null);
+  }
+
+  function changeNamingRule(value: string) {
+    setNamingRule(value);
+    setNamingRefused(null);
+    if (namingRuleError(value) === null)
+      setDraft((d) => ({ ...d, sessionNamingRule: namingRuleValue(value) }));
   }
 
   function changeBotSessions(value: string) {
@@ -337,7 +363,7 @@ export function PolicyForm({
       }
     }
     setModelErrors(errors);
-    if (noModes || botError || fileError || Object.keys(errors).length > 0) return;
+    if (noModes || botError || fileError || namingError || Object.keys(errors).length > 0) return;
     try {
       const updated = await save.mutateAsync(toPolicyBody(draft, restrict, saved));
       const next = toDraft(updated);
@@ -346,12 +372,15 @@ export function PolicyForm({
       setBotSessions(String(next.botSessionsMax));
       setBotFileMax(String(next.botFileMaxMb));
       setBotFileMaxRefused(null);
+      setNamingRule(next.sessionNamingRule ?? "");
+      setNamingRefused(null);
       toast.success("Work Zone policy saved", {
         description: "Every Work Zone session follows it from its next turn.",
       });
     } catch (err) {
       const refused = policyFieldError(err);
       if (refused?.field === "botFileMaxBytes") setBotFileMaxRefused(refused.message);
+      else if (refused?.field === "sessionNamingRule") setNamingRefused(refused.message);
       else toast.error("Could not save the Work Zone policy", { description: errorMessage(err) });
     }
   }
@@ -572,6 +601,29 @@ export function PolicyForm({
         />
       </Section>
 
+      {hasNamingRule ? (
+        <Section
+          title={NAMING_RULE_COPY.section}
+          description="How Work Zone session titles are worded across the organization. A project can add its own rule."
+        >
+          <div className="rounded-2xl border bg-card p-4 shadow-xs">
+            <div className="flex items-start gap-3">
+              <IconTile icon={Tags} warn={false} />
+              <div className="min-w-0 flex-1">
+                <NamingRuleField
+                  id={namingRuleId}
+                  value={namingRule}
+                  helper={NAMING_RULE_COPY.helper}
+                  error={namingRefused}
+                  onChange={changeNamingRule}
+                  testId="policy-naming-rule"
+                />
+              </div>
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t bg-background/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
         <span
           className={cn("mr-auto text-xs", noModes ? "text-destructive" : "text-muted-foreground")}
@@ -590,7 +642,7 @@ export function PolicyForm({
         </Button>
         <Button
           onClick={submit}
-          disabled={!dirty || noModes || !!botError || !!fileError || save.isPending}
+          disabled={!dirty || noModes || !!botError || !!fileError || !!namingError || save.isPending}
           data-testid="save-policy"
         >
           {save.isPending ? <Spinner /> : <Save />}
