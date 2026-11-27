@@ -62,6 +62,7 @@ import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
 import { SessionMemoryStrip } from "./session-memory-strip";
 import { ASSIGN_DIALOG_COPY, AssignSessionDialog, assignMenuState } from "./session-owner/assign-dialog";
+import { absentParticipants, OwnerChip, OwnerLine } from "./session-owner/owner-chip";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
@@ -683,14 +684,19 @@ function SessionHeader({
   const viewers = usePresentPeople(`ws:${session.id}`, { excludeUserId: me, resolve });
   const absent = useMemo(() => {
     const here = new Set(viewers.map((v) => v.userId));
-    return [...participants.entries()]
-      .filter(([uid]) => uid !== me && !here.has(uid))
-      .map(([uid, name]) => ({
-        uid,
-        name,
-        avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
-      }));
-  }, [participants, viewers, me, directory.data]);
+    // The owner has their own chip / line (07.13.1.1, D-02): never repeated among the absent participants.
+    return absentParticipants(participants, here, me, session.createdBy).map(([uid, name]) => ({
+      uid,
+      name,
+      avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
+    }));
+  }, [participants, viewers, me, directory.data, session.createdBy]);
+  const ownerMember = directory.data?.members.find((x) => x.userId === session.createdBy);
+  const owner = {
+    ownerId: session.createdBy,
+    name: session.createdByName ?? ownerMember?.displayName ?? null,
+    avatarUrl: ownerMember?.avatarUrl ?? null,
+  };
   // Below 768 (the 44 px touch rule) the header has two rows: the project and the controls, then the title on its
   // own line, so the 44 px controls never squeeze the title (07.9 polish).
   const md = useMediaQuery("(min-width: 768px)", true);
@@ -776,6 +782,7 @@ function SessionHeader({
         <div className="flex min-w-0 items-center gap-1.5 md:shrink-0">
           {md ? <SessionAccountChip session={session} compact className="mr-0.5" /> : null}
           {md && session.fullAccess ? <FullAccessBadge /> : null}
+          {md ? <OwnerChip {...owner} /> : null}
           <VisibilityChip session={session} viewerId={me} canChange={canChangeVisibility} />
           <div className="flex items-center" data-testid="session-viewers">
             <PresenceStack
@@ -880,10 +887,21 @@ function SessionHeader({
         </div>
       </div>
       {md ? null : title}
-      {/* Below 768 the account chip sits on its own line under the title, so it never squeezes it (07.18, D-11). */}
-      {md || session.poolAccount === undefined ? null : (
-        <div className="mt-1 flex min-w-0">
-          <SessionAccountChip session={session} className="max-w-full" />
+      {/*
+        Below 768 the owner and the account chip share one line under the title, so neither squeezes it (07.18 D-11,
+        07.13.1.1 D-02): the owner first, then the chip.
+      */}
+      {md ? null : (
+        <div className="mt-1 flex min-h-6 min-w-0 items-center gap-1.5">
+          <OwnerLine {...owner} className="shrink" />
+          {session.poolAccount === undefined ? null : (
+            <>
+              <span aria-hidden className="text-muted-foreground/50 text-xs">
+                ·
+              </span>
+              <SessionAccountChip session={session} className="max-w-[55%] shrink-0" />
+            </>
+          )}
         </div>
       )}
       {session.lastError && (session.status === "failed" || session.status === "idle") ? (

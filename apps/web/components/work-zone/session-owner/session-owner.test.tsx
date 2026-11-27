@@ -1,8 +1,10 @@
 import { ASSIGN_REFUSAL_TEXT, type AssignPreview, type AssignRefusal } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { toneFor } from "@/components/ui/avatar";
 import { Dialog } from "@/components/ui/dialog";
 import { ASSIGN_DIALOG_COPY, AssignPreviewBody, assignMenuState } from "./assign-dialog";
+import { absentParticipants, OwnerChip, OwnerLine } from "./owner-chip";
 
 /**
  * The session owner surfaces of the session header (07.13.1.1-06, D-02, D-03, D-04, D-06, D-13, D-15): the Assign to
@@ -136,5 +138,50 @@ describe("assignMenuState (D-04, PD-14)", () => {
     expect(
       assignMenuState(detail({ allowed: false, reason: "not_on_server" }, { status: "archived" }), VIEWER),
     ).toEqual({ kind: "none" });
+  });
+});
+
+describe("the owner in the session header (D-02)", () => {
+  it("the desktop chip shows the first name, an avatar seeded by the owner id and the full name to tools", () => {
+    const markup = html(<OwnerChip ownerId={OWNER} name="Luis Pérez" avatarUrl={null} />);
+    expect(markup).toContain('data-testid="session-owner"');
+    expect(markup).toContain('aria-label="Owner: Luis Pérez"');
+    expect(markup).toContain(toneFor(OWNER));
+    expect(text(markup)).toContain("Luis");
+    expect(text(markup)).not.toContain("Pérez ");
+  });
+
+  it("the phone line says who owns it in full", () => {
+    const markup = html(<OwnerLine ownerId={OWNER} name="Luis Pérez" avatarUrl={null} />);
+    expect(markup).toContain('data-testid="session-owner"');
+    expect(text(markup)).toContain("Owner · Luis Pérez");
+    expect(markup).toContain(toneFor(OWNER));
+  });
+
+  it("an owner who left the organization reads as a former member", () => {
+    expect(text(html(<OwnerLine ownerId={OWNER} name={null} avatarUrl={null} />))).toContain(
+      "Owner · a former member",
+    );
+    const chip = html(<OwnerChip ownerId={OWNER} name={null} avatarUrl={null} />);
+    expect(chip).toContain('aria-label="Owner: a former member"');
+    expect(text(chip)).toContain("Former member");
+  });
+
+  it("the absent participants never repeat the owner, the viewer or anyone watching", () => {
+    const P1 = "01a11635-d6e7-7c87-9f17-0000000000a3";
+    const P2 = "01a11635-d6e7-7c87-9f17-0000000000a4";
+    const participants = new Map([
+      [OWNER, "Luis Pérez"],
+      [VIEWER, "Ana García"],
+      [P1, "Marta"],
+      [P2, "Jon"],
+    ]);
+    expect(absentParticipants(participants, new Set([P2]), VIEWER, OWNER)).toEqual([[P1, "Marta"]]);
+  });
+
+  it("names are plain text, never markup", () => {
+    const markup = html(<OwnerLine ownerId={OWNER} name={"<img src=x onerror=alert(1)>"} avatarUrl={null} />);
+    expect(markup).not.toContain("<img src=x");
+    expect(markup).toContain("&lt;img");
   });
 });
