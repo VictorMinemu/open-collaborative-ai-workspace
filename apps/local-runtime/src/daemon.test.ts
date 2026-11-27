@@ -4579,6 +4579,191 @@ describe("Work Zone browser: capability, lifecycle, server frames and the shim (
 });
 
 // -------------------------------------------------------------------------------------------------
+// 07.13.1.1 (D-07, PD-08, PD-09): the session's agent renames its session through the daemon and the Device Link
+
+describe("07.13.1.1 session tools", () => {
+  const RENAME_ALLOWED = { rename: true, namingRules: null };
+  const NOT_AVAILABLE = "Renaming the session is not available right now.";
+
+  /** Replaces the default daemon with one driving the real fake runtime (its `session rename` directive). */
+  async function fakeRuntimeDaemon(over: { timeoutMs?: number } = {}): Promise<string> {
+    await daemon.stop();
+    daemon = await Daemon.create({
+      home,
+      env: { CODEX_HOME: join(home, "codex-default") },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [new ScriptedRuntime("claude-code", 1)],
+      logger: silentLogger,
+      controlSocket: false,
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      ...(over.timeoutMs !== undefined ? { sessionTools: { timeoutMs: over.timeoutMs } } : {}),
+    });
+    const localId = (await daemon.registry.add(project)).localId;
+    await daemon.start();
+    await server.frame("hello");
+    return localId;
+  }
+
+  async function startRenameSession(
+    localId: string,
+    sessionTools: typeof RENAME_ALLOWED | undefined,
+  ): Promise<string> {
+    const sid = randomUUID();
+    server.send({
+      id: `start-${sid}`,
+      kind: "session.start",
+      sessionId: sid,
+      payload: {
+        projectLocalId: localId,
+        permissionMode: "plan",
+        ...(sessionTools ? { sessionTools } : {}),
+      },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sid}`)).toMatchObject({ ok: true });
+    return sid;
+  }
+
+  function renamePrompt(sid: string, promptId: string, sessionTools: typeof RENAME_ALLOWED | undefined) {
+    server.send({
+      id: `prompt-${promptId}`,
+      kind: "prompt",
+      sessionId: sid,
+      payload: {
+        promptId,
+        text: 'session rename {"title":"Fix login redirect"}',
+        ...(sessionTools ? { sessionTools } : {}),
+      },
+    });
+  }
+
+  const renameCompleted = (sid: string) =>
+    server.frame(
+      "event",
+      (f) =>
+        f.sessionId === sid && f.event.type === "tool.completed" && f.event.toolUseId.includes("-session-"),
+      5000,
+    );
+
+  it("a fake-runtime turn sends one session.rename and reads the API's answer", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const sid = await startRenameSession(localId, RENAME_ALLOWED);
+    renamePrompt(sid, "rp1", RENAME_ALLOWED);
+    const asked = await server.frame("session.rename", (f) => f.sessionId === sid);
+    expect(asked).toEqual({
+      type: "session.rename",
+      requestId: asked.requestId,
+      sessionId: sid,
+      promptId: "rp1",
+      title: "Fix login redirect",
+    });
+    server.push({
+      type: "session.rename.result",
+      requestId: asked.requestId,
+      result: { ok: true, title: "Fix login redirect" },
+    });
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({
+      type: "tool.completed",
+      ok: true,
+      summary: 'Renamed the session to "Fix login redirect".',
+    });
+    const started = await server.frame(
+      "event",
+      (f) =>
+        f.sessionId === sid && f.event.type === "tool.started" && f.event.toolUseId.includes("-session-"),
+    );
+    expect(started.event).toMatchObject({ name: "ocw_session_rename" });
+    // Never the call's arguments in the timeline.
+    expect(JSON.stringify(started.event)).not.toContain("Fix login redirect");
+    await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.completed");
+    expect(server.allFrames.filter((f) => f.type === "session.rename")).toHaveLength(1);
+  });
+
+  it("no answer from the API: the call ends after the timeout with not_available and the turn completes", async () => {
+    const localId = await fakeRuntimeDaemon({ timeoutMs: 50 });
+    const sid = await startRenameSession(localId, RENAME_ALLOWED);
+    renamePrompt(sid, "rp2", RENAME_ALLOWED);
+    await server.frame("session.rename", (f) => f.sessionId === sid);
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({ ok: false, summary: NOT_AVAILABLE });
+    const completed = await server.frame(
+      "event",
+      (f) => f.sessionId === sid && f.event.type === "prompt.completed",
+    );
+    expect(completed.event).not.toHaveProperty("isError");
+  });
+
+  it("a start without sessionTools: the tool is not offered, answers not_available locally, no frame", async () => {
+    const localId = await fakeRuntimeDaemon();
+    const sid = await startRenameSession(localId, undefined);
+    expect(daemon.sessionTools.forSession(sid).offered).toBe(false);
+    renamePrompt(sid, "rp3", undefined);
+    const done = await renameCompleted(sid);
+    expect(done.event).toMatchObject({ ok: false, summary: NOT_AVAILABLE });
+    expect(server.allFrames.filter((f) => f.type === "session.rename")).toEqual([]);
+  });
+
+  /** The default daemon (scripted stub runtime) with a started session whose turn is held in flight. */
+  async function heldTurn(): Promise<{
+    sid: string;
+    handle: NonNullable<StartSessionOptions["sessionTools"]>;
+  }> {
+    await daemon.start();
+    await server.frame("hello");
+    const localId = await addProject();
+    const sid = randomUUID();
+    server.send({
+      id: `start-${sid}`,
+      kind: "session.start",
+      sessionId: sid,
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits", sessionTools: RENAME_ALLOWED },
+    });
+    await server.frame("ack", (f) => f.commandId === `start-${sid}`);
+    runtime.promptHold = new Promise(() => {});
+    server.send({
+      id: `prompt-${sid}`,
+      kind: "prompt",
+      sessionId: sid,
+      payload: { promptId: "hp1", text: "work", sessionTools: RENAME_ALLOWED },
+    });
+    await server.frame("event", (f) => f.sessionId === sid && f.event.type === "prompt.started");
+    const handle = runtime.started.find((s) => s.sessionId === sid)?.sessionTools;
+    if (!handle) throw new Error("no session tools handed to the adapter");
+    expect(handle.offered).toBe(true);
+    return { sid, handle };
+  }
+
+  it("an answer for another requestId is dropped; the matching one settles the call", async () => {
+    const { sid, handle } = await heldTurn();
+    const call = handle.call("rename", { title: "Fix login redirect" });
+    const asked = await server.frame("session.rename", (f) => f.sessionId === sid);
+    server.push({
+      type: "session.rename.result",
+      requestId: randomUUID(),
+      result: { ok: true, title: "Someone else entirely" },
+    });
+    server.push({
+      type: "session.rename.result",
+      requestId: asked.requestId,
+      result: { ok: false, reason: "title_locked" },
+    });
+    expect(await call).toEqual({
+      content: [{ type: "text", text: "A person named this session, so their title stays." }],
+      isError: true,
+    });
+  });
+
+  it("daemon.stop() resolves a pending call with not_available", async () => {
+    const { sid, handle } = await heldTurn();
+    const call = handle.call("rename", { title: "Fix login redirect" });
+    await server.frame("session.rename", (f) => f.sessionId === sid);
+    await daemon.stop();
+    expect(await call).toEqual({ content: [{ type: "text", text: NOT_AVAILABLE }], isError: true });
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
 // ADR-0045: any file on a person's prompt lands in the working tree before the turn, with a note the runtime reads
 
 describe("ADR-0045 prompt files: copied into the tree before the turn, listed in a note", () => {

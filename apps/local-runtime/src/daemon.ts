@@ -157,6 +157,7 @@ import {
   SessionFileError,
   writeSessionFile,
 } from "./session-files.js";
+import { SessionToolRelay } from "./session-tools/relay.js";
 import { runTitle } from "./title.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -382,6 +383,8 @@ export interface DaemonOptions {
   browser?: Partial<
     Pick<BrowserManagerOptions, "root" | "browsers" | "createChild" | "childEntry" | "idleMs">
   >;
+  /** Tests only (07.13.1.1): a shorter wait for the API's answer to a rename (default `SESSION_RENAME_TIMEOUT_MS`). */
+  sessionTools?: { timeoutMs?: number };
 }
 
 /** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
@@ -593,6 +596,8 @@ export class Daemon {
   private readonly browserRoot: string;
   /** 07.13: every session's Work Zone browser (one manager per daemon). */
   readonly browser: BrowserManager;
+  /** 07.13.1.1 (D-07, PD-08): every session's `ocw_session` tools (one relay per daemon, fed beside the browser). */
+  readonly sessionTools: SessionToolRelay;
   /** 07.13 (D-18, PD-21): `OCW_APP_VERSION` (the desktop app's version) when it is a semver, read once. */
   private readonly appVersion: string | null;
 
@@ -644,6 +649,18 @@ export class Daemon {
       ...(opts.browser?.createChild ? { createChild: opts.browser.createChild } : {}),
       ...(opts.browser?.childEntry ? { childEntry: opts.browser.childEntry } : {}),
       ...(opts.browser?.idleMs !== undefined ? { idleMs: opts.browser.idleMs } : {}),
+    });
+    // 07.13.1.1 (PD-09): `session.rename` goes out only on a live link (an offline rename ends `not_available` now).
+    this.sessionTools = new SessionToolRelay({
+      send: (frame) => {
+        if (!this.isConnected) return false;
+        this.send(frame);
+        return true;
+      },
+      rootsFor: (sessionId) => this.rootsBySession.get(sessionId) ?? [],
+      ocwHome: home,
+      log,
+      ...(opts.sessionTools?.timeoutMs !== undefined ? { timeoutMs: opts.sessionTools.timeoutMs } : {}),
     });
   }
 
@@ -934,6 +951,11 @@ export class Daemon {
    * self-update then checks what the workspace serves (nothing at `off`).
    */
   private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
+    // 07.13.1.1 (PD-09): the API's answer to one of this device's renames; ephemeral, never queued or acked.
+    if (frame.type === "session.rename.result") {
+      this.sessionTools.onServerFrame(frame);
+      return;
+    }
     // 07.13 (PD-12 … PD-17): the six ephemeral browser frames go to the manager, never queued and never acked.
     if (isBrowserServerFrame(frame)) {
       void this.browser.onServerFrame(frame).catch((err: unknown) =>
@@ -974,6 +996,7 @@ export class Daemon {
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
     await this.browser.stopAll();
+    await this.sessionTools.stop();
     await this.link?.stop();
     await this.control?.close();
     this.started = false;
@@ -1286,6 +1309,9 @@ export class Daemon {
     // 07.13 (PD-09): the browser's calls use the grant of the turn running now.
     if (event.type === "prompt.started") this.browser.onTurnStarted(sessionId, event.promptId);
     else if (event.type === "prompt.completed") this.browser.onTurnEnded(sessionId, event.promptId);
+    // 07.13.1.1 (D-07): a rename is possible only during a turn, with that turn's grant.
+    if (event.type === "prompt.started") this.sessionTools.onTurnStarted(sessionId, event.promptId);
+    else if (event.type === "prompt.completed") this.sessionTools.onTurnEnded(sessionId, event.promptId);
     // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
     if (event.type === "prompt.completed" || event.type === "session.state") {
       const runtime = this.sessions.get(sessionId)?.runtime.id;
@@ -1313,6 +1339,8 @@ export class Daemon {
     this.turnsRunning.delete(sessionId);
     // 07.13 (PD-24): its page closes and its run dir goes.
     void this.browser.endSession(sessionId);
+    // 07.13.1.1: its waiting renames end and its shim token dir goes.
+    void this.sessionTools.endSession(sessionId);
   }
 
   /**
@@ -1875,6 +1903,8 @@ export class Daemon {
       fullAccess: mode === "fullAccess" && this.gate.optIn,
       steer,
     });
+    // 07.13.1.1 (PD-10): this turn's `ocw_session` grant (absent = no tool); a steer joins the running turn.
+    this.sessionTools.onPrompt(cmd.sessionId, prompt.promptId, prompt.sessionTools, { steer });
     if (paths !== null) {
       turn.text = withPromptFilesNote(turn.text, paths);
       await s.runtime.prompt(cmd.sessionId, turn);
@@ -2013,6 +2043,8 @@ export class Daemon {
     });
     // 07.13 (D-10, PD-09): the start's grant decides whether the adapter offers the browser tools from the start.
     this.browser.onPrompt(cmd.sessionId, null, payload.browser);
+    // 07.13.1.1 (PD-10): the start's grant decides whether the adapter offers `ocw_session` from the start.
+    this.sessionTools.onPrompt(cmd.sessionId, null, payload.sessionTools);
     try {
       await runtime.start(
         {
@@ -2022,6 +2054,7 @@ export class Daemon {
           ...(account ? { account } : {}),
           onAccountSignal: (signal) => this.sendAccountSignal(cmd.sessionId, signal),
           browser: this.browser.forSession(cmd.sessionId),
+          sessionTools: this.sessionTools.forSession(cmd.sessionId),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.effort ? { effort: payload.effort } : {}),
           ...(payload.fastMode !== undefined ? { fastMode: payload.fastMode } : {}),

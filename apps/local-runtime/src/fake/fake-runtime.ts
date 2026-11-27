@@ -26,6 +26,10 @@
 // after the behaviours above, with `tool.started` / `tool.completed` carrying the summary only (no `output`). The
 // answer lists each summary, `Signed in: yes|no` when the result says, and for a snapshot with `expect` only
 // `Contains "<expect>": yes|no`, never page text. The fake's models accept images (`setImageInput(true)`).
+// Session tools (07.13.1.1 D-07, the PD-28 precedent): each prompt line `session rename <json>` (e.g.
+// `session rename {"title":"Fix login redirect"}`) runs `ocw_session` › `rename` through the session's
+// `SessionToolsHandle`, after the browser lines, with `tool.started` / `tool.completed` named `ocw_session_rename` and
+// carrying the result's first line as summary only (never the arguments). No handle = the `not_available` sentence.
 
 import { execFile } from "node:child_process";
 import { access, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -47,6 +51,7 @@ import {
   promptFilesNotePaths,
   type RuntimeCatalog,
   type RuntimeModel,
+  SESSION_RENAME_REFUSAL_TEXT,
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
   type SessionSettingsPatch,
@@ -69,6 +74,7 @@ import {
   type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
+  type SessionToolsHandle,
   type StartSessionOptions,
   type TitleRequest,
 } from "../runtime.js";
@@ -101,6 +107,8 @@ interface FakeSession {
   onAccountSignal: (signal: AccountSignal) => void;
   /** 07.13 (PD-28): the session's browser, when the daemon handed one. */
   browser: SessionBrowserTools | null;
+  /** 07.13.1.1: the session's `ocw_session` tools, when the daemon handed them. */
+  sessionTools: SessionToolsHandle | null;
 }
 
 /** 07.18: how far ahead a fake limit resets. */
@@ -353,6 +361,7 @@ export class FakeRuntime implements AgentRuntime {
       accountLabel: o.account?.label ?? null,
       onAccountSignal: o.onAccountSignal ?? (() => undefined),
       browser: o.browser ?? null,
+      sessionTools: o.sessionTools ?? null,
     };
     // The fake's models accept images (PD-23).
     o.browser?.setImageInput(true);
@@ -573,6 +582,48 @@ export class FakeRuntime implements AgentRuntime {
   }
 
   /**
+   * 07.13.1.1 (D-07): the prompt's `session rename <json>` lines, in order, through the session's `ocw_session` tools.
+   * The timeline and the answer carry the result's first line only, never the arguments.
+   */
+  private async runSessionLines(s: FakeSession, prompt: PromptPayload): Promise<void> {
+    const lines = prompt.text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^session\s+rename(?:\s|$)/.test(l));
+    if (lines.length === 0) return;
+    const out: string[] = [];
+    for (const [i, line] of lines.entries()) {
+      if (s.aborted) return;
+      const raw = line.replace(/^session\s+rename/, "").trim();
+      let args: unknown = {};
+      if (raw) {
+        try {
+          args = JSON.parse(raw);
+        } catch {
+          args = null;
+        }
+      }
+      const toolUseId = `${prompt.promptId}-session-${i + 1}`;
+      this.emit(s, {
+        type: "tool.started",
+        toolUseId,
+        name: "ocw_session_rename",
+        summary: "Renaming the session",
+      });
+      const result = s.sessionTools
+        ? await s.sessionTools.call("rename", args)
+        : {
+            content: [{ type: "text" as const, text: SESSION_RENAME_REFUSAL_TEXT.not_available }],
+            isError: true,
+          };
+      const summary = (result.content[0]?.text ?? "").split("\n", 1)[0] ?? "";
+      this.emit(s, { type: "tool.completed", toolUseId, ok: !result.isError, summary });
+      out.push(`- ${summary}`);
+    }
+    if (!s.aborted) await this.stream(s, `${prompt.promptId}-session`, `Session:\n\n${out.join("\n")}\n`);
+  }
+
+  /**
    * ADR-0045: the footer's `Files: <path> (<n> bytes), …` for the note the daemon appended, each size read from the
    * working tree (`missing` when the file is not there), so end-to-end tests see the files landed before the turn.
    */
@@ -679,6 +730,7 @@ export class FakeRuntime implements AgentRuntime {
         );
       }
       if (!s.aborted) await this.runBrowserLines(s, prompt);
+      if (!s.aborted) await this.runSessionLines(s, prompt);
     } catch (err) {
       isError = true;
       this.emit(s, { type: "session.error", message: err instanceof Error ? err.message : String(err) });
