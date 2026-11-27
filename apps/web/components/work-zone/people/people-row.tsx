@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { relativeTime } from "@/lib/utils";
+import { relativeTime, shortAge } from "@/lib/utils";
 import { OnlineDot, RuntimeLogo, STATUS, StatusChip } from "../meta";
 import { ASSIGN_DIALOG_COPY, AssignSessionDialog } from "../session-owner/assign-dialog";
 import { RENAME_COPY, RenameSessionDialog } from "../session-owner/rename-dialog";
@@ -180,18 +180,25 @@ export function PeopleRow({
       >
         <RuntimeLogo runtime={s.runtime} className="size-8 rounded-lg" />
         <span className="grid min-w-0 flex-1 gap-0.5">
-          {s.visibility?.differsFromDefault ? (
-            <span className="flex min-w-0 items-center gap-1.5">
-              {title}
-              <VisibilityMarker session={s} viewerId={viewerId} />
-              <VisibilitySrSuffix session={s} viewerId={viewerId} />
+          {/* Below 640 px the short age ends the title line, so the meta line keeps room for the names. */}
+          <span className="flex min-w-0 items-center gap-1.5">
+            {title}
+            {s.visibility?.differsFromDefault ? (
+              <>
+                <VisibilityMarker session={s} viewerId={viewerId} />
+                <VisibilitySrSuffix session={s} viewerId={viewerId} />
+              </>
+            ) : null}
+            <span
+              aria-hidden
+              className="ml-auto shrink-0 whitespace-nowrap pl-1 text-muted-foreground text-xs tabular-nums sm:hidden"
+            >
+              {shortAge(s.updatedAt)}
             </span>
-          ) : (
-            title
-          )}
+          </span>
           {/* The names truncate; the Server marker and the time never do. */}
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
-            <span className="min-w-0 truncate" title={s.projectName}>
+            <span className="min-w-0 max-w-[45%] shrink-0 truncate" title={s.projectName}>
               {s.projectName}
             </span>
             <span aria-hidden>·</span>
@@ -209,8 +216,11 @@ export function PeopleRow({
                 {ROW_COPY.server}
               </Badge>
             ) : null}
-            <span aria-hidden>·</span>
-            <span data-testid="people-row-time" className="shrink-0 whitespace-nowrap">
+            <span aria-hidden className="max-sm:hidden">
+              ·
+            </span>
+            {/* On phones this stays for screen readers; the short age above is what shows. */}
+            <span data-testid="people-row-time" className="shrink-0 whitespace-nowrap max-sm:sr-only">
               {relativeTime(s.updatedAt)}
             </span>
           </span>

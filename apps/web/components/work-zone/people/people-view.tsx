@@ -224,9 +224,9 @@ export function PeopleFilterBar({
   return (
     <div
       data-testid="people-filters"
-      className="shrink-0 border-b bg-background/95 px-4 py-3 backdrop-blur sm:px-6"
+      className="shrink-0 border-b bg-background/95 pt-3 pb-1 backdrop-blur sm:py-3"
     >
-      <div className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-2 sm:flex sm:items-center">
+      <div className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-2 px-4 sm:flex sm:items-center sm:px-6">
         <FilterSelect
           label={PEOPLE_COPY.person}
           icon={UserRound}
