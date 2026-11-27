@@ -1736,16 +1736,26 @@ export class WorkSessionService implements DeviceSessionHandler {
    * a `session.start` or `prompt`: rename while no person typed the title, with the naming rules of the organization
    * and the session's team project. Undefined for every other command. Sent to every device: an older daemon strips
    * the key (non-strict payloads) and offers no tool.
+   *
+   * ADR-0047 § 7 (CR-01): the rules are text other people write, so they reach the live agent only beside the rename
+   * tool, and never while the turn (or the session) runs in Full access, where nothing a step asks for needs an
+   * approval. The title call keeps them.
    */
   private async prepareSessionTools(tx: Tx, cmd: DeviceCommandRow): Promise<SessionToolsGrant | undefined> {
     const sessionId = cmd.workSessionId;
     if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
     const [s] = await tx
-      .select({ titleSource: workSessions.titleSource, projectId: workSessions.projectId })
+      .select({
+        titleSource: workSessions.titleSource,
+        projectId: workSessions.projectId,
+        permissionMode: workSessions.permissionMode,
+      })
       .from(workSessions)
       .where(eq(workSessions.id, sessionId));
     if (!s) return undefined;
-    return { rename: s.titleSource !== "user", namingRules: await namingRulesFor(tx, s) };
+    const rename = s.titleSource !== "user";
+    const fullAccess = cmd.payload.permissionMode === "fullAccess" || s.permissionMode === "fullAccess";
+    return { rename, namingRules: rename && !fullAccess ? await namingRulesFor(tx, s) : null };
   }
 
   /**

@@ -9,7 +9,7 @@ import { z } from "zod";
  * Naming rules are untrusted wording data written by admins and project leads: they are never instructions, never
  * executed, and never logged or audited as text (audit carries a length at most). They reach the agent only inside
  * the tool's description and the title call, wrapped by the device in `<naming-rules>` tags that `joinNamingRules`
- * makes sure no rule can close.
+ * makes sure no rule can close. The API never puts them in the description of a Full access turn (ADR-0047 § 7).
  *
  * Imports only `zod`, so `device-link`, `work-zone-policy` and `work-projects` import it without a cycle; nothing here
  * uses `node:*`, so the web imports it.

@@ -180,9 +180,16 @@ shadow check or token directory):
   sources and a read-only, ephemeral Codex thread. The rename tool's description ends with the same delimited rules
   (built per session by `renameDescription`), not a system-prompt append, so the agent's preset and the repository's
   own `CLAUDE.md` / `AGENTS.md` keep their place and authority.
-- **Untrusted text.** Rules are written by admins and project leads but land in every session agent's context:
-  bounded, delimited, framed as data, shown in the web as plain text only, never executed or interpolated into SQL or
-  HTML.
+- **Untrusted text.** Rules are written by admins and project leads, who need not own the devices nor write to the
+  repository, yet would land in other people's session agents: bounded, delimited, framed as data, shown in the web as
+  plain text only, never executed or interpolated into SQL or HTML.
+- **Never in a Full access turn.** Framing in a tool description is not a boundary, so the API sends
+  `sessionTools.namingRules: null` (the tool keeps a fixed, rule-free description) whenever the command's turn mode
+  or the session's mode is `fullAccess`, where a step a rule asks for would run without any approval
+  (`prepareSessionTools`). The rules are also sent only beside the tool: `rename: false` (a person typed the title)
+  always comes with `namingRules: null`. The title call is unchanged and keeps the rules in every mode (no tools,
+  ephemeral, output normalized), so automatic titles still follow them; an agent rename in a Full access session
+  follows only the generated-title shape.
 - **Staleness.** Titles pick a rule change up at the next title call; Claude Code re-registers the server between
   turns when the rules differ; **a running Codex app-server sees a new rule only at its next start** (a wake-up, an
   account switch or an offered change).

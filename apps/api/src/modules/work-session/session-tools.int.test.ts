@@ -169,14 +169,6 @@ describe("the session tool grant on start and prompt frames (D-07, PD-10)", () =
     expect(await storedPayload(p.id)).not.toHaveProperty("sessionTools");
     await finish(id, p);
 
-    // A person's title turns the tool off for the next turn.
-    expect((await pia.request("PATCH", `/api/v1/work-sessions/${id}`, { title: "Pia's name" })).status).toBe(
-      200,
-    );
-    p = await prompt(id);
-    expect(grantOf(p)).toEqual({ rename: false, namingRules: both });
-    await finish(id, p);
-
     // A new project rule reaches the next prompt.
     expect(
       (await admin.request("PATCH", `/api/v1/work-projects/${atlasUnit}`, { namingRule: "Name the ticket" }))
@@ -184,6 +176,15 @@ describe("the session tool grant on start and prompt frames (D-07, PD-10)", () =
     ).toBe(200);
     p = await prompt(id);
     expect(grantOf(p).namingRules).toBe(joinNamingRules(ORG_RULE, "Name the ticket"));
+    await finish(id, p);
+
+    // A person's title turns the tool off for the next turn.
+    expect((await pia.request("PATCH", `/api/v1/work-sessions/${id}`, { title: "Pia's name" })).status).toBe(
+      200,
+    );
+    p = await prompt(id);
+    // CR-01: the rules are shown only beside the rename tool, so none once it is off.
+    expect(grantOf(p)).toEqual({ rename: false, namingRules: null });
 
     // Neither an interrupt nor a settings change nor a diff request carries it.
     device.ack(p.id);
@@ -223,6 +224,50 @@ describe("the session tool grant on start and prompt frames (D-07, PD-10)", () =
     const p = await prompt(id);
     expect(grantOf(p).namingRules).toBe(ORG_RULE);
     await finish(id, p);
+  });
+});
+
+describe("no naming rules in the agent's context while its turn runs in Full access (CR-01)", () => {
+  it("a Full access start and turn get the tool without the rules; the title call keeps them", async () => {
+    device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true);
+    await eventually(async () => {
+      const r = await su.query("select full_access_opt_in from app.devices where id = $1", [deviceId]);
+      return r.rows[0].full_access_opt_in === true;
+    });
+    expect((await admin.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true })).status).toBe(
+      200,
+    );
+    try {
+      const res = await pia.request("POST", "/api/v1/work-sessions", {
+        projectId: atlasRepo,
+        permissionMode: "fullAccess",
+        prompt: "Find why the deploy script hangs on the build server",
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const id = res.body!.id as string;
+      const s = (await device.command("session.start", id)) as Cmd;
+      expect(s.payload.permissionMode).toBe("fullAccess");
+      expect(grantOf(s)).toEqual({ rename: true, namingRules: null });
+      const title = (await device.command("session.title", id)) as Cmd;
+      expect(title.payload.namingRules).toBe(joinNamingRules(ORG_RULE, PROJECT_RULE));
+      device.ack(s.id);
+      device.event(id, {
+        type: "session.started",
+        runtime: "claude-code",
+        runtimeSessionId: `rt-${id}`,
+        permissionMode: "fullAccess",
+      });
+      device.event(id, { type: "session.state", status: "idle" });
+      const p = (await device.command("prompt", id)) as Cmd;
+      expect(p.payload.permissionMode).toBe("fullAccess");
+      expect(grantOf(p)).toEqual({ rename: true, namingRules: null });
+      await finish(id, p);
+    } finally {
+      expect(
+        (await admin.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: false })).status,
+      ).toBe(200);
+      device.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], false);
+    }
   });
 });
 
