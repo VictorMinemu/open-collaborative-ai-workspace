@@ -45,6 +45,7 @@ import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
+import { registerAssignRoutes } from "./assign";
 import { browserApproverRule, openBrowserPages } from "./browser-grant";
 import { loadControlsContext } from "./context";
 import {
@@ -914,6 +915,8 @@ export function registerWorkSessionRoutes(
 
   // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
   registerVisibilityRoutes(app, core, { perms, svc });
+  // Phase 07.13.1.1 (D-03, D-04, D-05): Assign to me on a server, with this route family's audience 404 and device denial.
+  registerAssignRoutes(app, core, { perms, svc, visible, assertDeviceUsable });
 }
 
 /** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */
