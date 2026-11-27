@@ -294,6 +294,31 @@ describe("Assign to me and rename requests (07.13.1.1)", () => {
     expect(qc.getQueryState(wzKeys.session(ID))?.isInvalidated).toBe(false);
   });
 
+  it("the answer keeps the list row's per-viewer fields, also after the shaped `user:` frame (WR-02)", () => {
+    const qc = new QueryClient();
+    const TEAM = { id: "4d4d4d4d-4444-4444-8444-444444444444", name: "Payroll" };
+    const attention = { approval: true, lastTurnEndedAt: "2026-10-22T10:04:00.000Z" };
+    // The shaped `user:` frame landed first, at the same updatedAt as the PATCH answer.
+    qc.setQueryData(
+      wzKeys.sessions,
+      list(session(ID, "2026-10-22T10:05:00.000Z", { title: "New title", teamProject: TEAM, attention })),
+    );
+    renameSessionOptions(qc, ID).onSuccess(session(ID, "2026-10-22T10:05:00.000Z", { title: "New title" }));
+    let row = qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0];
+    expect(row?.teamProject).toEqual(TEAM);
+    expect(row?.attention).toEqual(attention);
+    assignSessionOptions(qc, ID).onSuccess({
+      session: session(ID, "2026-10-22T10:06:00.000Z", { createdBy: B }),
+      removedCount: 0,
+      cancelledPrompts: 0,
+      settingsDowngraded: false,
+    });
+    row = qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0];
+    expect(row?.createdBy).toBe(B);
+    expect(row?.teamProject).toEqual(TEAM);
+    expect(row?.attention).toEqual(attention);
+  });
+
   it("an older answer never replaces a newer row in the list", () => {
     const qc = new QueryClient();
     qc.setQueryData(wzKeys.sessions, list(session(ID, "2026-10-22T10:10:00.000Z", { title: "Newer" })));

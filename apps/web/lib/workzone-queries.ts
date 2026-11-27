@@ -282,11 +282,17 @@ export function useAssignPreview(sessionId: string, enabled: boolean) {
   return useQuery(assignPreviewOptions(sessionId, enabled));
 }
 
-/** Puts a session the API answered with into the session list (the newer copy wins, as with the `user:` frames). */
+/**
+ * Puts a session the API answered with into the session list (the newer copy wins, as with the `user:` frames). The
+ * answer is the unshaped DTO (no `teamProject`, `teamProjectHidden` or `attention`), so the row keeps the per-viewer
+ * fields it already has (07.13.1.1 WR-02): otherwise a team-project session would leave its group in the sidebar.
+ */
 function upsertListSession(qc: QueryClient, session: WorkSession): void {
-  qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) =>
-    applySessionFrame(old, { type: EventTypes.workSessionUpdated, data: session }),
-  );
+  qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) => {
+    const prev = old?.sessions.find((s) => s.id === session.id);
+    const data = prev ? mergeSessionSnapshot(prev, session) : session;
+    return applySessionFrame(old, { type: EventTypes.workSessionUpdated, data });
+  });
 }
 
 /**
