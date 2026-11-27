@@ -28,6 +28,7 @@ let orgId: string;
 let admin: TestClient;
 let pia: TestClient;
 let piaId: string;
+let anaId: string;
 let pias: FakeDevice;
 let piasId: string;
 let anas: FakeDevice;
@@ -122,7 +123,9 @@ beforeAll(async () => {
   expect(setup.status, JSON.stringify(setup.body)).toBe(200);
   orgId = (setup.body!.organization as Json).id as string;
   ({ client: pia, userId: piaId } = await invite(stack, admin, "pia@example.test", "Pia Paz", "developer"));
-  const { client: ana } = await invite(stack, admin, "ana@example.test", "Ana Alvarez", "developer");
+  const anaInvite = await invite(stack, admin, "ana@example.test", "Ana Alvarez", "developer");
+  const ana = anaInvite.client;
+  anaId = anaInvite.userId;
 
   const paired = await pairDevice(stack, pia, "Pia's Mac");
   piasId = paired.deviceId;
@@ -305,5 +308,19 @@ describe("refused renames change nothing (D-07, PD-11, T-07.13.1.1-03-01)", () =
     expect(await sessionRow(id)).toEqual(before);
     expect(await renamedAudits(id)).toEqual([]);
     expect(await rename(pias, id, promptId, TITLE)).toEqual({ ok: true, title: TITLE });
+  });
+
+  it("IN-02: a turn whose author no longer reads the session cannot rename it", async () => {
+    const id = await started();
+    const promptId = await inFlight(id, true);
+    // The turn keeps running (no cut turn, D-05) while its author is outside the audience: Ana, who reads nothing
+    // of Pia's owner-only session, stands in for an author an Assign to me or an audience change removed.
+    await su.query("update app.work_prompts set author_user_id = $2 where id = $1", [promptId, anaId]);
+    const before = await sessionRow(id);
+    expect(await refused(pias, id, promptId)).toBe("not_available");
+    expect(await sessionRow(id)).toEqual(before);
+    expect(await renamedAudits(id)).toEqual([]);
+    const claim = await su.query("select title_renamed_at from app.work_prompts where id = $1", [promptId]);
+    expect(claim.rows[0].title_renamed_at).toBeNull();
   });
 });

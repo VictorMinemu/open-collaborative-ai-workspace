@@ -14,7 +14,9 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict } from "../../lib/errors";
 import type { AuditService } from "../audit";
 import type { DeviceRef, SendResult } from "../device";
+import type { PermissionService } from "../organization";
 import { ACTIVE_STATES, IN_FLIGHT, type SessionRow, type WorkSessionService } from "./service";
+import { stillReading } from "./visibility";
 
 /**
  * Renaming a Work Zone session (Phase 07.13.1.1, D-06, D-14, PD-07). A person's typed title is `titleSource = 'user'`
@@ -136,7 +138,7 @@ type RenameDecision = SessionRenameResultFrame["result"];
  * calling `ocw_session` › `rename`. Decided in the tenant of the device the link authenticated (never an organization
  * the frame names), under the session's lock, in this order: the session is this device's (else `not_available`, the
  * same answer as another organization's id, which RLS hides), it is active and the named prompt of this session is in
- * flight (else `no_turn`), a person did not type the title (`title_locked`), the title has the generated-title shape
+ * flight (else `no_turn`), its author still reads the session (else `not_available`, IN-02), a person did not type the title (`title_locked`), the title has the generated-title shape
  * (`invalid_title`, which does not use up the turn), the turn has not renamed yet (claimed once in
  * `work_prompts.title_renamed_at`, else `already_renamed`). Then `applyTitle` with `auto`: a late device title (which
  * replaces only `heuristic`) never overwrites it, and the agent may rename again in a later turn.
@@ -147,6 +149,7 @@ type RenameDecision = SessionRenameResultFrame["result"];
 export function createSessionToolHandler(
   core: Core,
   svc: WorkSessionService,
+  perms: PermissionService,
 ): {
   onSessionRename(
     device: DeviceRef,
@@ -159,7 +162,7 @@ export function createSessionToolHandler(
       let result: RenameDecision;
       try {
         result = await core.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
-          decideAgentRename(tx, core, svc, device, frame),
+          decideAgentRename(tx, core, svc, perms, device, frame),
         );
       } catch (err) {
         core.log.warn(
@@ -184,6 +187,7 @@ async function decideAgentRename(
   tx: Tx,
   core: Core,
   svc: WorkSessionService,
+  perms: PermissionService,
   device: DeviceRef,
   frame: SessionRenameFrame,
 ): Promise<RenameDecision> {
@@ -200,6 +204,11 @@ async function decideAgentRename(
     .from(workPrompts)
     .where(and(eq(workPrompts.id, frame.promptId), eq(workPrompts.workSessionId, s.id)));
   if (!prompt || !IN_FLIGHT.includes(prompt.status)) return refuse("no_turn");
+  // IN-02: a turn keeps running after its author lost the session (no cut turn, D-05), but it no longer speaks for
+  // them: an author outside the audience (an Assign to me, an audience change) never renames someone else's session.
+  if (!(await stillReading(tx, perms, s, [prompt.authorUserId])).has(prompt.authorUserId)) {
+    return refuse("not_available");
+  }
   if (s.titleSource === "user") return refuse("title_locked");
   if (!SessionTitle.safeParse(frame.title).success) return refuse("invalid_title");
   const claimed = await tx
