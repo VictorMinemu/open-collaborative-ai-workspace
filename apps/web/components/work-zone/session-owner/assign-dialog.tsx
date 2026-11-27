@@ -36,6 +36,8 @@ export const ASSIGN_DIALOG_COPY = {
   title: (title: string) => `Take over “${title}”?`,
   becomesYours: "It becomes yours: you control it, it is shared as your session and it moves to your list.",
   history: (previous: string) => `${previous} stays in its history as the previous owner.`,
+  /** IN-08 (ADR-0047 § 3): the owner's consent and proposal right over the memory summary move too. */
+  memory: "Its project memory summary then follows your preference, and only you can propose it.",
   previousLosesAccess: (previous: string) => `${previous} will lose access to this session.`,
   othersLoseAccess: (n: number) =>
     n === 1 ? "1 other person will lose access." : `${n} other people will lose access.`,
@@ -160,7 +162,8 @@ export function AssignPreviewBody({
       <DialogDescription render={<div />} className="grid gap-3">
         <p>
           <span className="sr-only">{title}. </span>
-          {ASSIGN_DIALOG_COPY.becomesYours} {ASSIGN_DIALOG_COPY.history(previousOwnerName)}
+          {ASSIGN_DIALOG_COPY.becomesYours} {ASSIGN_DIALOG_COPY.history(previousOwnerName)}{" "}
+          {ASSIGN_DIALOG_COPY.memory}
         </p>
         {warnings.length > 0 ? (
           <ul className="grid gap-2 rounded-lg border bg-muted/40 px-3 py-2.5 text-foreground">

@@ -96,6 +96,11 @@ the transfer.
   see. The arbiter `tryDispatch` is unchanged.
 - **The previous owner is not re-added.** On an `owner` session they lose access unless they own the device; on a
   `people` session they lose it unless they are listed. The confirm dialog says so before the transfer.
+- **The memory summary follows the owner.** The team-project memory summary of the session (ADR-0028) is decided by
+  the owner's consent (their button or automatic preference) and proposed, and paid for, only by the owner. After a
+  transfer that is the new owner, for the previous owner's turns too: the previous owner loses the say over whether
+  their earlier work is summarized. Accepted as the simplest rule (one owner, one decision); the confirm dialog says
+  so ("Its project memory summary then follows your preference, and only you can propose it.").
 - **Next turns run as their author**, as before: each prompt is decided for whoever wrote it at dispatch. Pool
   accounts, sign-ins on the server and the device's own state do not depend on the owner, so the device is told
   nothing else.

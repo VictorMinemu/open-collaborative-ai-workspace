@@ -60,6 +60,16 @@ describe("AssignPreviewBody (D-03, D-13, D-15)", () => {
     expect(ASSIGN_DIALOG_COPY.title("Fix the login page")).toBe("Take over “Fix the login page”?");
   });
 
+  it("IN-08: says the project memory summary follows the new owner's preference", () => {
+    expect(ASSIGN_DIALOG_COPY.memory).toBe(
+      "Its project memory summary then follows your preference, and only you can propose it.",
+    );
+    expect(text(body(preview()))).toContain(ASSIGN_DIALOG_COPY.memory);
+    expect(text(body(preview({ allowed: false, reason: "not_on_server" })))).not.toContain(
+      ASSIGN_DIALOG_COPY.memory,
+    );
+  });
+
   it("lists every consequence the preview reports, and the Assign to me button", () => {
     const markup = body(
       preview({
