@@ -206,15 +206,23 @@ export function codexSessionToolArgs(
   return overrides.flatMap((o) => ["-c", o]);
 }
 
-/** The shim of the running daemon: this process's interpreter and entry, and its OCW home. */
-function defaultBrowserShim(): CodexBrowserShim {
+/**
+ * The shims of the running daemon: this process's interpreter and entry, and the daemon's OCW home `home` (07.13.1.1
+ * IN-07: the home its relays write the shim tokens under, which may differ from the process env's).
+ */
+export function codexShimFor(home: string): CodexBrowserShim {
   const browsersDir = process.env.OCW_BROWSERS_DIR?.trim();
   return {
     command: process.execPath,
     entry: process.argv[1] ? [process.argv[1]] : [],
-    home: ocwHome(process.env),
+    home,
     ...(browsersDir ? { browsersDir } : {}),
   };
+}
+
+/** Without a daemon's home (a runtime built on its own): the process env's OCW home. */
+function defaultBrowserShim(): CodexBrowserShim {
+  return codexShimFor(ocwHome(process.env));
 }
 
 /** The answers that let our own tool run: an allow-like option, else the first one; free-text questions get none. */

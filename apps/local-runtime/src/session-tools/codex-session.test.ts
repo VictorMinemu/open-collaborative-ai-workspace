@@ -24,7 +24,7 @@ import {
 } from "../codex/codex-runtime.js";
 import type { JsonRpcNotification } from "../codex/jsonrpc.js";
 import { CodexEventMapper } from "../codex/mapper.js";
-import { Daemon } from "../daemon.js";
+import { Daemon, type RuntimeFactoryContext } from "../daemon.js";
 import { silentLogger } from "../logger.js";
 import type { SessionToolsHandle } from "../runtime.js";
 import { sanitizeEvent } from "../sanitize.js";
@@ -490,6 +490,31 @@ describe("CodexEventMapper: ocw_session calls (the synthetic 0.172.0 fixture)", 
     expect(unknown).toEqual([
       { type: "tool.started", toolUseId: "c2", name: "ocw_session", summary: "Renaming the session" },
     ]);
+  });
+});
+
+describe("the Codex shims run under the daemon's own OCW home (07.13.1.1 IN-07)", () => {
+  it("a daemon with a home other than the env's hands its runtimes a shim on that home", async () => {
+    const home = scratch("ocw-in07-");
+    let ctx: RuntimeFactoryContext | null = null;
+    await Daemon.create({
+      home,
+      env: { CODEX_HOME: join(home, "codex-default"), OCW_HOME: join(home, "not-this-one") },
+      token: null,
+      config: { serverUrl: "http://127.0.0.1:9" },
+      runtimes: (_allow, c) => {
+        ctx = c;
+        return [];
+      },
+      logger: silentLogger,
+      controlSocket: false,
+    });
+    const shim = (ctx as RuntimeFactoryContext | null)?.codexShim;
+    expect(shim?.home).toBe(home);
+    expect(shim?.command).toBe(process.execPath);
+    // The shim's OCW_HOME is the home the relay writes its tokens under.
+    const args = codexSessionToolArgs(shim!, { sessionId: SID, tokenFile: join(home, "run", "t") });
+    expect(args[5]).toContain(`OCW_HOME=${JSON.stringify(home)}`);
   });
 });
 

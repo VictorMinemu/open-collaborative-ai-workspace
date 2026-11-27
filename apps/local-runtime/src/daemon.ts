@@ -96,7 +96,12 @@ import { sweepRunDirs } from "./browser/child.js";
 import { browsersRoot } from "./browser/install.js";
 import { BrowserManager, type BrowserManagerOptions } from "./browser/manager.js";
 import { ClaudeCodeRuntime } from "./claude/claude-runtime.js";
-import { CodexRuntime, type SpawnAppServer } from "./codex/codex-runtime.js";
+import {
+  type CodexBrowserShim,
+  CodexRuntime,
+  codexShimFor,
+  type SpawnAppServer,
+} from "./codex/codex-runtime.js";
 import {
   type BrowserOptInSource,
   type BrowserSandboxMode,
@@ -317,6 +322,11 @@ export interface RuntimeFactoryContext {
    * the device's own Codex login is signed out, to collect its model catalog under that slot (no turn).
    */
   codexCatalogHome: () => Promise<string | null>;
+  /**
+   * 07.13.1.1 (IN-07): where the Codex `browser-mcp` / `session-mcp` shims run from, on this daemon's OCW home (the
+   * home the browser manager and the session tool relay write the shims' tokens under).
+   */
+  codexShim: CodexBrowserShim;
 }
 
 /**
@@ -679,7 +689,10 @@ export class Daemon {
     if (fake) log.warn("OCW_RUNTIME_FAKE=1: using the fake runtime (tests/demos only, no model is called)");
     const delay = env.OCW_RUNTIME_FAKE_DELAY_MS ? Number(env.OCW_RUNTIME_FAKE_DELAY_MS) : undefined;
     const codexSlots = new CodexSlotStore(home, env);
-    const ctx: RuntimeFactoryContext = { codexCatalogHome: () => firstSignedInSlotHome(codexSlots) };
+    const ctx: RuntimeFactoryContext = {
+      codexCatalogHome: () => firstSignedInSlotHome(codexSlots),
+      codexShim: codexShimFor(home),
+    };
     const runtimes = (typeof opts.runtimes === "function"
       ? opts.runtimes(allowFullAccess, ctx)
       : opts.runtimes) ??
@@ -700,6 +713,7 @@ export class Daemon {
           useApiKey: config.codex.useApiKey,
           allowFullAccess,
           catalogHome: ctx.codexCatalogHome,
+          browserShim: ctx.codexShim,
           ...(config.codex.path ? { codexPath: config.codex.path } : {}),
         }),
       ];
