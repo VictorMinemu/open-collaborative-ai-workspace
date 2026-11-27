@@ -35,12 +35,14 @@ export function OwnerChip({ ownerId, name, avatarUrl, className }: OwnerProps) {
         aria-label={label}
         data-testid="session-owner"
         className={cn(
-          "inline-flex h-8 min-w-0 max-w-[9rem] shrink items-center gap-1.5 rounded-lg border px-2 text-[12px] text-muted-foreground",
+          "inline-flex h-8 min-w-0 max-w-[9rem] shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[12px] text-muted-foreground",
+          // 768-1023: avatar only (the row is full there, as for the account chip); the tooltip keeps the name.
+          "max-lg:w-8 max-lg:justify-center max-lg:px-0",
           className,
         )}
       >
         <UserAvatar name={full} src={avatarUrl} seed={ownerId} className="size-5 [&_span]:text-[9px]" />
-        <span aria-hidden className="truncate">
+        <span aria-hidden className="truncate max-lg:hidden">
           {name ? firstName(name) : "Former member"}
         </span>
       </span>
