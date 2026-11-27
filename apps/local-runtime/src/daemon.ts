@@ -2401,6 +2401,11 @@ export class Daemon {
       // 07.13 (PD-08): the Codex shim's tool call; the manager checks the session's token, then decides it.
       case "browserCall":
         return this.browser.shimCall(req);
+      // 07.13.1.1 (PD-08): the Codex `ocw_session` shim; the relay checks the session's token, then decides the call.
+      case "sessionToolList":
+        return this.sessionTools.shimList(req);
+      case "sessionToolCall":
+        return this.sessionTools.shimCall(req);
       // 07.13.1 (D-07): the desktop app's restart hold; local only, never logged, no host data in or out.
       case "appUpdateHold":
         return this.appHold.hold({ drain: req.drain });

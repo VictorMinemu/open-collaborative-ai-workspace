@@ -4,7 +4,7 @@
 import { chmod, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { isAbsolute, join } from "node:path";
-import { RuntimeId, WorkBrowserTool } from "@ocw/contracts";
+import { RuntimeId, WorkBrowserTool, WorkSessionTool } from "@ocw/contracts";
 import { z } from "zod";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
@@ -108,6 +108,36 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
       session: z.uuid(),
       token: z.string().regex(/^[0-9a-f]{64}$/),
       tool: WorkBrowserTool,
+      args: z.unknown(),
+    })
+    .strict(),
+  /**
+   * 07.13.1.1 (D-07, PD-08): the Codex `ocw_session` shim (`ocw-runtime session-mcp`) asks for its tool list before it
+   * serves (the rename tool's description, naming rules included). Local only (never reachable from the server).
+   * `token` is the session's 256-bit token from its 0600 `<ocwHome>/run/sessions/<session>/shim-token`: it binds a shim
+   * to its own session, and is not a boundary against other processes of the same OS user (Pitfall 5, ADR-0035).
+   * Carries no host data; strict, so no other key is taken.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("sessionToolList"),
+      session: z.uuid(),
+      token: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .strict(),
+  /**
+   * 07.13.1.1 (D-07, PD-08): one `ocw_session` tool call from the Codex shim, with the same token. The session's relay
+   * checks the token, then decides the call exactly as it decides a Claude call (turn, grant, once per turn, the title's
+   * shape, the API). Local only; no host data; strict, `rename` only.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("sessionToolCall"),
+      session: z.uuid(),
+      token: z.string().regex(/^[0-9a-f]{64}$/),
+      tool: WorkSessionTool,
       args: z.unknown(),
     })
     .strict(),
