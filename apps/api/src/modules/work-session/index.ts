@@ -26,6 +26,7 @@ import {
   type WorkZoneProposalService,
   workZoneStartKind,
 } from "./proposals";
+import { createSessionToolHandler } from "./rename";
 import { revokeCauseOf } from "./revoke-cause";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
@@ -180,6 +181,8 @@ export function createWorkSessionModule(
     serverFileMaxBytes: serverFileMaxBytes(core.env),
   });
   hub.setSessionHandler(service);
+  // 07.13.1.1 (D-07, PD-09): the session agent's rename (`session.rename`) is decided here, answered on its socket only.
+  hub.setSessionToolHandler(createSessionToolHandler(core, service));
   // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.
   hub.setRuntimePolicySource(async (tx) => (await loadWorkZonePolicy(tx)).runtimeUpdates);
 
