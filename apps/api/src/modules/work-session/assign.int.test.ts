@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
+  AssignPreview,
   AssignWorkSessionResult,
   type RuntimeCatalog,
   WS_AUTH_PROTOCOL_PREFIX,
   WS_PROTOCOL,
 } from "@ocw/contracts";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
@@ -17,6 +18,7 @@ import {
   invite,
   linkRepo,
   pairDevice,
+  setAudience,
   settled,
   shareDevice,
   startSession,
@@ -89,6 +91,7 @@ async function fails(res: Promise<Res>, status: number) {
 }
 
 const assign = (as: TestClient, id: string) => as.request("POST", `/api/v1/work-sessions/${id}/assign`);
+const preview = (as: TestClient, id: string) => as.request("GET", `/api/v1/work-sessions/${id}/assign`);
 const _preview = (as: TestClient, id: string) => as.request("GET", `/api/v1/work-sessions/${id}/assign`);
 
 const audits = async (action: string, resourceId: string) =>
@@ -102,6 +105,23 @@ const audits = async (action: string, resourceId: string) =>
 const ownerOf = async (id: string) =>
   (await su.query("select created_by from app.work_sessions where id = $1", [id])).rows[0]
     .created_by as string;
+
+const prompt = async (as: TestClient, id: string, body: string) =>
+  (await ok(as.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body }))).id as string;
+
+const promptStatus = async (id: string) =>
+  (await su.query("select status from app.work_prompts where id = $1", [id])).rows[0].status as string;
+
+const commandsOf = async (sessionId: string, kind: string) =>
+  (
+    await su.query(
+      "select payload from app.device_commands where work_session_id = $1 and kind = $2 order by created_at",
+      [sessionId, kind],
+    )
+  ).rows.map((r) => r.payload as Json);
+
+const statusOf = async (id: string) =>
+  (await su.query("select status from app.work_sessions where id = $1", [id])).rows[0].status as string;
 
 const streamCount = async (topic: string) =>
   (await su.query("select count(*)::int as n from app.stream_events where stream_id = $1", [topic])).rows[0]
@@ -195,6 +215,8 @@ async function moveToOrgB(userId: string) {
 }
 
 beforeAll(async () => {
+  // A closed server goes offline at once (its queued prompts then wait), not after the production grace.
+  process.env.OCW_DEVICE_OFFLINE_GRACE_MS = "300";
   stack = await startTestStack();
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
@@ -260,6 +282,7 @@ afterAll(async () => {
     await su?.end();
   } finally {
     await stack?.stop();
+    delete process.env.OCW_DEVICE_OFFLINE_GRACE_MS;
   }
 });
 
@@ -398,5 +421,230 @@ describe("refusals (D-04, D-05, D-12): decided by the API, nothing written", () 
     expect(await Promise.all(all.map(ownerOf))).toEqual(ownersBefore);
     expect(await Promise.all(all.map((id) => streamCount(`ws:${id}`)))).toEqual(streamsBefore);
     for (const id of all) expect(await audits("work_session.assigned", id)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: no cut turn, cancellations, the preview
+
+describe("the takeover never cuts a turn (D-05, D-13, PD-03)", () => {
+  it("a running Full access turn by Pia finishes; the settings drop to Ana's cap between turns; Pia's queued prompt stays", async () => {
+    const id = await startSession(pia, srv.device, srv.repo.checkout!, {
+      title: "Migrate billing",
+      permissionMode: "fullAccess",
+    });
+    const running = await prompt(pia, id, "run the migration");
+    const cmd = await srv.device.command("prompt", id);
+    srv.device.ack(cmd.id as string);
+    srv.device.event(id, { type: "prompt.started", promptId: running });
+    await eventually(async () => (await promptStatus(running)) === "running");
+    const queued = await prompt(pia, id, "then the backfill");
+    expect(await promptStatus(queued)).toBe("queued");
+
+    const seen = AssignPreview.parse(await ok(preview(ana, id)));
+    expect(seen).toEqual({
+      allowed: true,
+      reason: null,
+      previousOwnerLosesAccess: false,
+      othersLosingAccess: 0,
+      cancelledPrompts: 0,
+      turnRunning: true,
+    });
+
+    const res = AssignWorkSessionResult.parse(await ok(assign(ana, id)));
+    expect(res).toMatchObject({ removedCount: 0, cancelledPrompts: 0, settingsDowngraded: true });
+    expect(res.session.permissionMode).toBe("acceptEdits");
+
+    // The device is told between turns, with the closed reason older daemons parse; never an interrupt.
+    const configure = await srv.device.command("session.configure", id);
+    expect(configure.payload).toEqual({
+      settings: { permissionMode: "acceptEdits" },
+      reason: "access_changed",
+    });
+    expect(await commandsOf(id, "interrupt")).toEqual([]);
+    expect(await promptStatus(running)).toBe("running");
+    expect(await promptStatus(queued)).toBe("queued");
+
+    const [downgraded] = await audits("work_session.settings_downgraded", id);
+    expect(downgraded!.user_id).toBe(anaId);
+    expect(downgraded!.metadata).toMatchObject({ reason: "access_changed", cause: "owner_changed" });
+    const [left] = await audits("work_session.full_access_left", id);
+    expect(left!.metadata).toMatchObject({ from: "fullAccess", to: "acceptEdits", cause: "owner_changed" });
+    expect((await audits("work_session.assigned", id))[0]!.metadata).toMatchObject({
+      settingsDowngraded: true,
+      cancelledPrompts: 0,
+    });
+    expect(await audits("work_prompt.cancelled", queued)).toEqual([]);
+  });
+});
+
+describe("people who lose access by the transfer (D-13, D-15, PD-05)", () => {
+  it("a people audience never re-adds the previous owner", async () => {
+    const id = await startSession(pia, anaSrv.device, anaSrv.repo.notes!, { title: "Notes cleanup" });
+    await setAudience(pia, id, { kind: "people", userIds: [leoId] });
+    const res = AssignWorkSessionResult.parse(await ok(assign(ana, id)));
+    expect(res.removedCount).toBe(1);
+    expect((await pia.request("GET", `/api/v1/work-sessions/${id}`)).status).toBe(404);
+    expect((await ok(leo.request("GET", `/api/v1/work-sessions/${id}`))).session.createdBy).toBe(anaId);
+    const grants = await su.query(
+      "select subject_id from app.work_session_grants where work_session_id = $1 and revoked_at is null",
+      [id],
+    );
+    expect(grants.rows.map((r) => r.subject_id)).toEqual([leoId]);
+  });
+
+  it("an owner-only session on Ana's server: the preview writes nothing; the POST cancels Pia's queued prompts and tells her", async () => {
+    const id = await startSession(pia, anaSrv.device, anaSrv.repo.notes!, { title: "Private notes" });
+    await setAudience(pia, id, { kind: "owner" });
+    const conversationId = (
+      await su.query("select conversation_id from app.work_sessions where id = $1", [id])
+    ).rows[0].conversation_id as string;
+    // The server goes offline: Pia's prompts wait in the queue, nothing runs.
+    await anaSrv.device.close();
+    await eventually(async () => (await statusOf(id)) === "host_offline");
+    const p1 = await prompt(pia, id, "first");
+    const p2 = await prompt(pia, id, "second");
+    expect([await promptStatus(p1), await promptStatus(p2)]).toEqual(["queued", "queued"]);
+
+    // The detail: Ana may take it (she owns the server, so she sees it); Pia already owns it.
+    expect((await ok(ana.request("GET", `/api/v1/work-sessions/${id}`))).assign).toEqual({
+      allowed: true,
+      reason: null,
+    });
+    expect((await ok(pia.request("GET", `/api/v1/work-sessions/${id}`))).assign).toEqual({
+      allowed: false,
+      reason: "already_owner",
+    });
+
+    const piaSock = await openSocket(pia);
+    await piaSock.sub(`user:${piaId}`);
+    await settled(stack, orgId);
+    const snapshot = async () => ({
+      owner: await ownerOf(id),
+      audits: (await su.query("select count(*)::int as n from app.audit_events")).rows[0].n,
+      prompts: (
+        await su.query("select id, status from app.work_prompts where work_session_id = $1 order by id", [id])
+      ).rows,
+      commands: (await su.query("select count(*)::int as n from app.device_commands")).rows[0].n,
+      notifications: (await su.query("select count(*)::int as n from app.notifications")).rows[0].n,
+      seqs: (
+        await su.query("select id, last_seq from app.streams where id = any($1::text[]) order by id", [
+          [`ws:${id}`, `user:${anaId}`, `user:${piaId}`],
+        ])
+      ).rows,
+      members: (
+        await su.query(
+          "select member_id, role from app.conversation_members where conversation_id = $1 order by member_id",
+          [conversationId],
+        )
+      ).rows,
+    });
+    const before = await snapshot();
+    const core = stack.built.core;
+    const spies = [
+      vi.spyOn(core.realtime, "appendEvent"),
+      vi.spyOn(core.realtime, "publishEphemeral"),
+      vi.spyOn(stack.built.deviceHub, "enqueue"),
+      vi.spyOn(core.chatEvents, "messagePosted"),
+    ];
+    try {
+      const seen = AssignPreview.parse(await ok(preview(ana, id)));
+      expect(seen).toEqual({
+        allowed: true,
+        reason: null,
+        previousOwnerLosesAccess: true,
+        othersLosingAccess: 0,
+        cancelledPrompts: 2,
+        turnRunning: false,
+      });
+      await settled(stack, orgId);
+      expect(spies.map((x) => x.mock.calls.length)).toEqual([0, 0, 0, 0]);
+      expect(await snapshot()).toEqual(before);
+
+      const res = AssignWorkSessionResult.parse(await ok(assign(ana, id)));
+      expect(res).toMatchObject({ removedCount: 1, cancelledPrompts: 2, settingsDowngraded: false });
+      await settled(stack, orgId);
+      // The same spies see the POST's side effects (they are wired to what the routes call).
+      expect(spies[0]!.mock.calls.length).toBeGreaterThan(0);
+      expect(spies[1]!.mock.calls.length).toBeGreaterThan(0);
+    } finally {
+      for (const x of spies) x.mockRestore();
+    }
+
+    expect([await promptStatus(p1), await promptStatus(p2)]).toEqual(["cancelled", "cancelled"]);
+    expect((await audits("work_prompt.cancelled", p1)).map((r) => r.metadata)).toEqual([
+      { promptId: p1, authorUserId: piaId, cancelledBy: anaId, cause: "owner_changed" },
+    ]);
+    expect((await audits("work_prompt.cancelled", p2)).map((r) => r.user_id)).toEqual([anaId]);
+    expect((await audits("work_session.assigned", id))[0]!.metadata).toEqual({
+      from: piaId,
+      to: anaId,
+      visibility: "owner",
+      hostKind: "service",
+      deviceOwnerId: anaId,
+      removedCount: 1,
+      cancelledPrompts: 2,
+      settingsDowngraded: false,
+    });
+
+    // Pia lost it: the 404 of a missing session, told on her own topic.
+    expect((await pia.request("GET", `/api/v1/work-sessions/${id}`)).status).toBe(404);
+    const removed = await waitFor(() =>
+      piaSock.frames.find((f) => f.op === "eph" && f.type === "work_session.removed"),
+    );
+    expect(removed.data).toEqual({ id });
+    // The conversation follows the owner.
+    const members = (
+      await su.query(
+        "select member_id, role from app.conversation_members where conversation_id = $1 and member_kind = 'user'",
+        [conversationId],
+      )
+    ).rows as Array<{ member_id: string; role: string }>;
+    expect(Object.fromEntries(members.map((m) => [m.member_id, m.role]))).toEqual({
+      [anaId]: "owner",
+      [piaId]: "member",
+    });
+  });
+});
+
+describe("what the views read (PD-14)", () => {
+  it("the detail says whether this viewer may assign; every DTO names its device's host kind; the preview refuses as the POST", async () => {
+    const onServer = await startSession(pia, srv.device, srv.repo.checkout!, { title: "Server view" });
+    const onLaptop = await startSession(ana, laptop.device, laptop.repo.scratch!, { title: "Laptop view" });
+    const onLegacy = await startSession(ana, legacy.device, legacy.repo.legacy!, { title: "Legacy view" });
+
+    expect((await ok(ana.request("GET", `/api/v1/work-sessions/${onServer}`))).assign).toEqual({
+      allowed: true,
+      reason: null,
+    });
+    expect((await ok(leo.request("GET", `/api/v1/work-sessions/${onServer}`))).assign).toEqual({
+      allowed: false,
+      reason: "device_not_shared",
+    });
+    expect((await ok(pia.request("GET", `/api/v1/work-sessions/${onLaptop}`))).assign).toEqual({
+      allowed: false,
+      reason: "not_on_server",
+    });
+    expect((await ok(pia.request("GET", `/api/v1/work-sessions/${onLegacy}`))).assign).toEqual({
+      allowed: false,
+      reason: "not_on_server",
+    });
+
+    expect(AssignPreview.parse(await ok(preview(pia, onLaptop)))).toEqual({
+      allowed: false,
+      reason: "not_on_server",
+      previousOwnerLosesAccess: false,
+      othersLosingAccess: 0,
+      cancelledPrompts: 0,
+      turnRunning: false,
+    });
+    await fails(preview(olga, onServer), 404);
+    await fails(preview(eve, onServer), 404);
+
+    const list = (await ok(pia.request("GET", "/api/v1/work-sessions"))).sessions as Json[];
+    const kinds = Object.fromEntries(list.map((s) => [s.id as string, s.deviceHostKind]));
+    expect(kinds[onServer]).toBe("service");
+    expect(kinds[onLaptop]).toBe("desktop");
+    expect(kinds[onLegacy]).toBeNull();
+    for (const s of list) expect(s).toHaveProperty("deviceHostKind");
   });
 });

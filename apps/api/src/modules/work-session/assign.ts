@@ -1,20 +1,21 @@
 import {
   ASSIGN_REFUSAL_TEXT,
+  AssignPreview,
   type AssignRefusal,
   AssignWorkSessionResult,
   EventTypes,
   type SessionEvent,
   type WorkSessionAssign,
 } from "@ocw/contracts";
-import { devices, type Tx, workSessions } from "@ocw/db";
-import { eq, sql } from "drizzle-orm";
+import { conversationMembers, devices, type Tx, withSavepoint, workPrompts, workSessions } from "@ocw/db";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, forbidden } from "../../lib/errors";
 import { type DeviceAccess, deviceFacts, loadDeviceAccess } from "../device";
 import type { PermissionService, ResourceFacts } from "../organization";
-import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
+import { IN_FLIGHT, type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { readers, stillReading } from "./visibility";
 
 /**
@@ -95,12 +96,16 @@ export interface Transfer {
   from: string;
   /** People who read the session before and no longer do (the previous owner included when they lose it). */
   removed: string[];
+  /** The queued prompts those people wrote (ids only; the POST cancels them, D-13, PD-05). */
+  removedPrompts: string[];
+  /** A turn is in flight (it finishes; never cut, D-05). */
+  turnRunning: boolean;
 }
 
 /**
- * The transfer itself: the readers before, the one UPDATE of `created_by`, the readers after. Writes nothing but
- * `work_sessions` (no service, realtime, hub, audit or notification dependency), so a savepoint that is rolled back
- * leaves no trace of it.
+ * The transfer itself: the readers before, the one UPDATE of `created_by`, the readers after, and what that means for
+ * the queue (read, never changed). Writes nothing but `work_sessions` (no service, realtime, hub, audit or
+ * notification dependency), so a savepoint that is rolled back leaves no trace of it, in the database or in memory.
  */
 export async function computeTransfer(
   tx: Tx,
@@ -116,7 +121,36 @@ export async function computeTransfer(
   const session: SessionRow = { ...s, createdBy: toUserId };
   const still = await stillReading(tx, perms, session, before);
   const removed = before.filter((id) => !still.has(id));
-  return { session, from: s.createdBy, removed };
+  // Pitfall 3: the dispatcher re-checks an author's device cap, not their audience, so the queued prompts of the
+  // people the transfer removes would run in a session they no longer see. A bot's prompt (author_agent_id) is not
+  // a person's and stays (bot sessions are refused anyway).
+  const prompts =
+    removed.length === 0
+      ? []
+      : await tx
+          .select({ id: workPrompts.id })
+          .from(workPrompts)
+          .where(
+            and(
+              eq(workPrompts.workSessionId, s.id),
+              eq(workPrompts.status, "queued"),
+              inArray(workPrompts.authorUserId, removed),
+              isNull(workPrompts.authorAgentId),
+            ),
+          )
+          .orderBy(asc(workPrompts.position), asc(workPrompts.createdAt));
+  const inFlight = await tx
+    .select({ id: workPrompts.id })
+    .from(workPrompts)
+    .where(and(eq(workPrompts.workSessionId, s.id), inArray(workPrompts.status, IN_FLIGHT)))
+    .limit(1);
+  return {
+    session,
+    from: s.createdBy,
+    removed,
+    removedPrompts: prompts.map((p) => p.id),
+    turnRunning: inFlight.length > 0,
+  };
 }
 
 export interface AssignRouteDeps {
@@ -164,6 +198,69 @@ export function registerAssignRoutes(app: App, core: Core, deps: AssignRouteDeps
         const d = check.device!;
         const t = await computeTransfer(tx, perms, s, auth.userId);
 
+        // D-13, PD-05: the queued prompts of the people who lost the session go, each audited, in this transaction.
+        const cancelled =
+          t.removedPrompts.length === 0
+            ? []
+            : await tx
+                .update(workPrompts)
+                .set({ status: "cancelled", completedAt: sql`now()` })
+                .where(and(inArray(workPrompts.id, t.removedPrompts), eq(workPrompts.status, "queued")))
+                .returning();
+        for (const p of cancelled) {
+          await svc.emitPrompt(tx, p);
+          await core.audit.record(tx, {
+            action: "work_prompt.cancelled",
+            resourceType: "work_prompt",
+            resourceId: p.id,
+            sessionId: s.id,
+            deviceId: s.deviceId,
+            clientKind: auth.clientKind,
+            metadata: {
+              promptId: p.id,
+              authorUserId: p.authorUserId,
+              cancelledBy: auth.userId,
+              cause: "owner_changed",
+            },
+          });
+        }
+        // The session's conversation follows its owner (the `joinConversation` shape): new owner `owner`, previous `member`.
+        await tx
+          .insert(conversationMembers)
+          .values(
+            [
+              { userId: auth.userId, role: "owner" as const },
+              { userId: t.from, role: "member" as const },
+            ].map((m) => ({
+              conversationId: s.conversationId,
+              organizationId: s.organizationId,
+              memberKind: "user" as const,
+              memberId: m.userId,
+              role: m.role,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [
+              conversationMembers.conversationId,
+              conversationMembers.memberKind,
+              conversationMembers.memberId,
+            ],
+            set: { role: sql`excluded.role` },
+          });
+        // D-05, PD-03: the settings drop to what the new owner may use on the device, between turns; the running turn
+        // finishes (no interrupt). The wire reason stays `access_changed` (Pitfall 2); the cause is in the audit only.
+        const { downgraded } = await svc.reauthorize(
+          tx,
+          t.session,
+          "access_changed",
+          undefined,
+          auth.userId,
+          {
+            interruptInFlight: false,
+            cause: "owner_changed",
+          },
+        );
+
         await core.audit.record(tx, {
           action: "work_session.assigned",
           resourceType: "work_session",
@@ -179,8 +276,8 @@ export function registerAssignRoutes(app: App, core: Core, deps: AssignRouteDeps
             hostKind: d.hostKind,
             deviceOwnerId: d.ownerUserId,
             removedCount: t.removed.length,
-            cancelledPrompts: 0,
-            settingsDowngraded: false,
+            cancelledPrompts: cancelled.length,
+            settingsDowngraded: downgraded,
           },
         });
         // The timeline line (server-only: a device can never write it), as `account.switched` is written.
@@ -202,8 +299,47 @@ export function registerAssignRoutes(app: App, core: Core, deps: AssignRouteDeps
         return {
           session: session!,
           removedCount: t.removed.length,
-          cancelledPrompts: 0,
-          settingsDowngraded: false,
+          cancelledPrompts: cancelled.length,
+          settingsDowngraded: downgraded,
+        };
+      }),
+  );
+
+  /**
+   * The confirm dialog (D-13, D-15, PD-14): the same decision as the POST and, when allowed, what the POST would do,
+   * from the same `computeTransfer` run in a savepoint that is always rolled back (its after-commit callbacks dropped
+   * with it). Writes nothing; a refusal opens no savepoint.
+   */
+  app.get(
+    "/work-sessions/:id/assign",
+    { ...user, schema: { tags, params: SessionParams, response: { 200: AssignPreview } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        const { s, facts } = await visible(req, tx, req.params.id);
+        const { reason } = await checkAssign(tx, perms, req, s, facts);
+        if (reason !== null) {
+          return {
+            allowed: false,
+            reason,
+            previousOwnerLosesAccess: false,
+            othersLosingAccess: 0,
+            cancelledPrompts: 0,
+            turnRunning: false,
+          };
+        }
+        const t = await withSavepoint(
+          tx,
+          (sp) => computeTransfer(sp, perms, s, userId),
+          () => false,
+        );
+        return {
+          allowed: true,
+          reason: null,
+          previousOwnerLosesAccess: t.removed.includes(t.from),
+          othersLosingAccess: t.removed.filter((id) => id !== t.from).length,
+          cancelledPrompts: t.removedPrompts.length,
+          turnRunning: t.turnRunning,
         };
       }),
   );

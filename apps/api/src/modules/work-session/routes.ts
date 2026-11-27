@@ -45,7 +45,7 @@ import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
-import { registerAssignRoutes } from "./assign";
+import { decideAssign, registerAssignRoutes } from "./assign";
 import { browserApproverRule, openBrowserPages } from "./browser-grant";
 import { loadControlsContext } from "./context";
 import {
@@ -563,7 +563,19 @@ export function registerWorkSessionRoutes(
           })
           .filter((e) => e !== null);
         const origin = await originFor(tx, viewerId, session.id);
-        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin };
+        // 07.13.1.1 (PD-14): per viewer, the cheap decision only (the preview route runs the transfer).
+        const [row] = await tx
+          .select({ startedByAgentId: workSessions.startedByAgentId })
+          .from(workSessions)
+          .where(eq(workSessions.id, found.id));
+        const assign = await decideAssign(
+          tx,
+          perms,
+          req,
+          { ...found, startedByAgentId: row?.startedByAgentId ?? null },
+          facts,
+        );
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin, assign };
       }),
   );
 
