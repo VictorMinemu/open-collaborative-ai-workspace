@@ -209,7 +209,8 @@ function checkReleaseBuild(resources) {
   try {
     const lib = createRequire(require.resolve("electron-builder")).resolve("app-builder-lib");
     const asar = createRequire(lib)("@electron/asar");
-    flags = JSON.parse(asar.extractFile(file, "dist/main/build-flags.json").toString("utf8"));
+    // @electron/asar splits the inner path on the platform's separator: a "/" path is not found on Windows.
+    flags = JSON.parse(asar.extractFile(file, join("dist", "main", "build-flags.json")).toString("utf8"));
   } catch {
     flags = null;
   }
