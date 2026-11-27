@@ -1,6 +1,27 @@
-import { EventTypes, type WorkSession, type WorkSessionList } from "@ocw/contracts";
-import { describe, expect, it } from "vitest";
-import { applySessionFrame, mergeSessionSnapshot, sessionListStale } from "./workzone-queries";
+import {
+  type AssignPreview,
+  type AssignWorkSessionResult,
+  EventTypes,
+  type WorkSession,
+  type WorkSessionDetail,
+  type WorkSessionList,
+} from "@ocw/contracts";
+import { QueryClient } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "./api";
+import {
+  applySessionFrame,
+  assignPreviewOptions,
+  assignSessionOptions,
+  mergeSessionSnapshot,
+  sessionListStale,
+  wzKeys,
+} from "./workzone-queries";
+
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
+  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), put: vi.fn(), del: vi.fn() },
+}));
 
 /**
  * Phase 07.9-07 (D-08, P-08): the session list follows the member's own `user:` topic. The API delivers a session's
@@ -174,5 +195,79 @@ describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-vie
     expect(replaced.attention).toEqual(cleared);
     // The project pair is kept independently of attention.
     expect(replaced.teamProject).toEqual(PROJECT);
+  });
+});
+
+/**
+ * 07.13.1.1-06 (D-03, D-06, PD-02, PD-07): Assign to me and the manual rename go through the API only. The hooks are
+ * thin wrappers over these option builders, so the request and the cache effects are tested without a DOM.
+ */
+describe("Assign to me and rename requests (07.13.1.1)", () => {
+  const ID = A;
+  const get = vi.mocked(api.get);
+  const post = vi.mocked(api.post);
+  const patch = vi.mocked(api.patch);
+  beforeEach(() => {
+    get.mockReset();
+    post.mockReset();
+    patch.mockReset();
+  });
+
+  const detail = (s: WorkSession): WorkSessionDetail => ({
+    session: s,
+    prompts: [],
+    approvals: [],
+    events: [],
+    lastSeq: 4,
+    viewerCan: ["work_session.read"],
+    assign: { allowed: true, reason: null },
+  });
+
+  it("the preview is a GET of /assign under the session's key, never kept fresh", async () => {
+    const preview: AssignPreview = {
+      allowed: true,
+      reason: null,
+      previousOwnerLosesAccess: false,
+      othersLosingAccess: 0,
+      cancelledPrompts: 0,
+      turnRunning: false,
+    };
+    get.mockResolvedValueOnce(preview);
+    const opts = assignPreviewOptions(ID, true);
+    expect(opts.queryKey.slice(0, 3)).toEqual([...wzKeys.session(ID)]);
+    expect(opts.staleTime).toBe(0);
+    expect(opts.enabled).toBe(true);
+    expect(assignPreviewOptions(ID, false).enabled).toBe(false);
+    const signal = new AbortController().signal;
+    await expect(opts.queryFn({ signal })).resolves.toEqual(preview);
+    expect(get).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}/assign`,
+      expect.objectContaining({ signal }),
+    );
+  });
+
+  it("the take-over is one POST of /assign; its success refreshes the session detail and the list", async () => {
+    const qc = new QueryClient();
+    const before = session(ID, "2026-10-22T10:00:00.000Z");
+    qc.setQueryData(wzKeys.session(ID), detail(before));
+    qc.setQueryData(wzKeys.sessions, list(before));
+    const result: AssignWorkSessionResult = {
+      session: session(ID, "2026-10-22T10:05:00.000Z", { createdBy: B, createdByName: "Luis" }),
+      removedCount: 1,
+      cancelledPrompts: 0,
+      settingsDowngraded: false,
+    };
+    post.mockResolvedValueOnce(result);
+    const opts = assignSessionOptions(qc, ID);
+    await expect(opts.mutationFn()).resolves.toEqual(result);
+    expect(post).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}/assign`,
+      expect.objectContaining({ body: {} }),
+    );
+    opts.onSuccess(result);
+    expect(qc.getQueryState(wzKeys.session(ID))?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(wzKeys.sessions)?.isInvalidated).toBe(true);
+    // The list shows the new owner at once; the refetch confirms it.
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.createdBy).toBe(B);
   });
 });

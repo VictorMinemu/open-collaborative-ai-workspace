@@ -5,6 +5,7 @@ import {
   type Permission,
   WORK_PROMPT_MAX_IMAGES,
   type WorkSession,
+  type WorkSessionAssign,
   type WorkSessionBrowserState,
   type WorkSessionChanges,
   type WorkSessionOrigin,
@@ -21,6 +22,7 @@ import {
   MoreHorizontal,
   SearchX,
   SquareArrowOutUpRight,
+  UserRoundCheck,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -34,7 +36,7 @@ import { PresenceStack, usePresentPeople } from "@/components/presence/presence-
 import { PageHeader } from "@/components/shell/page-header";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -59,6 +61,7 @@ import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
 import { SessionMemoryStrip } from "./session-memory-strip";
+import { ASSIGN_DIALOG_COPY, AssignSessionDialog, assignMenuState } from "./session-owner/assign-dialog";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
@@ -247,6 +250,7 @@ function LiveSessionView({ id, onReopen }: { id: string; onReopen: () => void })
       viewerCan={query.data?.viewerCan ?? []}
       leftProject={query.data?.viewerState === "left_project"}
       origin={query.data?.origin ?? null}
+      assign={query.data?.assign}
     />
   );
 }
@@ -322,6 +326,7 @@ function LoadedSession({
   viewerCan,
   leftProject,
   origin,
+  assign,
 }: {
   state: LiveSession;
   viewerCan: readonly Permission[];
@@ -329,6 +334,8 @@ function LoadedSession({
   leftProject: boolean;
   /** 07.16 (D-13): the conversation a bot started this session from, when this viewer reads it. */
   origin: WorkSessionOrigin | null;
+  /** 07.13.1.1 (PD-14): whether this viewer may Assign the session to themselves; absent = an older API. */
+  assign: WorkSessionAssign | undefined;
 }) {
   const session = state.session;
   const devices = useDevices();
@@ -442,6 +449,7 @@ function LoadedSession({
         canArchive={viewerCan.includes("work_session.archive")}
         canChangeVisibility={viewerCan.includes("work_session.visibility")}
         origin={origin}
+        assign={assign}
       />
       <div className="flex min-h-0 flex-1">
         <DropZone
@@ -634,6 +642,7 @@ function SessionHeader({
   canArchive,
   canChangeVisibility,
   origin,
+  assign,
 }: {
   session: WorkSession;
   state: LiveSession;
@@ -647,9 +656,12 @@ function SessionHeader({
   /** The API's `work_session.visibility` on this session (the chip says "Change" rather than "See"). */
   canChangeVisibility: boolean;
   origin: WorkSessionOrigin | null;
+  assign: WorkSessionAssign | undefined;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
+  // The menu's dialogs live outside the menu, so closing the menu never unmounts them.
+  const [dialog, setDialog] = useState<"assign" | null>(null);
   const participants = useMemo(() => {
     const m = new Map<string, string>();
     m.set(session.createdBy, session.createdByName ?? "Owner");
@@ -683,6 +695,9 @@ function SessionHeader({
   // own line, so the 44 px controls never squeeze the title (07.9 polish).
   const md = useMediaQuery("(min-width: 768px)", true);
   const browserOn = session.browser?.status === "available";
+  // 07.13.1.1 (D-04, PD-14): Assign to me, or why not, as the API decided it for this viewer.
+  const assignMenu = assignMenuState({ assign, session }, me);
+  const menuTop = (!md && browserOn) || assignMenu.kind !== "none";
 
   useEffect(() => {
     document.title = `${session.title} · Work Zone`;
@@ -820,7 +835,26 @@ function SessionHeader({
                   <Globe /> Browser
                 </DropdownMenuItem>
               ) : null}
+              {assignMenu.kind === "item" ? (
+                <DropdownMenuItem
+                  data-testid="session-assign"
+                  className="max-md:min-h-11"
+                  onClick={() => setDialog("assign")}
+                >
+                  <UserRoundCheck /> {ASSIGN_DIALOG_COPY.menuItem}
+                </DropdownMenuItem>
+              ) : assignMenu.kind === "reason" ? (
+                // Not a disabled item: one quiet line that says why Assign to me is not offered (D-04).
+                <p
+                  data-testid="session-assign-reason"
+                  className="max-w-64 px-2 py-1.5 text-muted-foreground text-xs leading-snug"
+                >
+                  {assignMenu.text}
+                </p>
+              ) : null}
+              {menuTop ? <DropdownMenuSeparator /> : null}
               <DropdownMenuItem
+                className="max-md:min-h-11"
                 disabled={session.status === "archived" || !canArchive}
                 onClick={() =>
                   archive.mutate(undefined, {
@@ -836,6 +870,13 @@ function SessionHeader({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </Menu.Root>
+          {assignMenu.kind === "item" || dialog === "assign" ? (
+            <AssignSessionDialog
+              session={session}
+              open={dialog === "assign"}
+              onOpenChange={(o) => setDialog(o ? "assign" : null)}
+            />
+          ) : null}
         </div>
       </div>
       {md ? null : title}
