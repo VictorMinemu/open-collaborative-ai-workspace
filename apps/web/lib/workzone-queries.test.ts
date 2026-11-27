@@ -177,6 +177,14 @@ describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-vie
     expect("teamProjectHidden" in named).toBe(false);
   });
 
+  it("keeps the viewer's canRename across a ws: snapshot; a snapshot that carries it wins (WR-03)", () => {
+    const mine = session(A, prev.updatedAt, { canRename: true });
+    expect(mergeSessionSnapshot(mine, session(A, "2026-10-22T10:05:00.000Z")).canRename).toBe(true);
+    expect(
+      mergeSessionSnapshot(mine, session(A, "2026-10-22T10:05:00.000Z", { canRename: false })).canRename,
+    ).toBe(false);
+  });
+
   it("a session without the fields stays without them", () => {
     const bare = session(A, prev.updatedAt);
     const merged = mergeSessionSnapshot(bare, session(A, "2026-10-22T10:05:00.000Z"));

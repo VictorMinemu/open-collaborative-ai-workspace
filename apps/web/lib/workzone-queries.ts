@@ -394,6 +394,7 @@ export function mergeSessionSnapshot(prev: WorkSession, next: WorkSession): Work
     if ("teamProjectHidden" in prev) out.teamProjectHidden = prev.teamProjectHidden;
   }
   if (!("attention" in next) && "attention" in prev) out.attention = prev.attention;
+  if (!("canRename" in next) && "canRename" in prev) out.canRename = prev.canRename;
   return out;
 }
 

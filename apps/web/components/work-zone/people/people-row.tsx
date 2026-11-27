@@ -24,21 +24,22 @@ export const ROW_COPY = {
 export type RowAction = "open" | "rename" | "assign";
 
 /**
- * What a row's menu offers (D-04, D-06). A UI hint only, from viewer-neutral fields of the list row (the DTO carries
- * no device owner and none is inferred): it hides what cannot apply; the dialogs show the API's decision (the assign
- * preview's `allowed`/`reason`, a refused rename), and the API refuses the write anyway (T-07.13.1.1-07-02).
+ * What a row's menu offers (D-04, D-06). A UI hint only, from fields of the list row (the DTO carries no device owner
+ * and none is inferred): it hides what cannot apply; the dialogs show the API's decision (the assign preview's
+ * `allowed`/`reason`, a refused rename), and the API refuses the write anyway (T-07.13.1.1-07-02).
  * - archived: Open only;
- * - the viewer's own session (the session's owner, never the device's): Rename, no Assign and no reason;
+ * - Rename only when the row's per-viewer `canRename` (the API's `work_session.configure` decision) says so (WR-03);
+ * - the viewer's own session (the session's owner, never the device's): no Assign and no reason;
  * - bot-started: the sponsor keeps it (the API checks this first);
  * - not on a server (`desktop`, or a host the device never reported): the server sentence;
  * - otherwise Assign to me.
  */
 export function rowActions(
-  session: Pick<WorkSession, "createdBy" | "deviceHostKind" | "startedByAgent" | "status">,
+  session: Pick<WorkSession, "createdBy" | "deviceHostKind" | "startedByAgent" | "status" | "canRename">,
   viewerId: string | null,
 ): { actions: RowAction[]; reason: string | null } {
   if (session.status === "archived") return { actions: ["open"], reason: null };
-  const base: RowAction[] = ["open", "rename"];
+  const base: RowAction[] = session.canRename === true ? ["open", "rename"] : ["open"];
   if (session.createdBy === viewerId) return { actions: base, reason: null };
   if (session.startedByAgent) return { actions: base, reason: ASSIGN_REFUSAL_TEXT.bot_session };
   if (session.deviceHostKind !== "service")

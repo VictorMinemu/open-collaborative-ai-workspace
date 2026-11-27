@@ -137,6 +137,12 @@ export const WorkSession = z.object({
    */
   attention: WorkSessionAttention.optional(),
   /**
+   * 07.13.1.1 (WR-03): whether this viewer may rename the session (`work_session.configure` through the resolver, on a
+   * session that is not archived), so a row menu offers Rename only where the PATCH would be allowed. A UI hint: the
+   * API decides the PATCH again. Per viewer like `attention`: absent on `ws:` (absent = not offered).
+   */
+  canRename: z.boolean().optional(),
+  /**
    * 07.16 (D-06): the bot that started the session (its sponsor is `createdBy`). Viewer-neutral, so it may ride every
    * surface; null = started by a person; optional so older payloads parse.
    */

@@ -21,6 +21,8 @@ import { answersPending, pendingApprovers } from "./browser-grant";
  * - Attention (PD-05): `approval` when the session has a pending approval and the resolver lets this person decide it
  *   (`work_session.approve` on their session facts, built by `facts.ts`: the detail's `viewerCan` decision);
  *   `lastTurnEndedAt` when the session's last finished turn ran this person's prompt.
+ * - Rename (07.13.1.1 WR-03): `canRename` when the resolver lets this person `work_session.configure` the session (the
+ *   rename PATCH's decision) and it is not archived, decided in memory on the facts already built (no query).
  *
  * These fields travel only on a viewer's own surfaces: the list and the detail (shaped for the requester) and each
  * `user:` frame (shaped for its recipient). The shared `ws:` stream and the public `WorkSessionService.session` /
@@ -60,6 +62,8 @@ export interface ViewerFields {
   /** True only when the session has a team project this viewer may not see named. */
   teamProjectHidden: boolean;
   attention: WorkSessionAttention;
+  /** 07.13.1.1 (WR-03): `work_session.configure` on a session that is not archived (the rename PATCH's decision). */
+  canRename: boolean;
 }
 
 /** The request's own decision for its viewer (`perms.filter(req, tx, …)`: principal facts memoized per request). */
@@ -69,7 +73,7 @@ export type ViewerFilter = <T>(
   toResource: (item: T) => ResourceFacts,
 ) => Promise<T[]>;
 
-const PER_VIEWER_KEYS = ["teamProject", "teamProjectHidden", "attention"] as const;
+const PER_VIEWER_KEYS = ["teamProject", "teamProjectHidden", "attention", "canRename"] as const;
 
 /** The viewer-neutral DTO: none of the per-viewer fields (the `ws:` snapshot, the public session readers). */
 export function withoutViewerFields(dto: WorkSession): WorkSession {
@@ -85,6 +89,7 @@ export function withViewerFields(dto: WorkSession, fields: ViewerFields): WorkSe
     teamProject: fields.teamProject,
     ...(fields.teamProjectHidden ? { teamProjectHidden: true } : {}),
     attention: fields.attention,
+    canRename: fields.canRename,
   };
 }
 
@@ -92,11 +97,12 @@ function fieldsOf(
   project: SessionProject | null,
   named: boolean,
   attention: WorkSessionAttention,
+  canRename: boolean,
 ): ViewerFields {
-  if (!project) return { teamProject: null, teamProjectHidden: false, attention };
+  if (!project) return { teamProject: null, teamProjectHidden: false, attention, canRename };
   return named
-    ? { teamProject: { id: project.id, name: project.name }, teamProjectHidden: false, attention }
-    : { teamProject: null, teamProjectHidden: true, attention };
+    ? { teamProject: { id: project.id, name: project.name }, teamProjectHidden: false, attention, canRename }
+    : { teamProject: null, teamProjectHidden: true, attention, canRename };
 }
 
 /** Distinct team projects of `sources` (by unit id). */
@@ -219,15 +225,30 @@ export async function loadViewerFields(
   ).map((s) => s.dto.id);
   const rules = await pendingApprovers(tx, mayApprove);
   const approves = new Set(mayApprove.filter((id) => answersPending(rules, id, a.viewerId)));
+  // 07.13.1.1 (WR-03): the rename PATCH's decision on the facts already built (in memory, no query).
+  const renames = new Set(
+    (
+      await a.filter(
+        a.sessions.filter((s) => s.dto.status !== "archived"),
+        "work_session.configure",
+        (s) => s.facts,
+      )
+    ).map((s) => s.dto.id),
+  );
   const out = new Map<string, ViewerFields>();
   for (const s of a.sessions) {
     const named = s.dto.createdBy === a.viewerId || (s.project !== null && open.has(s.project.id));
     out.set(
       s.dto.id,
-      fieldsOf(s.project, named, {
-        approval: approves.has(s.dto.id),
-        lastTurnEndedAt: lastTurnFor(turns.get(s.dto.id), a.viewerId),
-      }),
+      fieldsOf(
+        s.project,
+        named,
+        {
+          approval: approves.has(s.dto.id),
+          lastTurnEndedAt: lastTurnFor(turns.get(s.dto.id), a.viewerId),
+        },
+        renames.has(s.dto.id),
+      ),
     );
   }
   return out;
@@ -305,6 +326,17 @@ export async function loadViewerFieldsForRecipients(
     });
     for (const uid of allowed) if (answersPending(rules, d.dto.id, uid)) approves.add(key(d.dto.id, uid));
   }
+  // 07.13.1.1 (WR-03): who among each session's recipients may rename it, on the facts the delivery built.
+  const renames = new Set<string>();
+  for (const d of deliveries) {
+    if (d.dto.status === "archived" || d.recipients.length === 0) continue;
+    const allowed = decider.allowed([...d.recipients], "work_session.configure", (uid) => {
+      const f = d.facts.get(uid);
+      if (!f) throw new Error("session facts missing for a recipient");
+      return f;
+    });
+    for (const uid of allowed) renames.add(key(d.dto.id, uid));
+  }
   const out = new Map<string, Map<string, ViewerFields>>();
   for (const d of deliveries) {
     const perUser = new Map<string, ViewerFields>();
@@ -312,10 +344,15 @@ export async function loadViewerFieldsForRecipients(
       const named = uid === d.dto.createdBy || (d.project !== null && open.has(key(d.project.id, uid)));
       perUser.set(
         uid,
-        fieldsOf(d.project, named, {
-          approval: approves.has(key(d.dto.id, uid)),
-          lastTurnEndedAt: lastTurnFor(turns.get(d.dto.id), uid),
-        }),
+        fieldsOf(
+          d.project,
+          named,
+          {
+            approval: approves.has(key(d.dto.id, uid)),
+            lastTurnEndedAt: lastTurnFor(turns.get(d.dto.id), uid),
+          },
+          renames.has(key(d.dto.id, uid)),
+        ),
       );
     }
     out.set(d.dto.id, perUser);

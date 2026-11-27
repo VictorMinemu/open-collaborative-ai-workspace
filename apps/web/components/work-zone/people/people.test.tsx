@@ -71,6 +71,7 @@ function session(over: Partial<WorkSession> = {}): WorkSession {
     createdAt: "2026-11-27T08:00:00.000Z",
     updatedAt: "2026-11-27T09:00:00.000Z",
     deviceHostKind: "service",
+    canRename: true,
     ...over,
   };
 }
@@ -322,6 +323,20 @@ describe("rowActions (D-04, D-06): a hint from viewer-neutral fields; the dialog
       actions: ["open", "rename"],
       reason: null,
     });
+  });
+
+  it("offers Rename only to a viewer the API says may rename (WR-03); Assign still follows the row's fields", () => {
+    for (const canRename of [false, undefined] as const) {
+      expect(rowActions(pia({ deviceHostKind: "service", canRename }), ANA)).toEqual({
+        actions: ["open", "assign"],
+        reason: null,
+      });
+      expect(rowActions(ana({ canRename }), ANA)).toEqual({ actions: ["open"], reason: null });
+      expect(rowActions(pia({ deviceHostKind: "desktop", canRename }), ANA)).toEqual({
+        actions: ["open"],
+        reason: "Only sessions on a server can be assigned.",
+      });
+    }
   });
 
   it("an archived session only opens", () => {

@@ -518,7 +518,7 @@ describe("attention is decided per viewer on the list, the detail and each user:
 // ---------------------------------------------------------------- 07.10-07: every other session surface (HI-01)
 
 /** The per-viewer keys no write answer carries (they are shaped only on the list, the detail and `user:`). */
-const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention"] as const;
+const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention", "canRename"] as const;
 
 describe("the visibility panel and the write answers never name a project the viewer can't open (HI-01, T-07.10-02-05)", () => {
   /** A team assigned to Payroll, whose only member is Tom (not a direct Payroll member). */

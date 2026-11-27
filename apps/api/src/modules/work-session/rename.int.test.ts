@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { WorkSession } from "@ocw/contracts";
+import { WorkSession, WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import WebSocket from "ws";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import {
   CLAUDE_CATALOG,
@@ -41,6 +42,8 @@ let ana: TestClient;
 let anaId: string;
 let sam: TestClient;
 let olga: TestClient;
+let olgaId: string;
+let atlasUnit: string;
 let eve: TestClient;
 let device: FakeDevice;
 let projectId: string;
@@ -115,7 +118,13 @@ beforeAll(async () => {
   ));
   const samInvite = await invite(stack, admin, "sam@example.test", "Sam Soto", "standard");
   sam = samInvite.client;
-  ({ client: olga } = await invite(stack, admin, "olga@example.test", "Olga Ortiz", "developer"));
+  ({ client: olga, userId: olgaId } = await invite(
+    stack,
+    admin,
+    "olga@example.test",
+    "Olga Ortiz",
+    "developer",
+  ));
   const invited = await invite(stack, admin, "eve@example.test", "Eve", "developer");
   eve = invited.client;
   await moveToOrgB(invited.userId);
@@ -138,6 +147,7 @@ beforeAll(async () => {
     name: "Atlas",
     members: [{ userId: anaId }, { userId: samInvite.userId }],
   });
+  atlasUnit = atlas.unitId;
   await linkRepo(stack, {
     organizationId: orgId,
     unitId: atlas.unitId,
@@ -253,5 +263,85 @@ describe("a person renames a session (D-06, D-14, PD-07)", () => {
       id,
     ]);
     expect(flag.rows[0].wake_pending).toBe(true);
+  });
+});
+
+describe("each viewer's surfaces say whether they may rename (07.13.1.1 WR-03)", () => {
+  async function openSocket(as: TestClient) {
+    const socket = new WebSocket(
+      `${stack.baseUrl.replace("http", "ws")}/ws`,
+      [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await as.token()}`],
+      { headers: { origin: WEB_ORIGIN } },
+    );
+    const frames: Json[] = [];
+    socket.on("message", (m) => frames.push(JSON.parse(String(m)) as Json));
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const sub = async (topic: string) => {
+      socket.send(JSON.stringify({ op: "sub", topic }));
+      return eventually(async () =>
+        frames.find((f) => (f.op === "subscribed" || f.op === "err") && f.topic === topic),
+      );
+    };
+    return { socket, frames, sub };
+  }
+  const listRow = async (as: TestClient, id: string, archived = false) =>
+    (
+      (await ok(as.request("GET", `/api/v1/work-sessions${archived ? "?archived=1" : ""}`)))
+        .sessions as Json[]
+    ).find((s) => s.id === id);
+  const detailOf = async (as: TestClient, id: string) =>
+    (await ok(as.request("GET", `/api/v1/work-sessions/${id}`))).session as Json;
+
+  it("the list, the detail and the user: frames carry canRename = the configure decision; ws: never does", async () => {
+    // Olga joins Atlas, so she reads its sessions; a deny rule takes `work_session.configure` from her.
+    await ok(admin.request("POST", `/api/v1/units/${atlasUnit}/members`, { userId: olgaId, role: "member" }));
+    await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: olgaId,
+        permission: "work_session.configure",
+        effect: "deny",
+      }),
+    );
+    const id = await startSession(ana, device, projectId, { title: "Who may rename" });
+    expect((await listRow(ana, id))?.canRename, "Ana (owner) list").toBe(true);
+    expect((await detailOf(ana, id)).canRename, "Ana (owner) detail").toBe(true);
+    // The PATCH answers her 403, so no Rename is offered.
+    await fails(rename(olga, id, { title: "Mine" }), 403);
+    expect((await listRow(olga, id))?.canRename, "Olga list").toBe(false);
+    expect((await detailOf(olga, id)).canRename, "Olga detail").toBe(false);
+
+    const anaSock = await openSocket(ana);
+    const olgaSock = await openSocket(olga);
+    try {
+      expect((await anaSock.sub(`user:${anaId}`)).op).toBe("subscribed");
+      expect((await olgaSock.sub(`user:${olgaId}`)).op).toBe("subscribed");
+      await ok(rename(ana, id, { title: "Renamed for the frames" }));
+      const framesOf = (s: Awaited<ReturnType<typeof openSocket>>, topic: string) =>
+        s.frames.filter(
+          (f) =>
+            f.topic === topic &&
+            f.type === "work_session.updated" &&
+            f.data?.title === "Renamed for the frames",
+        );
+      await eventually(async () => framesOf(anaSock, `user:${anaId}`).length > 0, 3000);
+      await eventually(async () => framesOf(olgaSock, `user:${olgaId}`).length > 0, 3000);
+      for (const f of framesOf(anaSock, `user:${anaId}`)) expect(f.data.canRename).toBe(true);
+      for (const f of framesOf(olgaSock, `user:${olgaId}`)) expect(f.data.canRename).toBe(false);
+    } finally {
+      anaSock.socket.close();
+      olgaSock.socket.close();
+    }
+    const ws = await su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'work_session.updated'",
+      [`ws:${id}`],
+    );
+    for (const r of ws.rows) expect(Object.keys(r.payload as Json)).not.toContain("canRename");
+
+    await ok(ana.request("POST", `/api/v1/work-sessions/${id}/archive`));
+    expect((await listRow(ana, id, true))?.canRename, "archived").toBe(false);
   });
 });
