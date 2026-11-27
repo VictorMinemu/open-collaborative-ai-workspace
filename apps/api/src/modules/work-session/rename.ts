@@ -1,4 +1,5 @@
 import {
+  SESSION_RENAME_DECIDE_WITHIN_MS,
   type SessionRenameFrame,
   type SessionRenameRefusal,
   type SessionRenameResultFrame,
@@ -140,7 +141,8 @@ type RenameDecision = SessionRenameResultFrame["result"];
  * same answer as another organization's id, which RLS hides), it is active and the named prompt of this session is in
  * flight (else `no_turn`), its author still reads the session (else `not_available`, IN-02), a person did not type the title (`title_locked`), the title has the generated-title shape
  * (`invalid_title`, which does not use up the turn), the turn has not renamed yet (claimed once in
- * `work_prompts.title_renamed_at`, else `already_renamed`). Then `applyTitle` with `auto`: a late device title (which
+ * `work_prompts.title_renamed_at`, else `already_renamed`), and the device is still waiting: nothing is written once
+ * `SESSION_RENAME_DECIDE_WITHIN_MS` passed since the link received the frame (`not_available`, IN-03). Then `applyTitle` with `auto`: a late device title (which
  * replaces only `heuristic`) never overwrites it, and the agent may rename again in a later turn.
  *
  * The answer goes through `reply`, on the requesting socket only, after the transaction. A refusal writes nothing; an
@@ -155,14 +157,15 @@ export function createSessionToolHandler(
     device: DeviceRef,
     frame: SessionRenameFrame,
     reply: (frame: SessionRenameResultFrame) => SendResult,
+    receivedAt?: number,
   ): Promise<void>;
 } {
   return {
-    async onSessionRename(device, frame, reply) {
+    async onSessionRename(device, frame, reply, receivedAt = Date.now()) {
       let result: RenameDecision;
       try {
         result = await core.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
-          decideAgentRename(tx, core, svc, perms, device, frame),
+          decideAgentRename(tx, core, svc, perms, device, frame, receivedAt),
         );
       } catch (err) {
         core.log.warn(
@@ -190,6 +193,7 @@ async function decideAgentRename(
   perms: PermissionService,
   device: DeviceRef,
   frame: SessionRenameFrame,
+  receivedAt: number,
 ): Promise<RenameDecision> {
   const refuse = (reason: SessionRenameRefusal): RenameDecision => ({ ok: false, reason });
   const s = await svc.lock(tx, frame.sessionId);
@@ -211,6 +215,8 @@ async function decideAgentRename(
   }
   if (s.titleSource === "user") return refuse("title_locked");
   if (!SessionTitle.safeParse(frame.title).success) return refuse("invalid_title");
+  // IN-03: the device has stopped waiting (or is about to); a rename now would be one the agent was told failed.
+  if (Date.now() - receivedAt > SESSION_RENAME_DECIDE_WITHIN_MS) return refuse("not_available");
   const claimed = await tx
     .update(workPrompts)
     .set({ titleRenamedAt: sql`now()` })

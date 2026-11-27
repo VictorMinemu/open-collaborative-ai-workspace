@@ -17,6 +17,7 @@ import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   normalizeSessionTitle,
+  SESSION_RENAME_TIMEOUT_MS,
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
   type SessionRenameFrame,
@@ -36,8 +37,8 @@ import { refusalResult, renameDescription, renameResult } from "./tools.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** How long the device waits for the API's answer to a rename (PD-09): then `not_available`. */
-export const SESSION_RENAME_TIMEOUT_MS = 5_000;
+/** How long the device waits for the API's answer to a rename (PD-09); the API decides within less (IN-03). */
+export { SESSION_RENAME_TIMEOUT_MS };
 
 /** Prompts handed over and not yet started, kept per session at most (an API that never starts them). */
 const MAX_PENDING = 64;

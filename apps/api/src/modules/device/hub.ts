@@ -166,6 +166,8 @@ export interface DeviceSessionToolHandler {
     device: DeviceRef,
     frame: SessionRenameFrame,
     reply: (frame: SessionRenameResultFrame) => SendResult,
+    /** When the link received the frame (`Date.now()`), before it waited behind earlier frames (IN-03). */
+    receivedAt?: number,
   ): Promise<void>;
 }
 

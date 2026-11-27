@@ -52,6 +52,17 @@ export const SESSION_RENAME_REFUSAL_TEXT: Readonly<Record<SessionRenameRefusal, 
   not_available: "Renaming the session is not available right now.",
 };
 
+/** How long the device waits for the API's answer to a rename (PD-09); then the agent is told `not_available`. */
+export const SESSION_RENAME_TIMEOUT_MS = 5_000;
+
+/**
+ * 07.13.1.1 (IN-03): the API decides a `session.rename` only while the device is still waiting for it. A frame whose
+ * decision reaches its first write later than this after it arrived (the link handles frames one at a time, the
+ * session lock may be held) answers `not_available` and changes nothing, so the device's "not available" is never a
+ * rename that happened anyway. Below `SESSION_RENAME_TIMEOUT_MS`, leaving room for the commit and the reply.
+ */
+export const SESSION_RENAME_DECIDE_WITHIN_MS = 4_000;
+
 /** One naming rule (the organization's or a project's), in characters (D-08, PD-16). */
 export const NAMING_RULE_MAX_CHARS = 600;
 /** Both rules joined by `joinNamingRules` (organization, a blank line, project). */

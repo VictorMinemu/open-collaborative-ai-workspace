@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { SessionRenameResultFrame } from "@ocw/contracts";
+import {
+  SESSION_RENAME_DECIDE_WITHIN_MS,
+  SESSION_RENAME_TIMEOUT_MS,
+  SessionRenameResultFrame,
+} from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -309,6 +313,34 @@ describe("refused renames change nothing (D-07, PD-11, T-07.13.1.1-03-01)", () =
     expect(await renamedAudits(id)).toEqual([]);
     expect(await rename(pias, id, promptId, TITLE)).toEqual({ ok: true, title: TITLE });
   });
+
+  it("IN-03: a rename the API reaches only after the device stopped waiting changes nothing", async () => {
+    const id = await started();
+    const promptId = await inFlight(id, true);
+    const before = await sessionRow(id);
+    // Another transaction holds the session's row past the API's budget, so the decision starts too late.
+    const locker = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await locker.connect();
+    try {
+      await locker.query("begin");
+      await locker.query("select id from app.work_sessions where id = $1 for update", [id]);
+      const requestId = randomUUID();
+      pias.send({ type: "session.rename", requestId, sessionId: id, promptId, title: TITLE });
+      await sleep(SESSION_RENAME_DECIDE_WITHIN_MS + 300);
+      await locker.query("rollback");
+      const frame = await pias.next((f) => f.type === "session.rename.result" && f.requestId === requestId);
+      expect(SessionRenameResultFrame.parse(frame).result).toEqual({ ok: false, reason: "not_available" });
+    } finally {
+      await locker.end();
+    }
+    expect(await sessionRow(id)).toEqual(before);
+    expect(await renamedAudits(id)).toEqual([]);
+    const claim = await su.query("select title_renamed_at from app.work_prompts where id = $1", [promptId]);
+    expect(claim.rows[0].title_renamed_at).toBeNull();
+    // In time, the same turn renames the session.
+    expect(await rename(pias, id, promptId, TITLE)).toEqual({ ok: true, title: TITLE });
+    expect(SESSION_RENAME_DECIDE_WITHIN_MS).toBeLessThan(SESSION_RENAME_TIMEOUT_MS);
+  }, 30_000);
 
   it("IN-02: a turn whose author no longer reads the session cannot rename it", async () => {
     const id = await started();
