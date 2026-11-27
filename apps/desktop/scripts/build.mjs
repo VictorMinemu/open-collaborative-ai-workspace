@@ -2,7 +2,7 @@
 //   node scripts/build.mjs            → dist/{main,preload,renderer,assets}
 //   node scripts/build.mjs --daemon   → also dist/daemon (self-contained apps/local-runtime for packaging)
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -11,6 +11,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 const withDaemon = process.argv.includes("--daemon");
 const prod = withDaemon || process.env.NODE_ENV === "production";
+// src/main/build-flags.ts: only the release workflow's tag builds set OCW_RELEASE_BUILD=1 (07.13.1, D-02).
+const releaseBuild = process.env.OCW_RELEASE_BUILD === "1";
 
 for (const d of ["main", "preload", "renderer", "assets"])
   rmSync(join(dist, d), { recursive: true, force: true });
@@ -26,7 +28,8 @@ const common = {
 await Promise.all([
   build({
     ...common,
-    entryPoints: { "main/index": "src/main/index.ts" },
+    // The macOS swap helper (07.13.1, D-05) runs detached as Electron-as-Node after the app quits; no Electron imports.
+    entryPoints: { "main/index": "src/main/index.ts", "main/mac-swap-helper": "src/main/mac-swap-helper.ts" },
     outdir: dist,
     outExtension: { ".js": ".cjs" },
     platform: "node",
@@ -34,6 +37,7 @@ await Promise.all([
     target: "node24",
     external: ["electron"],
     absWorkingDir: root,
+    define: { __OCW_RELEASE_BUILD__: releaseBuild ? "true" : "false" },
   }),
   build({
     ...common,
@@ -60,6 +64,10 @@ await Promise.all([
     absWorkingDir: root,
   }),
 ]);
+
+// Review WR-05: the same flag, readable in the packaged app.asar, so the release workflow can prove a tag's build turned
+// its updater on (scripts/check-update-manifest.mjs --release-build).
+writeFileSync(join(dist, "main", "build-flags.json"), `${JSON.stringify({ releaseBuild })}\n`);
 
 const rendererDir = join(dist, "renderer", "onboarding");
 for (const f of ["index.html", "offline.html", "styles.css", "logo.svg"]) {

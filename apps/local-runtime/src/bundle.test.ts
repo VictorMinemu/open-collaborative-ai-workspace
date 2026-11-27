@@ -368,8 +368,8 @@ describe("the bundle outside the repository (07.12, D-01, D-10, PD-19)", () => {
     expect(await exited).toBe(0);
   }, 60_000);
 
-  it("is the 0.5.1 build and proves it loads the browser engine with only the externals beside it (07.13-20, PD-22)", async () => {
-    expect(manifest.version).toBe("0.5.1");
+  it("is the 0.5.2 build and proves it loads the browser engine with only the externals beside it (07.13-20, PD-22)", async () => {
+    expect(manifest.version).toBe("0.5.2");
     const s = scratch(true);
     const r = await run(s.file, ["browser-agent", "--check"], s.env);
     expect(r.code, r.stderr).toBe(0);

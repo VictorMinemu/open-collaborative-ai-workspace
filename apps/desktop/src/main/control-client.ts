@@ -10,7 +10,15 @@ export type ControlCommand =
   | { cmd: "addProject"; path: string; name?: string }
   | { cmd: "removeProject"; localId: string }
   /** Re-read runtime.json (Full access opt-in, ADR-0012); carries no value. */
-  | { cmd: "reloadConfig" };
+  | { cmd: "reloadConfig" }
+  /** 07.13.1 (D-07): hold every runtime gate for the app update's restart (`drain` closes them at once). */
+  | { cmd: "appUpdateHold"; drain: boolean }
+  /** 07.13.1 (D-07): reopen the gates after a cancelled or failed restart, for the hold it names (review CR-01). */
+  | { cmd: "appUpdateRelease"; holdId: string }
+  /** Review WR-03: the daemon stops itself (as on SIGTERM); Windows cannot signal its process tree. */
+  | { cmd: "shutdown" }
+  /** Review WR-03: whether the daemon runs from this absolute folder (a boolean comes back, never a path). */
+  | { cmd: "runsFromFolder"; folder: string };
 
 export class ControlError extends Error {}
 

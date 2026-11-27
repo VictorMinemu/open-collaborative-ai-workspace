@@ -55,6 +55,52 @@ describe("ConfigStore", () => {
     expect(store.config.webUrl).toBe("http://localhost:3000");
   });
 
+  it("keeps the AppImage's last file name (a plain name only) across a reload (07.13.1, Pitfall 6)", async () => {
+    const store = new ConfigStore(dir, cipher);
+    await store.load();
+    expect(store.config.lastAppImageName).toBeUndefined();
+    await store.update({ webUrl: "http://localhost:3000" });
+    await store.update({ lastAppImageName: "OCW-v0.5.2-linux-x86_64.AppImage" });
+    const again = new ConfigStore(dir, cipher);
+    await again.load();
+    expect(again.config.lastAppImageName).toBe("OCW-v0.5.2-linux-x86_64.AppImage");
+
+    // A path, or a name over 255 characters, is refused: the previous value stays.
+    for (const bad of ["/home/me/OCW.AppImage", "..\\OCW.AppImage", "a/b", "x".repeat(256), ""]) {
+      await again.update({ lastAppImageName: bad });
+      expect(again.config.lastAppImageName, bad).toBe("OCW-v0.5.2-linux-x86_64.AppImage");
+    }
+    const third = new ConfigStore(dir, cipher);
+    await third.load();
+    expect(third.config.lastAppImageName).toBe("OCW-v0.5.2-linux-x86_64.AppImage");
+  });
+
+  // Review IN-07: the app's version at the last start, so the AppImage rename notice follows a real update only.
+  it("keeps the app's last version (a plain version only) across a reload", async () => {
+    const store = new ConfigStore(dir, cipher);
+    await store.load();
+    expect(store.config.lastAppVersion).toBeUndefined();
+    await store.update({ lastAppVersion: "0.5.3" });
+    for (const bad of ["/opt/x", "v0.5.3", "0.5", "1.2.3; rm", "x".repeat(80)]) {
+      await store.update({ lastAppVersion: bad });
+      expect(store.config.lastAppVersion, bad).toBe("0.5.3");
+    }
+    const again = new ConfigStore(dir, cipher);
+    await again.load();
+    expect(again.config.lastAppVersion).toBe("0.5.3");
+  });
+
+  it("a stored AppImage name with a path is dropped on load, never the rest of the settings", async () => {
+    const store = new ConfigStore(dir, cipher);
+    await store.update({ webUrl: "http://localhost:3000" });
+    const { writeFileSync } = await import("node:fs");
+    const raw = JSON.parse(readFileSync(store.file, "utf8")) as Record<string, unknown>;
+    writeFileSync(store.file, JSON.stringify({ ...raw, lastAppImageName: "/opt/OCW.AppImage" }));
+    await store.load();
+    expect(store.config.lastAppImageName).toBeUndefined();
+    expect(store.config.webUrl).toBe("http://localhost:3000");
+  });
+
   it("survives a corrupt file", async () => {
     const store = new ConfigStore(dir, cipher);
     await store.update({ webUrl: "x" });

@@ -5,15 +5,15 @@ current_phase: 07.13
 current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
 status: executing
 stopped_at: Phase 07.17 complete, ready to plan Phase 1
-last_updated: "2026-11-25T16:40:45.103Z"
+last_updated: "2026-11-26T15:59:35.831Z"
 last_activity: 2026-11-11
 last_activity_desc: Phase 07.17 complete, transitioned to Phase 1
-state_head: a378bacaa6bb6624d5dd3665d8c4a6a431eddf3d
+state_head: e4e0bf669e1917d5c8a2017c81e1cc26c91d125b
 progress:
   total_phases: 12
   completed_phases: 8
   total_plans: 436
-  completed_plans: 394
+  completed_plans: 436
 ---
 
 # Project State
@@ -111,6 +111,7 @@ Recent decisions affecting current work:
 - Phase 07.13 inserted after Phase 07.12: Work Zone local browser: Claude Code and Codex sessions get a browser on the session's own device (localhost reachable), governed like the bots' browser, live in the web, delivered to existing teams by the upgrade
 - Phase 07.14 inserted after Phase 07.12: Organization connector auth: organization OAuth sign-in and client credentials for MCP servers, OAuth diagnosis; runs before 07.13 (owner: MCPs with OAuth could not be configured)
 - Phase 07.18 inserted after Phase 07: Subscription account pool for Work Zone runtimes and bots (owner request 2026-11-24)
+- Phase 07.13.1 inserted after Phase 07.13: Desktop auto-update on macOS, Windows and Linux (owner request 2026-11-26) (URGENT)
 
 ## Deferred Items
 

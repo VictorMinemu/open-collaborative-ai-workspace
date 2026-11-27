@@ -1,6 +1,10 @@
-# Desktop builds (scripts/package.mjs), each on its own platform; the release workflow renames the
-# files. None is signed yet (Phase 9):
-#   macOS arm64 .dmg (ad-hoc signature; no Developer ID, no notarization)
+# Desktop builds (scripts/package.mjs), each on its own platform. The build names every file with its release name and
+# writes the update manifests electron-updater reads (07.13.1, D-03): latest-mac.yml, latest.yml and latest-linux.yml
+# beside the files, and app-update.yml inside the packaged app. The release workflow uploads them exactly as built (no
+# rename, or the manifests would point at missing files) and scripts/check-update-manifest.mjs proves them on every
+# runner. `publish` only describes where the app looks for updates: scripts/package.mjs still passes `--publish never`
+# and the workflow uploads with `gh`. None is signed yet (Phase 9):
+#   macOS arm64 .dmg and .zip (ad-hoc signature; no Developer ID, no notarization; the zip is what the app updates from)
 #   Windows x64 per-user NSIS installer (no Authenticode signature: SmartScreen warns)
 #   Linux x64 AppImage and .deb (the .deb installs an AppArmor profile for Electron's sandbox)
 appId: dev.ocw.desktop
@@ -22,12 +26,23 @@ files:
 afterPack: scripts/after-pack.cjs
 asar: true
 npmRebuild: false
+# The canonical releases (D-02). The app sets the same source in code; this entry makes electron-builder write the
+# manifests and app-update.yml.
+publish:
+  - provider: github
+    owner: VictorMinemu
+    repo: open-collaborative-ai-workspace
+    releaseType: release
 mac:
   target:
     - target: dir
       arch: [arm64]
     - target: dmg
       arch: [arm64]
+    # The update payload (latest-mac.yml lists it with the dmg) and its blockmap.
+    - target: zip
+      arch: [arm64]
+  artifactName: OCW-v${version}-macos-arm64.${ext}
   category: public.app-category.developer-tools
   icon: resources/icon.icns
   identity: "-"
@@ -42,9 +57,13 @@ win:
     - target: nsis
       arch: [x64]
   icon: resources/icon.png
+  # Until Authenticode (Phase 9): the build never asks electron-updater to check a publisher (no publisherName in
+  # app-update.yml).
+  verifyUpdateCodeSignature: false
 nsis:
   oneClick: true
   perMachine: false
+  artifactName: OCW-v${version}-windows-x64-setup.${ext}
 linux:
   target:
     - target: AppImage
@@ -54,9 +73,13 @@ linux:
   icon: resources/icon.png
   category: Development
   executableName: ocw
-  # The default name comes from the package name (@ocw/desktop), whose slash becomes a directory.
-  artifactName: OCW-${version}-linux-${arch}.${ext}
   # WM_CLASS = ocw, so desktop environments match the window to ocw.desktop.
   syncDesktopName: true
   synopsis: Open Collaborative AI Workspace desktop app
   maintainer: Autofy Labs
+# Release names per target. Without them the default name comes from the package name (@ocw/desktop), whose slash
+# becomes a directory.
+appImage:
+  artifactName: OCW-v${version}-linux-x86_64.${ext}
+deb:
+  artifactName: OCW-v${version}-linux-amd64.${ext}

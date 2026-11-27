@@ -2,9 +2,21 @@
 # the apps, the server installer and their SHA-256 checksums; the notes come from docs/releases/<tag>.md (else GitHub's
 # generated notes). A tag with a suffix (v0.2.0-rc.1) is published as a pre-release, which `ocw upgrade` never picks by
 # itself. The release stays a draft until every build is uploaded and SHA256SUMS covers them all.
-# Pull requests touching the desktop app, the daemon or this file build the apps too (nothing is uploaded).
+# Pull requests touching the desktop app, the daemon or this file build the apps too, check their update manifests and
+# run the update e2e (nothing is uploaded).
 # No build is signed yet: macOS gets an ad-hoc signature (no Developer ID, no notarization) and Windows none (the
-# release notes say how to open them). workflow_dispatch rebuilds and re-uploads an existing tag.
+# release notes say how to open them).
+# The build names every file with its release name and writes the update manifests (latest-mac.yml, latest.yml,
+# latest-linux.yml) the desktop app's updater reads (07.13.1, D-03); this workflow uploads them unrenamed, with the mac
+# zip and the blockmaps, so every manifest points at a file of the same release. A manifest check
+# (apps/desktop/scripts/check-update-manifest.mjs: sha512, size, version, app-update.yml, on macOS the zip's seal) gates
+# every runner, for pull requests and tags. Only a tag's build sets the release-build flag, the one build that may turn
+# the updater on (D-02). Jobs that can write releases check out without persisting the token in .git/config. Turning on
+# GitHub immutable releases (published assets can no longer be replaced) is the owner's repository setting.
+# workflow_dispatch rebuilds and re-uploads an existing tag, only from v0.5.2 on: an older tag's electron-builder
+# config has neither the release names nor the update manifests, so `prepare` refuses it (scripts/release-tag.mjs,
+# review WR-06). `publish` marks a release "Latest" only when it is stable and at least as new as the current latest,
+# so a rebuild of an older tag never moves /releases/latest back.
 name: release
 
 on:
@@ -48,12 +60,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
           sparse-checkout: |
             docs/releases
             scripts/install.sh
             apps/local-runtime/package.json
             scripts/check-runtime-version.mjs
           sparse-checkout-cone-mode: false
+      # Review WR-06: the tag decisions come from this workflow's own commit (an older tag does not have the script).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gate
+          persist-credentials: false
+          sparse-checkout: scripts/release-tag.mjs
+          sparse-checkout-cone-mode: false
+      # A rebuild only from v0.5.2 on: an older tag has neither the release names nor the update manifests.
+      - name: Refuse a rebuild of a tag before v0.5.2
+        if: github.event_name == 'workflow_dispatch'
+        run: node gate/scripts/release-tag.mjs dispatch "$TAG"
       # The runtime's version follows the release (ADR-0040 § 13, D-10): a tag that disagrees publishes nothing.
       - name: Check the runtime version
         run: node scripts/check-runtime-version.mjs "$TAG"
@@ -93,6 +117,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
+          # This job holds contents: write and runs install scripts; gh reads GH_TOKEN, never git's credentials.
+          persist-credentials: false
           # .planning/ is most of the tree and no build reads it.
           sparse-checkout: |
             /*
@@ -109,23 +135,57 @@ jobs:
         working-directory: apps/desktop
         run: npm pkg set version="${TAG#v}"
       - name: Build the app
+        env:
+          # Only a release tag's build may turn the desktop updater on (D-02); pull requests build with it off.
+          OCW_RELEASE_BUILD: ${{ env.TAG != '' && '1' || '0' }}
+          # electron-builder skips signing on pull requests; the macOS build is only ever ad-hoc signed (identity "-",
+          # no secret), so a pull request signs it too and the update manifest check sees the bundle a release ships.
+          CSC_FOR_PULL_REQUEST: "true"
         run: pnpm --filter @ocw/desktop package
       - name: Check that the packaged daemon runs
         run: node apps/desktop/scripts/check-package.mjs
+      # A tag checks against its own version; a pull request against the package's. A tag's build must also carry the
+      # release-build flag in its packaged app.asar (review WR-05): a lost OCW_RELEASE_BUILD would ship an app whose
+      # updater is off, and every device would stay on it.
+      - name: Check the update manifests
+        run: |
+          set -euo pipefail
+          if [[ -n "$TAG" ]]; then
+            node apps/desktop/scripts/check-update-manifest.mjs --version "${TAG#v}" --release-build
+          else
+            node apps/desktop/scripts/check-update-manifest.mjs
+          fi
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs (the fix doctor prints).
+      - name: Allow Chromium's sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The update path end to end (07.13.1, D-12): the unpackaged app downloads from a loopback fake release served by
+      # the test process itself, never GitHub, and never installs (apps/desktop/e2e/update.e2e.ts).
+      - name: Update e2e (offline fake release)
+        run: |
+          set -euo pipefail
+          display=""
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            command -v xvfb-run >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq xvfb; }
+            display="xvfb-run -a"
+          fi
+          $display pnpm --filter @ocw/desktop test:update
+      # The files exactly as built: the manifests name them, so a rename would break every update. An unmatched
+      # pattern stays literal and `cp` fails the step.
       - name: Collect the release files
         run: |
           set -euo pipefail
           mkdir -p out
-          name="OCW-${TAG:-pr}"
           cd apps/desktop/release
           case "${{ matrix.platform }}" in
-            macos-arm64) cp *.dmg "../../../out/$name-macos-arm64.dmg" ;;
-            windows-x64) cp "OCW Setup "*.exe "../../../out/$name-windows-x64-setup.exe" ;;
+            macos-arm64)
+              files=(OCW-v*-macos-arm64.dmg OCW-v*-macos-arm64.zip OCW-v*-macos-arm64.zip.blockmap latest-mac.yml) ;;
+            windows-x64)
+              files=(OCW-v*-windows-x64-setup.exe OCW-v*-windows-x64-setup.exe.blockmap latest.yml) ;;
             linux-x64)
-              cp *.AppImage "../../../out/$name-linux-x86_64.AppImage"
-              cp *.deb "../../../out/$name-linux-amd64.deb"
-              ;;
+              files=(OCW-v*-linux-x86_64.AppImage OCW-v*-linux-amd64.deb latest-linux.yml) ;;
           esac
+          cp -- "${files[@]}" ../../../out/
           ls -l ../../../out
       # No workflow artifact: on a public repository it would be a second, unreviewed download channel. A pull request
       # only proves the apps build and their daemon runs; a tag publishes them through the draft release.
@@ -145,19 +205,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Review WR-06: whether this release may become "Latest" (this workflow's own commit, not the tag's).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gate
+          persist-credentials: false
+          sparse-checkout: scripts/release-tag.mjs
+          sparse-checkout-cone-mode: false
       - name: SHA256SUMS and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Marked "Latest" only when it is stable and at least as new as the current latest release: rebuilding an
+          # older tag must never move /releases/latest (what every device's updater reads) back to it.
+          if ! current="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>latest.err)"; then
+            grep -q 'HTTP 404' latest.err || { cat latest.err; exit 1; }
+            current=""
+          fi
+          mark="$(node gate/scripts/release-tag.mjs latest "$TAG" "$current")"
           mkdir files && cd files
-          gh release download "$TAG" --pattern 'OCW-*' --pattern 'install.sh'
+          gh release download "$TAG" --pattern 'OCW-*' --pattern 'latest*.yml' --pattern 'install.sh'
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --clobber
           if [[ "$TAG" == *-* ]]; then
             gh release edit "$TAG" --draft=false --prerelease
           else
-            gh release edit "$TAG" --draft=false --latest
+            gh release edit "$TAG" --draft=false --latest="$mark"
           fi

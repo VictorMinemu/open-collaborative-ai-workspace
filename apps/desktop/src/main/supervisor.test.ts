@@ -11,7 +11,9 @@ class FakeChild extends EventEmitter {
   }
 }
 
-function harness(opts: { exitOnTerm?: boolean } = {}) {
+function harness(
+  opts: { exitOnTerm?: boolean; requestStop?: (pid: number, children: FakeChild[]) => void } = {},
+) {
   let now = 0;
   let nextPid = 100;
   const timers: { at: number; fn: () => void; id: number }[] = [];
@@ -30,6 +32,7 @@ function harness(opts: { exitOnTerm?: boolean } = {}) {
         const c = children.find((x) => x.pid === pid);
         if (c && (opts.exitOnTerm ?? true)) queueMicrotask(() => c.exit(null, sig));
       },
+      ...(opts.requestStop ? { requestStop: async (pid: number) => opts.requestStop?.(pid, children) } : {}),
       now: () => now,
       setTimer: (fn, ms) => {
         const id = ++timerId;
@@ -41,7 +44,7 @@ function harness(opts: { exitOnTerm?: boolean } = {}) {
         if (i >= 0) timers.splice(i, 1);
       },
     },
-    { initialMs: 1000, maxMs: 8000, factor: 2, stableMs: 30_000, killTimeoutMs: 5000 },
+    { initialMs: 1000, maxMs: 8000, factor: 2, stableMs: 30_000, killTimeoutMs: 5000, gracefulStopMs: 8000 },
   );
   const advance = (ms: number) => {
     now += ms;
@@ -129,6 +132,52 @@ describe("DaemonSupervisor", () => {
       [100, "SIGTERM"],
       [100, "SIGKILL"],
     ]);
+  });
+
+  // Review WR-03: on Windows a signal is TerminateProcess of the daemon alone (its children survive), so the daemon is
+  // first asked to stop itself over its control socket, which stops its CLIs and browser children too.
+  it("with requestStop, stop() asks the daemon to stop itself and sends no signal when it exits in time", async () => {
+    const asked: number[] = [];
+    const h = harness({
+      requestStop: (pid, children) => {
+        asked.push(pid);
+        queueMicrotask(() => children.find((c) => c.pid === pid)?.exit(0));
+      },
+    });
+    h.sup.start();
+    await h.sup.stop();
+    expect(asked).toEqual([100]);
+    expect(h.kills).toEqual([]);
+    expect(h.sup.state).toBe("stopped");
+  });
+
+  it("with requestStop, a daemon still running after the graceful window gets the signals", async () => {
+    const h = harness({ exitOnTerm: false, requestStop: () => undefined });
+    h.sup.start();
+    const p = h.sup.stop();
+    await Promise.resolve();
+    h.advance(7999);
+    expect(h.kills).toEqual([]);
+    h.advance(1);
+    expect(h.kills).toEqual([[100, "SIGTERM"]]);
+    h.advance(5000);
+    h.children[0]!.exit(null, "SIGKILL");
+    await p;
+    expect(h.kills).toEqual([
+      [100, "SIGTERM"],
+      [100, "SIGKILL"],
+    ]);
+  });
+
+  it("with requestStop, a request that fails goes straight to the signals", async () => {
+    const h = harness({
+      requestStop: () => {
+        throw new Error("runtime is not running");
+      },
+    });
+    h.sup.start();
+    await h.sup.stop();
+    expect(h.kills).toEqual([[100, "SIGTERM"]]);
   });
 
   it("stop() during a pending restart cancels it", async () => {

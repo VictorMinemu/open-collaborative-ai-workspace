@@ -1391,6 +1391,59 @@ Plans:
 - [ ] 07.13-24-PLAN.md — The brw image's build wiring: compose, both CI pipelines, e2e-isolated, smokes, CODEOWNERS
 - [ ] 07.13-25-PLAN.md — Pinned runtime versions Codex 0.172.0 / Claude Code 2.1.332 with an offline fixture refresh
 
+### Phase 07.13.1: Desktop app auto-update on macOS, Windows and Linux: the app downloads, verifies and installs new releases by itself (bundled runtime included), switching only when no Work Zone turn runs (INSERTED)
+
+**Goal**: The OCW desktop app keeps itself up to date on Windows, Linux and macOS without anyone downloading installers:
+it finds a newer stable release on the canonical GitHub releases, downloads it, verifies it and installs it, its
+bundled Local Runtime included, and it restarts for that only when no Work Zone turn runs on its daemon. Builds stay
+unsigned (macOS ad-hoc, Windows without Authenticode) and nothing needs a paid service.
+
+- **Per platform:** Windows (per-user NSIS) and Linux (AppImage) use electron-updater's stock updaters; macOS uses an
+  ad-hoc updater that verifies the downloaded bundle and swaps it beside the installed one. The `.deb`, a Mac running
+  from the disk image or a folder it cannot write keep the "Update available" link.
+- **Never cuts a turn:** the app asks its daemon to hold every gate (strict local control commands) and quits for an
+  update only once the daemon reports it held; prompts sent meanwhile run after the restart.
+- **The 07.11 level decides:** Automatic installs on quit or by itself when idle and the person is away, Notify only
+  waits for "Restart to update", Off never checks by itself; "Check for updates…" always works.
+
+**Requirements**: DAU-01, DAU-02, DAU-03, DAU-04, DAU-05, DAU-06, DAU-07, DAU-08, DAU-09
+**Depends on:** Phase 07.13 (the "Update available" notice, `OCW_APP_VERSION`), Phase 07.11 (updates level), Phase 07.17.1 (all-gates hold)
+**ADR:** 0046
+**Success Criteria** (what must be TRUE):
+
+  1. A desktop app on Windows (NSIS), Linux (AppImage) or macOS (installed in a folder it can write) that runs a
+     release with this feature finds a newer stable release on the canonical GitHub releases over HTTPS, downloads it,
+     checks its sha512 (and on macOS the bundle's seal, id, version and daemon) and installs it with its bundled
+     runtime, relaunching after "Restart to update"; local and fork builds never update from upstream
+  2. The app quits for an update only after its daemon reports every gate held with no turn running; a prompt sent
+     meanwhile waits and runs after the restart; a hold gives up after 30 min (nothing cut) and releases itself 2 min
+     after it held if the app did not quit
+  3. The org ∩ device runtime updates level decides: Automatic downloads in the background and installs on quit or by
+     itself when the daemon is idle and the person has been away 30 min; Notify only downloads and waits for "Restart to
+     update"; Off never checks by itself; "Check for updates…" works at every level; an unknown level counts as Notify
+  4. The `.deb`, a Mac running from the disk image, a translocated or unwritable install keep the "Update available"
+     link (the `.deb` one names the AppImage; the Mac adds "Move OCW to Applications"); no root, no elevation, no
+     listening port, no absolute path in any log; the state shows only in the tray, the Runtime menu and the
+     onboarding window, never in the web app
+  5. Every release publishes `latest*.yml`, the Mac zip and the blockmaps under their release names, covered by
+     SHA256SUMS and checked on every runner (pull requests too), and release jobs never persist git credentials
+  6. Proven offline (unit tests for the controller, the Mac updater and its swap helper; daemon hold tests; a
+     fake-release e2e on the three CI runners); documented in ADR-0046, the README, AGENTS.md and the release notes;
+     real updates across two published releases on a Mac, Windows and Ubuntu are owner UAT
+
+**Plans:** 8 plans
+
+Plans:
+
+- [ ] 07.13.1-01-PLAN.md — Daemon: `appUpdateHold` / `appUpdateRelease` on the shared all-gates step, bounded, `status.appUpdate`
+- [ ] 07.13.1-02-PLAN.md — Release pipeline: electron-updater pin, release names and `latest*.yml` from electron-builder, manifest check on every runner, release-build flag
+- [ ] 07.13.1-03-PLAN.md — Desktop update controller: levels, states, hold before quit, install from the quit event, platform updaters, Semgrep guard
+- [ ] 07.13.1-04-PLAN.md — macOS ad-hoc updater: verified staging beside the bundle and the detached swap helper with rollback
+- [ ] 07.13.1-05-PLAN.md — App wiring: tray and Runtime menu, quit hook, fallbacks (`.deb`, dmg, unwritable), after-update notices
+- [ ] 07.13.1-06-PLAN.md — Onboarding window: update states and actions over a validated channel
+- [ ] 07.13.1-07-PLAN.md — Offline fake-release e2e on the three CI runners (good, corrupted, level off)
+- [ ] 07.13.1-08-PLAN.md — ADR-0046, AGENTS.md row, README, release notes v0.5.1, STATUS, runtime 0.5.1
+
 ### Phase 07.14: Organization connector auth (INSERTED)
 
 **Goal**: An admin can register any MCP server whatever its authentication, and give the organization's bots one shared

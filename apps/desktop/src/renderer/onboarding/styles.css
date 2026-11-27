@@ -414,15 +414,119 @@ h1 {
   opacity: 0.45;
 }
 
+/*
+ * 07.13.1 (D-09): the app update, in one slot under the header. Every state keeps one 32 px row (the sentence, the
+ * link pill and the button share it), so moving from "Downloading…" to "Restart to update" to "Waiting…" never moves
+ * the step below; only the longer link-and-Move pair wraps to a second row.
+ */
+.update-panel {
+  /* Never squeezed by the step below (a wrapped panel would overlap its title). */
+  flex: none;
+  align-self: stretch;
+  /* 16 px from the header and the step instead of the shell's 24: the tallest step still fits under two rows. */
+  margin-block: -8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 32px;
+}
+
+.update-panel[hidden] {
+  display: none;
+}
+
+.update-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.update-text:empty {
+  display: none;
+}
+
+.update-text[data-tone="warning"] {
+  color: var(--warning);
+}
+
+.update-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--primary-foreground);
+  background: var(--primary);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  box-shadow: 0 1px 0 oklch(1 0 0 / 18%) inset;
+  cursor: pointer;
+  outline: none;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.update-button[hidden] {
+  display: none;
+}
+
+.update-button:hover {
+  background: var(--primary-hover);
+}
+
+.update-button:focus-visible {
+  box-shadow: 0 0 0 3px oklch(0.64 0.19 278 / 45%);
+}
+
+.update-button.secondary {
+  color: var(--foreground);
+  background: transparent;
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.update-button.secondary:hover {
+  background: oklch(1 0 0 / 5%);
+}
+
+.update-button.secondary:focus-visible {
+  box-shadow: 0 0 0 3px oklch(0.64 0.19 278 / 45%);
+}
+
+.update-button[disabled] {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.update-button[disabled]:hover {
+  background: var(--primary);
+}
+
+.update-button.secondary[disabled]:hover {
+  background: transparent;
+}
+
 /* 07.13 (D-18): a newer release, linked to its page (never installed from here). */
 .update-link {
-  align-self: flex-start;
+  align-self: center;
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
   min-height: 32px;
   padding: 6px 12px;
-  border-radius: 999px;
+  /* Half the 32 px height: a pill on one line, a soft card when the .deb wording wraps. */
+  border-radius: 16px;
   background: var(--brand-soft);
   color: var(--brand-soft-foreground);
   font-size: 12.5px;
@@ -444,7 +548,12 @@ h1 {
   box-shadow: 0 0 0 3px oklch(0.64 0.19 278 / 45%);
 }
 
+.update-link svg {
+  flex: none;
+}
+
 .update-hint {
+  flex: none;
   font-weight: 400;
   opacity: 0.85;
 }

@@ -22,4 +22,6 @@ export const Channels = {
   onboardingCheckServer: "ocw-onboarding:check-server",
   onboardingEnroll: "ocw-onboarding:enroll",
   onboardingFinish: "ocw-onboarding:finish",
+  /** 07.13.1 (D-09): the app update's actions (`UpdateActionArgs`), from the onboarding window only. */
+  onboardingUpdateAction: "ocw-onboarding:update-action",
 } as const;
