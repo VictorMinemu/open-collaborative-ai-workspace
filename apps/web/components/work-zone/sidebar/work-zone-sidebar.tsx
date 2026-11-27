@@ -1,7 +1,7 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { Compass, Laptop, Plus, Search, X } from "lucide-react";
+import { Compass, Laptop, Plus, Search, Users, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -11,7 +11,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useWorkProjects, useWorkProjectsLive } from "@/lib/work-project-queries";
-import { isSessionPath } from "@/lib/work-zone-routes";
+import { isSessionPath, PEOPLE_PATH } from "@/lib/work-zone-routes";
 import { useWorkSessions } from "@/lib/workzone-queries";
 import { useWorkZone } from "../work-zone-context";
 import { buildWorkZoneSidebar, searchSidebar } from "./model";
@@ -43,7 +43,7 @@ export function useNow(isFast: (now: number) => boolean): number {
 /**
  * The Work Zone sidebar (Phase 07.10, UI-SPEC § Information Architecture): the header with New session, the search
  * field, Needs you, one section per department holding the team projects the viewer belongs to (each with its active
- * sessions), Personal, Settled, and Browse projects · Devices at the foot. While a query is typed, the grouped search
+ * sessions), Personal, Settled, and Browse projects · Sessions by person · Devices at the foot. While a query is typed, the grouped search
  * results replace everything between the search field and the foot. The same component is the desktop column and the
  * mobile drawer (`SectionSidebar`). It reads the two list requests only (`/work-sessions`, `/work-projects`) and
  * groups what they returned (PD-07): it never decides who can see what.
@@ -126,7 +126,6 @@ export function WorkZoneSidebar() {
     list.length === 0 &&
     model.sections.length === 0 &&
     model.personal === null;
-  const browsing = pathname === "/work-zone/projects";
 
   return (
     <SectionSidebar
@@ -207,26 +206,44 @@ export function WorkZoneSidebar() {
           </>
         )}
 
-        <div className="mt-auto grid gap-0.5">
-          <Link
-            href="/work-zone/projects"
-            data-testid="sidebar-projects"
-            aria-current={browsing ? "page" : undefined}
-            className={cn(sectionItemClass(browsing), "text-muted-foreground max-md:h-11")}
-          >
-            <Compass className="size-4" /> Browse projects
-          </Link>
-          <Link
-            href="/settings/devices"
-            className={cn(
-              sectionItemClass(pathname === "/settings/devices"),
-              "text-muted-foreground max-md:h-11",
-            )}
-          >
-            <Laptop className="size-4" /> Devices
-          </Link>
-        </div>
+        <SidebarFooterLinks pathname={pathname} />
       </nav>
     </SectionSidebar>
+  );
+}
+
+/**
+ * The sidebar's foot: Browse projects · Sessions by person (07.13.1.1, D-01) · Devices, each 44 px on phones and
+ * `aria-current` on its own page.
+ */
+export function SidebarFooterLinks({ pathname }: { pathname: string }) {
+  const browsing = pathname === "/work-zone/projects";
+  const people = pathname === PEOPLE_PATH;
+  const devices = pathname === "/settings/devices";
+  return (
+    <div className="mt-auto grid gap-0.5">
+      <Link
+        href="/work-zone/projects"
+        data-testid="sidebar-projects"
+        aria-current={browsing ? "page" : undefined}
+        className={cn(sectionItemClass(browsing), "text-muted-foreground max-md:h-11")}
+      >
+        <Compass className="size-4" /> Browse projects
+      </Link>
+      <Link
+        href={PEOPLE_PATH}
+        data-testid="sidebar-people"
+        aria-current={people ? "page" : undefined}
+        className={cn(sectionItemClass(people), "text-muted-foreground max-md:h-11")}
+      >
+        <Users className="size-4" /> Sessions by person
+      </Link>
+      <Link
+        href="/settings/devices"
+        className={cn(sectionItemClass(devices), "text-muted-foreground max-md:h-11")}
+      >
+        <Laptop className="size-4" /> Devices
+      </Link>
+    </div>
   );
 }

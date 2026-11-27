@@ -8,6 +8,7 @@ import { errorMessage } from "@/lib/api";
 import { useUnits, useUnitsLive } from "@/lib/org-queries";
 import { ProjectAccessLine } from "./project-access-line";
 import { ProjectDefaultSwitch } from "./project-default-switch";
+import { NAMING_RULE_COPY, ProjectNamingRule } from "./project-naming-rule";
 import { ProjectReposSection } from "./project-repos-section";
 import { ProjectTeamsSection } from "./project-teams-section";
 import { ListError, ListSkeleton } from "./settings-list";
@@ -23,8 +24,8 @@ export const readOnlySettings = (p: Pick<WorkProjectDetail, "viewerCan">) =>
   !p.viewerCan.manage && !p.viewerCan.assignTeams && !p.viewerCan.members;
 
 /**
- * The project page's Settings tab (UI-SPEC § 4.3, D-03, D-10, D-14), in order: Access, New sessions, People, Teams,
- * Repositories. Every action renders from the API's `viewerCan`; read-only viewers see the same facts without
+ * The project page's Settings tab (UI-SPEC § 4.3, D-03, D-10, D-14), in order: Access, New sessions, Session names
+ * (07.13.1.1 D-08), People, Teams, Repositories. Every action renders from the API's `viewerCan`; read-only viewers see the same facts without
  * actions and one line saying who changes them. Managers outside the project (D-14) get the complete tab.
  */
 export function ProjectSettings({ project }: { project: WorkProjectDetail }) {
@@ -36,6 +37,7 @@ export function ProjectSettings({ project }: { project: WorkProjectDetail }) {
       teams={<ProjectTeamsSection project={project} />}
       repos={<ProjectReposSection project={project} />}
       defaultSwitch={<ProjectDefaultSwitch project={project} />}
+      namingRule={<ProjectNamingRule project={project} />}
     />
   );
 }
@@ -44,12 +46,15 @@ export function ProjectSettings({ project }: { project: WorkProjectDetail }) {
 export function ProjectSettingsLayout({
   project,
   defaultSwitch,
+  namingRule,
   people,
   teams,
   repos,
 }: {
   project: WorkProjectDetail;
   defaultSwitch: React.ReactNode;
+  /** The naming rule field; shown only when the API sent `namingRule` (absent = an older API, 07.13.1.1 D-08). */
+  namingRule?: React.ReactNode;
   people: React.ReactNode;
   teams: React.ReactNode;
   repos: React.ReactNode;
@@ -72,6 +77,12 @@ export function ProjectSettingsLayout({
         <SectionHeader title={SETTINGS_COPY.newSessions} />
         {defaultSwitch}
       </section>
+      {project.namingRule !== undefined && namingRule ? (
+        <section className="grid gap-3" aria-label={NAMING_RULE_COPY.section}>
+          <SectionHeader title={NAMING_RULE_COPY.section} />
+          {namingRule}
+        </section>
+      ) : null}
       {people}
       {teams}
       {repos}

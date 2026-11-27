@@ -151,6 +151,22 @@ export function useUpdateWorkProject(unitId: string) {
 }
 
 /**
+ * `PATCH /work-projects/:unitId { namingRule }` (07.13.1.1, D-08): the project's session naming rule (null = none).
+ * Not optimistic: the field keeps the draft until the API answers, and shows its refusal inline.
+ */
+export function useUpdateWorkProjectNamingRule(unitId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (namingRule: string | null) =>
+      api.patch(`/api/v1/work-projects/${unitId}`, {
+        body: { namingRule },
+        schema: WorkProjectDetail,
+      }),
+    onSuccess: (project) => settle(qc, project),
+  });
+}
+
+/**
  * `GET /work-projects/:unitId/assignable-teams?q=`: teams and departments the viewer may assign and that are not
  * assigned yet (D-14: every one for admins, the led subtree for leads; never a project).
  */
