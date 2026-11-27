@@ -343,8 +343,9 @@ export function registerWorkSessionRoutes(
             clientKind: auth.clientKind,
             metadata: { changed },
           });
-          // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told).
-          await svc.reauthorizeOrg(tx, "policy");
+          // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told). 07.13.1.1
+          // (D-08): a naming rule clamps nothing, so a change of it alone re-decides no session.
+          if (changed.some((key) => key !== "sessionNamingRule")) await svc.reauthorizeOrg(tx, "policy");
         }
         return { view: await policyView(tx, policy), changed, browserOff };
       });

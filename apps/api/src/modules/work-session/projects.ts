@@ -47,6 +47,7 @@ import {
   uuidArray,
   workProjectResource,
 } from "../organization";
+import { storedRule } from "./policy";
 
 /**
  * Team projects (Phase 07.9, D-01, D-02, D-03, D-10, D-13; ADR-0024): an org unit of kind `project` with direct
@@ -315,6 +316,19 @@ export async function defaultVisibilityOf(tx: Tx, unitId: string): Promise<"proj
   return row?.v ?? "project";
 }
 
+/**
+ * 07.13.1.1 (D-08, PD-16): the project's naming rule for its sessions' titles, or null (no settings row, or none set).
+ * Untrusted wording data: returned as plain text, never logged or audited.
+ */
+export async function projectNamingRuleOf(tx: Tx, unitId: string): Promise<string | null> {
+  const [row] = await tx
+    .select({ rule: workProjectSettings.namingRule })
+    .from(workProjectSettings)
+    .where(eq(workProjectSettings.unitId, unitId))
+    .limit(1);
+  return storedRule(row?.rule);
+}
+
 /** The project page's model, decided for the request's principal (`viewerCan` gates the UI only). */
 async function projectDetail(
   req: FastifyRequest,
@@ -336,6 +350,8 @@ async function projectDetail(
     parentId: unit.parentId,
     trail: await trailOf(tx, unit.path),
     defaultVisibility: await defaultVisibilityOf(tx, unit.id),
+    // 07.13.1.1 (D-08): everyone who opens the page reads the rule (it reaches every session agent of the project).
+    namingRule: await projectNamingRuleOf(tx, unit.id),
     access: { count: people.length, people: people.slice(0, WORK_PROJECT_LIMITS.accessPeople) },
     teams: await assignedTeams(tx, unit.id),
     repos: await linkedRepos(tx, unit.id),
@@ -556,17 +572,14 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         const { userId } = authOf(req);
         // D-03: the project's leads, leads above it and admins.
         const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const organizationId = tenantOf(tx).organizationId;
+        let changed = false;
         const to = req.body.defaultVisibility;
         const from = await defaultVisibilityOf(tx, project.unit.id);
-        if (from !== to) {
+        if (to !== undefined && from !== to) {
           await tx
             .insert(workProjectSettings)
-            .values({
-              organizationId: tenantOf(tx).organizationId,
-              unitId: project.unit.id,
-              defaultVisibility: to,
-              updatedBy: userId,
-            })
+            .values({ organizationId, unitId: project.unit.id, defaultVisibility: to, updatedBy: userId })
             .onConflictDoUpdate({
               target: workProjectSettings.unitId,
               set: { defaultVisibility: to, updatedBy: userId, updatedAt: sql`now()` },
@@ -577,8 +590,29 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             resourceId: project.unit.id,
             metadata: { from, to },
           });
-          await projectChanged(core, tx, project.unit.id);
+          changed = true;
         }
+        // 07.13.1.1 (D-08, PD-16): the project's naming rule; blank = none. Audited by its length only (0 = cleared).
+        if (req.body.namingRule !== undefined) {
+          const rule = storedRule(req.body.namingRule);
+          if (rule !== (await projectNamingRuleOf(tx, project.unit.id))) {
+            await tx
+              .insert(workProjectSettings)
+              .values({ organizationId, unitId: project.unit.id, namingRule: rule, updatedBy: userId })
+              .onConflictDoUpdate({
+                target: workProjectSettings.unitId,
+                set: { namingRule: rule, updatedBy: userId, updatedAt: sql`now()` },
+              });
+            await core.audit.record(tx, {
+              action: "work_project.naming_rule_changed",
+              resourceType: "org_unit",
+              resourceId: project.unit.id,
+              metadata: { length: rule?.length ?? 0 },
+            });
+            changed = true;
+          }
+        }
+        if (changed) await projectChanged(core, tx, project.unit.id);
         return projectDetail(req, tx, perms, project);
       }),
   );

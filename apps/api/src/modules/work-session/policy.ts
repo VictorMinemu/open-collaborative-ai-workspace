@@ -31,6 +31,15 @@ const RUNTIMES: readonly RuntimeId[] = ["claude-code", "codex"];
 const ListedMode = PermissionMode.exclude(["fullAccess"]);
 const ModelIds = z.array(z.string().max(200)).max(100);
 
+/**
+ * 07.13.1.1 (D-08, PD-16): a naming rule as stored (the organization's or a project's): trimmed, blank = null. The text
+ * is untrusted wording data: stored and returned as plain text, never logged or audited.
+ */
+export function storedRule(rule: string | null | undefined): string | null {
+  const text = (rule ?? "").trim();
+  return text.length === 0 ? null : text;
+}
+
 /** Tolerant read: every stored key that no longer parses falls back to its default. */
 function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
   const d = structuredClone(DEFAULT_WORK_ZONE_POLICY);
@@ -38,7 +47,7 @@ function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
   const botSessionsMax = BOT_WORK_ZONE_LIMITS.orgSessionsDefault;
   // 07.17.1.1 (D-07, PD-11): the largest file a bot moves; absent row = 25 MiB (the column's default too).
   const botFileMaxBytes = BOT_FILE_LIMITS.defaultMaxBytes;
-  if (!row) return { ...d, botSessionsMax, botFileMaxBytes, updatedAt: null };
+  if (!row) return { ...d, botSessionsMax, botFileMaxBytes, sessionNamingRule: null, updatedAt: null };
   const modes = z.array(ListedMode).min(1).max(4).safeParse(row.allowedPermissionModes);
   const models = (row.allowedModels ?? {}) as Record<string, unknown>;
   const efforts = (row.maxEffort ?? {}) as Record<string, unknown>;
@@ -62,6 +71,8 @@ function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
     botFileMaxBytes: Number(row.botFileMaxBytes),
     // 07.13 (D-10): the organization's browser switch; the column defaults to off.
     allowBrowser: row.allowBrowser,
+    // 07.13.1.1 (D-08, PD-16): the organization's naming rule for session titles; null = none.
+    sessionNamingRule: storedRule(row.sessionNamingRule),
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -88,6 +99,8 @@ function changedKeys(before: WorkZonePolicy, after: WorkZonePolicy): string[] {
   if (before.botSessionsMax !== after.botSessionsMax) out.push("botSessionsMax");
   if (before.botFileMaxBytes !== after.botFileMaxBytes) out.push("botFileMaxBytes");
   if ((before.allowBrowser ?? false) !== (after.allowBrowser ?? false)) out.push("allowBrowser");
+  // 07.13.1.1 (D-08): the key only; the audit never carries the rule's text.
+  if ((before.sessionNamingRule ?? null) !== (after.sessionNamingRule ?? null)) out.push("sessionNamingRule");
   return out;
 }
 
@@ -158,6 +171,11 @@ export async function saveWorkZonePolicy(
     botFileMaxBytes: patch.botFileMaxBytes ?? before.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes,
     // 07.13 (D-10): absent in the request = unchanged.
     allowBrowser: patch.allowBrowser ?? before.allowBrowser ?? false,
+    // 07.13.1.1 (D-08): absent = unchanged; blank or null = no rule.
+    sessionNamingRule:
+      patch.sessionNamingRule === undefined
+        ? (before.sessionNamingRule ?? null)
+        : storedRule(patch.sessionNamingRule),
     updatedAt: before.updatedAt,
   };
   if (next.allowedPermissionModes.length === 0) {
@@ -176,6 +194,7 @@ export async function saveWorkZonePolicy(
     botSessionsMax: next.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
     botFileMaxBytes: next.botFileMaxBytes ?? BOT_FILE_LIMITS.defaultMaxBytes,
     allowBrowser: next.allowBrowser ?? false,
+    sessionNamingRule: next.sessionNamingRule ?? null,
     updatedBy: actorUserId,
     updatedAt: new Date().toISOString(),
   };
