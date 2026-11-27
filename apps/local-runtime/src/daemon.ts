@@ -916,6 +916,8 @@ export class Daemon {
     this.started = true;
     // 07.13 (PD-19, Pitfall 1): a crash or a kill leaves run dirs (throwaway profiles) behind; none of them is alive.
     await sweepRunDirs(this.browserRoot, new Set(this.sessions.keys())).catch(() => undefined);
+    // 07.13.1.1 (PD-08): the same for the `ocw_session` shim tokens (`<home>/run/sessions/<id>`).
+    await this.sessionTools.sweep(new Set(this.sessions.keys())).catch(() => undefined);
     if (this.opts.controlSocket !== false) {
       const path = this.opts.controlSocket ?? controlSocketPath(this.home);
       this.control = new ControlSocketServer(path, (req) => this.handleControl(req), this.log);

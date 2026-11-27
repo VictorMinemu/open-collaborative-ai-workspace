@@ -51,7 +51,6 @@ import {
   promptFilesNotePaths,
   type RuntimeCatalog,
   type RuntimeModel,
-  SESSION_RENAME_REFUSAL_TEXT,
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
   type SessionSettingsPatch,
@@ -78,6 +77,7 @@ import {
   type StartSessionOptions,
   type TitleRequest,
 } from "../runtime.js";
+import { canonicalSessionTool, RENAME_STARTED_SUMMARY, refusalResult } from "../session-tools/tools.js";
 
 interface FakeSettings {
   model: string;
@@ -607,15 +607,12 @@ export class FakeRuntime implements AgentRuntime {
       this.emit(s, {
         type: "tool.started",
         toolUseId,
-        name: "ocw_session_rename",
-        summary: "Renaming the session",
+        name: canonicalSessionTool("rename"),
+        summary: RENAME_STARTED_SUMMARY,
       });
       const result = s.sessionTools
         ? await s.sessionTools.call("rename", args)
-        : {
-            content: [{ type: "text" as const, text: SESSION_RENAME_REFUSAL_TEXT.not_available }],
-            isError: true,
-          };
+        : refusalResult("not_available");
       const summary = (result.content[0]?.text ?? "").split("\n", 1)[0] ?? "";
       this.emit(s, { type: "tool.completed", toolUseId, ok: !result.isError, summary });
       out.push(`- ${summary}`);

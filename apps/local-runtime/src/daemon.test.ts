@@ -51,6 +51,7 @@ import { setBrowserOptIn, setFullAccessOptIn, setIsolatedServer, setRuntimeUpdat
 import { type ControlRequest, controlRequest } from "./control-socket.js";
 import { Daemon, SELF_UPDATE_UNAVAILABLE_MESSAGE, toBrowserApiUrl, toRuntimeFileUrl } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
+import { installedBundlePath, installInfoPath } from "./install-info.js";
 import { type Logger, silentLogger } from "./logger.js";
 import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
@@ -1274,6 +1275,35 @@ describe("Isolated server and host kind (07.16, D-19, PD-18)", () => {
     expect(hello.device.host).toBe("desktop");
     expect(hello.isolatedServer).toBe(false);
     expect((await server.frame("capabilities")).isolatedServer).toBe(false);
+  });
+
+  it("07.13.1.1 (D-04): the desktop app's env wins over an install record whose bundle is the running entry", async () => {
+    // The install record and `runtime/current/ocw-runtime.mjs` pointing at this process's own entry (argv[1]), so
+    // without the env the daemon would say `service` (the control half below proves the setup is effective).
+    const entry = process.argv[1];
+    if (!entry) throw new Error("no entry script");
+    mkdirSync(dirname(installedBundlePath(home)), { recursive: true });
+    symlinkSync(realpathSync(entry), installedBundlePath(home));
+    writeFileSync(
+      installInfoPath(home),
+      JSON.stringify({
+        serverUrl: server.url,
+        version: "1.0.0",
+        sha256: "a".repeat(64),
+        installedAt: new Date().toISOString(),
+        nodePath: process.execPath,
+      }),
+    );
+    await gatedDaemon({ OCW_RUNTIME_HOST: "desktop" });
+    await daemon.start();
+    expect((await server.frame("hello")).device.host).toBe("desktop");
+
+    await gatedDaemon({});
+    await daemon.start();
+    const hello = await server.waitFor(() =>
+      server.connections.length >= 2 ? server.last.frames.find((f) => f.type === "hello") : undefined,
+    );
+    expect(hello.type === "hello" ? hello.device.host : null).toBe("service");
   });
 
   it("an unknown host sends no device.host and no mark", async () => {
