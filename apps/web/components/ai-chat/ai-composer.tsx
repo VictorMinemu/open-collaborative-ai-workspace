@@ -608,7 +608,7 @@ function MentionSuggestions({
             onMouseEnter={() => onHover(i)}
             onClick={() => onPick(x)}
             className={cn(
-              "flex w-full min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none",
+              "flex w-full min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none max-md:min-h-11",
               i === active ? "bg-accent text-accent-foreground" : "",
             )}
           >
