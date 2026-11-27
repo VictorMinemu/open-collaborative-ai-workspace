@@ -20,8 +20,8 @@ import { readers, stillReading } from "./visibility";
 
 /**
  * Assign to me (Phase 07.13.1.1, D-03, D-04, D-05, D-11, D-12, D-13, D-15; ADR-0047). A member takes over a session that
- * runs on a server: one UPDATE of `work_sessions.created_by` under the session lock, so every owner rule (the SQL rule
- * `app.work_session_access`, the RLS backstop, the resolver's `creator` relation) moves at once (PD-01). Who reads the
+ * runs on a server: one UPDATE of `work_sessions.created_by` under the session lock, so every owner rule (the SQL
+ * access rule, the RLS backstop, the resolver's `creator` relation) moves at once (PD-01). Who reads the
  * session afterwards comes only from the SQL rule (`readers` / `stillReading`), never from a TypeScript copy of it.
  *
  * Only a server (`devices.host_kind = 'service'`, exactly; null and desktop refused), only a person who may prompt the
