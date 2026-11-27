@@ -68,8 +68,11 @@ export const NAMING_RULE_MAX_CHARS = 600;
 /** Both rules joined by `joinNamingRules` (organization, a blank line, project). */
 export const NAMING_RULES_MAX_CHARS = 2 * NAMING_RULE_MAX_CHARS + 2;
 
-/** Every control character except line feed and tab (a rule may span lines; no NUL, ESC, CR or C1). */
-const RULE_FORBIDDEN_RE = /[^\P{Cc}\n\t]/u;
+/**
+ * Every control character except line feed and tab (a rule may span lines; no NUL, ESC, CR or C1), and every format
+ * character but the zero-width non-joiner and joiner (IN-04: no bidi override, isolate, zero-width space or BOM).
+ */
+const RULE_FORBIDDEN_RE = /(?![\n\t\u200C\u200D])[\p{Cc}\p{Cf}]/u;
 
 const ruleText = (max: number) =>
   z

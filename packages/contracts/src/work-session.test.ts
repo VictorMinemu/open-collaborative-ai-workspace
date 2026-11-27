@@ -459,6 +459,29 @@ describe("owner, Assign to me and the typed rename (07.13.1.1-01, D-04, D-05, D-
     expect(UpdateWorkSessionRequest.safeParse({}).success).toBe(false);
   });
 
+  it("IN-04: no bidi override or invisible format character, so a title cannot pose as another one", () => {
+    for (const title of [
+      "Fix \u202Enigol",
+      "Fix\u202Alogin",
+      "\u2066Fix login\u2069",
+      "Fix\u200Elogin",
+      "Fix\u200Flogin",
+      "Fix\u200Blogin",
+      "Fix\u2060login",
+      "Fix\uFEFFlogin",
+      "Fix\u00ADlogin",
+    ]) {
+      expect(UpdateWorkSessionRequest.safeParse({ title }).success, JSON.stringify(title)).toBe(false);
+    }
+    // The joiners scripts and emoji need stay allowed (Persian ZWNJ, a ZWJ emoji sequence).
+    for (const title of [
+      "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+      "Team \u{1F468}\u200D\u{1F4BB} work",
+    ]) {
+      expect(UpdateWorkSessionRequest.safeParse({ title }).success, JSON.stringify(title)).toBe(true);
+    }
+  });
+
   it("the creation title rule is unchanged", () => {
     const body = { projectId: a, title: "  Fix the login redirect on Safari  " };
     expect(CreateWorkSessionRequest.parse(body).title).toBe("Fix the login redirect on Safari");

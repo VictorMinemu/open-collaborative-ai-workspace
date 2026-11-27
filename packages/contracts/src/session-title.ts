@@ -231,8 +231,12 @@ export const SessionTitle = z.string().superRefine((text, ctx) => {
   for (const problem of titleProblems(text)) ctx.addIssue({ code: "custom", message: problem });
 });
 
-/** Any C0/C1 control character (line feed, carriage return and tab included) or a Unicode line/paragraph separator. */
-const TYPED_TITLE_FORBIDDEN_RE = /[\p{Cc}\u2028\u2029]/u;
+/**
+ * Any C0/C1 control character (line feed, carriage return and tab included), a Unicode line/paragraph separator, or a
+ * format character (IN-04: bidi overrides and isolates, zero-width spaces, BOM, soft hyphen), which would let a title
+ * render as another session's. The zero-width non-joiner and joiner stay: scripts (Persian, Indic) and emoji need them.
+ */
+const TYPED_TITLE_FORBIDDEN_RE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\u2028\u2029]/u;
 
 /**
  * A title a person types (07.13.1.1, D-06, D-14, PD-07): `PATCH /work-sessions/:id` and the rename menus. The

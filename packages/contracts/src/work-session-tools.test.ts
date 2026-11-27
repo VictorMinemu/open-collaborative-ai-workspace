@@ -108,6 +108,12 @@ describe("naming rules (07.13.1.1-01, D-08, PD-16)", () => {
     expect(NamingRule.safeParse("Start\u0000 here").success).toBe(false);
     expect(NamingRule.safeParse("Start\u001b[31m here").success).toBe(false);
     expect(NamingRule.parse("  Start with the ticket  ")).toBe("Start with the ticket");
+    // IN-04: no bidi override or invisible format character either; the scripts' joiners stay.
+    for (const rule of ["Start \u202Ehere", "Start\u200Bhere", "\u2066Start\u2069", "Start\uFEFFhere"]) {
+      expect(NamingRule.safeParse(rule).success, JSON.stringify(rule)).toBe(false);
+      expect(NamingRules.safeParse(rule).success, JSON.stringify(rule)).toBe(false);
+    }
+    expect(NamingRule.safeParse("\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645").success).toBe(true);
     expect(NAMING_RULES_MAX_CHARS).toBe(2 * NAMING_RULE_MAX_CHARS + 2);
     expect(NamingRules.safeParse("a".repeat(NAMING_RULES_MAX_CHARS)).success).toBe(true);
     expect(NamingRules.safeParse("a".repeat(NAMING_RULES_MAX_CHARS + 1)).success).toBe(false);
