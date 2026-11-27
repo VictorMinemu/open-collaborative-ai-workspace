@@ -50,6 +50,7 @@ export * from "./work-projects";
 export * from "./work-prompt-files";
 export * from "./work-session";
 export * from "./work-session-files";
+export * from "./work-session-tools";
 export * from "./work-zone-memory";
 export * from "./work-zone-policy";
 export * from "./work-zone-proposals";

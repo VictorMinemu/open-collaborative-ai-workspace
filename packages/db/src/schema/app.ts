@@ -1575,6 +1575,12 @@ export const workZonePolicies = appSchema.table(
      * session gets it only where this and the device's own opt-in (`devices.browser_opt_in`) both allow it.
      */
     allowBrowser: boolean("allow_browser").notNull().default(false),
+    /**
+     * Phase 07.13.1.1 (D-08, PD-16; ADR-0047): the organization's session naming rule (at most 600 characters), used by
+     * the automatic title call and shown to every session's agent with its rename tool, before a project's rule.
+     * Untrusted wording data, never logged or audited as text. null = none.
+     */
+    sessionNamingRule: text("session_naming_rule"),
   },
   (t) => [
     check("work_zone_policies_runtime_updates_ck", sql`${t.runtimeUpdates} in ('automatic','notify','off')`),
@@ -1583,6 +1589,7 @@ export const workZonePolicies = appSchema.table(
       "work_zone_policies_bot_file_max_bytes_ck",
       sql`${t.botFileMaxBytes} between 1048576 and 1073741824`,
     ),
+    check("work_zone_policies_session_naming_rule_ck", sql`char_length(${t.sessionNamingRule}) <= 600`),
   ],
 );
 
@@ -1820,6 +1827,12 @@ export const workSessions = appSchema.table(
     titleSource: text("title_source", { enum: ["user", "heuristic", "auto"] })
       .notNull()
       .default("user"),
+    /**
+     * The session's owner (07.13.1.1 D-02, D-11; ADR-0047): its creator until an Assign to me on a service host moves
+     * it (an UPDATE under the session lock, so every owner rule in `app.work_session_access`, the RLS backstop and the
+     * resolver's `creator` relation moves at once); the creator is kept in the `work_session.created` audit. A
+     * bot-started session's owner is the bot's sponsor (07.16).
+     */
     createdBy: uuid("created_by").notNull(),
     runtimeSessionId: text("runtime_session_id"),
     worktree: boolean("worktree").notNull().default(false),
@@ -1836,9 +1849,10 @@ export const workSessions = appSchema.table(
     /** `DiffStat` of the last `diff.result`. */
     diffStat: jsonb("diff_stat").$type<{ files: number; additions: number; deletions: number }>(),
     /**
-     * Phase 07.9 (D-04): who sees and follows the session, always within project access. `owner` = its creator only;
-     * `project` = everyone with access to its project; `teams` / `people` = the active `work_session_grants` rows (plus
-     * the creator). The rule lives only in `app.work_session_access` (post-migrate.sql), never in a copy.
+     * Phase 07.9 (D-04): who sees and follows the session, always within project access. `owner` = its owner
+     * (`created_by`) only; `project` = everyone with access to its project; `teams` / `people` = the active
+     * `work_session_grants` rows (plus the owner). The device owner always sees it (D-11). The rule lives only in
+     * `app.work_session_access` (post-migrate.sql), never in a copy.
      */
     visibility: text("visibility", { enum: ["owner", "project", "teams", "people"] })
       .notNull()
@@ -1912,6 +1926,11 @@ export const workProjectSettings = appSchema.table(
       .default("project"),
     updatedBy: uuid("updated_by").notNull(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.13.1.1 (D-08, PD-16; ADR-0047): the project's session naming rule (at most 600 characters), added after
+     * the organization's. Editable by `work_project.manage`; untrusted wording data. null = none.
+     */
+    namingRule: text("naming_rule"),
   },
   (t) => [
     foreignKey({
@@ -1920,6 +1939,7 @@ export const workProjectSettings = appSchema.table(
       foreignColumns: [orgUnits.organizationId, orgUnits.id],
     }).onDelete("cascade"),
     check("work_project_settings_default_ck", sql`${t.defaultVisibility} in ('project','owner')`),
+    check("work_project_settings_naming_rule_ck", sql`char_length(${t.namingRule}) <= 600`),
   ],
 );
 
@@ -2054,6 +2074,11 @@ export const workPrompts = appSchema.table(
     tainted: boolean("tainted").notNull().default(false),
     /** Phase 07.18 (PD-05, PD-15): how many times a limit moved this prompt to another pool account (at most 3). */
     accountSwitches: integer("account_switches").notNull().default(0),
+    /**
+     * 07.13.1.1 (D-07, PD-11): set once when the turn's agent renamed its session; the API claims it with a conditional
+     * update, so one rename per turn.
+     */
+    titleRenamedAt: ts("title_renamed_at"),
   },
   (t) => [
     index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position),

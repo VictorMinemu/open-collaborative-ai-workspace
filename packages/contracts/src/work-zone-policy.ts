@@ -4,6 +4,7 @@ import { RuntimeUpdatesLevel } from "./runtime-maintenance";
 import { PermissionMode } from "./session-events";
 import { EffortLevel } from "./session-settings";
 import { BOT_FILE_LIMITS } from "./work-session-files";
+import { NamingRule } from "./work-session-tools";
 
 /**
  * Organization Work Zone policy (Phase 03.2, D-02, D-11; ADR-0012). One row per organization
@@ -54,6 +55,12 @@ export const WorkZonePolicy = z.object({
    * opt-in ∩ its `browser` capability, decided per turn by the API. Absent = false.
    */
   allowBrowser: z.boolean().optional(),
+  /**
+   * 07.13.1.1 (D-08, PD-16): the organization's session naming rule, followed by the automatic title generator and
+   * shown to every session's agent with its rename tool (a project's rule comes after it). Untrusted wording data,
+   * never logged or audited as text. null = none; absent = an older API.
+   */
+  sessionNamingRule: NamingRule.nullable().optional(),
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -68,6 +75,7 @@ export const DEFAULT_WORK_ZONE_POLICY: Omit<WorkZonePolicy, "updatedAt"> = {
   allowFastMode: false,
   runtimeUpdates: "automatic",
   allowBrowser: false,
+  sessionNamingRule: null,
 };
 
 /** `PUT /api/v1/work-zone-policy`: any subset. */

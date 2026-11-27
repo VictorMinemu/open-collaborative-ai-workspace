@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { Project } from "./device";
+import { SERVER_ONLY_SESSION_EVENTS, SessionEvent } from "./session-events";
 import { SessionVisibilityKind, WORK_PROJECT_LIMITS } from "./work-projects";
 import {
+  ASSIGN_REFUSAL_TEXT,
+  AssignPreview,
+  AssignRefusal,
+  AssignWorkSessionResult,
   AudiencePeople,
   AudiencePreview,
   CreateWorkSessionRequest,
   SessionAudienceInput,
+  UpdateWorkSessionRequest,
   UpdateWorkSessionVisibilityRequest,
   UpdateWorkSessionVisibilityResult,
   WorkPrompt,
   WorkSession,
   WorkSessionAgentRef,
+  WorkSessionAssign,
   WorkSessionAttention,
   WorkSessionDetail,
   WorkSessionOrigin,
@@ -425,5 +432,97 @@ describe("bot-authored prompts, the session's bot and the per-viewer origin (07.
     expect(WorkSessionDetail.safeParse({ ...detail, origin: { ...origin, kind: "thread" } }).success).toBe(
       false,
     );
+  });
+});
+
+describe("owner, Assign to me and the typed rename (07.13.1.1-01, D-04, D-05, D-06, D-11, D-12, D-14, D-15)", () => {
+  it("a typed title is trimmed, 1-200 characters, one line, with no host path and no extra key", () => {
+    expect(UpdateWorkSessionRequest.parse({ title: "  Fix login  " })).toEqual({ title: "Fix login" });
+    expect(UpdateWorkSessionRequest.parse({ title: "x".repeat(200) }).title).toHaveLength(200);
+    for (const title of [
+      "",
+      "   ",
+      "x".repeat(201),
+      "Fix\nlogin",
+      "Fix\rlogin",
+      "Fix\u2028login",
+      "Fix\u0000login",
+      "Fix\u001blogin",
+      "Fix\u0085login",
+      "Look at /Users/ana/x",
+      "Look at C:\\x",
+      "Read ~/notes",
+    ]) {
+      expect(UpdateWorkSessionRequest.safeParse({ title }).success, JSON.stringify(title)).toBe(false);
+    }
+    expect(UpdateWorkSessionRequest.safeParse({ title: "Fix login", source: "user" }).success).toBe(false);
+    expect(UpdateWorkSessionRequest.safeParse({}).success).toBe(false);
+  });
+
+  it("the creation title rule is unchanged", () => {
+    const body = { projectId: a, title: "  Fix the login redirect on Safari  " };
+    expect(CreateWorkSessionRequest.parse(body).title).toBe("Fix the login redirect on Safari");
+  });
+
+  it("names the seven assign refusals in order, each with one fixed sentence", () => {
+    expect(AssignRefusal.options).toEqual([
+      "not_on_server",
+      "bot_session",
+      "archived",
+      "device_revoked",
+      "device_not_shared",
+      "not_allowed",
+      "already_owner",
+    ]);
+    for (const code of AssignRefusal.options) {
+      const text = ASSIGN_REFUSAL_TEXT[code];
+      expect(text.length, code).toBeGreaterThan(1);
+      expect(text.endsWith("."), code).toBe(true);
+    }
+    expect(Object.keys(ASSIGN_REFUSAL_TEXT).sort()).toEqual([...AssignRefusal.options].sort());
+  });
+
+  it("parses the assign state, the preview and the result", () => {
+    expect(WorkSessionAssign.parse({ allowed: true, reason: null })).toEqual({ allowed: true, reason: null });
+    expect(WorkSessionAssign.parse({ allowed: false, reason: "not_on_server" }).reason).toBe("not_on_server");
+    expect(WorkSessionAssign.safeParse({ allowed: false, reason: "desktop" }).success).toBe(false);
+    const preview = {
+      allowed: true,
+      reason: null,
+      previousOwnerLosesAccess: true,
+      othersLosingAccess: 2,
+      cancelledPrompts: 1,
+      turnRunning: false,
+    };
+    expect(AssignPreview.parse(preview)).toEqual(preview);
+    expect(AssignPreview.safeParse({ ...preview, othersLosingAccess: -1 }).success).toBe(false);
+    expect(AssignPreview.safeParse({ ...preview, cancelledPrompts: 1.5 }).success).toBe(false);
+    const result = { session: oldSession, removedCount: 1, cancelledPrompts: 0, settingsDowngraded: false };
+    expect(AssignWorkSessionResult.parse(result).removedCount).toBe(1);
+    expect(AssignWorkSessionResult.safeParse({ ...result, removedCount: -1 }).success).toBe(false);
+  });
+
+  it("a session carries an optional, nullable, viewer-neutral device host kind", () => {
+    expect(WorkSession.parse(oldSession).deviceHostKind).toBeUndefined();
+    expect(WorkSession.parse({ ...oldSession, deviceHostKind: "service" }).deviceHostKind).toBe("service");
+    expect(WorkSession.parse({ ...oldSession, deviceHostKind: "desktop" }).deviceHostKind).toBe("desktop");
+    expect(WorkSession.parse({ ...oldSession, deviceHostKind: null }).deviceHostKind).toBeNull();
+    expect(WorkSession.safeParse({ ...oldSession, deviceHostKind: "laptop" }).success).toBe(false);
+  });
+
+  it("the detail carries an optional per-viewer assign state", () => {
+    const detail = { session: oldSession, prompts: [], approvals: [], events: [], lastSeq: 0 };
+    expect(WorkSessionDetail.parse(detail).assign).toBeUndefined();
+    const assign = { allowed: false, reason: "bot_session" };
+    expect(WorkSessionDetail.parse({ ...detail, assign }).assign).toEqual(assign);
+  });
+
+  it("session.owner_changed is a session event only the API writes", () => {
+    const e = { type: "session.owner_changed", fromUserId: a, toUserId: b };
+    expect(SessionEvent.parse(e)).toEqual(e);
+    expect(SessionEvent.safeParse({ ...e, toUserId: "bob" }).success).toBe(false);
+    expect(SessionEvent.safeParse({ type: "session.owner_changed", fromUserId: a }).success).toBe(false);
+    expect(SERVER_ONLY_SESSION_EVENTS.has("session.owner_changed")).toBe(true);
+    expect(SERVER_ONLY_SESSION_EVENTS.has("account.switched")).toBe(true);
   });
 });

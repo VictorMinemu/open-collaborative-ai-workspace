@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { IsoDateTime } from "./common";
+import { Id, IsoDateTime } from "./common";
 import { WorkBrowserApprovalRequest } from "./work-browser";
 
 /**
@@ -178,6 +178,13 @@ export const SessionEvent = z.discriminatedUnion("type", [
     reason: z.enum(["limit", "unavailable"]),
     until: IsoDateTime.nullable(),
   }),
+  /**
+   * Phase 07.13.1.1 (D-03, D-11, PD-04): the session changed owner through Assign to me (`work_sessions.created_by`
+   * moved from one person to another). Written by the API only (`SERVER_ONLY_SESSION_EVENTS`); ids only, names come
+   * from the directory. The original creator stays in the history (this line and the `work_session.created` audit).
+   * Old webs ignore it.
+   */
+  ev("session.owner_changed", { fromUserId: Id, toUserId: Id }),
   /** Unknown runtime event, forwarded as-is (sanitized). The runtime's own type travels as `rawType`. */
   ev("runtime.raw", { rawType: z.string().max(200), data: z.unknown() }),
 ]);
@@ -189,7 +196,10 @@ export type RuntimeRawEvent = Extract<SessionEvent, { type: "runtime.raw" }>;
 export const EPHEMERAL_SESSION_EVENTS: ReadonlySet<SessionEventType> = new Set(["assistant.delta"]);
 
 /**
- * Event types only the API writes (07.18 PD-14). The API appends them to `ws:<id>` itself; one a device sends is
- * dropped, so a device cannot fake an account switch.
+ * Event types only the API writes (07.18 PD-14, 07.13.1.1 PD-04). The API appends them to `ws:<id>` itself; one a
+ * device sends is dropped, so a device cannot fake an account switch or an owner change.
  */
-export const SERVER_ONLY_SESSION_EVENTS: ReadonlySet<SessionEventType> = new Set(["account.switched"]);
+export const SERVER_ONLY_SESSION_EVENTS: ReadonlySet<SessionEventType> = new Set([
+  "account.switched",
+  "session.owner_changed",
+]);
