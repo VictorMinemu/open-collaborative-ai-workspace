@@ -38,6 +38,7 @@ import {
 } from "./work-browser";
 import { WORK_PROMPT_MAX_ATTACHMENTS } from "./work-prompt-files";
 import { BOT_FILE_LIMITS, WorkSessionFilePath } from "./work-session-files";
+import { NamingRules, SessionRenameRefusal, SessionToolsGrant } from "./work-session-tools";
 
 /**
  * Device Link protocol: JSON frames on `GET /runtime/ws` (Authorization: Bearer <device token>).
@@ -470,6 +471,21 @@ export const BrowserFocusFrame = z.strictObject({
 });
 export type BrowserFocusFrame = z.infer<typeof BrowserFocusFrame>;
 
+/**
+ * 07.13.1.1 (D-07, D-14, PD-09): the session's agent called `ocw_session` › `rename` during a turn. The request half
+ * of a pair modelled on `browser.signin.load` / `browser.signin.state`: the API decides it from its own state (same
+ * device, that turn in flight, title not person-typed, one rename per turn, the generated-title shape) and answers
+ * `session.rename.result` on the same socket only. The device sends it only for a turn in flight.
+ */
+export const SessionRenameFrame = z.strictObject({
+  type: z.literal("session.rename"),
+  requestId: z.uuid(),
+  sessionId: z.uuid(),
+  promptId: z.string().min(1).max(128),
+  title: z.string().max(200),
+});
+export type SessionRenameFrame = z.infer<typeof SessionRenameFrame>;
+
 export const DeviceToServerFrame = z.discriminatedUnion("type", [
   HelloFrame,
   ProjectsSyncFrame,
@@ -488,6 +504,7 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   BrowserEventFrame,
   BrowserSignInLoadFrame,
   BrowserFocusFrame,
+  SessionRenameFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -605,6 +622,21 @@ export const BrowserServerFrame = z.discriminatedUnion("type", [
 ]);
 export type BrowserServerFrame = z.infer<typeof BrowserServerFrame>;
 
+/**
+ * 07.13.1.1 (D-07, PD-09): the answer to `session.rename`, sent on the same socket only (ephemeral, never queued in
+ * `device_commands`). `ok: true` carries the title the API stored (it goes live like any title); `ok: false` one
+ * refusal, whose fixed sentence (`SESSION_RENAME_REFUSAL_TEXT`) the device gives the agent.
+ */
+export const SessionRenameResultFrame = z.strictObject({
+  type: z.literal("session.rename.result"),
+  requestId: z.uuid(),
+  result: z.discriminatedUnion("ok", [
+    z.strictObject({ ok: z.literal(true), title: z.string().max(200) }),
+    z.strictObject({ ok: z.literal(false), reason: SessionRenameRefusal }),
+  ]),
+});
+export type SessionRenameResultFrame = z.infer<typeof SessionRenameResultFrame>;
+
 export const ServerToDeviceFrame = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), deviceId: z.uuid(), organizationId: z.uuid() }),
   CommandFrame,
@@ -620,6 +652,7 @@ export const ServerToDeviceFrame = z.discriminatedUnion("type", [
   BrowserHandbackFrame,
   BrowserCloseFrame,
   BrowserSignInStateFrame,
+  SessionRenameResultFrame,
 ]);
 export type ServerToDeviceFrame = z.infer<typeof ServerToDeviceFrame>;
 
@@ -649,6 +682,12 @@ export const SessionStartPayload = z.object({
    * hello carried `browser`; the device re-checks it per call with its live local opt-in.
    */
   browser: SessionBrowserGrant.optional(),
+  /**
+   * 07.13.1.1 (D-07, D-08, PD-10): the `ocw_session` tool the first turn's agent may use and the naming rules it shows.
+   * Absent = no session tool. The API adds it to the sent copy only (never to the stored `device_commands` payload),
+   * decided at send time; older daemons strip it (non-strict payload).
+   */
+  sessionTools: SessionToolsGrant.optional(),
 });
 export type SessionStartPayload = z.infer<typeof SessionStartPayload>;
 
@@ -734,6 +773,12 @@ export const PromptPayload = z.object({
    * Absent = not allowed. Sent only to a device whose hello carried `browser`.
    */
   browser: SessionBrowserGrant.optional(),
+  /**
+   * 07.13.1.1 (D-07, D-08, PD-10): the `ocw_session` tool this turn's agent may use, decided per turn (a person typing
+   * the title turns `rename` off from the next turn). Absent = no session tool. The API adds it to the sent copy only;
+   * older daemons strip it (non-strict payload).
+   */
+  sessionTools: SessionToolsGrant.optional(),
 });
 export type PromptPayload = z.infer<typeof PromptPayload>;
 
@@ -762,6 +807,11 @@ export const SessionTitlePayload = z.object({
   runtime: RuntimeId,
   model: z.string().min(1).max(200),
   prompt: z.string().min(1).max(TITLE_PROMPT_MAX_CHARS),
+  /**
+   * 07.13.1.1 (D-08, PD-06): the organization's then the project's naming rules (`joinNamingRules`), untrusted wording
+   * data the title call follows within the title limits. Absent = no rule; older daemons strip it (non-strict payload).
+   */
+  namingRules: NamingRules.optional(),
 });
 export type SessionTitlePayload = z.infer<typeof SessionTitlePayload>;
 

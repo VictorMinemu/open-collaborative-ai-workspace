@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id } from "./common";
+import { NamingRule } from "./work-session-tools";
 
 /**
  * Work Zone team projects and session audiences (Phase 07.9, ADR-0030). A team project is an org unit of kind
@@ -7,7 +8,8 @@ import { Id } from "./common";
  * repositories linked to it. Who may see a session is decided only by the API resolver; these schemas carry ids,
  * display names and avatars, never a host path (AGENTS principle 7) and never anything else about a person.
  *
- * Imports only `common.ts`: `work-session.ts` and `device.ts` import from here, never the other way round.
+ * Imports only `common.ts` and the zod-only `work-session-tools.ts`: `work-session.ts` and `device.ts` import from
+ * here, never the other way round.
  */
 
 /**
@@ -204,11 +206,27 @@ export const WorkProjectDetail = z.object({
     members: z.boolean(),
     open: z.boolean().optional(),
   }),
+  /**
+   * 07.13.1.1 (D-08, PD-16): the project's session naming rule, added after the organization's. Shown to everyone who
+   * can open the project page, editable by `work_project.manage`. Untrusted wording data. null = none; absent = an
+   * older API.
+   */
+  namingRule: NamingRule.nullable().optional(),
 });
 export type WorkProjectDetail = z.infer<typeof WorkProjectDetail>;
 
-/** `PATCH /api/v1/work-projects/:unitId`: the default audience of new sessions (existing sessions never change). */
-export const UpdateWorkProjectRequest = z.strictObject({ defaultVisibility: ProjectDefaultVisibility });
+/**
+ * `PATCH /api/v1/work-projects/:unitId`: the default audience of new sessions (existing sessions never change) and,
+ * from 07.13.1.1 (D-08), the project's naming rule (null or blank = none). At least one key; nothing else.
+ */
+export const UpdateWorkProjectRequest = z
+  .strictObject({
+    defaultVisibility: ProjectDefaultVisibility.optional(),
+    namingRule: NamingRule.nullable().optional(),
+  })
+  .refine((body) => body.defaultVisibility !== undefined || body.namingRule !== undefined, {
+    message: "nothing_to_update",
+  });
 export type UpdateWorkProjectRequest = z.infer<typeof UpdateWorkProjectRequest>;
 
 /** `POST /api/v1/work-projects/:unitId/teams`. */
