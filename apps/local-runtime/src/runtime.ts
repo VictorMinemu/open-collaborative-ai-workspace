@@ -32,6 +32,12 @@ export interface TitleRequest {
    * (never the device owner's login); absent or unknown = the device's own login, as before.
    */
   sessionId?: string;
+  /**
+   * 07.13.1.1 (D-08, PD-06): the organization's then the project's naming rules for titles. Untrusted wording data
+   * written by admins and project leads: the adapter puts them into the title call only through `titleInstructions`
+   * (delimited, framed as data, limits restated) and never logs them. Absent = no rule.
+   */
+  namingRules?: string;
 }
 
 export interface RuntimeCapabilities {

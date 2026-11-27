@@ -383,6 +383,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       model: req.model,
       resolvedModel: row?.resolvedModel ?? null,
       signal: req.signal,
+      ...(req.namingRules ? { namingRules: req.namingRules } : {}),
     });
   }
 

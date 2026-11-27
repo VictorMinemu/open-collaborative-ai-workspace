@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { normalizeSessionTitle, titleProblems } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { TITLE_INSTRUCTIONS, TitleError, titleUserMessage } from "../title.js";
+import { TITLE_INSTRUCTIONS, TitleError, titleInstructions, titleUserMessage } from "../title.js";
 import { type AppServerProcess, CodexRuntime } from "./codex-runtime.js";
 import type { ModelListResponse } from "./generated/v2/ModelListResponse.js";
 import { generateCodexTitle } from "./title.js";
@@ -431,6 +431,11 @@ describe("CodexRuntime.generateTitle", () => {
         item("item/completed", { type: "agentMessage", id: "m1", text: "Fix login redirect bug" }),
         turnCompleted(),
       ]),
+      // 4. a second title thread, with naming rules (07.13.1.1 PD-06)
+      conversation([
+        item("item/completed", { type: "agentMessage", id: "m2", text: "Auth fix login redirect" }),
+        turnCompleted(),
+      ]),
     ];
     const servers: ReplayAppServer[] = [];
     const runtime = new CodexRuntime({
@@ -460,6 +465,21 @@ describe("CodexRuntime.generateTitle", () => {
     expect({ received: servers[0]!.received.length, events: events.length }).toEqual(before);
     expect(servers[0]!.received.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start"]);
     expect(servers[0]!.killed).toEqual([]);
+    expect(sent(servers[2]!, "thread/start")?.params).toMatchObject({ baseInstructions: TITLE_INSTRUCTIONS });
+
+    // 07.13.1.1 (PD-06): the request's naming rules reach the title thread's base instructions only.
+    await runtime.generateTitle({
+      prompt: "Please fix the login redirect bug",
+      model: "gpt-6-luna",
+      signal: new AbortController().signal,
+      namingRules: "Start with the area",
+    });
+    expect(servers).toHaveLength(4);
+    expect(sent(servers[3]!, "thread/start")?.params).toMatchObject({
+      baseInstructions: titleInstructions("Start with the area"),
+      sandbox: "read-only",
+      ephemeral: true,
+    });
     await runtime.stopAll().catch(() => undefined);
   });
 });

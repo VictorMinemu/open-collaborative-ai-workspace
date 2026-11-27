@@ -28,6 +28,10 @@
 //   every call to the daemon's manager over the control socket; only the token FILE's path is in argv/env. Codex's
 //   approvals for our own tools are off (`default_tools_approval_mode = "approve"`, A-2): the manager decides them. A
 //   change of availability restarts the app-server between turns (never inside one) and resumes the same thread.
+// - the session's own tools (07.13.1.1 D-07, PD-08): a session whose payloads carry `sessionTools` also gets
+//   `-c mcp_servers.ocw_session.*` overrides that start `ocw-runtime session-mcp` (session-tools/mcp-shim.ts), the same
+//   bridge for the `rename` tool; the session's relay decides every call. A change of the offered state restarts the
+//   app-server between turns as the browser's does; a change of naming rules alone reaches it at its next start.
 // Known limit: Codex's sandbox restricts writes and network, not reads; secrets read by a sandboxed
 // command are still caught on the way out by redact().
 
@@ -49,6 +53,7 @@ import {
   type SessionSettingsPatch,
   slashDisposition,
   WORK_BROWSER_MCP_SERVER,
+  WORK_SESSION_MCP_SERVER,
   type WorkSessionStatus,
 } from "@ocw/contracts";
 import { CodexRateLimits } from "../accounts/codex-protocol.js";
@@ -67,6 +72,7 @@ import {
   type RuntimeAccount,
   type RuntimeCapabilities,
   RuntimeError,
+  type SessionToolsHandle,
   type StartSessionOptions,
   type TitleRequest,
 } from "../runtime.js";
@@ -167,6 +173,35 @@ export function codexBrowserArgs(
     `${key}.env={${env.map(([k, v]) => `${k}=${tomlString(v)}`).join(",")}}`,
     `${key}.default_tools_approval_mode="approve"`,
     `${key}.tool_timeout_sec=${CODEX_BROWSER_TOOL_TIMEOUT_SEC}`,
+  ];
+  return overrides.flatMap((o) => ["-c", o]);
+}
+
+/** The longest one `ocw_session` call may take on Codex's side: the relay's 15 s budget with room for the socket. */
+export const CODEX_SESSION_TOOL_TIMEOUT_SEC = 30;
+
+/**
+ * 07.13.1.1 (D-07, PD-08): the `-c` overrides that make a session's app-server start the `ocw_session` shim
+ * (`ocw-runtime session-mcp`), built like `codexBrowserArgs`: the env names the session, the token FILE (never the
+ * token) and the daemon's home, nothing else. `default_tools_approval_mode = "approve"`: Codex never asks about the
+ * rename; the session's relay decides each call.
+ */
+export function codexSessionToolArgs(
+  shim: CodexBrowserShim,
+  session: { sessionId: string; tokenFile: string },
+): string[] {
+  const env: Array<[string, string]> = [
+    ["OCW_SESSION_TOOLS_SESSION", session.sessionId],
+    ["OCW_SESSION_TOOLS_TOKEN_FILE", session.tokenFile],
+    ["OCW_HOME", shim.home],
+  ];
+  const key = `mcp_servers.${WORK_SESSION_MCP_SERVER}`;
+  const overrides = [
+    `${key}.command=${tomlString(shim.command)}`,
+    `${key}.args=[${[...shim.entry, "session-mcp"].map(tomlString).join(",")}]`,
+    `${key}.env={${env.map(([k, v]) => `${k}=${tomlString(v)}`).join(",")}}`,
+    `${key}.default_tools_approval_mode="approve"`,
+    `${key}.tool_timeout_sec=${CODEX_SESSION_TOOL_TIMEOUT_SEC}`,
   ];
   return overrides.flatMap((o) => ["-c", o]);
 }
@@ -336,6 +371,18 @@ interface Session {
   browser: SessionBrowserTools | null;
   /** 07.13 (PD-08): the running app-server was started with the `ocw_browser` overrides. */
   browserOn: boolean;
+  /** 07.13.1.1 (D-07): the session's own tools (null = none). */
+  sessionTools: SessionToolsHandle | null;
+  /** 07.13.1.1 (PD-08): the running app-server was started with the `ocw_session` overrides. */
+  sessionToolsOn: boolean;
+}
+
+/** The server is one of our shims and this app-server runs its overrides (not a configured server of that name). */
+function ourShimServer(s: Session, server: unknown): boolean {
+  return (
+    (s.browserOn && server === WORK_BROWSER_MCP_SERVER) ||
+    (s.sessionToolsOn && server === WORK_SESSION_MCP_SERVER)
+  );
 }
 
 /** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
@@ -485,6 +532,7 @@ export class CodexRuntime implements AgentRuntime {
       model: req.model,
       effort,
       signal: req.signal,
+      ...(req.namingRules ? { namingRules: req.namingRules } : {}),
       ...(this.opts.onRpcMessage ? { onRpcMessage: this.opts.onRpcMessage } : {}),
     });
   }
@@ -510,11 +558,17 @@ export class CodexRuntime implements AgentRuntime {
     const browser = options.browser ?? null;
     // 07.13 (PD-08): the shim's overrides when the session's browser is available now (the token file first).
     const browserArgs = await this.browserSpawnArgs(options.sessionId, browser);
+    // 07.13.1.1 (PD-08): the `ocw_session` shim's overrides when the session's tools are offered (beside the browser's).
+    const sessionTools = options.sessionTools ?? null;
+    const sessionArgs = await this.sessionToolSpawnArgs(options.sessionId, sessionTools);
     // R1.7: one app-server of a slot starts at a time; held until its first authenticated read settles.
     const releaseSlot = account ? await this.slotLocks.acquire(account.codexHome) : () => undefined;
     let proc: AppServerProcess;
     try {
-      proc = this.spawnSessionServer(options.sessionId, options.cwd, account, browserArgs);
+      proc = this.spawnSessionServer(options.sessionId, options.cwd, account, [
+        ...browserArgs,
+        ...sessionArgs,
+      ]);
     } catch (err) {
       releaseSlot();
       throw err;
@@ -566,6 +620,8 @@ export class CodexRuntime implements AgentRuntime {
       onAccountSignal: options.onAccountSignal ?? null,
       browser,
       browserOn: browserArgs.length > 0,
+      sessionTools,
+      sessionToolsOn: sessionArgs.length > 0,
     } as Omit<Session, "peer" | "exited"> as Session;
     this.attach(session, proc);
 
@@ -842,20 +898,20 @@ export class CodexRuntime implements AgentRuntime {
   /**
    * A session's app-server (start and wake-up): the same filtered env and arguments every time. A slot session runs
    * with `CODEX_HOME` = the slot's directory and never with an API key (07.18 D-02, D-15); without one the env is
-   * exactly as before 07.18. `browserArgs` (07.13) are the shim's overrides, appended to either argument list; none =
-   * the arguments are exactly as before 07.13.
+   * exactly as before 07.18. `mcpArgs` are our shims' overrides (07.13 `ocw_browser`, 07.13.1.1 `ocw_session`),
+   * appended to either argument list; none = the arguments are exactly as before 07.13.
    */
   private spawnSessionServer(
     sessionId: string,
     cwd: string,
     account: SlotAccount | null,
-    browserArgs: readonly string[],
+    mcpArgs: readonly string[],
   ): AppServerProcess {
     const env = account
       ? { ...codexChildEnv(process.env, false), CODEX_HOME: account.codexHome }
       : codexChildEnv(process.env, this.opts.useApiKey ?? false);
-    const base = account ? CODEX_SLOT_APP_SERVER_ARGS : browserArgs.length > 0 ? CODEX_APP_SERVER_ARGS : null;
-    const args = base ? [...base, ...browserArgs] : undefined;
+    const base = account ? CODEX_SLOT_APP_SERVER_ARGS : mcpArgs.length > 0 ? CODEX_APP_SERVER_ARGS : null;
+    const args = base ? [...base, ...mcpArgs] : undefined;
     const proc = this.opts.spawnAppServer
       ? this.opts.spawnAppServer({ cwd, env, ...(args ? { args } : {}) })
       : this.spawnReal(cwd, env, args);
@@ -920,13 +976,14 @@ export class CodexRuntime implements AgentRuntime {
    */
   private async wake(s: Session): Promise<void> {
     if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
-    // 07.13 (PD-08): the overrides follow the browser's availability at this wake-up.
+    // 07.13 (PD-08): the overrides follow the browser's availability (and 07.13.1.1 the session tools') at this wake-up.
     const browserArgs = await this.browserSpawnArgs(s.id, s.browser);
+    const sessionArgs = await this.sessionToolSpawnArgs(s.id, s.sessionTools);
     const releaseSlot = s.account ? await this.slotLocks.acquire(s.account.codexHome) : () => undefined;
     let proc: AppServerProcess;
     try {
       if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
-      proc = this.spawnSessionServer(s.id, s.cwd, s.account, browserArgs);
+      proc = this.spawnSessionServer(s.id, s.cwd, s.account, [...browserArgs, ...sessionArgs]);
     } catch (err) {
       releaseSlot();
       throw err;
@@ -934,6 +991,7 @@ export class CodexRuntime implements AgentRuntime {
     this.attach(s, proc);
     s.dormant = false;
     s.browserOn = browserArgs.length > 0;
+    s.sessionToolsOn = sessionArgs.length > 0;
     const { peer, exited } = s;
     const c = s.configured;
     // Never resume into full access without the device opt-in (ADR-0012); the turn itself is refused anyway.
@@ -1003,14 +1061,23 @@ export class CodexRuntime implements AgentRuntime {
    * Everything a turn needs before `turn/start` (between turns only): the account asked for during the last turn
    * (07.18 D-08), the browser tools when their availability changed since the app-server started (07.13 PD-08: the
    * app-server is stopped as an account switch stops it, and the wake-up resumes the same thread with or without the
-   * overrides), the wake-up of a dormant session (07.11 D-03a), and the model's image input (PD-23).
+   * overrides), the same for the session's own tools when their offered state changed (07.13.1.1 PD-08; a change of
+   * the description alone waits for the next start), the wake-up of a dormant session (07.11 D-03a), and the model's
+   * image input (PD-23).
    */
   private async prepareTurn(s: Session): Promise<void> {
     await this.applyPendingAccount(s);
-    if (!s.dormant && (s.browser?.available ?? false) !== s.browserOn) {
+    const browserChanged = (s.browser?.available ?? false) !== s.browserOn;
+    const sessionToolsChanged = (s.sessionTools?.offered ?? false) !== s.sessionToolsOn;
+    if (!s.dormant && (browserChanged || sessionToolsChanged)) {
       s.dormant = true; // first, as in retireIdle(): a prompt arriving meanwhile wakes a new process
       await this.closeProcess(s, s.proc, s.peer, s.exited);
-      this.log.info("codex app-server restarted for the browser tools", { sessionId: s.id });
+      this.log.info(
+        browserChanged
+          ? "codex app-server restarted for the browser tools"
+          : "codex app-server restarted for the session tools",
+        { sessionId: s.id },
+      );
     }
     if (s.dormant) await this.wake(s);
     this.syncImageInput(s);
@@ -1031,6 +1098,24 @@ export class CodexRuntime implements AgentRuntime {
       const code = (err as NodeJS.ErrnoException).code ?? "error";
       this.log.warn("codex browser tools unavailable", { sessionId, code });
       browser.markUnavailable("runtime");
+      return [];
+    }
+  }
+
+  /**
+   * 07.13.1.1 (PD-08): the `ocw_session` shim's `-c` overrides when the session's tools are offered, else none. A token
+   * file that cannot be created marks the tools unavailable for the session (`runtime`), which starts without them.
+   */
+  private async sessionToolSpawnArgs(sessionId: string, tools: SessionToolsHandle | null): Promise<string[]> {
+    if (!tools?.offered) return [];
+    try {
+      const tokenFile = await tools.shimTokenFile();
+      return codexSessionToolArgs(this.opts.browserShim ?? defaultBrowserShim(), { sessionId, tokenFile });
+    } catch (err) {
+      // The code only: a file system error names the run dir's absolute path.
+      const code = (err as NodeJS.ErrnoException).code ?? "error";
+      this.log.warn("codex session tools unavailable", { sessionId, code });
+      tools.markUnavailable("runtime");
       return [];
     }
   }
@@ -1463,24 +1548,22 @@ export class CodexRuntime implements AgentRuntime {
        * 07.13 (PD-08, A-2): Codex asks before an MCP tool call when the server's approval mode is not `approve` (a
        * user's config.toml or a later Codex may change it). For `ocw_browser`, and only while this app-server runs our
        * overrides (so the server is our shim, not a configured one of the same name), the answer is yes: the daemon's
-       * manager decides that very call itself (opt-in, grant, lease, admin rules, host approvals). Every other server's
+       * manager decides that very call itself (opt-in, grant, lease, admin rules, host approvals). The same for
+       * `ocw_session` while its overrides run (07.13.1.1: the session's relay decides the rename). Every other server's
        * elicitation is declined. The request's `_meta.tool_params` carries the call's arguments: never logged.
        */
       case "mcpServer/elicitation/request": {
         const p = (r.params ?? {}) as { serverName?: unknown; mode?: unknown };
-        const ours =
-          s.browserOn &&
-          p.serverName === WORK_BROWSER_MCP_SERVER &&
-          (p.mode === undefined || p.mode === "form");
+        const ours = ourShimServer(s, p.serverName) && (p.mode === undefined || p.mode === "form");
         return ours
           ? { action: "accept", content: {}, _meta: null }
           : { action: "decline", content: null, _meta: null };
       }
-      /** The same for a question Codex asks about a tool call: answered only for an `ocw_browser` call, else none. */
+      /** The same for a question Codex asks about a tool call: answered only for a call of ours, else none. */
       case "item/tool/requestUserInput": {
         const p = (r.params ?? {}) as { itemId?: unknown; questions?: unknown };
         const item = typeof p.itemId === "string" ? s.mapper.items.get(p.itemId) : undefined;
-        const ours = s.browserOn && item?.type === "mcpToolCall" && item.server === WORK_BROWSER_MCP_SERVER;
+        const ours = item?.type === "mcpToolCall" && ourShimServer(s, item.server);
         return { answers: ours ? approveAnswers(p.questions) : {} };
       }
       default:

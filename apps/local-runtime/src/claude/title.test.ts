@@ -5,7 +5,7 @@ import type { ModelInfo, Options, SDKMessage, SDKUserMessage } from "@anthropic-
 import { normalizeSessionTitle, titleProblems } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { AsyncQueue } from "../async-queue.js";
-import { TITLE_INSTRUCTIONS, TitleError, titleUserMessage } from "../title.js";
+import { TITLE_INSTRUCTIONS, TitleError, titleInstructions, titleUserMessage } from "../title.js";
 import { ClaudeCodeRuntime, childEnv, type QueryHandle } from "./claude-runtime.js";
 import { type ClaudeTitleOptions, generateClaudeTitle } from "./title.js";
 import { secretDenyRules } from "./tool-policy.js";
@@ -330,6 +330,18 @@ describe("ClaudeCodeRuntime.generateTitle", () => {
     expect(titleQuery.params.options.cwd).not.toBe(cwd);
     expect({ prompts: session.prompts.length, calls: session.calls, events: events.length }).toEqual(before);
     expect(session.closed).toBe(false);
+    expect(titleQuery.params.options.systemPrompt).toBe(TITLE_INSTRUCTIONS);
+
+    // 07.13.1.1 (PD-06): the request's naming rules reach the title query's system prompt, and nothing else changes.
+    await runtime.generateTitle({
+      prompt: "Please fix the login redirect bug",
+      model: "haiku",
+      signal: new AbortController().signal,
+      namingRules: "Start with the area",
+    });
+    const ruled = queries.filter((q) => Array.isArray(q.params.options.tools)).at(-1)!;
+    expect(ruled.params.options.systemPrompt).toBe(titleInstructions("Start with the area"));
+    expect(ruled.params.options.tools).toEqual([]);
     await runtime.stopAll();
   });
 });

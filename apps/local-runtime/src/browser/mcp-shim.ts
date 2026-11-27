@@ -104,8 +104,11 @@ export async function readShimConfig(env: NodeJS.ProcessEnv): Promise<ShimConfig
   return { session, token, socket: controlSocketPath(ocwHome(env)) };
 }
 
-/** One request on the control socket, one answer line; the call's abort ends the connection. */
-function controlCall(
+/**
+ * One request on the control socket, one answer line; the call's abort ends the connection. Shared with the
+ * `ocw_session` shim (session-tools/mcp-shim.ts), so both shims use one socket client.
+ */
+export function controlCall(
   path: string,
   req: ControlRequest,
   timeoutMs: number,
