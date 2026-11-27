@@ -407,7 +407,9 @@ test("people and the agent rename a session", async ({ browser }) => {
     piaPage.getByTestId("tool-card").filter({ hasText: "ocw_session_rename" }).first(),
   ).toBeVisible({ timeout: 45_000 });
   // The quotes may be typographic once rendered as Markdown: any character stands for them.
-  await expect(sessionAnswer(piaPage, new RegExp(`Renamed the session to .${esc(AGENT_TITLE)}.\\.`))).toBeVisible({
+  await expect(
+    sessionAnswer(piaPage, new RegExp(`Renamed the session to .${esc(AGENT_TITLE)}.\\.`)),
+  ).toBeVisible({
     timeout: 45_000,
   });
   await idle(piaPage);
