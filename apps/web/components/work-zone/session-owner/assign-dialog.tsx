@@ -94,7 +94,7 @@ export function assignWarnings(preview: AssignPreview, previousOwnerName: string
 }
 
 const footerClass = "flex-col sm:flex-row";
-const buttonClass = "max-sm:h-11 max-sm:w-full";
+const buttonClass = "max-md:h-11 max-sm:w-full";
 
 /**
  * The confirm's body and footer for a loaded preview (pure, so every sentence is unit-tested). Allowed: what changes,

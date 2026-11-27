@@ -114,7 +114,7 @@ export function RenameForm({
           aria-invalid={!!error}
           aria-describedby={describedBy(id, error)}
           data-testid="rename-input"
-          className="max-sm:h-11 max-sm:text-base"
+          className="max-md:h-11 max-md:text-base"
           onChange={(e) => onChange(e.currentTarget.value)}
         />
       </FormField>
@@ -122,7 +122,7 @@ export function RenameForm({
         <Button
           type="button"
           variant="ghost"
-          className="max-sm:h-11 max-sm:w-full"
+          className="max-md:h-11 max-sm:w-full"
           disabled={pending}
           onClick={onCancel}
         >
@@ -131,7 +131,7 @@ export function RenameForm({
         <Button
           type="submit"
           data-testid="rename-save"
-          className="max-sm:h-11 max-sm:w-full"
+          className="max-md:h-11 max-sm:w-full"
           disabled={!canSave}
         >
           {pending ? <Spinner /> : null}

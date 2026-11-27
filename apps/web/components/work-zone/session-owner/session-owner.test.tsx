@@ -222,6 +222,24 @@ describe("rename (D-06, D-14, PD-07)", () => {
     expect(renameError("x".repeat(200))).toBeNull();
   });
 
+  it("IN-05: the field and both buttons are 44 px on every touch width (below 768 px), not only on phones", () => {
+    const markup = form("Old title");
+    const input = markup.match(/<input[^>]*data-testid="rename-input"[^>]*>/)?.[0] ?? "";
+    expect(input).toContain("max-md:h-11");
+    const buttons = markup.match(/<button[^>]*>/g) ?? [];
+    expect(buttons).toHaveLength(2);
+    for (const b of buttons) {
+      expect(b).toContain("max-md:h-11");
+      expect(b).not.toContain("max-sm:h-11");
+    }
+    const assign = body(preview()).match(/<button[^>]*>/g) ?? [];
+    expect(assign.length).toBeGreaterThan(0);
+    for (const b of assign) {
+      expect(b).toContain("max-md:h-11");
+      expect(b).not.toContain("max-sm:h-11");
+    }
+  });
+
   it("Save is off while unchanged, invalid or pending; a changed valid title can be saved", () => {
     const disabledSave =
       /data-testid="rename-save"[^>]*disabled=""|disabled=""[^>]*data-testid="rename-save"/;
