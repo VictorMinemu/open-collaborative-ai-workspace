@@ -14,6 +14,7 @@ import {
   assignPreviewOptions,
   assignSessionOptions,
   mergeSessionSnapshot,
+  renameSessionOptions,
   sessionListStale,
   wzKeys,
 } from "./workzone-queries";
@@ -269,5 +270,34 @@ describe("Assign to me and rename requests (07.13.1.1)", () => {
     expect(qc.getQueryState(wzKeys.sessions)?.isInvalidated).toBe(true);
     // The list shows the new owner at once; the refetch confirms it.
     expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.createdBy).toBe(B);
+  });
+
+  it("a rename PATCHes the session with { title } and writes the answer into the list", async () => {
+    const qc = new QueryClient();
+    const before = session(ID, "2026-10-22T10:00:00.000Z", { title: "Old title" });
+    const cached = detail(before);
+    qc.setQueryData(wzKeys.session(ID), cached);
+    qc.setQueryData(wzKeys.sessions, list(before));
+    const renamed = session(ID, "2026-10-22T10:05:00.000Z", { title: "New title", titleSource: "user" });
+    patch.mockResolvedValueOnce(renamed);
+    const opts = renameSessionOptions(qc, ID);
+    await expect(opts.mutationFn("New title")).resolves.toEqual(renamed);
+    expect(patch).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}`,
+      expect.objectContaining({ body: { title: "New title" } }),
+    );
+    opts.onSuccess(renamed);
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.title).toBe("New title");
+    // The open view takes the title from its `ws:` stream (every viewer at once). Its REST snapshot is left alone: a
+    // rewrite would re-seed the live view from the snapshot it loaded and drop the events received since.
+    expect(qc.getQueryData(wzKeys.session(ID))).toBe(cached);
+    expect(qc.getQueryState(wzKeys.session(ID))?.isInvalidated).toBe(false);
+  });
+
+  it("an older answer never replaces a newer row in the list", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(wzKeys.sessions, list(session(ID, "2026-10-22T10:10:00.000Z", { title: "Newer" })));
+    renameSessionOptions(qc, ID).onSuccess(session(ID, "2026-10-22T10:05:00.000Z", { title: "Older" }));
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.title).toBe("Newer");
   });
 });

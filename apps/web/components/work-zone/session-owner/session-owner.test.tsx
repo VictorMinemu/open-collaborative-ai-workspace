@@ -5,6 +5,7 @@ import { toneFor } from "@/components/ui/avatar";
 import { Dialog } from "@/components/ui/dialog";
 import { ASSIGN_DIALOG_COPY, AssignPreviewBody, assignMenuState } from "./assign-dialog";
 import { absentParticipants, OwnerChip, OwnerLine } from "./owner-chip";
+import { RENAME_COPY, RenameForm, renameAllowed, renameError } from "./rename-dialog";
 
 /**
  * The session owner surfaces of the session header (07.13.1.1-06, D-02, D-03, D-04, D-06, D-13, D-15): the Assign to
@@ -183,5 +184,64 @@ describe("the owner in the session header (D-02)", () => {
     const markup = html(<OwnerLine ownerId={OWNER} name={"<img src=x onerror=alert(1)>"} avatarUrl={null} />);
     expect(markup).not.toContain("<img src=x");
     expect(markup).toContain("&lt;img");
+  });
+});
+
+describe("rename (D-06, D-14, PD-07)", () => {
+  const form = (value: string, over: Partial<React.ComponentProps<typeof RenameForm>> = {}) =>
+    html(
+      <RenameForm
+        id="rename"
+        value={value}
+        initial="Old title"
+        pending={false}
+        serverError={null}
+        onChange={noop}
+        onSubmit={noop}
+        onCancel={noop}
+        {...over}
+      />,
+    );
+
+  it("prefills the title with a visible label, the counter and Save", () => {
+    const markup = form("Old title");
+    const t = text(markup);
+    expect(markup).toMatch(/<label[^>]*for="rename"[^>]*>Title<\/label>/);
+    expect(markup).toContain('value="Old title"');
+    expect(t).toContain("9/200");
+    expect(t).toContain(RENAME_COPY.save);
+    expect(t).toContain(RENAME_COPY.cancel);
+  });
+
+  it("gives the client hints for an empty, a too long and a two-line title", () => {
+    expect(renameError("")).toBe("Enter a title.");
+    expect(renameError("   ")).toBe("Enter a title.");
+    expect(renameError("x".repeat(201))).toBe("Use at most 200 characters.");
+    expect(renameError("first\nsecond")).toBe("Use one line.");
+    expect(renameError("  Fix login  ")).toBeNull();
+    expect(renameError("x".repeat(200))).toBeNull();
+  });
+
+  it("Save is off while unchanged, invalid or pending; a changed valid title can be saved", () => {
+    const disabledSave =
+      /data-testid="rename-save"[^>]*disabled=""|disabled=""[^>]*data-testid="rename-save"/;
+    expect(form("Old title")).toMatch(disabledSave);
+    expect(form("  Old title ")).toMatch(disabledSave);
+    expect(form("")).toMatch(disabledSave);
+    expect(form("New title", { pending: true })).toMatch(disabledSave);
+    expect(form("New title")).not.toMatch(disabledSave);
+  });
+
+  it("shows the hint for an invalid value and the API's own message as is", () => {
+    expect(text(form(""))).toContain("Enter a title.");
+    expect(
+      text(form("New title", { serverError: "A title can't contain a path on your computer." })),
+    ).toContain("A title can't contain a path on your computer.");
+  });
+
+  it("is offered to people who may configure a session that is not archived", () => {
+    expect(renameAllowed(["work_session.read", "work_session.configure"], "idle")).toBe(true);
+    expect(renameAllowed(["work_session.read", "work_session.prompt"], "idle")).toBe(false);
+    expect(renameAllowed(["work_session.configure"], "archived")).toBe(false);
   });
 });

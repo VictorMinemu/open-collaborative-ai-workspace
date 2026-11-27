@@ -20,6 +20,7 @@ import {
   ListOrdered,
   Lock,
   MoreHorizontal,
+  PencilLine,
   SearchX,
   SquareArrowOutUpRight,
   UserRoundCheck,
@@ -63,6 +64,7 @@ import { SessionFooter } from "./session-footer";
 import { SessionMemoryStrip } from "./session-memory-strip";
 import { ASSIGN_DIALOG_COPY, AssignSessionDialog, assignMenuState } from "./session-owner/assign-dialog";
 import { absentParticipants, OwnerChip, OwnerLine } from "./session-owner/owner-chip";
+import { RENAME_COPY, RenameSessionDialog, renameAllowed } from "./session-owner/rename-dialog";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
@@ -449,6 +451,7 @@ function LoadedSession({
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
         canChangeVisibility={viewerCan.includes("work_session.visibility")}
+        canRename={renameAllowed(viewerCan, session.status)}
         origin={origin}
         assign={assign}
       />
@@ -642,6 +645,7 @@ function SessionHeader({
   changesCount,
   canArchive,
   canChangeVisibility,
+  canRename,
   origin,
   assign,
 }: {
@@ -656,13 +660,19 @@ function SessionHeader({
   canArchive: boolean;
   /** The API's `work_session.visibility` on this session (the chip says "Change" rather than "See"). */
   canChangeVisibility: boolean;
+  /** The API's `work_session.configure` on a session that is not archived (07.13.1.1, D-06). */
+  canRename: boolean;
   origin: WorkSessionOrigin | null;
   assign: WorkSessionAssign | undefined;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
   // The menu's dialogs live outside the menu, so closing the menu never unmounts them.
-  const [dialog, setDialog] = useState<"assign" | null>(null);
+  const [dialog, setDialog] = useState<"assign" | "rename" | null>(null);
+  // The API's answer to a rename, shown until the live stream brings a session at least as new (no flash of the old
+  // title between the dialog closing and the `ws:` frame).
+  const [renamed, setRenamed] = useState<Pick<WorkSession, "title" | "updatedAt"> | null>(null);
+  const shownTitle = renamed && renamed.updatedAt > session.updatedAt ? renamed.title : session.title;
   const participants = useMemo(() => {
     const m = new Map<string, string>();
     m.set(session.createdBy, session.createdByName ?? "Owner");
@@ -703,11 +713,11 @@ function SessionHeader({
   const browserOn = session.browser?.status === "available";
   // 07.13.1.1 (D-04, PD-14): Assign to me, or why not, as the API decided it for this viewer.
   const assignMenu = assignMenuState({ assign, session }, me);
-  const menuTop = (!md && browserOn) || assignMenu.kind !== "none";
+  const menuTop = (!md && browserOn) || canRename || assignMenu.kind !== "none";
 
   useEffect(() => {
-    document.title = `${session.title} · Work Zone`;
-  }, [session.title]);
+    document.title = `${shownTitle} · Work Zone`;
+  }, [shownTitle]);
 
   // Queue / Changes: toggles of the side panel on wide screens (`tab-*`), sheet openers below (`open-*`).
   const panelButton = (t: PanelTab, label: string, icon: ReactNode, count: number) => (
@@ -736,9 +746,9 @@ function SessionHeader({
       <h1
         className="truncate font-medium text-[15px] leading-snug tracking-tight md:text-[14.5px]"
         data-testid="session-title"
-        title={session.title}
+        title={shownTitle}
       >
-        {session.title}
+        {shownTitle}
       </h1>
     </span>
   );
@@ -842,6 +852,15 @@ function SessionHeader({
                   <Globe /> Browser
                 </DropdownMenuItem>
               ) : null}
+              {canRename ? (
+                <DropdownMenuItem
+                  data-testid="session-rename"
+                  className="max-md:min-h-11"
+                  onClick={() => setDialog("rename")}
+                >
+                  <PencilLine /> {RENAME_COPY.menuItem}
+                </DropdownMenuItem>
+              ) : null}
               {assignMenu.kind === "item" ? (
                 <DropdownMenuItem
                   data-testid="session-assign"
@@ -882,6 +901,14 @@ function SessionHeader({
               session={session}
               open={dialog === "assign"}
               onOpenChange={(o) => setDialog(o ? "assign" : null)}
+            />
+          ) : null}
+          {canRename || dialog === "rename" ? (
+            <RenameSessionDialog
+              session={{ id: session.id, title: shownTitle }}
+              open={dialog === "rename"}
+              onOpenChange={(o) => setDialog(o ? "rename" : null)}
+              onRenamed={(s) => setRenamed({ title: s.title, updatedAt: s.updatedAt })}
             />
           ) : null}
         </div>

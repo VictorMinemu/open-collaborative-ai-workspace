@@ -311,6 +311,25 @@ export function useAssignSession(sessionId: string) {
   return useMutation(assignSessionOptions(qc, sessionId));
 }
 
+/**
+ * A person renames the session (`PATCH …/:id { title }`, D-06, D-14, PD-07): the API checks the title and the right
+ * (`work_session.configure`) and stores it as typed. The answer goes into the list at once; every open view, the
+ * renamer's included, takes the new title from its `ws:` stream. The view's REST snapshot is not rewritten: that would
+ * re-seed the live view from the snapshot it loaded and drop the events received since.
+ */
+export function renameSessionOptions(qc: QueryClient, sessionId: string) {
+  return {
+    mutationFn: (title: string) =>
+      api.patch(`/api/v1/work-sessions/${sessionId}`, { body: { title }, schema: WorkSession }),
+    onSuccess: (session: WorkSession) => upsertListSession(qc, session),
+  };
+}
+
+export function useRenameSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation(renameSessionOptions(qc, sessionId));
+}
+
 export function useDiff(sessionId: string, enabled: boolean) {
   return useQuery({
     queryKey: wzKeys.diff(sessionId),
