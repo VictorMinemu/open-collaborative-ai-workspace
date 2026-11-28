@@ -22,6 +22,7 @@ import {
   type SessionBrowserGrant,
   type SessionEvent,
   SessionTitle,
+  type SessionToolsGrant,
   type SessionVisibilityKind,
   type TeamProjectRef,
   TITLE_PROMPT_MAX_CHARS,
@@ -98,6 +99,7 @@ import {
 } from "./controls";
 import { type SessionFactsRow, sessionAccessSql, sessionFactsForSessions, sessionResourceOf } from "./facts";
 import { hydratePromptImages, type PromptImagesPlan, preparePromptImages } from "./images";
+import { namingRulesFor } from "./naming-rules";
 import { eachBounded, OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import {
@@ -147,6 +149,16 @@ function seesSession(f: ResourceFacts): boolean {
 /** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
 export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
 
+/**
+ * 07.13.1.1 (D-05, D-13, PD-03): how one re-check runs. `interruptInFlight: false` lets a Full access turn in flight
+ * finish (Assign to me never cuts a turn; the lower settings apply between turns). `cause` names what changed the
+ * access in the audit rows only; the device keeps its closed `reason` (Pitfall 2).
+ */
+export interface ReauthorizeOptions {
+  interruptInFlight?: boolean;
+  cause?: "owner_changed";
+}
+
 /** What a sweep re-checks: every active session of the organization, or of one device (07.9 fan-out). */
 interface SweepScope {
   reason: ReauthorizeReason;
@@ -186,6 +198,8 @@ interface CommandPlan {
   account: { stored: Extract<StoredSessionAccount, { kind: "token" }>; token: string | null } | undefined;
   /** 07.13 (PD-09, PD-20): the turn's browser grant, decided at send time; undefined for a device without a browser. */
   browser?: SessionBrowserGrant;
+  /** 07.13.1.1 (D-07, D-08, PD-10, PD-13): the turn's `ocw_session` grant, decided at send time (start and prompt). */
+  sessionTools?: SessionToolsGrant;
 }
 
 /** The token account a stored `session.start` or `prompt` payload names (the API wrote it; checked anyway), or null. */
@@ -221,7 +235,8 @@ export const ACTIVE_STATES: WorkSessionStatus[] = [
   "host_offline",
 ];
 const TERMINAL_RESTARTABLE: WorkSessionStatus[] = ["failed", "completed"];
-const IN_FLIGHT: PromptRow["status"][] = ["dispatched", "running"];
+/** A turn the device holds: sent, or running. Assign to me (07.13.1.1) reads it for the confirm dialog. */
+export const IN_FLIGHT: PromptRow["status"][] = ["dispatched", "running"];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const wsTopic = (sessionId: string) => `ws:${sessionId}`;
@@ -360,6 +375,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceOwner: devices.ownerUserId,
         deviceBrowserVersion: devices.browserVersion,
         deviceBrowserOptIn: devices.browserOptIn,
+        deviceHostKind: devices.hostKind,
         unitPath: orgUnits.path,
         access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
         poolId: accountPoolAccounts.id,
@@ -422,6 +438,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         deviceOwner,
         deviceBrowserVersion,
         deviceBrowserOptIn,
+        deviceHostKind,
         unitPath,
         access,
         poolId,
@@ -439,6 +456,8 @@ export class WorkSessionService implements DeviceSessionHandler {
           deviceId: s.deviceId,
           deviceName,
           deviceOnline: deviceStatus === "online" && !deviceRevoked,
+          // 07.13.1.1 (PD-14): the device's self-reported host label, viewer-neutral (null = never reported).
+          deviceHostKind,
           runtime: s.runtime,
           model: s.model,
           permissionMode: s.permissionMode,
@@ -1201,6 +1220,9 @@ export class WorkSessionService implements DeviceSessionHandler {
    * sponsor's controls while the profile is active, and with the sponsor's own controls when it is not (people keep
    * their control of the session); a bot turn in flight that its layer no longer allows is interrupted, a person's turn
    * never is by the bot's layer. A person's session takes the branch it always took.
+   *
+   * 07.13.1.1 (PD-03): `opts` (Assign to me only) keeps a Full access turn in flight running and names the cause in the
+   * audit; every other caller passes none and behaves exactly as before. Answers whether a `session.configure` went out.
    */
   async reauthorize(
     tx: Tx,
@@ -1208,9 +1230,12 @@ export class WorkSessionService implements DeviceSessionHandler {
     reason: ReauthorizeReason,
     policy?: WorkZonePolicy,
     actorUserId: string | null = null,
-  ): Promise<void> {
+    opts: ReauthorizeOptions = {},
+  ): Promise<{ downgraded: boolean }> {
     const actor = actorUserId ? { userId: actorUserId } : {};
-    if (!ACTIVE_STATES.includes(s.status)) return;
+    const cause = opts.cause ? { cause: opts.cause } : {};
+    const unchanged = { downgraded: false };
+    if (!ACTIVE_STATES.includes(s.status)) return unchanged;
     const layer = s.startedByAgentId ? await botLayerForSession(tx, this.deps.perms, s) : null;
     const creator = await loadControlsContext(tx, this.deps.perms, {
       deviceId: s.deviceId,
@@ -1220,7 +1245,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       ...(policy ? { policy } : {}),
       ...(layer ? { agent: layer } : {}),
     });
-    if (!creator) return;
+    if (!creator) return unchanged;
     if (creator.cap === null) {
       const [d] = await tx.select({ name: devices.name }).from(devices).where(eq(devices.id, s.deviceId));
       const message = `Access to ${d?.name ?? "the device"} was revoked`;
@@ -1242,13 +1267,13 @@ export class WorkSessionService implements DeviceSessionHandler {
         metadata: { reason, createdBy: s.createdBy, revoked: creator.revoked },
       });
       await this.setStatus(tx, s, "failed", { lastError: message });
-      return;
+      return unchanged;
     }
     const current = requestedSettings(s);
     const { next, changed } = clampToControls(current, buildRuntimeControls(s.runtime, creator.ctx, s.model));
     if (changed.length === 0) {
       if (s.startedByAgentId) await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
-      return;
+      return unchanged;
     }
     const from = current.permissionMode;
     const to = next.permissionMode ?? from;
@@ -1278,7 +1303,13 @@ export class WorkSessionService implements DeviceSessionHandler {
       resourceId: s.id,
       deviceId: s.deviceId,
       sessionId: s.id,
-      metadata: { reason, changed, from: pickSettings(current, changed), to: pickSettings(next, changed) },
+      metadata: {
+        reason,
+        changed,
+        from: pickSettings(current, changed),
+        to: pickSettings(next, changed),
+        ...cause,
+      },
     });
     if (from === "fullAccess" && to !== "fullAccess") {
       await this.deps.audit.record(tx, {
@@ -1288,19 +1319,23 @@ export class WorkSessionService implements DeviceSessionHandler {
         resourceId: s.id,
         deviceId: s.deviceId,
         sessionId: s.id,
-        metadata: { from, to, source: reason },
+        metadata: { from, to, source: reason, ...cause },
       });
-      const fullTurn = await tx
-        .select({ id: workPrompts.id })
-        .from(workPrompts)
-        .where(
-          and(
-            eq(workPrompts.workSessionId, s.id),
-            inArray(workPrompts.status, IN_FLIGHT),
-            eq(workPrompts.permissionMode, "fullAccess"),
-          ),
-        )
-        .limit(1);
+      // 07.13.1.1 (D-05): an owner transfer lets the running turn finish; every other re-check cuts it as before.
+      const fullTurn =
+        opts.interruptInFlight === false
+          ? []
+          : await tx
+              .select({ id: workPrompts.id })
+              .from(workPrompts)
+              .where(
+                and(
+                  eq(workPrompts.workSessionId, s.id),
+                  inArray(workPrompts.status, IN_FLIGHT),
+                  eq(workPrompts.permissionMode, "fullAccess"),
+                ),
+              )
+              .limit(1);
       if (fullTurn.length > 0) {
         await this.deps.hub.enqueue(tx, {
           deviceId: s.deviceId,
@@ -1317,6 +1352,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     // WR-07: the live card shows the mode and model every reader of the channel sees; it follows the downgrade.
     await this.syncBotCard(tx, s);
     await this.emitSession(tx, s.id);
+    return { downgraded: true };
   }
 
   /**
@@ -1678,8 +1714,48 @@ export class WorkSessionService implements DeviceSessionHandler {
     const images = await preparePromptImages(tx, cmd);
     const account = await this.prepareAccount(tx, cmd);
     const browser = await this.prepareBrowser(tx, cmd);
-    if (images === undefined && account === undefined && browser === undefined) return undefined;
-    return { images, account, ...(browser ? { browser } : {}) } satisfies CommandPlan;
+    const sessionTools = await this.prepareSessionTools(tx, cmd);
+    if (
+      images === undefined &&
+      account === undefined &&
+      browser === undefined &&
+      sessionTools === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      images,
+      account,
+      ...(browser ? { browser } : {}),
+      ...(sessionTools ? { sessionTools } : {}),
+    } satisfies CommandPlan;
+  }
+
+  /**
+   * 07.13.1.1 (D-07, D-08, PD-10, PD-13): what the session's agent may do with `ocw_session` this turn, decided now for
+   * a `session.start` or `prompt`: rename while no person typed the title, with the naming rules of the organization
+   * and the session's team project. Undefined for every other command. Sent to every device: an older daemon strips
+   * the key (non-strict payloads) and offers no tool.
+   *
+   * ADR-0047 § 7 (CR-01): the rules are text other people write, so they reach the live agent only beside the rename
+   * tool, and never while the turn (or the session) runs in Full access, where nothing a step asks for needs an
+   * approval. The title call keeps them.
+   */
+  private async prepareSessionTools(tx: Tx, cmd: DeviceCommandRow): Promise<SessionToolsGrant | undefined> {
+    const sessionId = cmd.workSessionId;
+    if (!sessionId || (cmd.kind !== "session.start" && cmd.kind !== "prompt")) return undefined;
+    const [s] = await tx
+      .select({
+        titleSource: workSessions.titleSource,
+        projectId: workSessions.projectId,
+        permissionMode: workSessions.permissionMode,
+      })
+      .from(workSessions)
+      .where(eq(workSessions.id, sessionId));
+    if (!s) return undefined;
+    const rename = s.titleSource !== "user";
+    const fullAccess = cmd.payload.permissionMode === "fullAccess" || s.permissionMode === "fullAccess";
+    return { rename, namingRules: rename && !fullAccess ? await namingRulesFor(tx, s) : null };
   }
 
   /**
@@ -1738,7 +1814,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     cmd: DeviceCommandRow,
     plan: unknown,
   ): Promise<Record<string, unknown>> {
-    const { images, account, browser } = plan as CommandPlan;
+    const { images, account, browser, sessionTools } = plan as CommandPlan;
     if (account && account.token === null) {
       throw new CommandUndeliverableError(ACCOUNT_UNAVAILABLE, "The session's pool account is not available");
     }
@@ -1747,9 +1823,15 @@ export class WorkSessionService implements DeviceSessionHandler {
     const sent: SessionAccount | undefined = account?.token
       ? { ...account.stored, oauthToken: account.token }
       : undefined;
-    // 07.13 (PD-09): then the turn's browser grant, on the sent copy only too (never written back).
-    if (!sent && !browser) return payload;
-    return { ...payload, ...(sent ? { account: sent } : {}), ...(browser ? { browser } : {}) };
+    // 07.13 (PD-09): then the turn's browser grant, and 07.13.1.1 (PD-10) its session tools grant, on the sent copy
+    // only too (never written back).
+    if (!sent && !browser && !sessionTools) return payload;
+    return {
+      ...payload,
+      ...(sent ? { account: sent } : {}),
+      ...(browser ? { browser } : {}),
+      ...(sessionTools ? { sessionTools } : {}),
+    };
   }
 
   async onCommandResult(
@@ -1952,11 +2034,19 @@ export class WorkSessionService implements DeviceSessionHandler {
     const decision = decideTitleRequest({ runtime: s.runtime, catalog, policy });
     if (!decision.ok) return false;
     const text = prompt.slice(0, TITLE_PROMPT_MAX_CHARS);
+    // 07.13.1.1 (D-08, PD-06): the organization's and the project's naming rules; organization data, so the stored
+    // title command may hold them (never logged, never audited). Absent when there are none.
+    const namingRules = await namingRulesFor(tx, s);
     await this.deps.hub.enqueue(tx, {
       deviceId: s.deviceId,
       workSessionId: s.id,
       kind: "session.title",
-      payload: { runtime: s.runtime, model: decision.model, prompt: text },
+      payload: {
+        runtime: s.runtime,
+        model: decision.model,
+        prompt: text,
+        ...(namingRules ? { namingRules } : {}),
+      },
     });
     await this.deps.audit.record(tx, {
       action: "work_session.title_requested",

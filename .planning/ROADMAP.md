@@ -1444,6 +1444,63 @@ Plans:
 - [ ] 07.13.1-07-PLAN.md — Offline fake-release e2e on the three CI runners (good, corrupted, level off)
 - [ ] 07.13.1-08-PLAN.md — ADR-0046, AGENTS.md row, README, release notes v0.5.1, STATUS, runtime 0.5.1
 
+### Phase 07.13.1.1: Work Zone session owners: a sessions-by-person view, Assign to me on server devices only, manual rename and an agent rename tool following org and project naming rules (INSERTED)
+
+**Goal**: Everyone sees at a glance who owns each Work Zone session they can see, a member can take over a session
+that runs on a shared server, and sessions carry names that follow the company's and the project's standards, typed
+by people or set by the session's own agent.
+
+- **Owner = `created_by`:** "Assign to me" moves the existing owner column under the session lock, so the audience
+  rule, the RLS backstop and the resolver's `creator` relation follow at once; the creator stays in the audit and the
+  timeline. Only on `service` hosts, never on someone's computer, never for bot-started sessions.
+- **No cut turn:** the session is re-authorized for the new owner without interrupting a running turn; queued prompts
+  of people who lose access are cancelled, audited, and the confirm dialog says so beforehand.
+- **Names:** people rename from the header and the people view (`user`, never replaced); the agent calls
+  `ocw_session` › `rename` (Claude in-process, Codex through the stdio shim) and the API decides each call; naming rules
+  per organization and project reach the title generator and the tool's description.
+
+**Requirements**: WZO-01, WZO-02, WZO-03, WZO-04, WZO-05, WZO-06, WZO-07, WZO-08, WZO-09
+**Depends on:** Phase 07.13.1; Phase 07.13 (on-device tool bridge), Phase 07.9 / 07.10 (audience rule, per-viewer fields), Phase 07.12 / 07.16 (service hosts, device sharing, bot sponsors), Phase 03.2 (titles)
+**ADR:** 0047
+**Success Criteria** (what must be TRUE):
+
+  1. `/work-zone/people` lists exactly the sessions the viewer already sees (`GET /work-sessions`, no new visibility),
+     grouped by owner with avatar and name, device (server marked), project, status and last activity, filterable by
+     person, project and device; it passes axe in light and dark, never scrolls sideways at 390 px and has 44 px
+     targets on phones; the session header shows the owner
+  2. "Assign to me" on a session whose device reports `host_kind = 'service'` makes the caller its owner (the audience
+     rule, the controls and "Mine" follow at once); it is refused server-side for desktop and unreported hosts,
+     bot-started and archived sessions, callers who cannot prompt it or may not use the server, and answers 404 across
+     organizations; the UI hides it with a one-line reason
+  3. A running turn is never cut (re-authorized without interrupt, `session.configure` `access_changed` between turns);
+     queued prompts of people who lose access are cancelled and audited; the previous owner is never re-added; the
+     confirm dialog says beforehand who loses access; `work_session.assigned { from, to }` and the server-only
+     `session.owner_changed` timeline line keep the creator in the history
+  4. People who can configure a session rename it (1–200 characters, `user`, never replaced, conversation renamed,
+     audited by length only, live on `ws:`); the agent renames it with `ocw_session` › `rename` on Claude Code and Codex,
+     decided by the API (same device, a turn in flight, not person-typed, once per turn, 2–5 words ≤ 32 characters, no
+     path or secret), stored `auto` and live; a foreign `ocw_session` server is refused; no listening port
+  5. An organization naming rule and a project naming rule (≤ 600 characters each, plain untrusted text, project after
+     organization) reach the title generator and the rename tool's description; their changes are audited without the
+     text; older daemons and older APIs keep working without them
+  6. Proven by integration tests on real PostgreSQL, offline runtime fixtures and a CI e2e with review screenshots at
+     390 px and 1440 px in both themes; documented in ADR-0047, AGENTS.md (≤ 200 lines), `docs/SERVER.md` and the v0.5.3
+     release notes; the Local Runtime is 0.5.3
+
+**Plans:** 9 plans
+
+Plans:
+
+- [ ] 07.13.1.1-01-PLAN.md — Contracts (assign, rename, `session.owner_changed`, `ocw_session`, `session.rename` frames, naming rules) and the additive migration
+- [ ] 07.13.1.1-02-PLAN.md — API: Assign to me (server-only, no cut turn, cancelled prompts, dry-run preview) and the manual rename route
+- [ ] 07.13.1.1-03-PLAN.md — API: the agent rename decision over the Device Link and the naming rules (storage, title payload, `sessionTools`)
+- [ ] 07.13.1.1-04-PLAN.md — Device: the `ocw_session` relay in the daemon and the Claude in-process server
+- [ ] 07.13.1.1-05-PLAN.md — Device: the Codex `session-mcp` shim and device titles that follow the naming rules
+- [ ] 07.13.1.1-06-PLAN.md — Web: the owner in the session header, Assign to me and Rename dialogs, the timeline line
+- [ ] 07.13.1.1-07-PLAN.md — Web: the Sessions by person view and the naming-rule settings fields
+- [ ] 07.13.1.1-08-PLAN.md — e2e on a server and a desktop device, review screenshots at 390 and 1440 in both themes
+- [ ] 07.13.1.1-09-PLAN.md — ADR-0047, AGENTS.md rows in place, SERVER.md, STATUS, release notes v0.5.3, runtime 0.5.3
+
 ### Phase 07.14: Organization connector auth (INSERTED)
 
 **Goal**: An admin can register any MCP server whatever its authentication, and give the organization's bots one shared

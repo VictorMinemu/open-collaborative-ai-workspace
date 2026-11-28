@@ -150,6 +150,22 @@ describe("buildDaemonEnv host kind (07.16, PD-18, A-02)", () => {
     expect(env.OCW_SERVER_URL).toBe("http://localhost:4000");
     expect(env.OCW_DEVICE_TOKEN).toBe("ocwdt_x");
   });
+
+  // 07.13.1.1 (D-04, D-12, T-07.13.1.1-04-07): Assign to me is offered only on server devices, so the app's daemon must
+  // never be able to announce `service`, whatever the app inherited.
+  const inherited = ["service", "SERVICE", " service ", "laptop"];
+  const combos = [null, "ocwdt_x"].flatMap((token) =>
+    [null, "http://localhost:4000"].flatMap((apiUrl) =>
+      [false, true].map((electronAsNode) => ({ token, apiUrl, electronAsNode })),
+    ),
+  );
+  it.each(inherited.flatMap((value) => combos.map((opts) => [value, opts] as const)))(
+    "an inherited OCW_RUNTIME_HOST=%j with %j always yields desktop",
+    (value, opts) => {
+      const env = buildDaemonEnv({ OCW_RUNTIME_HOST: value, PATH: "/usr/bin" }, opts);
+      expect(env.OCW_RUNTIME_HOST).toBe("desktop");
+    },
+  );
 });
 
 describe("buildDaemonEnv app version (07.13, D-18, PD-21)", () => {

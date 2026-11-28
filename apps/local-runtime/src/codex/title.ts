@@ -8,7 +8,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TITLE_INSTRUCTIONS, TitleError, titleUserMessage } from "../title.js";
+import { TitleError, titleInstructions, titleUserMessage } from "../title.js";
 import type { AppServerProcess, SpawnAppServer } from "./codex-runtime.js";
 import type { InitializeParams } from "./generated/InitializeParams.js";
 import type { ReviewDecision } from "./generated/ReviewDecision.js";
@@ -35,10 +35,15 @@ export interface CodexTitleOptions {
   tmpRoot?: string;
   /** Observe every JSON-RPC message (fixture recording). */
   onRpcMessage?: (direction: "in" | "out", message: unknown) => void;
+  /** 07.13.1.1 (PD-06): the naming rules, untrusted wording data (only through `titleInstructions`, never logged). */
+  namingRules?: string;
 }
 
-/** The stable `thread/start` fields of a title thread (exported for the tests and the recorder). */
-export function titleThreadParams(cwd: string, model: string): ThreadStartParams {
+/**
+ * The stable `thread/start` fields of a title thread (exported for the tests and the recorder); the naming rules only
+ * change `baseInstructions` (`titleInstructions`), never the sandbox or the approvals.
+ */
+export function titleThreadParams(cwd: string, model: string, namingRules?: string): ThreadStartParams {
   return {
     cwd,
     model,
@@ -46,7 +51,7 @@ export function titleThreadParams(cwd: string, model: string): ThreadStartParams
     approvalPolicy: "untrusted",
     approvalsReviewer: "user",
     ephemeral: true,
-    baseInstructions: TITLE_INSTRUCTIONS,
+    baseInstructions: titleInstructions(namingRules),
   };
 }
 
@@ -142,7 +147,11 @@ export async function generateCodexTitle(spawn: SpawnAppServer, o: CodexTitleOpt
     await step(peer.request("initialize", init, RPC_TIMEOUT_MS));
     peer.notify("initialized");
     const thread = await step(
-      peer.request<ThreadStartResponse>("thread/start", titleThreadParams(cwd, o.model), RPC_TIMEOUT_MS),
+      peer.request<ThreadStartResponse>(
+        "thread/start",
+        titleThreadParams(cwd, o.model, o.namingRules),
+        RPC_TIMEOUT_MS,
+      ),
     );
     if (isUnrestrictedCodexPolicy({ approvalPolicy: thread.approvalPolicy, sandboxPolicy: thread.sandbox })) {
       throw new TitleError("title_failed", "Codex reported an unrestricted sandbox or approval policy");

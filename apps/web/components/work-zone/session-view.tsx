@@ -5,6 +5,7 @@ import {
   type Permission,
   WORK_PROMPT_MAX_IMAGES,
   type WorkSession,
+  type WorkSessionAssign,
   type WorkSessionBrowserState,
   type WorkSessionChanges,
   type WorkSessionOrigin,
@@ -19,8 +20,10 @@ import {
   ListOrdered,
   Lock,
   MoreHorizontal,
+  PencilLine,
   SearchX,
   SquareArrowOutUpRight,
+  UserRoundCheck,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -34,7 +37,7 @@ import { PresenceStack, usePresentPeople } from "@/components/presence/presence-
 import { PageHeader } from "@/components/shell/page-header";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -59,6 +62,14 @@ import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
 import { SessionMemoryStrip } from "./session-memory-strip";
+import {
+  ASSIGN_DIALOG_COPY,
+  AssignReasonItem,
+  AssignSessionDialog,
+  assignMenuState,
+} from "./session-owner/assign-dialog";
+import { absentParticipants, OwnerChip, OwnerLine } from "./session-owner/owner-chip";
+import { RENAME_COPY, RenameSessionDialog, renameAllowed } from "./session-owner/rename-dialog";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
@@ -247,6 +258,7 @@ function LiveSessionView({ id, onReopen }: { id: string; onReopen: () => void })
       viewerCan={query.data?.viewerCan ?? []}
       leftProject={query.data?.viewerState === "left_project"}
       origin={query.data?.origin ?? null}
+      assign={query.data?.assign}
     />
   );
 }
@@ -322,6 +334,7 @@ function LoadedSession({
   viewerCan,
   leftProject,
   origin,
+  assign,
 }: {
   state: LiveSession;
   viewerCan: readonly Permission[];
@@ -329,6 +342,8 @@ function LoadedSession({
   leftProject: boolean;
   /** 07.16 (D-13): the conversation a bot started this session from, when this viewer reads it. */
   origin: WorkSessionOrigin | null;
+  /** 07.13.1.1 (PD-14): whether this viewer may Assign the session to themselves; absent = an older API. */
+  assign: WorkSessionAssign | undefined;
 }) {
   const session = state.session;
   const devices = useDevices();
@@ -441,7 +456,9 @@ function LoadedSession({
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
         canChangeVisibility={viewerCan.includes("work_session.visibility")}
+        canRename={renameAllowed(viewerCan, session.status)}
         origin={origin}
+        assign={assign}
       />
       <div className="flex min-h-0 flex-1">
         <DropZone
@@ -633,7 +650,9 @@ function SessionHeader({
   changesCount,
   canArchive,
   canChangeVisibility,
+  canRename,
   origin,
+  assign,
 }: {
   session: WorkSession;
   state: LiveSession;
@@ -646,10 +665,19 @@ function SessionHeader({
   canArchive: boolean;
   /** The API's `work_session.visibility` on this session (the chip says "Change" rather than "See"). */
   canChangeVisibility: boolean;
+  /** The API's `work_session.configure` on a session that is not archived (07.13.1.1, D-06). */
+  canRename: boolean;
   origin: WorkSessionOrigin | null;
+  assign: WorkSessionAssign | undefined;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
+  // The menu's dialogs live outside the menu, so closing the menu never unmounts them.
+  const [dialog, setDialog] = useState<"assign" | "rename" | null>(null);
+  // The API's answer to a rename, shown until the live stream brings a session at least as new (no flash of the old
+  // title between the dialog closing and the `ws:` frame).
+  const [renamed, setRenamed] = useState<Pick<WorkSession, "title" | "updatedAt"> | null>(null);
+  const shownTitle = renamed && renamed.updatedAt > session.updatedAt ? renamed.title : session.title;
   const participants = useMemo(() => {
     const m = new Map<string, string>();
     m.set(session.createdBy, session.createdByName ?? "Owner");
@@ -671,22 +699,30 @@ function SessionHeader({
   const viewers = usePresentPeople(`ws:${session.id}`, { excludeUserId: me, resolve });
   const absent = useMemo(() => {
     const here = new Set(viewers.map((v) => v.userId));
-    return [...participants.entries()]
-      .filter(([uid]) => uid !== me && !here.has(uid))
-      .map(([uid, name]) => ({
-        uid,
-        name,
-        avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
-      }));
-  }, [participants, viewers, me, directory.data]);
+    // The owner has their own chip / line (07.13.1.1, D-02): never repeated among the absent participants.
+    return absentParticipants(participants, here, me, session.createdBy).map(([uid, name]) => ({
+      uid,
+      name,
+      avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
+    }));
+  }, [participants, viewers, me, directory.data, session.createdBy]);
+  const ownerMember = directory.data?.members.find((x) => x.userId === session.createdBy);
+  const owner = {
+    ownerId: session.createdBy,
+    name: session.createdByName ?? ownerMember?.displayName ?? null,
+    avatarUrl: ownerMember?.avatarUrl ?? null,
+  };
   // Below 768 (the 44 px touch rule) the header has two rows: the project and the controls, then the title on its
   // own line, so the 44 px controls never squeeze the title (07.9 polish).
   const md = useMediaQuery("(min-width: 768px)", true);
   const browserOn = session.browser?.status === "available";
+  // 07.13.1.1 (D-04, PD-14): Assign to me, or why not, as the API decided it for this viewer.
+  const assignMenu = assignMenuState({ assign, session }, me);
+  const menuTop = (!md && browserOn) || canRename || assignMenu.kind !== "none";
 
   useEffect(() => {
-    document.title = `${session.title} · Work Zone`;
-  }, [session.title]);
+    document.title = `${shownTitle} · Work Zone`;
+  }, [shownTitle]);
 
   // Queue / Changes: toggles of the side panel on wide screens (`tab-*`), sheet openers below (`open-*`).
   const panelButton = (t: PanelTab, label: string, icon: ReactNode, count: number) => (
@@ -715,9 +751,9 @@ function SessionHeader({
       <h1
         className="truncate font-medium text-[15px] leading-snug tracking-tight md:text-[14.5px]"
         data-testid="session-title"
-        title={session.title}
+        title={shownTitle}
       >
-        {session.title}
+        {shownTitle}
       </h1>
     </span>
   );
@@ -761,6 +797,7 @@ function SessionHeader({
         <div className="flex min-w-0 items-center gap-1.5 md:shrink-0">
           {md ? <SessionAccountChip session={session} compact className="mr-0.5" /> : null}
           {md && session.fullAccess ? <FullAccessBadge /> : null}
+          {md ? <OwnerChip {...owner} /> : null}
           <VisibilityChip session={session} viewerId={me} canChange={canChangeVisibility} />
           <div className="flex items-center" data-testid="session-viewers">
             <PresenceStack
@@ -820,7 +857,30 @@ function SessionHeader({
                   <Globe /> Browser
                 </DropdownMenuItem>
               ) : null}
+              {canRename ? (
+                <DropdownMenuItem
+                  data-testid="session-rename"
+                  className="max-md:min-h-11"
+                  onClick={() => setDialog("rename")}
+                >
+                  <PencilLine /> {RENAME_COPY.menuItem}
+                </DropdownMenuItem>
+              ) : null}
+              {assignMenu.kind === "item" ? (
+                <DropdownMenuItem
+                  data-testid="session-assign"
+                  className="max-md:min-h-11"
+                  onClick={() => setDialog("assign")}
+                >
+                  <UserRoundCheck /> {ASSIGN_DIALOG_COPY.menuItem}
+                </DropdownMenuItem>
+              ) : assignMenu.kind === "reason" ? (
+                // One quiet line that says why Assign to me is not offered (D-04), as a menu item (IN-06).
+                <AssignReasonItem text={assignMenu.text} testId="session-assign-reason" />
+              ) : null}
+              {menuTop ? <DropdownMenuSeparator /> : null}
               <DropdownMenuItem
+                className="max-md:min-h-11"
                 disabled={session.status === "archived" || !canArchive}
                 onClick={() =>
                   archive.mutate(undefined, {
@@ -836,13 +896,39 @@ function SessionHeader({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </Menu.Root>
+          {assignMenu.kind === "item" || dialog === "assign" ? (
+            <AssignSessionDialog
+              session={session}
+              open={dialog === "assign"}
+              onOpenChange={(o) => setDialog(o ? "assign" : null)}
+            />
+          ) : null}
+          {canRename || dialog === "rename" ? (
+            <RenameSessionDialog
+              session={{ id: session.id, title: shownTitle }}
+              open={dialog === "rename"}
+              onOpenChange={(o) => setDialog(o ? "rename" : null)}
+              onRenamed={(s) => setRenamed({ title: s.title, updatedAt: s.updatedAt })}
+            />
+          ) : null}
         </div>
       </div>
       {md ? null : title}
-      {/* Below 768 the account chip sits on its own line under the title, so it never squeezes it (07.18, D-11). */}
-      {md || session.poolAccount === undefined ? null : (
-        <div className="mt-1 flex min-w-0">
-          <SessionAccountChip session={session} className="max-w-full" />
+      {/*
+        Below 768 the owner and the account chip share one line under the title, so neither squeezes it (07.18 D-11,
+        07.13.1.1 D-02): the owner first, then the chip.
+      */}
+      {md ? null : (
+        <div className="mt-1 flex min-h-6 min-w-0 items-center gap-1.5">
+          <OwnerLine {...owner} className="shrink" />
+          {session.poolAccount === undefined ? null : (
+            <>
+              <span aria-hidden className="text-muted-foreground/50 text-xs">
+                ·
+              </span>
+              <SessionAccountChip session={session} className="max-w-[55%] shrink-0" />
+            </>
+          )}
         </div>
       )}
       {session.lastError && (session.status === "failed" || session.status === "idle") ? (

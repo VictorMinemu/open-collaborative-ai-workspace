@@ -569,7 +569,7 @@ describe("narrowing a session: the people it removes get `revoked` and `work_ses
 
 describe("the device owner outside a project: no frame names it, live or replayed (07.10, PD-03, PD-04)", () => {
   const PAYROLL = "Payroll";
-  const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention"];
+  const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention", "canRename"];
   let dana: TestClient;
   let danaId: string;
   let box: FakeDevice;

@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  AssignPreview,
+  AssignWorkSessionResult,
   CreateEnrollmentResponse,
   type CreatePromptRequest,
   type CreateWorkSessionRequest,
@@ -27,7 +29,7 @@ import {
   WorkSessionList,
   WorkSessionRemovedEvent,
 } from "@ocw/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { api } from "./api";
 import { useMe } from "./queries";
@@ -258,6 +260,82 @@ export function useArchiveSession(sessionId: string) {
   });
 }
 
+// ---- owner and title (07.13.1.1: Assign to me on servers, manual rename) ----
+
+/**
+ * What Assign to me would change for this viewer (`GET …/assign`, D-13, D-15): under the session's key, never kept
+ * fresh (a queue or audience change since the last look must show), loaded only while the confirm dialog is open.
+ */
+export function assignPreviewOptions(sessionId: string, enabled: boolean) {
+  return {
+    queryKey: [...wzKeys.session(sessionId), "assign"] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      api.get(`/api/v1/work-sessions/${sessionId}/assign`, { schema: AssignPreview, signal }),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  };
+}
+
+export function useAssignPreview(sessionId: string, enabled: boolean) {
+  return useQuery(assignPreviewOptions(sessionId, enabled));
+}
+
+/**
+ * Puts a session the API answered with into the session list (the newer copy wins, as with the `user:` frames). The
+ * answer is the unshaped DTO (no `teamProject`, `teamProjectHidden` or `attention`), so the row keeps the per-viewer
+ * fields it already has (07.13.1.1 WR-02): otherwise a team-project session would leave its group in the sidebar.
+ */
+function upsertListSession(qc: QueryClient, session: WorkSession): void {
+  qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) => {
+    const prev = old?.sessions.find((s) => s.id === session.id);
+    const data = prev ? mergeSessionSnapshot(prev, session) : session;
+    return applySessionFrame(old, { type: EventTypes.workSessionUpdated, data });
+  });
+}
+
+/**
+ * The take-over (`POST …/assign`, D-03, PD-02): the API decides and moves the owner. Its success refetches the session
+ * detail (the per-viewer `viewerCan` and `assign` changed with the owner; a refetch rather than a cache write, so the
+ * live view is re-seeded with every event since it loaded) and the list, which shows the new owner at once.
+ */
+export function assignSessionOptions(qc: QueryClient, sessionId: string) {
+  return {
+    mutationFn: () =>
+      api.post(`/api/v1/work-sessions/${sessionId}/assign`, { body: {}, schema: AssignWorkSessionResult }),
+    onSuccess: (result: AssignWorkSessionResult) => {
+      upsertListSession(qc, result.session);
+      void qc.invalidateQueries({ queryKey: wzKeys.session(sessionId), exact: true });
+      void qc.invalidateQueries({ queryKey: wzKeys.sessions });
+    },
+  };
+}
+
+export function useAssignSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation(assignSessionOptions(qc, sessionId));
+}
+
+/**
+ * A person renames the session (`PATCH …/:id { title }`, D-06, D-14, PD-07): the API checks the title and the right
+ * (`work_session.configure`) and stores it as typed. The answer goes into the list at once; every open view, the
+ * renamer's included, takes the new title from its `ws:` stream. The view's REST snapshot is not rewritten: that would
+ * re-seed the live view from the snapshot it loaded and drop the events received since.
+ */
+export function renameSessionOptions(qc: QueryClient, sessionId: string) {
+  return {
+    mutationFn: (title: string) =>
+      api.patch(`/api/v1/work-sessions/${sessionId}`, { body: { title }, schema: WorkSession }),
+    onSuccess: (session: WorkSession) => upsertListSession(qc, session),
+  };
+}
+
+export function useRenameSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation(renameSessionOptions(qc, sessionId));
+}
+
 export function useDiff(sessionId: string, enabled: boolean) {
   return useQuery({
     queryKey: wzKeys.diff(sessionId),
@@ -316,6 +394,7 @@ export function mergeSessionSnapshot(prev: WorkSession, next: WorkSession): Work
     if ("teamProjectHidden" in prev) out.teamProjectHidden = prev.teamProjectHidden;
   }
   if (!("attention" in next) && "attention" in prev) out.attention = prev.attention;
+  if (!("canRename" in next) && "canRename" in prev) out.canRename = prev.canRename;
   return out;
 }
 

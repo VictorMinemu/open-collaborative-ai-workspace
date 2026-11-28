@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AsyncQueue } from "../async-queue.js";
-import { TITLE_INSTRUCTIONS, TitleError, titleUserMessage } from "../title.js";
+import { TitleError, titleInstructions, titleUserMessage } from "../title.js";
 import type { QueryFn, QueryHandle } from "./claude-runtime.js";
 import { secretDenyRules } from "./tool-policy.js";
 
@@ -28,6 +28,8 @@ export interface ClaudeTitleOptions {
   signal: AbortSignal;
   /** Parent of the temporary working directory (tests). */
   tmpRoot?: string;
+  /** 07.13.1.1 (PD-06): the naming rules, untrusted wording data (only through `titleInstructions`, never logged). */
+  namingRules?: string;
 }
 
 /** The options of the title query (exported for the recorder and the tests). */
@@ -50,7 +52,7 @@ export function titleQueryOptions(o: ClaudeTitleOptions, cwd: string, abort: Abo
     // The 2.1.289 title fixture shows Haiku thinking ~3.7k tokens (31 s) for a title, past the daemon's 20 s
     // timeout: a title needs no extended thinking.
     thinking: { type: "disabled" },
-    systemPrompt: TITLE_INSTRUCTIONS,
+    systemPrompt: titleInstructions(o.namingRules),
     env: o.env,
     abortController: abort,
   };

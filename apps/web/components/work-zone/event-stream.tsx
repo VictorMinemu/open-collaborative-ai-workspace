@@ -24,13 +24,14 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { MessageAttachments } from "@/components/chat/attachments/attachment-grid";
 import { Lightbox } from "@/components/chat/attachments/lightbox";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
+import { useMembers } from "@/lib/queries";
 import type { LiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { AgentAuthorLine, OutsideContentChip } from "./agent-author-line";
@@ -67,7 +68,29 @@ const ACCOUNT_SWITCH_LINE = "account-switch-line";
 const hhmm = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
-export function buildItems(state: LiveSession, formatTime: (iso: string) => string = hhmm): Item[] {
+const OWNER_CHANGED_LINE = "owner-changed-line";
+const FORMER_MEMBER = "a former member";
+
+/**
+ * 07.13.1.1 (D-03): "<new owner> took over this session from <previous owner>", names from the member directory, "a
+ * former member" for an id it does not know. Text only.
+ */
+export function ownerChangedSentence(
+  e: { fromUserId: string; toUserId: string },
+  nameOf?: (userId: string) => string | null,
+): string {
+  // A person's name is shown as they wrote it; only the fallback starts the sentence with a capital.
+  const to = nameOf?.(e.toUserId) ?? "A former member";
+  const from = nameOf?.(e.fromUserId) ?? FORMER_MEMBER;
+  return `${to} took over this session from ${from}`;
+}
+
+export function buildItems(
+  state: LiveSession,
+  formatTime: (iso: string) => string = hhmm,
+  /** The member directory's display name for a user id; null when it does not know them. */
+  nameOf?: (userId: string) => string | null,
+): Item[] {
   const prompts = new Map(state.prompts.map((p) => [p.id, p]));
   const approvals = new Map(state.approvals.map((a) => [a.id, a]));
   const items: Item[] = [];
@@ -183,6 +206,17 @@ export function buildItems(state: LiveSession, formatTime: (iso: string) => stri
           testId: ACCOUNT_SWITCH_LINE,
         });
         break;
+      case "session.owner_changed":
+        // 07.13.1.1 (D-03, D-11): the API writes this event when a member takes a server session over (Assign to
+        // me), so every viewer sees who took it from whom, also after a reload. Plain text through React.
+        items.push({
+          kind: "system",
+          key,
+          at,
+          text: ownerChangedSentence(e, nameOf),
+          testId: OWNER_CHANGED_LINE,
+        });
+        break;
       default:
         break;
     }
@@ -231,7 +265,13 @@ export function EventStream({
   /** The "N changed files · Open diff" card, shown after the latest completed turn (ref-4). */
   changesCard?: ReactNode;
 }) {
-  const items = buildItems(state);
+  const directory = useMembers();
+  const members = directory.data?.members;
+  const nameOf = useCallback(
+    (userId: string) => members?.find((m) => m.userId === userId)?.displayName ?? null,
+    [members],
+  );
+  const items = buildItems(state, undefined, nameOf);
   const turns = groupTurns(items, state.prompts);
   const busy = session.status === "running" || session.status === "provisioning";
   const lastIsStreaming =

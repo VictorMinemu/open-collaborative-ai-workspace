@@ -22,6 +22,8 @@ import {
   type RuntimeUpdatesLevel,
   type ServerToDeviceFrame,
   type SessionAccountLimitedFrame,
+  type SessionRenameFrame,
+  SessionRenameResultFrame,
   stripImageData,
   type TitleResultFrame,
 } from "@ocw/contracts";
@@ -150,6 +152,23 @@ export interface DeviceBrowserHandler {
     reply: (frame: BrowserServerFrame) => SendResult,
   ): Promise<void>;
   onHello?(device: DeviceRef, hello: HelloFrame): Promise<void>;
+}
+
+/**
+ * 07.13.1.1 (D-07, D-14, PD-09): the session tools' request frames (`ocw_session`), registered with
+ * `hub.setSessionToolHandler` by the work-session module. Every method is optional: a frame without its method is
+ * ignored. Called sequentially per device socket, in frame order, with the device the link authenticated (never an
+ * organization the frame names). `reply` sends on the socket the request came on only, never through Redis or the
+ * command queue, and says whether it was sent.
+ */
+export interface DeviceSessionToolHandler {
+  onSessionRename?(
+    device: DeviceRef,
+    frame: SessionRenameFrame,
+    reply: (frame: SessionRenameResultFrame) => SendResult,
+    /** When the link received the frame (`Date.now()`), before it waited behind earlier frames (IN-03). */
+    receivedAt?: number,
+  ): Promise<void>;
 }
 
 /**
@@ -289,6 +308,7 @@ export class DeviceHub {
   private handler: DeviceSessionHandler | null = null;
   private accounts: DeviceAccountHandler | null = null;
   private browsers: DeviceBrowserHandler | null = null;
+  private sessionTools: DeviceSessionToolHandler | null = null;
   readonly offlineGraceMs: number;
   private readonly maxFrameBytes: number;
   /** What session start and the device DTO decide compatibility with (07.11 D-04, PD-12, PD-13). */
@@ -335,6 +355,15 @@ export class DeviceHub {
 
   get browserHandler(): DeviceBrowserHandler | null {
     return this.browsers;
+  }
+
+  /** 07.13.1.1: where the device's session tool requests go (`session.rename`, the work-session module). */
+  setSessionToolHandler(handler: DeviceSessionToolHandler): void {
+    this.sessionTools = handler;
+  }
+
+  get sessionToolHandler(): DeviceSessionToolHandler | null {
+    return this.sessionTools;
   }
 
   /**
@@ -504,12 +533,17 @@ export class DeviceHub {
   }
 
   /**
-   * 07.13 (PD-16, P7): a browser frame answering a request on `socket` (the `browser.signin.state` reply), sent on that
-   * socket only: validated as a `BrowserServerFrame` (throws otherwise) and size-checked like every frame. Never
-   * queued, never published, never logged (a sign-in state is the only frame carrying a storage state).
+   * 07.13 (PD-16, P7), 07.13.1.1 (PD-09): a frame answering a request on `socket` (the `browser.signin.state` or the
+   * `session.rename.result` reply), sent on that socket only: validated with its own schema (throws otherwise) and
+   * size-checked like every frame. Never queued, never published, never logged (a sign-in state is the only frame
+   * carrying a storage state).
    */
-  replyOn(socket: WebSocket, frame: BrowserServerFrame): SendResult {
-    return this.send(socket, BrowserServerFrame.parse(frame));
+  replyOn(socket: WebSocket, frame: BrowserServerFrame | SessionRenameResultFrame): SendResult {
+    const parsed =
+      frame.type === "session.rename.result"
+        ? SessionRenameResultFrame.parse(frame)
+        : BrowserServerFrame.parse(frame);
+    return this.send(socket, parsed);
   }
 
   /**

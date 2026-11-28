@@ -35,7 +35,7 @@ function policy(over: Partial<WorkZonePolicyView> = {}): WorkZonePolicyView {
 
 function render(
   view: WorkZonePolicyView,
-  initial?: { botSessions?: string; botFileMax?: string; botFileMaxError?: string },
+  initial?: { botSessions?: string; botFileMax?: string; botFileMaxError?: string; namingRule?: string },
 ): string {
   const qc = new QueryClient();
   return renderToStaticMarkup(
@@ -44,6 +44,8 @@ function render(
     </QueryClientProvider>,
   );
 }
+
+const RESTRICT_NONE = { "claude-code": false, codex: false };
 
 const text = (markup: string) =>
   markup
@@ -110,6 +112,8 @@ describe("Bot sessions at once (Task 3)", () => {
       runtimeUpdates: "automatic",
       // 07.13 D-10: the default policy names the browser (off); the draft carries it through.
       allowBrowser: false,
+      // 07.13.1.1 D-08: and the naming rule (none); the draft carries the API's value through.
+      sessionNamingRule: null,
       botSessionsMax: 0,
     });
     // The form's Save sends exactly that body, and refuses an invalid value first.
@@ -130,6 +134,8 @@ describe("Bot sessions at once (Task 3)", () => {
       "Fast mode",
       "Runtime updates",
       "Bots",
+      // 07.13.1.1-07 (D-08): the naming rule last, so every earlier section keeps its place.
+      "Session names",
     ]);
   });
 
@@ -188,6 +194,7 @@ describe("Largest file a bot moves (07.17.1.1-09 Task 1)", () => {
       allowFastMode: false,
       runtimeUpdates: "automatic",
       allowBrowser: false,
+      sessionNamingRule: null,
       botSessionsMax: 10,
       botFileMaxBytes: 41943040,
     });
@@ -328,5 +335,65 @@ describe("Allow the browser in Work Zone sessions (07.13-11 Task 1)", () => {
   it("is its own section right after Full access", () => {
     const titles = [...render(policy()).matchAll(/<h2[^>]*>([^<]+)<\/h2>/g)].map((m) => m[1]);
     expect(titles.slice(0, 3)).toEqual(["Permission modes", "Full access", "Browser"]);
+  });
+});
+
+/**
+ * 07.13.1.1-07 (D-08, PD-16, Pitfall 5): the organization's naming rule, saved with the rest of the policy in the
+ * existing PUT. Untrusted wording data: plain text, at most 600 characters, CRLF normalised, blank = none.
+ */
+describe("Session names (07.13.1.1-07 Task 3)", () => {
+  it("renders the Naming rule field with the helper and the counter", () => {
+    const html = render(policy({ sessionNamingRule: null }));
+    const t = text(html);
+    expect(t).toContain("Naming rule");
+    expect(t).toContain(
+      "Used for generated titles and when a session's agent renames it. Titles stay 2 to 5 words and 32 characters.",
+    );
+    expect(t).toContain("0/600");
+    expect(html).toMatch(/<label[^>]*for="[^"]+"[^>]*>Naming rule<\/label>/);
+    expect(tagsOf(html, "policy-naming-rule")[0]).toMatch(/^<textarea/);
+  });
+
+  it("prefills the stored rule", () => {
+    const html = render(policy({ sessionNamingRule: "Area first, then the change" }));
+    expect(html).toContain(">Area first, then the change</textarea>");
+    expect(text(html)).toContain("27/600");
+  });
+
+  it("a 601-character draft says the limit and turns Save off", () => {
+    const html = render(policy({ sessionNamingRule: null }), { namingRule: "x".repeat(601) });
+    expect(text(html)).toContain("Use at most 600 characters.");
+    expect(tagsOf(html, "policy-naming-rule")[0]).toContain('aria-invalid="true"');
+    expect(tagsOf(html, "save-policy")[0]).toMatch(/\sdisabled=""/);
+    expect(text(html)).toContain("Unsaved changes");
+  });
+
+  it("saving sends sessionNamingRule (blank = null) with the rest of the draft", () => {
+    const saved = toDraft(policy({ sessionNamingRule: "old" }));
+    expect(
+      toPolicyBody({ ...saved, sessionNamingRule: "Area first\nthen the change" }, RESTRICT_NONE),
+    ).toMatchObject({
+      sessionNamingRule: "Area first\nthen the change",
+    });
+    expect(toPolicyBody({ ...saved, sessionNamingRule: null }, RESTRICT_NONE).sessionNamingRule).toBeNull();
+    const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
+    expect(source).toContain("sessionNamingRule: namingRuleValue(value)");
+    expect(source).toMatch(/if \(noModes \|\| botError \|\| fileError \|\| namingError \|\|[^\n]*\) return;/);
+  });
+
+  it("an older API without the field gets no Session names section and sends no rule", () => {
+    const { sessionNamingRule: _drop, ...older } = policy();
+    const html = render(older as WorkZonePolicyView);
+    expect(text(html)).not.toContain("Session names");
+    expect("sessionNamingRule" in toPolicyBody(toDraft(older as WorkZonePolicyView), RESTRICT_NONE)).toBe(
+      false,
+    );
+  });
+
+  it("never renders markup from a stored rule", () => {
+    const html = render(policy({ sessionNamingRule: "<img src=x onerror=alert(1)>" }));
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x");
   });
 });

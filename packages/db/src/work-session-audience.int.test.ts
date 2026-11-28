@@ -494,3 +494,79 @@ describe("assigned teams never reach nested projects (D-14)", () => {
     expect(viewers).not.toContain(U.nestedMember);
   });
 });
+
+describe("07.13.1.1 owner transfer", () => {
+  // ADR-0047 (D-03, D-11, PD-01): Assign to me is `UPDATE app.work_sessions SET created_by = <new owner>`. These prove,
+  // on the rule itself, that every owner fact follows the column with no SQL, RLS or function change.
+  const OWNER_S = randomUUID();
+  const PEOPLE_S = randomUUID();
+  const from = U.creator;
+  const to = U.viewer;
+  const q = (text: string, values: unknown[]) => migrator.query(text, values);
+  const facts = (sid: string, user: string) =>
+    as(
+      user,
+      async (c) =>
+        (await c("select app.work_session_access($1, $2) as f", [sid, user])).rows[0].f as string[],
+    );
+  const viewers = (sid: string) =>
+    as(null, async (c) =>
+      (await c("select user_id::text as id from app.work_session_viewers($1)", [sid])).rows
+        .map((r) => r.id as string)
+        .sort(),
+    );
+  // As the migrator (the test's own setup role); the API does the same under the session lock (plan 02).
+  const transfer = (sid: string) =>
+    migrator.query("update app.work_sessions set created_by = $2 where id = $1", [sid, to]);
+
+  beforeAll(async () => {
+    await session(q, A, OWNER_S, REPO, DEV, from, "owner");
+    await session(q, A, PEOPLE_S, REPO, DEV, from, "people");
+    await q(
+      "insert into app.work_session_grants (organization_id, work_session_id, subject_kind, subject_id, granted_by) values ($1, $2, 'user', $3, $3)",
+      [A, PEOPLE_S, from],
+    );
+  });
+
+  it("an `owner` session moves its creator fact, its viewers and the backstop to the new owner", async () => {
+    expect(await facts(OWNER_S, from)).toContain("creator");
+    expect(await facts(OWNER_S, to)).not.toContain("creator");
+    expect(await viewers(OWNER_S)).toEqual([from, U.deviceOwner].sort());
+    expect((await seen(to, OWNER_S))["app.work_sessions"]).toBe(0);
+
+    expect((await transfer(OWNER_S)).rowCount).toBe(1);
+
+    const old = await facts(OWNER_S, from);
+    expect(old).not.toContain("creator");
+    expect(old).not.toContain("viewer");
+    expect(await facts(OWNER_S, to)).toContain("creator");
+    expect(await viewers(OWNER_S)).toEqual([to, U.deviceOwner].sort());
+    // The RLS backstop follows too: the old owner reads nothing, the new owner reads the session.
+    expect(await seen(from, OWNER_S)).toEqual(none);
+    expect((await seen(to, OWNER_S))["app.work_sessions"]).toBe(1);
+  });
+
+  it("a `people` session listing the previous owner keeps them as a viewer (a grant): only the owner fact moved", async () => {
+    expect(await facts(PEOPLE_S, from)).toContain("creator");
+
+    expect((await transfer(PEOPLE_S)).rowCount).toBe(1);
+
+    const old = await facts(PEOPLE_S, from);
+    expect(old).not.toContain("creator");
+    expect(old).toContain("viewer");
+    expect(await facts(PEOPLE_S, to)).toContain("creator");
+    expect(await viewers(PEOPLE_S)).toEqual([from, to, U.deviceOwner].sort());
+  });
+
+  it("another organization's admin still sees neither session", async () => {
+    for (const sid of [OWNER_S, PEOPLE_S]) {
+      const n = await as(
+        BU.admin,
+        async (c) =>
+          (await c("select count(*)::int as n from app.work_sessions where id = $1", [sid])).rows[0].n,
+        B,
+      );
+      expect(n).toBe(0);
+    }
+  });
+});

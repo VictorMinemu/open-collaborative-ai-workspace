@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SessionPoolAccountRef } from "./account-pool";
 import { Attachment } from "./attachments";
 import { Id, IsoDateTime } from "./common";
+import { DeviceHostKind } from "./device";
 import { DiffFile } from "./device-link";
 import { Permission } from "./permissions";
 import {
@@ -12,7 +13,7 @@ import {
   WorkSessionStatus,
 } from "./session-events";
 import { ContextWindow, EffortLevel, WorkSessionSettings } from "./session-settings";
-import { TitleSource } from "./session-title";
+import { TitleSource, TypedSessionTitle } from "./session-title";
 import { WorkBrowserApprovalRequest, WorkSessionBrowserState } from "./work-browser";
 import {
   ProjectDefaultVisibility,
@@ -95,6 +96,10 @@ export const WorkSession = z.object({
   title: z.string(),
   /** Typed (`user`, never replaced), the prompt's first line (`heuristic`) or generated (`auto`) (D-19). */
   titleSource: TitleSource,
+  /**
+   * The session's owner (07.13.1.1 D-02, D-11): its creator until an Assign to me on a server moves it (ADR-0047); a
+   * bot-started session's owner is the bot's sponsor. The original creator stays in the `work_session.created` audit.
+   */
   createdBy: Id,
   createdByName: z.string().nullable(),
   /** Prompts waiting in the shared queue. */
@@ -132,6 +137,12 @@ export const WorkSession = z.object({
    */
   attention: WorkSessionAttention.optional(),
   /**
+   * 07.13.1.1 (WR-03): whether this viewer may rename the session (`work_session.configure` through the resolver, on a
+   * session that is not archived), so a row menu offers Rename only where the PATCH would be allowed. A UI hint: the
+   * API decides the PATCH again. Per viewer like `attention`: absent on `ws:` (absent = not offered).
+   */
+  canRename: z.boolean().optional(),
+  /**
    * 07.16 (D-06): the bot that started the session (its sponsor is `createdBy`). Viewer-neutral, so it may ride every
    * surface; null = started by a person; optional so older payloads parse.
    */
@@ -146,6 +157,12 @@ export const WorkSession = z.object({
    * so it may ride every surface; absent = an older API.
    */
   browser: WorkSessionBrowserState.optional(),
+  /**
+   * 07.13.1.1 (D-04, D-12, PD-14): how the session's device runs (`service` = a headless server, the only host where
+   * Assign to me is offered). Viewer-neutral, so it may ride every surface; null = the device never reported it;
+   * absent = an older API.
+   */
+  deviceHostKind: DeviceHostKind.nullable().optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 
@@ -327,6 +344,76 @@ export const WorkSessionOrigin = z.object({
 });
 export type WorkSessionOrigin = z.infer<typeof WorkSessionOrigin>;
 
+// ---------------------------------------------------------------- owner transfer (Phase 07.13.1.1, ADR-0047)
+
+/**
+ * Why Assign to me is refused (07.13.1.1 D-04, D-05, D-12, PD-02), in the order the API checks them: the device is not
+ * a server (`devices.host_kind` is not exactly `service`), a bot started the session (07.16 sponsor model), the
+ * session is archived, the device was revoked, the caller may not use the device, the caller may not prompt the
+ * session, or the caller already owns it.
+ */
+export const AssignRefusal = z.enum([
+  "not_on_server",
+  "bot_session",
+  "archived",
+  "device_revoked",
+  "device_not_shared",
+  "not_allowed",
+  "already_owner",
+]);
+export type AssignRefusal = z.infer<typeof AssignRefusal>;
+
+/** The one fixed sentence the web shows for each refusal (never a server-built string). */
+export const ASSIGN_REFUSAL_TEXT: Readonly<Record<AssignRefusal, string>> = {
+  not_on_server: "Only sessions on a server can be assigned.",
+  bot_session: "A bot started this session; it stays with the bot's sponsor.",
+  archived: "Archived sessions can't be assigned.",
+  device_revoked: "This server's access was revoked.",
+  device_not_shared: "You can't use this server.",
+  not_allowed: "You can't take over this session.",
+  already_owner: "This session is already yours.",
+};
+
+/** Whether this viewer may Assign the session to themselves, and the first reason why not (PD-14). */
+export const WorkSessionAssign = z.object({
+  allowed: z.boolean(),
+  reason: AssignRefusal.nullable(),
+});
+export type WorkSessionAssign = z.infer<typeof WorkSessionAssign>;
+
+/**
+ * What the Assign to me confirm dialog says (D-13, D-15): the previous owner loses access unless the audience still
+ * lists them; `othersLosingAccess` counts everyone else who loses it; `cancelledPrompts` counts the queued prompts of
+ * people who lose access (cancelled in the transfer); `turnRunning` = a turn is in flight (it finishes, never cut).
+ */
+export const AssignPreview = WorkSessionAssign.extend({
+  previousOwnerLosesAccess: z.boolean(),
+  othersLosingAccess: z.number().int().nonnegative(),
+  cancelledPrompts: z.number().int().nonnegative(),
+  turnRunning: z.boolean(),
+});
+export type AssignPreview = z.infer<typeof AssignPreview>;
+
+/**
+ * The answer to `POST /api/v1/work-sessions/:id/assign` (PD-02): the session as its new owner sees it, how many
+ * people lost access, how many queued prompts were cancelled, and whether the session's settings were lowered to what
+ * the new owner may use on the device.
+ */
+export const AssignWorkSessionResult = z.object({
+  session: WorkSession,
+  removedCount: z.number().int().nonnegative(),
+  cancelledPrompts: z.number().int().nonnegative(),
+  settingsDowngraded: z.boolean(),
+});
+export type AssignWorkSessionResult = z.infer<typeof AssignWorkSessionResult>;
+
+/**
+ * `PATCH /api/v1/work-sessions/:id` (07.13.1.1 D-06, D-14, PD-07): a person renames the session. The title becomes
+ * `titleSource = 'user'` and is never replaced automatically. Strict: nothing else changes through this route.
+ */
+export const UpdateWorkSessionRequest = z.strictObject({ title: TypedSessionTitle });
+export type UpdateWorkSessionRequest = z.infer<typeof UpdateWorkSessionRequest>;
+
 export const WorkSessionDetail = z.object({
   session: WorkSession,
   prompts: z.array(WorkPrompt),
@@ -343,6 +430,11 @@ export const WorkSessionDetail = z.object({
    * conversation the bot started the session from, never on `ws:` or `user:` frames. null = none or not readable.
    */
   origin: WorkSessionOrigin.nullable().optional(),
+  /**
+   * 07.13.1.1 (D-04, D-05, PD-14): per viewer, only on `GET /work-sessions/:id`, never on `ws:` or `user:` frames:
+   * whether this viewer may Assign the session to themselves. Absent = an older API.
+   */
+  assign: WorkSessionAssign.optional(),
 });
 export type WorkSessionDetail = z.infer<typeof WorkSessionDetail>;
 

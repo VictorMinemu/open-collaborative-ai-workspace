@@ -344,7 +344,7 @@ describe("the ai-eval workflow (label, weekly, dispatch; never on every PR)", ()
     expect(runStep).toContain("OCW_EVAL_PROVIDER: openrouter");
     expect(runStep).toContain("OCW_EVAL_CONFIRM: metered");
     expect(runStep).toContain("pnpm --filter @ocw/api eval:multiplayer");
-    expect(text).toMatch(/actions\/upload-artifact@v\d+[\s\S]*path: apps\/api\/eval-out/u);
+    expect(text).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v\d+[\s\S]*path: apps\/api\/eval-out/u);
     // Secrets by name only: no literal key in the file.
     expect(text).not.toMatch(/sk-[A-Za-z0-9-]{8,}|OCW_EVAL_API_KEY: ["'][^$]/u);
     expect(text.match(/secrets\.\w+/gu)?.every((s) => s === "secrets.OCW_EVAL_API_KEY")).toBe(true);

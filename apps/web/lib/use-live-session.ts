@@ -129,6 +129,15 @@ export function turnEndedAt(frame: TopicFrame): number | null {
   return null;
 }
 
+/**
+ * 07.13.1.1 (WR-01): a durable frame saying the session's audience changed (an Assign to me, a visibility change). The
+ * detail's per-viewer fields (`viewerCan`, `viewerState`, `assign`) are decided for the old shape, so the view
+ * refetches them; the `ws:` snapshot never carries them (ADR-0031).
+ */
+export function refreshesDetail(frame: TopicFrame): boolean {
+  return frame.op !== "eph" && frame.type === EventTypes.workSessionVisibilityChanged;
+}
+
 /** The latest turn end a freshly loaded view knows (the viewer's own last turn, every finished prompt); 0 if none. */
 export function lastTurnEndOf(detail: { session: WorkSession; prompts: readonly WorkPrompt[] }): number {
   const times = [detail.session.attention?.lastTurnEndedAt, ...detail.prompts.map((p) => p.completedAt)]
@@ -171,6 +180,11 @@ export function useLiveSession(id: string) {
       if (ended !== null) markSeen(id, Math.max(Date.now(), ended));
       // Settings and what the caller may pick follow the session (D-07): refresh the controls with it.
       if (frame.op !== "eph" && frame.type === EventTypes.workSessionUpdated) {
+        void qc.invalidateQueries({ queryKey: wzKeys.controls(id) });
+      }
+      // WR-01: who owns the session (or who reads it) changed: re-decide what this viewer may do from the API.
+      if (refreshesDetail(frame)) {
+        void qc.invalidateQueries({ queryKey: wzKeys.session(id), exact: true });
         void qc.invalidateQueries({ queryKey: wzKeys.controls(id) });
       }
     },

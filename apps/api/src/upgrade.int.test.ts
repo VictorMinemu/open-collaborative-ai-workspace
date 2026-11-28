@@ -150,6 +150,7 @@ const HEAD_ONLY = [
   "20261124150907_account_pool",
   "20261125154808_work_prompt_files",
   "20261125164903_work_zone_browser",
+  "20261127204827_session_owners_rename",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

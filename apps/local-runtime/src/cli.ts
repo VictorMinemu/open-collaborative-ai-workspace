@@ -765,6 +765,29 @@ async function browserMcpCommand(): Promise<void> {
   });
 }
 
+/**
+ * 07.13.1.1 (D-07, PD-08): the hidden `session-mcp` stdio MCP server of a Codex session's own tools (`ocw_session`,
+ * the rename tool), started only by that session's Codex app-server (`-c mcp_servers.ocw_session.*`), not in the usage
+ * text. stdout is the MCP stream, so console output goes to stderr. A missing or foreign token file, or a daemon that
+ * does not know the session, exits non-zero before serving. Loaded lazily, so no other command loads the MCP server.
+ */
+async function sessionMcpCommand(): Promise<void> {
+  if (process.stdin.isTTY) {
+    process.stderr.write("ocw-runtime: session-mcp is started by Codex, not from a terminal\n");
+    process.exitCode = 2;
+    return;
+  }
+  console.log = console.error;
+  console.info = console.error;
+  const { runSessionMcpShim } = await import("./session-tools/mcp-shim.js");
+  await runSessionMcpShim({
+    env: process.env,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  });
+}
+
 async function main(argv: string[]): Promise<void> {
   const [cmd = "run", ...rest] = argv;
   switch (cmd) {
@@ -840,6 +863,8 @@ async function main(argv: string[]): Promise<void> {
       return browserAgentCommand(rest);
     case "browser-mcp":
       return browserMcpCommand();
+    case "session-mcp":
+      return sessionMcpCommand();
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

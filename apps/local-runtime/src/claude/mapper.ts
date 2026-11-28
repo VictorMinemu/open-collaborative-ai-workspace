@@ -7,15 +7,19 @@ import {
   canonicalBrowserTool,
   FastModeState,
   originOf,
+  SESSION_RENAME_REFUSAL_TEXT,
   type SessionEvent,
   type Usage,
   WORK_BROWSER_MCP_SERVER,
   WORK_BROWSER_REFUSAL_TEXT,
+  WORK_SESSION_MCP_SERVER,
   type WorkBrowserTool,
   type WorkSessionStatus,
+  WorkSessionTool,
 } from "@ocw/contracts";
 import { INVALID_REQUEST_TEXT } from "../browser/tools.js";
 import { truncateBytes } from "../sanitize.js";
+import { canonicalSessionTool, RENAME_STARTED_SUMMARY } from "../session-tools/tools.js";
 import { summarizeToolInput } from "./tool-policy.js";
 
 export const TOOL_OUTPUT_MAX_BYTES = 4 * 1024;
@@ -162,6 +166,31 @@ function browserCompletedSummary(tool: WorkBrowserTool, ok: boolean, content: un
   return SUMMARY.test(line) ? line : `${canonical} completed`;
 }
 
+// ------------------------------------------------------------------ the session's own tools (07.13.1.1 D-07, PD-08)
+
+const SESSION_PREFIX = `mcp__${WORK_SESSION_MCP_SERVER}__`;
+
+/**
+ * The timeline name of a tool of a server named `ocw_session` (`mcp__ocw_session__rename` → `ocw_session_rename`; an
+ * unknown tool of that name → `ocw_session`), or null for any other tool.
+ */
+function sessionToolNameOf(name: string): string | null {
+  if (!name.startsWith(SESSION_PREFIX)) return null;
+  const tool = WorkSessionTool.safeParse(name.slice(SESSION_PREFIX.length));
+  return tool.success ? canonicalSessionTool(tool.data) : WORK_SESSION_MCP_SERVER;
+}
+
+/** The relay's answers: the stored title (one line, bounded) or a refusal's fixed sentence. */
+const RENAMED = /^Renamed the session to "[^"\n]{1,200}"\.$/;
+const SESSION_REFUSALS: ReadonlySet<string> = new Set(Object.values(SESSION_RENAME_REFUSAL_TEXT));
+
+/** `tool.completed` summary: the result's first line when it is one of the relay's sentences, else a fixed one. */
+function sessionCompletedSummary(name: string, ok: boolean, content: unknown): string {
+  const line = firstTextLine(content);
+  if (ok ? RENAMED.test(line) : SESSION_REFUSALS.has(line)) return line;
+  return `${name} ${ok ? "completed" : "failed"}`;
+}
+
 export class ClaudeEventMapper {
   /** Prompt the next `result` message completes. Set by the runtime when it dispatches a prompt. */
   currentPromptId: string | null = null;
@@ -280,6 +309,12 @@ export class ClaudeEventMapper {
           });
           continue;
         }
+        const session = sessionToolNameOf(name);
+        if (session) {
+          // 07.13.1.1: the canonical name and a fixed summary, never the arguments (the agent's title).
+          out.push({ type: "tool.started", toolUseId, name: session, summary: RENAME_STARTED_SUMMARY });
+          continue;
+        }
         out.push({
           type: "tool.started",
           toolUseId,
@@ -311,6 +346,18 @@ export class ClaudeEventMapper {
         // D-09, Pitfall 2: the summary line only, never `output` (page text, image bytes).
         const summary = browserCompletedSummary(browser, ok, block.content);
         out.push({ type: "tool.completed", toolUseId, ok, summary });
+        this.toolNames.delete(toolUseId);
+        continue;
+      }
+      const session = sessionToolNameOf(name);
+      if (session) {
+        // 07.13.1.1: the relay's sentence only, never `output`.
+        out.push({
+          type: "tool.completed",
+          toolUseId,
+          ok,
+          summary: sessionCompletedSummary(session, ok, block.content),
+        });
         this.toolNames.delete(toolUseId);
         continue;
       }

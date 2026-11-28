@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSessionPath, projectTabOf } from "./work-zone-routes";
+import { isSessionPath, PEOPLE_PATH, projectTabOf } from "./work-zone-routes";
 
 /** R8: the Work Zone layout keeps a session open when its module turns off; the project pages are not sessions. */
 describe("isSessionPath", () => {
@@ -14,6 +14,9 @@ describe("isSessionPath", () => {
     expect(isSessionPath("/work-zone/projects")).toBe(false);
     expect(isSessionPath("/work-zone/projects/01a11635-d6e7-7c87-9f17-0000000000a1")).toBe(false);
     expect(isSessionPath("/work-zone/abc/def")).toBe(false);
+    // 07.13.1.1 (Pitfall 9): the people view is a page, never a session kept open when the module turns off.
+    expect(isSessionPath("/work-zone/people")).toBe(false);
+    expect(isSessionPath("/work-zone/people/")).toBe(false);
     expect(isSessionPath("/chat/abc")).toBe(false);
   });
 });
@@ -28,5 +31,11 @@ describe("projectTabOf", () => {
     expect(projectTabOf("SETTINGS")).toBe("sessions");
     expect(projectTabOf("members")).toBe("sessions");
     expect(projectTabOf(["settings", "sessions"])).toBe("settings");
+  });
+});
+
+describe("PEOPLE_PATH", () => {
+  it("is the people view", () => {
+    expect(PEOPLE_PATH).toBe("/work-zone/people");
   });
 });

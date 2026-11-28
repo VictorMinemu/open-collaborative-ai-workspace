@@ -147,7 +147,7 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
         if (Date.now() - lastFrameAt > IDLE_TIMEOUT_MS) socket.terminate();
       }, 15_000);
 
-      const handle = async (raw: string) => {
+      const handle = async (raw: string, receivedAt: number) => {
         let json: unknown;
         try {
           json = JSON.parse(raw);
@@ -220,6 +220,14 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
           case "browser.signin.load":
             // The answer goes on this socket only (P7), never through Redis or the command queue.
             return hub.browserHandler?.onSignInLoad?.(device, frame, (reply) => hub.replyOn(socket, reply));
+          // 07.13.1.1 (D-07, PD-09): the work-session module decides the agent's rename; the answer goes on this socket only.
+          case "session.rename":
+            return hub.sessionToolHandler?.onSessionRename?.(
+              device,
+              frame,
+              (reply) => hub.replyOn(socket, reply),
+              receivedAt,
+            );
         }
       };
 
@@ -293,8 +301,10 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
           return;
         }
         const raw = data.toString();
+        // 07.13.1.1 (IN-03): when the frame arrived, before it waits behind the frames ahead of it.
+        const receivedAt = Date.now();
         chain = chain
-          .then(() => handle(raw))
+          .then(() => handle(raw, receivedAt))
           .catch((err) => {
             log.error({ err }, "device frame handling failed");
           });

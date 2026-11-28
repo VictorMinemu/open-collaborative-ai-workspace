@@ -505,6 +505,85 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
     expect((await ok(patch(lena, "project"))).defaultVisibility).toBe("project");
   });
 
+  it("07.13.1.1: project leads write the naming rule (audited by length only); everyone who opens the project reads it", async () => {
+    const RULE = "Prefix with the module";
+    const rows = async () =>
+      (
+        await su.query(
+          "select metadata, row_to_json(a)::text as row from app.audit_events a where action = 'work_project.naming_rule_changed' and resource_id = $1 order by occurred_at",
+          [portal],
+        )
+      ).rows as Array<{ metadata: Record<string, unknown>; row: string }>;
+    const stored = async () =>
+      (await su.query("select naming_rule from app.work_project_settings where unit_id = $1", [portal]))
+        .rows[0]?.naming_rule as string | null | undefined;
+    const announced = (await orgEvents("work_project.updated")).length;
+    const defaults = (await audits("work_project.default_changed", portal)).length;
+    expect((await ok(dana.request("GET", `/api/v1/work-projects/${portal}`))).namingRule).toBeNull();
+
+    const saved = await ok(
+      otto.request("PATCH", `/api/v1/work-projects/${portal}`, { namingRule: `  ${RULE} ` }),
+    );
+    expect(saved.namingRule).toBe(RULE);
+    expect(await stored()).toBe(RULE);
+    // The lead and a member of an assigned team read it.
+    expect((await ok(lena.request("GET", `/api/v1/work-projects/${portal}`))).namingRule).toBe(RULE);
+    expect((await ok(dana.request("GET", `/api/v1/work-projects/${portal}`))).namingRule).toBe(RULE);
+    const audited = await rows();
+    expect(audited.map((a) => a.metadata)).toEqual([{ length: 22 }]);
+    expect(audited[0]!.row).not.toContain("Prefix with");
+    // The rule-only body never touched the default, and the write was announced once.
+    expect((await audits("work_project.default_changed", portal)).length).toBe(defaults);
+    expect((await orgEvents("work_project.updated")).length).toBe(announced + 1);
+
+    // The same rule again writes and announces nothing.
+    await ok(otto.request("PATCH", `/api/v1/work-projects/${portal}`, { namingRule: RULE }));
+    expect(await rows()).toHaveLength(1);
+    expect((await orgEvents("work_project.updated")).length).toBe(announced + 1);
+
+    // A plain member cannot change it; an outsider gets the unknown-id 404 without the rule; {} is refused.
+    expect(
+      (await fails(dana.request("PATCH", `/api/v1/work-projects/${portal}`, { namingRule: "Mine" }), 403))
+        .code,
+    ).toBe("forbidden");
+    for (const res of [
+      oscar.request("PATCH", `/api/v1/work-projects/${portal}`, { namingRule: "Mine" }),
+      oscar.request("GET", `/api/v1/work-projects/${portal}`),
+    ]) {
+      const r = await res;
+      expect(r.status).toBe(404);
+      expect(JSON.stringify(r.body)).not.toContain("namingRule");
+      expect(JSON.stringify(r.body)).not.toContain(RULE);
+    }
+    const index = JSON.stringify((await ok(oscar.request("GET", "/api/v1/work-projects"))).teamProjects);
+    expect(index).not.toContain(RULE);
+    await fails(otto.request("PATCH", `/api/v1/work-projects/${portal}`, {}), 400);
+    await fails(
+      otto.request("PATCH", `/api/v1/work-projects/${portal}`, { namingRule: "x".repeat(601) }),
+      400,
+    );
+    expect(await stored()).toBe(RULE);
+
+    // Both keys in one body: each is decided on its own, announced once.
+    const both = await ok(
+      otto.request("PATCH", `/api/v1/work-projects/${portal}`, {
+        defaultVisibility: "owner",
+        namingRule: "   ",
+      }),
+    );
+    expect(both).toMatchObject({ defaultVisibility: "owner", namingRule: null });
+    expect(await stored()).toBeNull();
+    expect((await rows()).map((a) => a.metadata)).toEqual([{ length: 22 }, { length: 0 }]);
+    expect((await audits("work_project.default_changed", portal)).length).toBe(defaults + 1);
+    expect((await orgEvents("work_project.updated")).length).toBe(announced + 2);
+    await ok(
+      otto.request("PATCH", `/api/v1/work-projects/${portal}`, {
+        defaultVisibility: "project",
+        namingRule: RULE,
+      }),
+    );
+  });
+
   it("every write announces work_project.updated with the unit id only", async () => {
     const events = await orgEvents("work_project.updated");
     expect(events.length).toBeGreaterThanOrEqual(8);
@@ -555,8 +634,12 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
           await notFound(eve.request("POST", "/api/v1/work-projects", { name: "X", parentId: web })),
         ).toBe("unit_not_found"),
       "GET /api/v1/work-projects/:unitId": async () => notFound(eve.request("GET", P)),
-      "PATCH /api/v1/work-projects/:unitId": async () =>
-        notFound(eve.request("PATCH", P, { defaultVisibility: "owner" })),
+      "PATCH /api/v1/work-projects/:unitId": async () => {
+        await notFound(eve.request("PATCH", P, { defaultVisibility: "owner" }));
+        // 07.13.1.1 (D-08): nor A's naming rule, written or read.
+        await notFound(eve.request("PATCH", P, { namingRule: "Evil rule" }));
+        expect(JSON.stringify((await eve.request("GET", P)).body)).not.toContain("Prefix with the module");
+      },
       "GET /api/v1/work-projects/:unitId/assignable-teams": async () =>
         notFound(eve.request("GET", `${P}/assignable-teams`)),
       "POST /api/v1/work-projects/:unitId/teams": async () => {
@@ -591,6 +674,18 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
       await run();
     }
     expect(await snapshot()).toBe(before);
+
+    // 07.13.1.1 (D-08): organization A's session naming rule never reaches B's policy, and B's save never touches A's.
+    await ok(
+      victor.request("PUT", "/api/v1/work-zone-policy", { sessionNamingRule: "Area first, then the change" }),
+    );
+    const policyB = await ok(eve.request("GET", "/api/v1/work-zone-policy"));
+    expect(policyB.sessionNamingRule).toBeNull();
+    expect(JSON.stringify(policyB)).not.toContain("Area first");
+    await ok(eve.request("PUT", "/api/v1/work-zone-policy", { sessionNamingRule: "Evil rule" }));
+    expect((await ok(victor.request("GET", "/api/v1/work-zone-policy"))).sessionNamingRule).toBe(
+      "Area first, then the change",
+    );
   });
 
   it("a project with a linked repository cannot be deleted; unlinked, it goes with its settings and teams", async () => {

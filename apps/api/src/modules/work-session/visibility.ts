@@ -215,7 +215,7 @@ export async function applyAudience(
   return { changed: kindChanged || revoke.length > 0 || add.length > 0, from: s.visibility };
 }
 
-type DraftSession = Pick<SessionRow, "id" | "createdBy" | "deviceId">;
+export type DraftSession = Pick<SessionRow, "id" | "createdBy" | "deviceId">;
 
 /**
  * Run `fn` on a session that does not exist yet: a row on the same repository and device, created by `ownerUserId`
@@ -341,7 +341,7 @@ export async function validateAudience(
 
 // ---------------------------------------------------------------- who can see it
 
-interface Reader {
+export interface Reader {
   userId: string;
   reason: ViewerReason;
   via: string | null;
@@ -350,9 +350,9 @@ interface Reader {
 /**
  * Who can see the session now: `app.work_session_viewers` (the one enumerator, never admins for being admins) filtered
  * by the resolver's `work_session.read` on each person's own facts (a role without the Work Zone, a deny rule or the
- * module off on the project's path takes a person out).
+ * module off on the project's path takes a person out). Also decides who an Assign to me removes (07.13.1.1, assign.ts).
  */
-async function readers(tx: Tx, perms: PermissionService, s: DraftSession): Promise<Reader[]> {
+export async function readers(tx: Tx, perms: PermissionService, s: DraftSession): Promise<Reader[]> {
   const res = await tx.execute(sql`
     select v.user_id::text as user_id, v.reason, v.via::text as via from app.work_session_viewers(${s.id}::uuid) v`);
   const rows = (res.rows as Array<{ user_id: string; reason: string; via: string | null }>).flatMap((r) => {
@@ -373,7 +373,7 @@ async function readers(tx: Tx, perms: PermissionService, s: DraftSession): Promi
 }
 
 /** Of `userIds` (people who could read before a change), those who still may now. */
-async function stillReading(
+export async function stillReading(
   tx: Tx,
   perms: PermissionService,
   s: DraftSession,

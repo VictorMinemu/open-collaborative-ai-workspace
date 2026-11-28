@@ -5,15 +5,19 @@ import {
   browserToolFromName,
   canonicalBrowserTool,
   originOf,
+  SESSION_RENAME_REFUSAL_TEXT,
   type SessionEvent,
   type Usage,
   WORK_BROWSER_MCP_SERVER,
   WORK_BROWSER_REFUSAL_TEXT,
+  WORK_SESSION_MCP_SERVER,
   type WorkBrowserTool,
+  WorkSessionTool,
 } from "@ocw/contracts";
 import { INVALID_REQUEST_TEXT } from "../browser/tools.js";
 import { rawEvent, TOOL_OUTPUT_MAX_BYTES } from "../claude/mapper.js";
 import { truncateBytes } from "../sanitize.js";
+import { canonicalSessionTool, RENAME_STARTED_SUMMARY } from "../session-tools/tools.js";
 import type { AgentMessageDeltaNotification } from "./generated/v2/AgentMessageDeltaNotification.js";
 import type { ApprovalsReviewer } from "./generated/v2/ApprovalsReviewer.js";
 import type { AskForApproval } from "./generated/v2/AskForApproval.js";
@@ -138,9 +142,47 @@ function browserCompletion(item: McpItem): { ok: boolean; summary: string } {
   return { ok: !summary.startsWith("Refused: "), summary };
 }
 
+// ------------------------------------------------------------------ the session's own tools (07.13.1.1 D-07, PD-08)
+//
+// An `ocw_session` call (our `session-mcp` shim) shows under its canonical name (`ocw_session_rename`) with a fixed
+// started summary; the completed summary is the relay's sentence (the stored title or a refusal) and only when it is
+// one, else a fixed one. The item's `arguments` (the title the model typed) and its `result` never reach an event.
+
+/** The item when it is an `ocw_session` call, else null. */
+const sessionItem = (item: ThreadItem): McpItem | null =>
+  item.type === "mcpToolCall" && item.server === WORK_SESSION_MCP_SERVER ? item : null;
+
+function sessionName(item: McpItem): string {
+  const tool = WorkSessionTool.safeParse(item.tool);
+  return tool.success ? canonicalSessionTool(tool.data) : WORK_SESSION_MCP_SERVER;
+}
+
+/** The relay's answers: the stored title (one line, bounded) or a refusal's fixed sentence. */
+const RENAMED = /^Renamed the session to "[^"\n]{1,200}"\.$/;
+const SESSION_REFUSALS: ReadonlySet<string> = new Set(Object.values(SESSION_RENAME_REFUSAL_TEXT));
+
+function sessionCompletion(item: McpItem): { ok: boolean; summary: string } {
+  const name = sessionName(item);
+  if (item.error !== null || item.status !== "completed") return { ok: false, summary: `${name} failed` };
+  const content = Array.isArray(item.result?.content) ? item.result.content : [];
+  const first = content.find(
+    (c): c is { type: "text"; text: string } =>
+      typeof c === "object" &&
+      c !== null &&
+      (c as { type?: unknown }).type === "text" &&
+      typeof (c as { text?: unknown }).text === "string",
+  );
+  const line = first?.text.split("\n")[0] ?? "";
+  if (RENAMED.test(line)) return { ok: true, summary: line };
+  if (SESSION_REFUSALS.has(line)) return { ok: false, summary: line };
+  return { ok: true, summary: `${name} completed` };
+}
+
 export function toolNameForItem(item: ThreadItem): string | null {
   const browser = browserItem(item);
   if (browser) return browserName(browser);
+  const session = sessionItem(item);
+  if (session) return sessionName(session);
   switch (item.type) {
     case "commandExecution":
       return "Bash";
@@ -169,6 +211,7 @@ function clip(s: string, max: number): string {
 export function summarizeItem(item: ThreadItem): string {
   const browser = browserItem(item);
   if (browser) return browserStartedSummary(browser);
+  if (sessionItem(item)) return RENAME_STARTED_SUMMARY;
   switch (item.type) {
     case "commandExecution":
       return `$ ${clip(item.command, 300)}`;
@@ -195,6 +238,9 @@ function completion(item: ThreadItem): { ok: boolean; summary: string; output?: 
   // Never an `output` for the browser: the result is page content (PD-11, Pitfall 2).
   const browser = browserItem(item);
   if (browser) return browserCompletion(browser);
+  // Never an `output` for the session's tools either: the arguments and the result stay on the device (D-07).
+  const session = sessionItem(item);
+  if (session) return sessionCompletion(session);
   switch (item.type) {
     case "commandExecution": {
       const ok = item.status === "completed" && (item.exitCode === null || item.exitCode === 0);

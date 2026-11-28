@@ -1,6 +1,28 @@
-import { EventTypes, type WorkSession, type WorkSessionList } from "@ocw/contracts";
-import { describe, expect, it } from "vitest";
-import { applySessionFrame, mergeSessionSnapshot, sessionListStale } from "./workzone-queries";
+import {
+  type AssignPreview,
+  type AssignWorkSessionResult,
+  EventTypes,
+  type WorkSession,
+  type WorkSessionDetail,
+  type WorkSessionList,
+} from "@ocw/contracts";
+import { QueryClient } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "./api";
+import {
+  applySessionFrame,
+  assignPreviewOptions,
+  assignSessionOptions,
+  mergeSessionSnapshot,
+  renameSessionOptions,
+  sessionListStale,
+  wzKeys,
+} from "./workzone-queries";
+
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
+  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), put: vi.fn(), del: vi.fn() },
+}));
 
 /**
  * Phase 07.9-07 (D-08, P-08): the session list follows the member's own `user:` topic. The API delivers a session's
@@ -155,6 +177,14 @@ describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-vie
     expect("teamProjectHidden" in named).toBe(false);
   });
 
+  it("keeps the viewer's canRename across a ws: snapshot; a snapshot that carries it wins (WR-03)", () => {
+    const mine = session(A, prev.updatedAt, { canRename: true });
+    expect(mergeSessionSnapshot(mine, session(A, "2026-10-22T10:05:00.000Z")).canRename).toBe(true);
+    expect(
+      mergeSessionSnapshot(mine, session(A, "2026-10-22T10:05:00.000Z", { canRename: false })).canRename,
+    ).toBe(false);
+  });
+
   it("a session without the fields stays without them", () => {
     const bare = session(A, prev.updatedAt);
     const merged = mergeSessionSnapshot(bare, session(A, "2026-10-22T10:05:00.000Z"));
@@ -174,5 +204,133 @@ describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-vie
     expect(replaced.attention).toEqual(cleared);
     // The project pair is kept independently of attention.
     expect(replaced.teamProject).toEqual(PROJECT);
+  });
+});
+
+/**
+ * 07.13.1.1-06 (D-03, D-06, PD-02, PD-07): Assign to me and the manual rename go through the API only. The hooks are
+ * thin wrappers over these option builders, so the request and the cache effects are tested without a DOM.
+ */
+describe("Assign to me and rename requests (07.13.1.1)", () => {
+  const ID = A;
+  const get = vi.mocked(api.get);
+  const post = vi.mocked(api.post);
+  const patch = vi.mocked(api.patch);
+  beforeEach(() => {
+    get.mockReset();
+    post.mockReset();
+    patch.mockReset();
+  });
+
+  const detail = (s: WorkSession): WorkSessionDetail => ({
+    session: s,
+    prompts: [],
+    approvals: [],
+    events: [],
+    lastSeq: 4,
+    viewerCan: ["work_session.read"],
+    assign: { allowed: true, reason: null },
+  });
+
+  it("the preview is a GET of /assign under the session's key, never kept fresh", async () => {
+    const preview: AssignPreview = {
+      allowed: true,
+      reason: null,
+      previousOwnerLosesAccess: false,
+      othersLosingAccess: 0,
+      cancelledPrompts: 0,
+      turnRunning: false,
+    };
+    get.mockResolvedValueOnce(preview);
+    const opts = assignPreviewOptions(ID, true);
+    expect(opts.queryKey.slice(0, 3)).toEqual([...wzKeys.session(ID)]);
+    expect(opts.staleTime).toBe(0);
+    expect(opts.enabled).toBe(true);
+    expect(assignPreviewOptions(ID, false).enabled).toBe(false);
+    const signal = new AbortController().signal;
+    await expect(opts.queryFn({ signal })).resolves.toEqual(preview);
+    expect(get).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}/assign`,
+      expect.objectContaining({ signal }),
+    );
+  });
+
+  it("the take-over is one POST of /assign; its success refreshes the session detail and the list", async () => {
+    const qc = new QueryClient();
+    const before = session(ID, "2026-10-22T10:00:00.000Z");
+    qc.setQueryData(wzKeys.session(ID), detail(before));
+    qc.setQueryData(wzKeys.sessions, list(before));
+    const result: AssignWorkSessionResult = {
+      session: session(ID, "2026-10-22T10:05:00.000Z", { createdBy: B, createdByName: "Luis" }),
+      removedCount: 1,
+      cancelledPrompts: 0,
+      settingsDowngraded: false,
+    };
+    post.mockResolvedValueOnce(result);
+    const opts = assignSessionOptions(qc, ID);
+    await expect(opts.mutationFn()).resolves.toEqual(result);
+    expect(post).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}/assign`,
+      expect.objectContaining({ body: {} }),
+    );
+    opts.onSuccess(result);
+    expect(qc.getQueryState(wzKeys.session(ID))?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(wzKeys.sessions)?.isInvalidated).toBe(true);
+    // The list shows the new owner at once; the refetch confirms it.
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.createdBy).toBe(B);
+  });
+
+  it("a rename PATCHes the session with { title } and writes the answer into the list", async () => {
+    const qc = new QueryClient();
+    const before = session(ID, "2026-10-22T10:00:00.000Z", { title: "Old title" });
+    const cached = detail(before);
+    qc.setQueryData(wzKeys.session(ID), cached);
+    qc.setQueryData(wzKeys.sessions, list(before));
+    const renamed = session(ID, "2026-10-22T10:05:00.000Z", { title: "New title", titleSource: "user" });
+    patch.mockResolvedValueOnce(renamed);
+    const opts = renameSessionOptions(qc, ID);
+    await expect(opts.mutationFn("New title")).resolves.toEqual(renamed);
+    expect(patch).toHaveBeenCalledWith(
+      `/api/v1/work-sessions/${ID}`,
+      expect.objectContaining({ body: { title: "New title" } }),
+    );
+    opts.onSuccess(renamed);
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.title).toBe("New title");
+    // The open view takes the title from its `ws:` stream (every viewer at once). Its REST snapshot is left alone: a
+    // rewrite would re-seed the live view from the snapshot it loaded and drop the events received since.
+    expect(qc.getQueryData(wzKeys.session(ID))).toBe(cached);
+    expect(qc.getQueryState(wzKeys.session(ID))?.isInvalidated).toBe(false);
+  });
+
+  it("the answer keeps the list row's per-viewer fields, also after the shaped `user:` frame (WR-02)", () => {
+    const qc = new QueryClient();
+    const TEAM = { id: "4d4d4d4d-4444-4444-8444-444444444444", name: "Payroll" };
+    const attention = { approval: true, lastTurnEndedAt: "2026-10-22T10:04:00.000Z" };
+    // The shaped `user:` frame landed first, at the same updatedAt as the PATCH answer.
+    qc.setQueryData(
+      wzKeys.sessions,
+      list(session(ID, "2026-10-22T10:05:00.000Z", { title: "New title", teamProject: TEAM, attention })),
+    );
+    renameSessionOptions(qc, ID).onSuccess(session(ID, "2026-10-22T10:05:00.000Z", { title: "New title" }));
+    let row = qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0];
+    expect(row?.teamProject).toEqual(TEAM);
+    expect(row?.attention).toEqual(attention);
+    assignSessionOptions(qc, ID).onSuccess({
+      session: session(ID, "2026-10-22T10:06:00.000Z", { createdBy: B }),
+      removedCount: 0,
+      cancelledPrompts: 0,
+      settingsDowngraded: false,
+    });
+    row = qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0];
+    expect(row?.createdBy).toBe(B);
+    expect(row?.teamProject).toEqual(TEAM);
+    expect(row?.attention).toEqual(attention);
+  });
+
+  it("an older answer never replaces a newer row in the list", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(wzKeys.sessions, list(session(ID, "2026-10-22T10:10:00.000Z", { title: "Newer" })));
+    renameSessionOptions(qc, ID).onSuccess(session(ID, "2026-10-22T10:05:00.000Z", { title: "Older" }));
+    expect(qc.getQueryData<WorkSessionList>(wzKeys.sessions)?.sessions[0]?.title).toBe("Newer");
   });
 });

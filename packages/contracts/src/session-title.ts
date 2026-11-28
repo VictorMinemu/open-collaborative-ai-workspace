@@ -230,3 +230,24 @@ export function titleProblems(text: string): string[] {
 export const SessionTitle = z.string().superRefine((text, ctx) => {
   for (const problem of titleProblems(text)) ctx.addIssue({ code: "custom", message: problem });
 });
+
+/**
+ * Any C0/C1 control character (line feed, carriage return and tab included), a Unicode line/paragraph separator, or a
+ * format character (IN-04: bidi overrides and isolates, zero-width spaces, BOM, soft hyphen), which would let a title
+ * render as another session's. The zero-width non-joiner and joiner stay: scripts (Persian, Indic) and emoji need them.
+ */
+const TYPED_TITLE_FORBIDDEN_RE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\u2028\u2029]/u;
+
+/**
+ * A title a person types (07.13.1.1, D-06, D-14, PD-07): `PATCH /work-sessions/:id` and the rename menus. The
+ * creation rule (trimmed, 1-200 characters) plus one line (no control character, no line break) and no host path
+ * (principle 7). Unlike `SessionTitle` it has no word or 32-character shape: a typed title is the person's own and is
+ * never replaced automatically (`titleSource = 'user'`). `CreateWorkSessionRequest.title` keeps its older rule.
+ */
+export const TypedSessionTitle = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((text) => !TYPED_TITLE_FORBIDDEN_RE.test(text), { message: "one_line" })
+  .refine((text) => !HOST_PATH_RE.test(text), { message: "host_path" });
