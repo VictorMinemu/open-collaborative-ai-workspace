@@ -408,9 +408,10 @@ test("people and the agent rename a session", async ({ browser }) => {
   for (const page of [piaPage, anaPage]) {
     await expect(page.getByTestId("session-title")).toHaveText(AGENT_TITLE, { timeout: 45_000 });
   }
+  // The tool card is in the timeline; once the turn ends it folds into "Worked for …", so it is attached, not shown.
   await expect(
     piaPage.getByTestId("tool-card").filter({ hasText: "ocw_session_rename" }).first(),
-  ).toBeVisible({ timeout: 45_000 });
+  ).toBeAttached({ timeout: 45_000 });
   // The quotes may be typographic once rendered as Markdown: any character stands for them.
   await expect(
     sessionAnswer(piaPage, new RegExp(`Renamed the session to .${esc(AGENT_TITLE)}.\\.`)),
@@ -429,7 +430,7 @@ test("people and the agent rename a session", async ({ browser }) => {
   });
   await expect(
     piaPage.getByTestId("tool-card").filter({ hasText: "ocw_session_rename" }).first(),
-  ).toBeVisible();
+  ).toBeAttached();
   await idle(piaPage);
   await expect(piaPage.getByTestId("session-title")).toHaveText(MANUAL_TITLE);
   expect((await sessionAs(ana, S.taken))?.title).toBe(MANUAL_TITLE);
