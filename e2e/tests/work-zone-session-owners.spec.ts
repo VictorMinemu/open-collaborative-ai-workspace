@@ -112,9 +112,14 @@ async function openActions(page: Page): Promise<void> {
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
   if (!mobile) return;
+  // The menu opens with a scale transition: measure once it has settled, not mid-animation.
   for (const item of await menu.getByRole("menuitem").all()) {
-    const box = await item.boundingBox();
-    expect.soft(box?.height ?? 0, `menu item ${await item.textContent()}`).toBeGreaterThanOrEqual(43.5);
+    await expect
+      .poll(async () => (await item.boundingBox())?.height ?? 0, {
+        message: `menu item ${await item.textContent()}`,
+        timeout: 2_000,
+      })
+      .toBeGreaterThanOrEqual(43.5);
   }
 }
 
