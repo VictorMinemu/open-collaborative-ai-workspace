@@ -672,6 +672,9 @@ test("keys: arrows through the sidebar and the results, toggles, Escape, focus k
     await page.keyboard.press("End");
     expect((await focused(page)).text.trim()).toBe("Devices");
     await page.keyboard.press("ArrowUp");
+    // 07.13.1.1: "Sessions by person" sits between Browse projects and Devices in the sidebar's foot.
+    expect((await focused(page)).testId).toBe("sidebar-people");
+    await page.keyboard.press("ArrowUp");
     expect((await focused(page)).testId).toBe("sidebar-projects");
     await page.keyboard.press("Home");
     expect((await focused(page)).id).toBe("wz-section-needs");
